@@ -225,13 +225,18 @@ pub fn depgraph(
         .resolve(root, root_ver)
         .map_err(|e| crate::error::Error::Other(format!("resolution failed: {:?}", e)))?;
 
-    let edges = provider.dependency_graph(&solution);
-    let order = provider.install_order(&solution);
+    let edges: Vec<_> = provider
+        .dependency_graph(&solution)
+        .into_iter()
+        .filter(|e| e.from.0.cpn.category != "virtual")
+        .collect();
 
-    println!("Packages: {}", order.len());
+    let order = provider.install_order(&solution);
+    let real_count = order.iter().filter(|(p, _)| p.cpn.category != "virtual").count();
+    println!("Packages: {}", real_count);
 
     let class_label = |c: DepClass| match c {
-        DepClass::Depend => "BDEPEND",
+        DepClass::Depend => "DEPEND",
         DepClass::Rdepend => "RDEPEND",
         DepClass::Bdepend => "BDEPEND",
         DepClass::Pdepend => "PDEPEND",
@@ -251,8 +256,13 @@ pub fn depgraph(
     }
 
     println!("\nInstall order:");
-    for (i, (pkg, ver)) in order.iter().enumerate() {
-        println!("  {:>3}. {}-{}", i + 1, pkg.cpn, ver);
+    let mut idx = 0;
+    for (pkg, ver) in &order {
+        if pkg.cpn.category == "virtual" {
+            continue;
+        }
+        idx += 1;
+        println!("  {:>3}. {}-{}", idx, pkg.cpn, ver);
     }
 
     Ok(())
