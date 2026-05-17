@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use portage_atom::gentoo_interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Cpv, Dep, Operator, Version};
+use portage_atom::{Cpn, Cpv, Dep, Operator};
 use portage_atom_pubgrub::{
     DepClass, IUseDefault, PackageDeps, PackageRepository, PackageVersions,
     PortageDependencyProvider, PortagePackage, PortageVersionSet, UseConfig,
@@ -186,9 +186,6 @@ pub fn depgraph(
 
     let mut provider = PortageDependencyProvider::new(adapter, use_config);
 
-    let root = PortagePackage::unslotted(Cpn::parse("virtual/root").unwrap());
-    let root_ver = Version::parse("1").unwrap();
-
     let mut root_deps = Vec::new();
     for target in atoms {
         let dep = Dep::parse(target)
@@ -203,8 +200,6 @@ pub fn depgraph(
         };
         root_deps.push((pkg, vs));
     }
-
-    provider.add_root(root.clone(), root_ver.clone(), root_deps);
 
     let dropped = provider.dropped_deps();
     if !dropped.is_empty() {
@@ -222,7 +217,7 @@ pub fn depgraph(
     }
 
     let solution = provider
-        .resolve(root, root_ver)
+        .resolve_targets(root_deps)
         .map_err(|e| crate::error::Error::Other(format!("resolution failed: {:?}", e)))?;
 
     let edges = provider.dependency_graph(&solution);
