@@ -8,14 +8,9 @@ use crate::error::{Error, Result};
 pub fn run(repo_path: &Path, pattern: &str, search_description: bool) -> Result<()> {
     let repo = Repository::open(repo_path).map_err(|e| Error::Other(e.to_string()))?;
 
-    let ebuilds = repo
-        .ebuilds()
-        .map_err(|e| Error::Other(e.to_string()))?;
-
-    // Collect unique CPNs that match; if --description, also check DESCRIPTION from cache
     let mut seen: BTreeSet<String> = BTreeSet::new();
 
-    for ebuild in ebuilds {
+    for ebuild in repo.ebuilds().map_err(|e| Error::Other(e.to_string()))? {
         let cpv = ebuild.cpv();
         let cpn = cpv.cpn.to_string();
 
@@ -25,30 +20,21 @@ pub fn run(repo_path: &Path, pattern: &str, search_description: bool) -> Result<
 
         let name_match = cpn.contains(pattern);
 
-        let desc_match = if search_description && !name_match {
+        // Read cache once; needed for description display and optional desc search
+        let desc = if name_match || search_description {
             repo.cache_entry(cpv)
                 .ok()
-                .map(|e| e.metadata.description.contains(pattern))
-                .unwrap_or(false)
+                .map(|e| e.metadata.description.clone())
+                .unwrap_or_default()
         } else {
-            false
+            String::new()
         };
 
-        if name_match || desc_match {
+        let matched = name_match || (search_description && desc.contains(pattern));
+
+        if matched {
             seen.insert(cpn.clone());
-            if search_description {
-                let desc = repo
-                    .cache_entry(cpv)
-                    .ok()
-                    .map(|e| e.metadata.description.clone())
-                    .unwrap_or_default();
-                println!("{cpn}");
-                if !desc.is_empty() {
-                    println!("    {desc}");
-                }
-            } else {
-                println!("{cpn}");
-            }
+            println!("{cpn}: {desc}");
         }
     }
     Ok(())
