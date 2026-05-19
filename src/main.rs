@@ -2,6 +2,7 @@ mod cli;
 mod depgraph;
 mod error;
 mod query;
+mod search;
 
 use std::str::FromStr;
 
@@ -129,10 +130,7 @@ fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
         Applet::Search {
             pattern,
             description,
-        } => {
-            eprintln!("search: pattern={} description={}", pattern, description);
-            Err(error::Error::NotImplemented("search".into()))
-        }
+        } => search::run(&std::path::PathBuf::from(&globals.repo), pattern, *description),
         Applet::Atom { atoms } => run_atom(atoms),
         Applet::Select { module, args } => {
             eprintln!("select: module={} args={:?}", module, args);
