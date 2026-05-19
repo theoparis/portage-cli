@@ -220,8 +220,7 @@ fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             Err(error::Error::NotImplemented("equery has".into()))
         }
         QueryCommand::Hasuse { flag } => {
-            eprintln!("equery hasuse: {:?}", flag);
-            Err(error::Error::NotImplemented("equery hasuse".into()))
+            query::hasuse::run(&std::path::PathBuf::from(&globals.repo), flag)
         }
         QueryCommand::Keywords { atom } => {
             query::keywords::run(&std::path::PathBuf::from(&globals.repo), atom)
