@@ -1,6 +1,7 @@
 mod cli;
 mod depgraph;
 mod error;
+mod query;
 
 use std::str::FromStr;
 
@@ -230,8 +231,7 @@ fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             Err(error::Error::NotImplemented("equery keywords".into()))
         }
         QueryCommand::List { pattern } => {
-            eprintln!("equery list: {:?}", pattern);
-            Err(error::Error::NotImplemented("equery list".into()))
+            query::list::run(&std::path::PathBuf::from(&globals.repo), pattern)
         }
         QueryCommand::Meta { atom } => {
             let parsed = parse_atoms(atom);

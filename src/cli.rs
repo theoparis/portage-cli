@@ -338,9 +338,10 @@ pub enum QueryCommand {
         #[arg(required = true)]
         atom: Vec<String>,
     },
-    #[command(about = "List packages matching a pattern", alias = "l")]
+    #[command(about = "List installed/available packages matching a pattern")]
     List {
-        #[arg(required = true)]
+        /// Glob or substring pattern(s); omit to list all packages
+        #[arg()]
         pattern: Vec<String>,
     },
     #[command(
