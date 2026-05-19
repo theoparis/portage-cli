@@ -240,10 +240,21 @@ pub enum Applet {
 
     #[command(about = "Search package names and descriptions")]
     Search {
-        #[arg(required = true)]
-        pattern: String,
-        #[arg(long)]
-        description: bool,
+        /// List all packages (no pattern required)
+        #[arg(short = 'a', long)]
+        all: bool,
+        /// Search package descriptions instead of names
+        #[arg(short = 'S', long = "desc")]
+        desc: bool,
+        /// Show only package name, no description
+        #[arg(short = 'N', long = "name-only")]
+        name_only: bool,
+        /// Show homepage instead of description
+        #[arg(short = 'H', long)]
+        homepage: bool,
+        /// Pattern to search (required unless --all)
+        #[arg(required_unless_present = "all")]
+        pattern: Option<String>,
     },
 
     #[command(about = "Parse/split atom strings")]

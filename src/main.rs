@@ -128,9 +128,19 @@ fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             Err(error::Error::NotImplemented("grep".into()))
         }
         Applet::Search {
+            all,
+            desc,
+            name_only,
+            homepage,
             pattern,
-            description,
-        } => search::run(&std::path::PathBuf::from(&globals.repo), pattern, *description),
+        } => search::run(
+            &std::path::PathBuf::from(&globals.repo),
+            pattern.as_deref(),
+            *all,
+            *desc,
+            *name_only,
+            *homepage,
+        ),
         Applet::Atom { atoms } => run_atom(atoms),
         Applet::Select { module, args } => {
             eprintln!("select: module={} args={:?}", module, args);
