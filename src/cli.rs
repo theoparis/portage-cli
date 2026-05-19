@@ -1,13 +1,27 @@
 use std::str::FromStr;
 
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Parser, Subcommand};
 use gentoo_core::Arch;
+
+const fn cli_styles() -> Styles {
+    Styles::styled()
+        .header(AnsiColor::Yellow.on_default().bold())
+        .usage(AnsiColor::Green.on_default().bold())
+        .literal(AnsiColor::Green.on_default())
+        .placeholder(AnsiColor::Cyan.on_default())
+        .error(AnsiColor::Red.on_default().bold())
+        .valid(AnsiColor::Green.on_default())
+        .invalid(AnsiColor::Red.on_default())
+}
+
 #[derive(Parser)]
 #[command(
     name = "em",
     version,
     about = "Gentoo Portage package manager CLI",
-    arg_required_else_help = true
+    arg_required_else_help = true,
+    styles = cli_styles()
 )]
 pub struct Cli {
     #[arg(short = 'p', long)]
