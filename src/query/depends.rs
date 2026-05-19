@@ -45,7 +45,7 @@ fn tree_contains(target: &Dep, entries: &[DepEntry]) -> bool {
 
 fn entry_matches(target: &Dep, entry: &DepEntry) -> bool {
     match entry {
-        DepEntry::Atom(dep) => dep.cpn == target.cpn,
+        DepEntry::Atom(dep) => dep.blocker.is_none() && dep.cpn == target.cpn,
         DepEntry::UseConditional { children, .. }
         | DepEntry::AllOf(children)
         | DepEntry::AnyOf(children)
