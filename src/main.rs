@@ -80,7 +80,8 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             Err(error::Error::NotImplemented("depclean".into()))
         }
         Applet::Regen { repos, output, repos_dir, jobs, dedup } => {
-            let repo_path = repos.first().map_or(globals.repo.as_str(), |r| r.as_str());
+            let resolved = globals.repo_path();
+            let repo_path = repos.first().map(|r| r.as_str()).unwrap_or(&resolved);
             regen::run(repo_path, repos_dir.as_deref(), output.clone(), *jobs, *dedup).await
         }
         Applet::Quickpkg { atoms } => {
@@ -139,7 +140,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             homepage,
             pattern,
         } => search::run(
-            &std::path::PathBuf::from(&globals.repo),
+            &globals.search_repos(),
             pattern.as_deref(),
             *all,
             *desc,
@@ -206,7 +207,7 @@ fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             Err(error::Error::NotImplemented("equery check".into()))
         }
         QueryCommand::Depends { atom } => {
-            query::depends::run(&std::path::PathBuf::from(&globals.repo), atom)
+            query::depends::run(&std::path::PathBuf::from(globals.repo_path()), atom)
         }
         QueryCommand::Depgraph { atom } => {
             let parsed = parse_atoms(atom);
@@ -214,10 +215,11 @@ fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             if atoms.is_empty() {
                 return Err(error::Error::NotImplemented("equery depgraph: no valid atoms".into()));
             }
-            let repo_path = std::path::PathBuf::from(&globals.repo);
+            let resolved = globals.repo_path();
+            let repo_path = std::path::PathBuf::from(&resolved);
             if !repo_path.is_dir() {
                 return Err(error::Error::Other(
-                    format!("repo not found at {}", globals.repo),
+                    format!("repo not found at {resolved}"),
                 ));
             }
             depgraph::depgraph(&repo_path, &atoms, &globals.arch, None)
@@ -233,13 +235,13 @@ fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             Err(error::Error::NotImplemented("equery has".into()))
         }
         QueryCommand::Hasuse { flag } => {
-            query::hasuse::run(&std::path::PathBuf::from(&globals.repo), flag)
+            query::hasuse::run(&std::path::PathBuf::from(globals.repo_path()), flag)
         }
         QueryCommand::Keywords { atom } => {
-            query::keywords::run(&std::path::PathBuf::from(&globals.repo), atom)
+            query::keywords::run(&std::path::PathBuf::from(globals.repo_path()), atom)
         }
         QueryCommand::List { pattern } => {
-            query::list::run(&std::path::PathBuf::from(&globals.repo), pattern)
+            query::list::run(&std::path::PathBuf::from(globals.repo_path()), pattern)
         }
         QueryCommand::Meta { atom } => {
             let parsed = parse_atoms(atom);
@@ -252,10 +254,10 @@ fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             Err(error::Error::NotImplemented("equery size".into()))
         }
         QueryCommand::Uses { atom } => {
-            query::uses::run(&std::path::PathBuf::from(&globals.repo), atom)
+            query::uses::run(&std::path::PathBuf::from(globals.repo_path()), atom)
         }
         QueryCommand::Which { atom } => {
-            query::which::run(&std::path::PathBuf::from(&globals.repo), atom)
+            query::which::run(&std::path::PathBuf::from(globals.repo_path()), atom)
         }
     }
 }

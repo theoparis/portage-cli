@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use portage_atom::{Cpn, Cpv};
 use portage_metadata::CacheEntry;
@@ -8,50 +7,74 @@ use portage_repo::Repository;
 use crate::error::{Error, Result};
 
 pub fn run(
-    repo_path: &Path,
+    repo_paths: &[std::path::PathBuf],
     pattern: Option<&str>,
     all: bool,
     search_desc: bool,
     name_only: bool,
     homepage: bool,
 ) -> Result<()> {
-    let repo = Repository::open(repo_path).map_err(|e| Error::Other(e.to_string()))?;
+    if repo_paths.is_empty() {
+        return Err(Error::Other("no repositories configured".into()));
+    }
+    let mut repos: Vec<Repository> = Vec::with_capacity(repo_paths.len());
+    for p in repo_paths {
+        match Repository::open(p) {
+            Ok(r) => repos.push(r),
+            Err(e) => eprintln!("em: skipping {}: {e}", p.display()),
+        }
+    }
+    if repos.is_empty() {
+        return Err(Error::Other("no usable repositories".into()));
+    }
     let pat = pattern.unwrap_or("");
 
     if search_desc {
-        run_desc(&repo, pat, all, name_only, homepage)
+        run_desc(&repos, pat, all, name_only, homepage)
     } else {
-        run_name(&repo, pat, all, name_only, homepage)
+        run_name(&repos, pat, all, name_only, homepage)
     }
 }
 
-/// Name-mode: enumerate category/package directories — cheap. Read the
-/// metadata cache only for packages whose name passes the filter (and only
-/// when we actually have to print something other than the cpn).
+/// Name-mode: enumerate category/package directories across every repo —
+/// dedupe by `cat/pkg` (first repo wins). Reads the metadata cache only when
+/// we actually have to print something other than the cpn.
 fn run_name(
-    repo: &Repository,
+    repos: &[Repository],
     pat: &str,
     all: bool,
     name_only: bool,
     homepage: bool,
 ) -> Result<()> {
-    // A pattern containing `/` matches against full `category/package`; bare
-    // patterns match the package basename only (qsearch parity).
     let pat_has_slash = pat.contains('/');
-    let mut matched: BTreeMap<String, Cpn> = BTreeMap::new();
-    for cat in repo.categories().map_err(|e| Error::Other(e.to_string()))? {
-        for pkg in cat.packages().map_err(|e| Error::Other(e.to_string()))? {
-            let hit = if all {
-                true
-            } else if pat_has_slash {
-                let full = format!("{}/{}", cat.name(), pkg.name());
-                full.contains(pat)
-            } else {
-                pkg.name().contains(pat)
+    // value: (cpn, repo_index_of_first_sighting)
+    let mut matched: BTreeMap<String, (Cpn, usize)> = BTreeMap::new();
+    for (idx, repo) in repos.iter().enumerate() {
+        let cats = match repo.categories() {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("em: skipping {} categories: {e}", repo.path());
+                continue;
+            }
+        };
+        for cat in cats {
+            let pkgs = match cat.packages() {
+                Ok(v) => v,
+                Err(_) => continue,
             };
-            if hit {
-                let key = format!("{}/{}", cat.name(), pkg.name());
-                matched.insert(key, pkg.cpn().clone());
+            for pkg in pkgs {
+                let hit = if all {
+                    true
+                } else if pat_has_slash {
+                    let full = format!("{}/{}", cat.name(), pkg.name());
+                    full.contains(pat)
+                } else {
+                    pkg.name().contains(pat)
+                };
+                if hit {
+                    let key = format!("{}/{}", cat.name(), pkg.name());
+                    matched.entry(key).or_insert_with(|| (pkg.cpn().clone(), idx));
+                }
             }
         }
     }
@@ -63,8 +86,8 @@ fn run_name(
         return Ok(());
     }
 
-    for (key, cpn) in &matched {
-        let info = latest_entry_info(repo, cpn, homepage);
+    for (key, (cpn, idx)) in &matched {
+        let info = latest_entry_info(&repos[*idx], cpn, homepage);
         println!("{key}: {info}");
     }
     Ok(())
@@ -90,20 +113,24 @@ fn latest_entry_info(repo: &Repository, cpn: &Cpn, homepage: bool) -> String {
     }
 }
 
-/// Description mode: walks every cache entry via the parallel iterator,
-/// keeps the highest cpv per cpn, then filters on description content.
+/// Description mode: walks every cache entry across every repo via the
+/// parallel iterator, keeps the highest cpv per cpn (first repo wins on
+/// equal versions), then filters on description content.
 fn run_desc(
-    repo: &Repository,
+    repos: &[Repository],
     pat: &str,
     all: bool,
     name_only: bool,
     homepage: bool,
 ) -> Result<()> {
-    let mut entries: Vec<(Cpv, CacheEntry)> = repo
-        .cache_entries()
-        .into_iter()
-        .filter_map(|(cpv, r)| r.ok().map(|e| (cpv, e)))
-        .collect();
+    let mut entries: Vec<(Cpv, CacheEntry)> = Vec::new();
+    for repo in repos {
+        for (cpv, r) in repo.cache_entries() {
+            if let Ok(entry) = r {
+                entries.push((cpv, entry));
+            }
+        }
+    }
 
     // Group by cpn (asc), then highest version first within each group.
     entries.sort_by(|(a, _), (b, _)| {
@@ -134,3 +161,4 @@ fn run_desc(
     }
     Ok(())
 }
+

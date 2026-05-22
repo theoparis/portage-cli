@@ -42,8 +42,11 @@ pub struct Cli {
     #[arg(long, value_name = "ARCH", default_value_t = Arch::current(), value_parser = parse_arch)]
     pub arch: Arch,
 
-    #[arg(long, value_name = "PATH", default_value = "/var/db/repos/gentoo")]
-    pub repo: String,
+    /// Pin search/query to a single repository. When unset, repositories are
+    /// auto-discovered from `repos.conf` (the main repo wins for single-repo
+    /// applets; `em search` walks all of them).
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<String>,
 
     #[arg(short = 'N', long)]
     pub newuse: bool,
@@ -119,6 +122,36 @@ pub struct Cli {
 
     #[arg(num_args = 1..)]
     pub atoms: Vec<String>,
+}
+
+impl Cli {
+    /// Path used by single-repo applets. Falls back to `/var/db/repos/gentoo`
+    /// when neither `--repo` nor `repos.conf` is available.
+    pub fn repo_path(&self) -> String {
+        if let Some(p) = &self.repo {
+            return p.clone();
+        }
+        if let Ok(rc) = portage_repo::ReposConf::load()
+            && let Some(main) = rc.main_repo()
+        {
+            return main.location.to_string_lossy().into_owned();
+        }
+        "/var/db/repos/gentoo".to_string()
+    }
+
+    /// Repositories to walk for `em search`. Honours `--repo` when set;
+    /// otherwise returns every entry from `repos.conf` (main first).
+    pub fn search_repos(&self) -> Vec<std::path::PathBuf> {
+        if let Some(p) = &self.repo {
+            return vec![std::path::PathBuf::from(p)];
+        }
+        match portage_repo::ReposConf::load() {
+            Ok(rc) if !rc.repos().is_empty() => {
+                rc.repos().iter().map(|e| e.location.clone()).collect()
+            }
+            _ => vec![std::path::PathBuf::from("/var/db/repos/gentoo")],
+        }
+    }
 }
 
 #[derive(Subcommand)]
