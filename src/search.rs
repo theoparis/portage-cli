@@ -36,9 +36,31 @@ pub async fn run(
     }
 }
 
-/// Name-mode: enumerate category/package directories across every repo —
-/// dedupe by `cat/pkg` (first repo wins). Reads the metadata cache only when
-/// we actually have to print something other than the cpn.
+/// ASCII-only case-insensitive `haystack.contains(needle)` — zero-alloc.
+/// Non-ASCII bytes compare exactly. Matches the behaviour of `strcasestr`
+/// that qsearch (and most C portage tools) use.
+fn contains_ci(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let hb = haystack.as_bytes();
+    let nb = needle.as_bytes();
+    if nb.len() > hb.len() {
+        return false;
+    }
+    hb.windows(nb.len()).any(|w| w.eq_ignore_ascii_case(nb))
+}
+
+/// Name-mode: enumerate category/package directories across every repo
+/// (each repo's `profiles/categories` → `Category::packages()`). Reads
+/// the metadata cache only when we actually have to print something
+/// other than the cpn — and only for matched packages.
+///
+/// Walking the porttree (not `metadata/md5-cache/`) is the correct
+/// source here: overlays like crossdev list their categories in
+/// `profiles/categories` and symlink their package dirs at gentoo's
+/// originals without ever populating md5-cache for them; qsearch
+/// surfaces those (with empty descriptions) and so do we.
 fn run_name(
     repos: &[Repository],
     pat: &str,
@@ -67,9 +89,9 @@ fn run_name(
                     true
                 } else if pat_has_slash {
                     let full = format!("{}/{}", cat.name(), pkg.name());
-                    full.contains(pat)
+                    contains_ci(&full, pat)
                 } else {
-                    pkg.name().contains(pat)
+                    contains_ci(pkg.name(), pat)
                 };
                 if hit {
                     let key = format!("{}/{}", cat.name(), pkg.name());
@@ -115,8 +137,10 @@ fn latest_entry_info(repo: &Repository, cpn: &Cpn, homepage: bool) -> String {
 
 /// Description mode: walks every cache entry across every repo via the
 /// parallel reader, keeps the highest cpv per cpn, then filters on
-/// description content. Uses `RawCacheEntry` to skip atom-tree parsing —
-/// we only need DESCRIPTION (and optionally HOMEPAGE) per file.
+/// description content (case-insensitive, matching qsearch's `-S`
+/// behaviour — description-only, no name fallback). `RawCacheEntry`
+/// skips atom-tree parsing — we only need DESCRIPTION (and optionally
+/// HOMEPAGE).
 async fn run_desc(
     repos: &[Repository],
     pat: &str,
@@ -135,13 +159,13 @@ async fn run_desc(
     // duration of the call, so values we want to keep must be cloned.
     // Filter and pick the single field we'll actually print inside the
     // closure: non-matches return None (zero allocs); matches allocate
-    // exactly one String (the field needed for output).
+    // exactly one String.
     let pat_owned = pat.to_string();
     let mut entries: Vec<(Cpv, Option<String>)> =
         cache_entries_parallel(repos, &opts, move |text| {
             let raw = RawCacheEntry::new(text);
             let desc = raw.field("DESCRIPTION").unwrap_or("");
-            if !all && !desc.contains(&pat_owned) {
+            if !all && !contains_ci(desc, &pat_owned) {
                 return Ok(None);
             }
             let info = if name_only {
@@ -176,5 +200,3 @@ async fn run_desc(
     }
     Ok(())
 }
-
-
