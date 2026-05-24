@@ -1,0 +1,48 @@
+[package]
+name = "portage-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+authors = ["Luca Barbato <lu_zero@gentoo.org>"]
+license = "MIT"
+description = "Gentoo Portage command-line tools (em)"
+repository = "https://github.com/lu-zero/portage-cli"
+keywords = ["gentoo", "portage", "cli", "package-manager"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "em"
+path = "src/main.rs"
+
+[features]
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
+lasso = [
+    "portage-atom/lasso",
+    "portage-metadata/lasso",
+    "portage-atom-pubgrub/lasso",
+    "portage-repo/lasso",
+]
+symbol-table = [
+    "portage-atom/symbol-table",
+    "portage-metadata/symbol-table",
+    "portage-atom-pubgrub/symbol-table",
+    "portage-repo/symbol-table",
+]
+
+[dependencies]
+gentoo-core = "0.5"
+portage-atom = "0.9"
+portage-atom-pubgrub = "0.4"
+portage-metadata = "0.7"
+portage-repo = { path = "../portage-repo" }
+clap = { version = "4", features = ["derive"] }
+itertools = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+thiserror = "2"
+mimalloc = { version = "0.1.50", optional = true }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

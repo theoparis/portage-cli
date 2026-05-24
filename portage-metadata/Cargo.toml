@@ -1,0 +1,29 @@
+[package]
+name = "portage-metadata"
+version = "0.7.1"
+edition = "2021"
+rust-version = "1.88"
+authors = ["Luca Barbato <lu_zero@gentoo.org>"]
+license = "MIT"
+description = "Gentoo ebuild metadata cache types and parser based on PMS"
+repository = "https://github.com/lu-zero/portage-metadata"
+keywords = ["gentoo", "portage", "ebuild", "pms", "metadata"]
+categories = ["parser-implementations", "development-tools"]
+
+[dependencies]
+portage-atom = "0.9"
+winnow = { version = "1.0", features = ["ascii"] }
+thiserror = "2"
+
+[features]
+default = []
+lasso = ["portage-atom/lasso"]
+symbol-table = ["portage-atom/symbol-table"]
+
+[[example]]
+name = "parse_cache"
+path = "examples/parse_cache.rs"
+
+[profile.release]
+opt-level = 3
+lto = true

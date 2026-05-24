@@ -1,0 +1,9 @@
+/target
+Cargo.lock
+gentoo
+# profiling / benchmarking artifacts
+perf.data*
+*.svg
+FlameGraph/
+dhat-*.json
+bench.sh

@@ -1,0 +1,1092 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use camino::{Utf8Path, Utf8PathBuf};
+
+use gentoo_core::Arch;
+use jwalk::WalkDir;
+use portage_atom::{Cpn, Cpv, Dep};
+use portage_metadata::{CacheEntry, Eapi};
+
+use super::ebuild::Ebuild;
+
+type EbuildFilter = dyn Fn(&Ebuild) -> bool + Send + Sync;
+
+/// Lazy, composable ebuild discovery over a repository tree.
+///
+/// Wraps a [`jwalk::WalkDir`] builder and an optional filter closure.
+/// Nothing is walked until [`IntoIterator::into_iter`] or a collecting
+/// method is called. The filter is applied during iteration, not upfront.
+///
+/// ```
+/// # use portage_repo::Repository;
+/// # fn demo(repo: Repository) {
+/// // iterate lazily
+/// for ebuild in repo.ebuilds().unwrap() {
+///     println!("{}", ebuild.cpv());
+/// }
+///
+/// // filter + collect
+/// let ebuilds = repo.ebuilds()
+///     .unwrap()
+///     .filter(|eb| eb.category() == "dev-util")
+///     .collect_vec();
+/// # }
+/// ```
+pub struct Ebuilds {
+    walker: WalkDir,
+    filter: Option<Arc<EbuildFilter>>,
+}
+
+/// Concrete iterator produced by [`Ebuilds::into_iter`].
+///
+/// Holds the jwalk [`DirEntryIter`] and converts each entry
+/// to an [`Ebuild`] on the fly, applying the optional filter.
+pub struct EbuildsIter {
+    inner: jwalk::DirEntryIter<((), ())>,
+    filter: Option<Arc<EbuildFilter>>,
+}
+
+impl Ebuilds {
+    fn new(walker: WalkDir) -> Self {
+        Self {
+            walker,
+            filter: None,
+        }
+    }
+
+    /// Retain only ebuilds matching the predicate.
+    ///
+    /// Consuming: call `.filter(...)` repeatedly to chain predicates.
+    pub fn filter<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&Ebuild) -> bool + Send + Sync + 'static,
+    {
+        self.filter = Some(Arc::new(f));
+        self
+    }
+
+    /// Collect all matching ebuilds into a sorted `Vec`.
+    pub fn collect_vec(self) -> Vec<Ebuild> {
+        let mut v: Vec<Ebuild> = self.into_iter().collect();
+        v.sort_by(|a, b| a.cpv().cmp(b.cpv()));
+        v
+    }
+}
+
+fn dir_entry_to_ebuild(entry: jwalk::Result<jwalk::DirEntry<((), ())>>) -> Option<Ebuild> {
+    let entry = entry.ok()?;
+    let path: Utf8PathBuf = entry.path().try_into().ok()?;
+    let stem = path.file_name()?.strip_suffix(".ebuild")?;
+    let cat_name = path.parent()?.parent()?.file_name()?;
+
+    let mut cpv_str = String::with_capacity(cat_name.len() + 1 + stem.len());
+    cpv_str.push_str(cat_name);
+    cpv_str.push('/');
+    cpv_str.push_str(stem);
+    let cpv = Cpv::parse(&cpv_str).ok()?;
+    Some(Ebuild::new(cpv, path))
+}
+
+impl IntoIterator for Ebuilds {
+    type Item = Ebuild;
+    type IntoIter = EbuildsIter;
+
+    fn into_iter(self) -> EbuildsIter {
+        EbuildsIter {
+            inner: self.walker.into_iter(),
+            filter: self.filter,
+        }
+    }
+}
+
+impl Iterator for EbuildsIter {
+    type Item = Ebuild;
+
+    fn next(&mut self) -> Option<Ebuild> {
+        loop {
+            let ebuild = dir_entry_to_ebuild(self.inner.next()?)?;
+            match &self.filter {
+                Some(f) if !f(&ebuild) => continue,
+                _ => return Some(ebuild),
+            }
+        }
+    }
+}
+
+/// Lazy iterator over every `metadata/md5-cache/{cat}/{name-version}` file.
+///
+/// Produced by [`Repository::cache_entries`]. Each item is a `(Cpv, …)`
+/// tuple; the second element is the parsed entry or the I/O / parse error
+/// for that specific file.
+pub struct CacheEntries {
+    walker: WalkDir,
+}
+
+/// Concrete iterator produced by [`CacheEntries::into_iter`].
+pub struct CacheEntriesIter {
+    inner: jwalk::DirEntryIter<((), ())>,
+}
+
+fn dir_entry_to_cache(
+    entry: jwalk::Result<jwalk::DirEntry<((), ())>>,
+) -> Option<(Cpv, Result<CacheEntry>)> {
+    let entry = entry.ok()?;
+    if !entry.file_type().is_file() {
+        return None;
+    }
+    let path: Utf8PathBuf = entry.path().try_into().ok()?;
+    let stem = path.file_name()?;
+    let cat_name = path.parent()?.file_name()?;
+
+    let mut cpv_str = String::with_capacity(cat_name.len() + 1 + stem.len());
+    cpv_str.push_str(cat_name);
+    cpv_str.push('/');
+    cpv_str.push_str(stem);
+    let cpv = Cpv::parse(&cpv_str).ok()?;
+
+    let result = match std::fs::read_to_string(&path) {
+        Ok(contents) => CacheEntry::parse(&contents).map_err(Error::from),
+        Err(e) => Err(util::io_err(&path, e)),
+    };
+    Some((cpv, result))
+}
+
+impl IntoIterator for CacheEntries {
+    type Item = (Cpv, Result<CacheEntry>);
+    type IntoIter = CacheEntriesIter;
+
+    fn into_iter(self) -> CacheEntriesIter {
+        CacheEntriesIter {
+            inner: self.walker.into_iter(),
+        }
+    }
+}
+
+impl Iterator for CacheEntriesIter {
+    type Item = (Cpv, Result<CacheEntry>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(item) = dir_entry_to_cache(self.inner.next()?) {
+                return Some(item);
+            }
+        }
+    }
+}
+
+/// A single package-move or slot-move entry from `profiles/updates/`.
+///
+/// See [PMS 4.4.4](https://projects.gentoo.org/pms/9/pms.html#profiles-updates).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileUpdate {
+    /// `move <old> <new>` — package renamed.
+    Move {
+        /// Old category/package name.
+        old: Cpn,
+        /// New category/package name.
+        new: Cpn,
+    },
+    /// `slotmove <dep> <old_slot> <new_slot>` — slot renamed.
+    SlotMove {
+        /// Atom (possibly versioned) identifying affected packages.
+        dep: Dep,
+        /// Old slot value.
+        old_slot: String,
+        /// New slot value.
+        new_slot: String,
+    },
+}
+
+use super::category::Category;
+use crate::error::{Error, Result};
+use super::layout::LayoutConf;
+use super::profile::{Profile, ProfileDesc, ProfileStack};
+use super::use_expand::UseExpand;
+use super::util;
+
+/// A Gentoo ebuild repository.
+///
+/// This is the main entry point for the crate. It eagerly loads `layout.conf`
+/// and the repository name, while category/package enumeration is lazy.
+///
+/// See [PMS 4 — Tree Layout](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
+#[derive(Debug, Clone)]
+pub struct Repository {
+    path: Utf8PathBuf,
+    layout: LayoutConf,
+    name: String,
+    arch_cache: Vec<Arch>,
+}
+
+impl Repository {
+    /// Open an ebuild repository at the given path.
+    ///
+    /// Reads `metadata/layout.conf` and `profiles/repo_name` eagerly.
+    /// Returns an error if the directory lacks a valid `layout.conf`.
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let std_path = path.into();
+        let path = Utf8PathBuf::from_path_buf(std_path).map_err(Error::InvalidRepository)?;
+        if !path.is_dir() {
+            return Err(Error::InvalidRepository(path.into_std_path_buf()));
+        }
+
+        let layout = LayoutConf::from_repo(path.as_std_path())?;
+
+        let name = util::read_single_line(path.join("profiles").join("repo_name"))?
+            .unwrap_or_else(|| path.file_name().unwrap_or_default().to_string());
+
+        let arch_cache: Vec<Arch> = util::read_lines(path.join("profiles").join("arch.list"))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| Arch::intern(&s))
+            .collect();
+
+        Ok(Repository {
+            path,
+            layout,
+            name,
+            arch_cache,
+        })
+    }
+
+    /// Absolute path to the repository root.
+    pub fn path(&self) -> &Utf8Path {
+        &self.path
+    }
+
+    /// Repository name (from `profiles/repo_name`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The parsed `metadata/layout.conf`.
+    pub fn layout(&self) -> &LayoutConf {
+        &self.layout
+    }
+
+    /// List all categories declared in `profiles/categories`.
+    ///
+    /// See [PMS 4](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
+    pub fn categories(&self) -> Result<Vec<Category>> {
+        let lines = util::read_lines(self.path.join("profiles").join("categories"))?;
+        Ok(lines
+            .into_iter()
+            .map(|name| {
+                let cat_path = self.path.join(&name);
+                Category::new(name, cat_path)
+            })
+            .collect())
+    }
+
+    /// List all ebuilds in the repository using parallel directory walking.
+    ///
+    /// Uses [`jwalk`] to walk category directories concurrently, collecting
+    /// all `.ebuild` files. Only categories listed in `profiles/categories`
+    /// are visited. Results are sorted by CPV.
+    ///
+    /// See [PMS 4](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
+    pub fn ebuilds(&self) -> Result<Ebuilds> {
+        let categories: HashSet<String> =
+            util::read_lines(self.path.join("profiles").join("categories"))?
+                .into_iter()
+                .collect();
+
+        let walker = WalkDir::new(&self.path)
+            .min_depth(3)
+            .max_depth(3)
+            .process_read_dir(move |depth, _path, _state, children| {
+                children.retain(|entry| {
+                    entry.as_ref().is_ok_and(|e| {
+                        let name = e.file_name();
+                        let name = name.to_string_lossy();
+                        match depth {
+                            None => true,
+                            Some(0) => categories.contains(name.as_ref()),
+                            Some(1) => !name.starts_with('.'),
+                            _ => name.ends_with(".ebuild"),
+                        }
+                    })
+                });
+            });
+
+        Ok(Ebuilds::new(walker))
+    }
+
+    /// Look up a single category by name.
+    pub fn category(&self, name: &str) -> Option<Category> {
+        let cat_path: Utf8PathBuf = self.path.join(name);
+        if cat_path.is_dir() {
+            Some(Category::new(name.to_string(), cat_path))
+        } else {
+            None
+        }
+    }
+
+    /// Read a metadata cache entry for the given `Cpv`.
+    ///
+    /// Reads from `metadata/md5-cache/{category}/{package-version}`.
+    /// Returns `Ok(None)` when no cache file exists for this cpv (the typical
+    /// cache-miss case); other I/O or parse failures still produce `Err`.
+    ///
+    /// See [PMS 14 — Metadata Cache](https://projects.gentoo.org/pms/9/pms.html#metadata-cache).
+    pub fn cache_entry(&self, cpv: &Cpv) -> Result<Option<CacheEntry>> {
+        let cache_path = self
+            .cache_dir()
+            .join(cpv.cpn.category.as_str())
+            .join(format!("{}-{}", cpv.cpn.package, cpv.version));
+        match std::fs::read_to_string(&cache_path) {
+            Ok(contents) => Ok(Some(CacheEntry::parse(&contents)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(util::io_err(&cache_path, e)),
+        }
+    }
+
+    /// `{repo}/metadata/md5-cache/` — the directory PMS 14 places the cache in.
+    pub(crate) fn cache_dir(&self) -> Utf8PathBuf {
+        self.path.join("metadata").join("md5-cache")
+    }
+
+    /// Walk `metadata/md5-cache/` yielding every entry as `(Cpv, Result<CacheEntry>)`.
+    ///
+    /// The walk is parallel (via [`jwalk`]); parsing happens on demand as
+    /// the iterator is consumed. Files whose name does not parse as a Cpv
+    /// are skipped silently. I/O failures and parse errors on individual
+    /// valid-named files come through as `Err` items so the consumer can
+    /// decide whether to abort or continue.
+    ///
+    /// See [PMS 14 — Metadata Cache](https://projects.gentoo.org/pms/9/pms.html#metadata-cache).
+    pub fn cache_entries(&self) -> CacheEntries {
+        let walker = WalkDir::new(self.cache_dir())
+            .skip_hidden(true)
+            .min_depth(2)
+            .max_depth(2);
+        CacheEntries { walker }
+    }
+
+    /// Verify that `entry`'s recorded eclass checksums still match the live tree.
+    ///
+    /// For every `(name, md5)` in `entry.eclasses`, the eclass is located by
+    /// searching this repository's `eclass/` directory and each master's (in
+    /// order), then its current md5 is compared against the recorded one. An
+    /// entry with no `_eclasses_` is trivially fresh.
+    ///
+    /// This does **not** verify `entry.md5` against the ebuild on disk —
+    /// callers that want that check should compare it themselves (they
+    /// already know which ebuild they're holding metadata for; this method
+    /// has no Cpv to resolve a path from).
+    ///
+    /// Returns `false` if any eclass cannot be located, cannot be read, or
+    /// hashes to a different value than the cache entry records.
+    pub fn is_fresh(&self, entry: &CacheEntry, masters: &[Repository]) -> bool {
+        if entry.eclasses.is_empty() {
+            return true;
+        }
+        let eclass_dirs: Vec<Utf8PathBuf> = std::iter::once(self.path.join("eclass"))
+            .chain(masters.iter().map(|m| m.path.join("eclass")))
+            .collect();
+        for (name, recorded) in &entry.eclasses {
+            let Some(path) = find_eclass_in(&eclass_dirs, name) else {
+                return false;
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                return false;
+            };
+            let actual = format!("{:x}", md5::compute(&bytes));
+            if !actual.eq_ignore_ascii_case(recorded) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Parse `profiles/profiles.desc` to get available profile descriptions.
+    ///
+    /// See [PMS 5](https://projects.gentoo.org/pms/9/pms.html#profiles).
+    pub fn profiles_desc(&self) -> Result<Vec<ProfileDesc>> {
+        let lines = util::read_lines(self.path.join("profiles").join("profiles.desc"))?;
+        let mut descs = Vec::new();
+        for line in lines {
+            descs.push(ProfileDesc::parse(&line)?);
+        }
+        Ok(descs)
+    }
+
+    /// Read the default EAPI for profiles in this repository.
+    ///
+    /// Returns `None` if `profiles/eapi` is absent (EAPI 0 is implied).
+    ///
+    /// See [PMS 4.4](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
+    pub fn profiles_eapi(&self) -> Result<Option<Eapi>> {
+        match util::read_single_line(self.path.join("profiles").join("eapi"))? {
+            Some(s) => {
+                let eapi = s.parse::<Eapi>().map_err(|e| {
+                    Error::InvalidProfile(format!("bad EAPI in profiles/eapi: {e}"))
+                })?;
+                Ok(Some(eapi))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Parse the repository-level `profiles/package.mask`.
+    ///
+    /// These masks apply across all profiles in the repository and should
+    /// be merged before any profile-stack masks.  Returns an empty `Vec`
+    /// if the file is absent.
+    ///
+    /// See [PMS 4.4](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
+    pub fn repo_package_mask(&self) -> Result<Vec<Dep>> {
+        let lines = util::read_lines(self.path.join("profiles").join("package.mask"))?;
+        lines
+            .into_iter()
+            .map(|l| Dep::parse(&l).map_err(Into::into))
+            .collect()
+    }
+
+    /// Build a [`UseExpand`] grouper from this repository's `profiles/desc/` names.
+    ///
+    /// This is a convenience wrapper around [`Repository::use_expand_names`] that
+    /// constructs the grouper ready for [`UseExpand::group`] calls.
+    pub fn use_expand(&self) -> Result<UseExpand> {
+        Ok(UseExpand::new(self.use_expand_names()?))
+    }
+
+    /// List available USE_EXPAND variable names from `profiles/desc/`.
+    ///
+    /// Returns the stem of each `.desc` file (e.g. `"cpu_flags_x86"`),
+    /// sorted alphabetically.
+    ///
+    /// See [PMS 4.4](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
+    pub fn use_expand_names(&self) -> Result<Vec<String>> {
+        let dir: Utf8PathBuf = self.path.join("profiles").join("desc");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(util::io_err(&dir, e)),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| util::io_err(&dir, e))?;
+            let path: Utf8PathBuf = match entry.path().try_into() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if let Some(fname) = path.file_name()
+                && let Some(stem) = fname.strip_suffix(".desc")
+                && !stem.starts_with('.')
+            {
+                names.push(stem.to_string());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Parse USE_EXPAND flag descriptions from `profiles/desc/{name}.desc`.
+    ///
+    /// Returns `(flag_name, description)` pairs.  Returns an empty `Vec`
+    /// if the file does not exist.
+    ///
+    /// See [PMS 4.4](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
+    pub fn use_expand_desc(&self, name: &str) -> Result<Vec<(String, String)>> {
+        parse_desc_file(
+            self.path
+                .join("profiles")
+                .join("desc")
+                .join(format!("{name}.desc")),
+        )
+    }
+
+    /// Parse all package-move and slot-move entries from `profiles/updates/`.
+    ///
+    /// Files are read in sorted order (oldest first by filename convention).
+    /// Lines with unrecognised tags or parse errors are silently skipped.
+    ///
+    /// See [PMS 4.4.4](https://projects.gentoo.org/pms/9/pms.html#profiles-updates).
+    pub fn profile_updates(&self) -> Result<Vec<ProfileUpdate>> {
+        let dir: Utf8PathBuf = self.path.join("profiles").join("updates");
+        let mut files: Vec<Utf8PathBuf> = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let path: Utf8PathBuf = e.path().try_into().ok()?;
+                    let name = path.file_name()?;
+                    if name.starts_with('.') {
+                        None
+                    } else {
+                        Some(path)
+                    }
+                })
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(util::io_err(&dir, e)),
+        };
+        files.sort();
+
+        let mut updates = Vec::new();
+        for file in files {
+            for line in util::read_lines(&file)? {
+                let mut parts = line.split_whitespace();
+                match parts.next() {
+                    Some("move") => {
+                        let (Some(old_s), Some(new_s)) = (parts.next(), parts.next()) else {
+                            continue;
+                        };
+                        let (Ok(old), Ok(new)) = (Cpn::parse(old_s), Cpn::parse(new_s)) else {
+                            continue;
+                        };
+                        updates.push(ProfileUpdate::Move { old, new });
+                    }
+                    Some("slotmove") => {
+                        let (Some(dep_s), Some(old_s), Some(new_s)) =
+                            (parts.next(), parts.next(), parts.next())
+                        else {
+                            continue;
+                        };
+                        let Ok(dep) = Dep::parse(dep_s) else { continue };
+                        updates.push(ProfileUpdate::SlotMove {
+                            dep,
+                            old_slot: old_s.to_string(),
+                            new_slot: new_s.to_string(),
+                        });
+                    }
+                    _ => continue, // unknown tag — skip
+                }
+            }
+        }
+        Ok(updates)
+    }
+
+    /// Open a profile directory relative to `profiles/`.
+    pub fn profile(&self, relative_path: &str) -> Result<Profile> {
+        let profile_path = self.path.join("profiles").join(relative_path);
+        Profile::open(profile_path.into())
+    }
+
+    /// Build the full profile stack for a profile relative to `profiles/`.
+    ///
+    /// Follows `parent` files recursively and returns a [`ProfileStack`] with
+    /// all ancestor profiles in resolution order.
+    ///
+    /// See [PMS 5.1](https://projects.gentoo.org/pms/9/pms.html#profiles).
+    pub fn profile_stack(&self, relative_path: &str) -> Result<ProfileStack> {
+        let profile_path = self.path.join("profiles").join(relative_path);
+        ProfileStack::build(profile_path.into())
+    }
+
+    /// List available eclass names (without the `.eclass` extension).
+    pub fn eclasses(&self) -> Result<Vec<String>> {
+        let eclass_dir: Utf8PathBuf = self.path.join("eclass");
+        let entries = match std::fs::read_dir(&eclass_dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(util::io_err(&eclass_dir, e)),
+        };
+
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| util::io_err(&eclass_dir, e))?;
+            let path: Utf8PathBuf = match entry.path().try_into() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if let Some(stem) = path.file_name().and_then(|n| n.strip_suffix(".eclass")) {
+                names.push(stem.to_string());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// List available license names from `licenses/`.
+    pub fn licenses(&self) -> Result<Vec<String>> {
+        list_dir_names(self.path.join("licenses"))
+    }
+
+    /// Architectures declared in `profiles/arch.list` (typed).
+    ///
+    /// Populated eagerly at `open()`. See
+    /// [PMS 4.4](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
+    pub fn arch_list(&self) -> &[Arch] {
+        &self.arch_cache
+    }
+
+    /// Resolve an [`Arch`] to its Gentoo keyword string.
+    pub fn arch_keyword<'a>(&self, arch: &'a Arch) -> &'a str {
+        arch.as_str()
+    }
+
+    /// Extract the CPU architecture from a GNU CHOST triple.
+    ///
+    /// Returns `None` only when `chost` is empty.
+    pub fn arch_from_chost(&self, chost: &str) -> Option<Arch> {
+        Arch::from_chost(chost)
+    }
+
+    /// Parse global USE flag descriptions from `profiles/use.desc`.
+    ///
+    /// Returns `(flag_name, description)` pairs.
+    pub fn use_desc(&self) -> Result<Vec<(String, String)>> {
+        parse_desc_file(self.path.join("profiles").join("use.desc"))
+    }
+
+    /// Parse per-package USE flag descriptions from `profiles/use.local.desc`.
+    ///
+    /// Returns `(Cpn, flag_name, description)` tuples.
+    pub fn use_local_desc(&self) -> Result<Vec<(Cpn, String, String)>> {
+        let lines = util::read_lines(self.path.join("profiles").join("use.local.desc"))?;
+        let mut result = Vec::new();
+        for line in lines {
+            // Format: category/package:flag - description
+            let Some((cpn_str, rest)) = line.split_once(':') else {
+                continue;
+            };
+            let cpn = Cpn::parse(cpn_str)?;
+            let (flag, desc) = if let Some((f, d)) = rest.split_once(" - ") {
+                (f.to_string(), d.to_string())
+            } else {
+                (rest.to_string(), String::new())
+            };
+            result.push((cpn, flag, desc));
+        }
+        Ok(result)
+    }
+
+    /// Parse `profiles/thirdpartymirrors`.
+    ///
+    /// Returns `(mirror_name, [urls...])` pairs.
+    pub fn thirdpartymirrors(&self) -> Result<Vec<(String, Vec<String>)>> {
+        let lines = util::read_lines(self.path.join("profiles").join("thirdpartymirrors"))?;
+        let mut result = Vec::new();
+        for line in lines {
+            let mut parts = line.split_whitespace();
+            if let Some(name) = parts.next() {
+                let urls: Vec<String> = parts.map(String::from).collect();
+                result.push((name.to_string(), urls));
+            }
+        }
+        Ok(result)
+    }
+
+    /// Open a repository, resolving its master repositories from `repos_dir`.
+    ///
+    /// Each master listed in `layout.conf` is opened from
+    /// `repos_dir/<master_name>`, and its own masters are resolved
+    /// recursively (depth-first). Returns the opened repository and
+    /// the flattened list of master repositories in search order.
+    pub fn open_with_masters(
+        path: impl Into<PathBuf>,
+        repos_dir: impl AsRef<Path>,
+    ) -> Result<(Self, Vec<Repository>)> {
+        let repo = Self::open(path)?;
+        let mut masters: Vec<Repository> = Vec::new();
+        let mut seen = HashSet::new();
+        seen.insert(repo.name().to_string());
+        Self::resolve_masters(&repo, repos_dir.as_ref(), &mut masters, &mut seen)?;
+        Ok((repo, masters))
+    }
+
+    /// Recursively resolve master repositories (depth-first).
+    fn resolve_masters(
+        repo: &Repository,
+        repos_dir: &Path,
+        out: &mut Vec<Repository>,
+        seen: &mut HashSet<String>,
+    ) -> Result<()> {
+        for master_name in &repo.layout().masters {
+            if !seen.insert(master_name.clone()) {
+                continue; // already resolved or cycle
+            }
+            let master_path = repos_dir.join(master_name);
+            let master = Self::open(master_path)?;
+            // Resolve the master's own masters first (depth-first).
+            Self::resolve_masters(&master, repos_dir, out, seen)?;
+            out.push(master);
+        }
+        Ok(())
+    }
+}
+
+/// Locate `{name}.eclass` by searching `dirs` in order (first hit wins).
+fn find_eclass_in(dirs: &[Utf8PathBuf], name: &str) -> Option<Utf8PathBuf> {
+    let filename = format!("{name}.eclass");
+    for dir in dirs {
+        let path = dir.join(&filename);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// List file/directory names in a directory (sorted, skipping dotfiles).
+fn list_dir_names(dir: impl AsRef<Path>) -> Result<Vec<String>> {
+    let dir = dir.as_ref();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(util::io_err(dir, e)),
+    };
+
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| util::io_err(dir, e))?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        if !name.starts_with('.') && name != "CVS" {
+            names.push(name.into_owned());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Parse a `flag - description` file format used by `use.desc` etc.
+fn parse_desc_file(path: impl AsRef<Path>) -> Result<Vec<(String, String)>> {
+    let lines = util::read_lines(path)?;
+    let mut result = Vec::new();
+    for line in lines {
+        if let Some((flag, desc)) = line.split_once(" - ") {
+            result.push((flag.to_string(), desc.to_string()));
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create the minimal directory structure required by `Repository::open`.
+    fn make_test_repo(dir: &tempfile::TempDir) -> Repository {
+        std::fs::create_dir_all(dir.path().join("metadata")).unwrap();
+        std::fs::write(dir.path().join("metadata").join("layout.conf"), "").unwrap();
+        std::fs::create_dir_all(dir.path().join("profiles")).unwrap();
+        Repository::open(dir.path()).unwrap()
+    }
+
+    #[test]
+    fn profiles_eapi_absent_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        assert!(repo.profiles_eapi().unwrap().is_none());
+    }
+
+    #[test]
+    fn profiles_eapi_returns_parsed_eapi() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::write(dir.path().join("profiles").join("eapi"), "5\n").unwrap();
+        assert_eq!(repo.profiles_eapi().unwrap(), Some(Eapi::Five));
+    }
+
+    #[test]
+    fn repo_package_mask_absent_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        assert!(repo.repo_package_mask().unwrap().is_empty());
+    }
+
+    #[test]
+    fn repo_package_mask_parses_atoms() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::write(
+            dir.path().join("profiles").join("package.mask"),
+            "# comment\ndev-libs/foo\ndev-libs/bar\n",
+        )
+        .unwrap();
+        let masks = repo.repo_package_mask().unwrap();
+        assert_eq!(masks.len(), 2);
+    }
+
+    #[test]
+    fn use_expand_names_absent_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        assert!(repo.use_expand_names().unwrap().is_empty());
+    }
+
+    #[test]
+    fn use_expand_names_and_desc() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let desc_dir = dir.path().join("profiles").join("desc");
+        std::fs::create_dir_all(&desc_dir).unwrap();
+        std::fs::write(
+            desc_dir.join("cpu_flags_x86.desc"),
+            "mmx - MMX instruction support\nsse2 - SSE2 support\n",
+        )
+        .unwrap();
+
+        let names = repo.use_expand_names().unwrap();
+        assert_eq!(names, vec!["cpu_flags_x86"]);
+
+        let descs = repo.use_expand_desc("cpu_flags_x86").unwrap();
+        assert_eq!(descs.len(), 2);
+        assert_eq!(
+            descs[0],
+            ("mmx".to_string(), "MMX instruction support".to_string())
+        );
+        assert_eq!(descs[1], ("sse2".to_string(), "SSE2 support".to_string()));
+    }
+
+    #[test]
+    fn use_expand_desc_absent_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        assert!(repo.use_expand_desc("nonexistent").unwrap().is_empty());
+    }
+
+    #[test]
+    fn profile_updates_absent_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        assert!(repo.profile_updates().unwrap().is_empty());
+    }
+
+    #[test]
+    fn profile_updates_parses_move_and_slotmove() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let updates_dir = dir.path().join("profiles").join("updates");
+        std::fs::create_dir_all(&updates_dir).unwrap();
+        std::fs::write(
+            updates_dir.join("1Q-2024"),
+            "# comment\nmove dev-libs/foo dev-libs/bar\nslotmove >=dev-libs/baz-1.0 0 1\n",
+        )
+        .unwrap();
+
+        let updates = repo.profile_updates().unwrap();
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(&updates[0], ProfileUpdate::Move { old, new }
+            if old.to_string() == "dev-libs/foo" && new.to_string() == "dev-libs/bar"));
+        assert!(
+            matches!(&updates[1], ProfileUpdate::SlotMove { old_slot, new_slot, .. }
+            if old_slot == "0" && new_slot == "1")
+        );
+    }
+
+    #[test]
+    fn profile_updates_skips_unknown_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let updates_dir = dir.path().join("profiles").join("updates");
+        std::fs::create_dir_all(&updates_dir).unwrap();
+        std::fs::write(
+            updates_dir.join("1Q-2024"),
+            "unknown_tag foo bar\nmove dev-libs/a dev-libs/b\n",
+        )
+        .unwrap();
+
+        let updates = repo.profile_updates().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(&updates[0], ProfileUpdate::Move { .. }));
+    }
+
+    #[test]
+    fn category_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::create_dir_all(dir.path().join("dev-util")).unwrap();
+
+        assert!(repo.category("dev-util").is_some());
+        assert!(repo.category("nonexistent").is_none());
+    }
+
+    #[test]
+    fn cache_entry_reads_md5_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+
+        let cpv = Cpv::parse("dev-util/foo-1.0").unwrap();
+        let cache_dir = dir
+            .path()
+            .join("metadata")
+            .join("md5-cache")
+            .join("dev-util");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("foo-1.0"),
+            "EAPI=8\nDESCRIPTION=test\nSLOT=0\n",
+        )
+        .unwrap();
+
+        let entry = repo.cache_entry(&cpv).unwrap().expect("cache file present");
+        assert_eq!(entry.metadata.eapi, Eapi::Eight);
+        assert_eq!(entry.metadata.description, "test");
+    }
+
+    #[test]
+    fn cache_entries_walks_md5_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+
+        let cache_root = dir.path().join("metadata").join("md5-cache");
+        std::fs::create_dir_all(cache_root.join("dev-util")).unwrap();
+        std::fs::create_dir_all(cache_root.join("sys-apps")).unwrap();
+        std::fs::write(
+            cache_root.join("dev-util").join("foo-1.0"),
+            "EAPI=8\nDESCRIPTION=foo\nSLOT=0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cache_root.join("sys-apps").join("bar-2.1"),
+            "EAPI=8\nDESCRIPTION=bar\nSLOT=0\n",
+        )
+        .unwrap();
+        // Malformed filename — should be silently skipped.
+        std::fs::write(cache_root.join("dev-util").join("not-a-cpv"), "EAPI=8\n").unwrap();
+
+        let mut entries: Vec<(String, Result<CacheEntry>)> = repo
+            .cache_entries()
+            .into_iter()
+            .map(|(cpv, r)| (cpv.to_string(), r))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "dev-util/foo-1.0");
+        assert_eq!(entries[0].1.as_ref().unwrap().metadata.description, "foo");
+        assert_eq!(entries[1].0, "sys-apps/bar-2.1");
+        assert_eq!(entries[1].1.as_ref().unwrap().metadata.description, "bar");
+    }
+
+    #[test]
+    fn cache_entries_surfaces_parse_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let cache_root = dir.path().join("metadata").join("md5-cache");
+        std::fs::create_dir_all(cache_root.join("dev-util")).unwrap();
+        // Missing mandatory DESCRIPTION etc — parse should error.
+        std::fs::write(cache_root.join("dev-util").join("foo-1.0"), "EAPI=8\n").unwrap();
+
+        let entries: Vec<_> = repo.cache_entries().into_iter().collect();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].1.is_err());
+    }
+
+    #[test]
+    fn cache_entry_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let cpv = Cpv::parse("dev-util/foo-1.0").unwrap();
+        assert!(repo.cache_entry(&cpv).unwrap().is_none());
+    }
+
+    #[test]
+    fn is_fresh_validates_eclass_md5_across_local_and_masters() {
+        let local_dir = tempfile::tempdir().unwrap();
+        let master_dir = tempfile::tempdir().unwrap();
+        let local = make_test_repo(&local_dir);
+        let master = make_test_repo(&master_dir);
+
+        // Two eclasses: one in local, one only in master.
+        std::fs::create_dir_all(local_dir.path().join("eclass")).unwrap();
+        std::fs::create_dir_all(master_dir.path().join("eclass")).unwrap();
+        std::fs::write(
+            local_dir.path().join("eclass").join("local-only.eclass"),
+            b"local body\n",
+        )
+        .unwrap();
+        std::fs::write(
+            master_dir.path().join("eclass").join("master-only.eclass"),
+            b"master body\n",
+        )
+        .unwrap();
+
+        let local_md5 = format!("{:x}", md5::compute(b"local body\n"));
+        let master_md5 = format!("{:x}", md5::compute(b"master body\n"));
+
+        // Construct a CacheEntry via parse() to avoid hand-building EbuildMetadata.
+        let make_entry = |eclasses: &[(&str, &str)]| {
+            let eclass_field = eclasses
+                .iter()
+                .map(|(n, m)| format!("{n}\t{m}"))
+                .collect::<Vec<_>>()
+                .join("\t");
+            let raw = format!("EAPI=8\nDESCRIPTION=test\nSLOT=0\n_eclasses_={eclass_field}\n");
+            CacheEntry::parse(&raw).unwrap()
+        };
+
+        // Both eclasses present and matching — fresh.
+        let entry = make_entry(&[("local-only", &local_md5), ("master-only", &master_md5)]);
+        assert!(local.is_fresh(&entry, std::slice::from_ref(&master)));
+
+        // Wrong md5 for the master eclass — stale.
+        let entry = make_entry(&[("master-only", "00000000000000000000000000000000")]);
+        assert!(!local.is_fresh(&entry, std::slice::from_ref(&master)));
+
+        // Eclass not findable anywhere — stale.
+        let entry = make_entry(&[("ghost", &local_md5)]);
+        assert!(!local.is_fresh(&entry, std::slice::from_ref(&master)));
+
+        // Empty eclass list — trivially fresh.
+        let entry = make_entry(&[]);
+        assert!(local.is_fresh(&entry, &[]));
+    }
+
+    #[test]
+    fn profiles_desc_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::create_dir_all(dir.path().join("profiles").join("default").join("linux")).unwrap();
+        std::fs::write(
+            dir.path().join("profiles").join("profiles.desc"),
+            "amd64 default/linux/amd64/23.0 stable\n",
+        )
+        .unwrap();
+
+        let descs = repo.profiles_desc().unwrap();
+        assert_eq!(descs.len(), 1);
+        assert_eq!(descs[0].path(), "default/linux/amd64/23.0");
+    }
+
+    #[test]
+    fn ebuilds_lists_ebuilds() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::write(dir.path().join("profiles").join("categories"), "dev-util\n").unwrap();
+        let pkg_dir = dir.path().join("dev-util").join("foo");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("foo-1.0.ebuild"), "EAPI=8\n").unwrap();
+        std::fs::write(pkg_dir.join("foo-2.0.ebuild"), "EAPI=8\n").unwrap();
+
+        let ebuilds: Vec<_> = repo.ebuilds().unwrap().into_iter().collect();
+        assert_eq!(ebuilds.len(), 2);
+    }
+
+    #[test]
+    fn thirdpartymirrors_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::write(
+            dir.path().join("profiles").join("thirdpartymirrors"),
+            "foo https://foo.com/mirror1 https://foo.com/mirror2\n",
+        )
+        .unwrap();
+
+        let mirrors = repo.thirdpartymirrors().unwrap();
+        assert_eq!(mirrors.len(), 1);
+        assert_eq!(mirrors[0].0, "foo");
+        assert_eq!(mirrors[0].1.len(), 2);
+    }
+
+    #[test]
+    fn use_desc_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::write(
+            dir.path().join("profiles").join("use.desc"),
+            "ssl - Enable SSL support\nzlib - Use zlib compression\n",
+        )
+        .unwrap();
+
+        let descs = repo.use_desc().unwrap();
+        assert_eq!(descs.len(), 2);
+        assert_eq!(descs[0].0, "ssl");
+        assert_eq!(descs[0].1, "Enable SSL support");
+    }
+}

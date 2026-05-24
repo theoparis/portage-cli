@@ -1,0 +1,62 @@
+[package]
+name = "portage-bench"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+lasso = [
+    "portage-atom/lasso",
+    "portage-metadata/lasso",
+    "portage-atom-pubgrub/lasso",
+    "portage-atom-resolvo/lasso",
+    "portage-repo/lasso",
+]
+symbol-table = [
+    "portage-atom/symbol-table",
+    "portage-metadata/symbol-table",
+    "portage-atom-pubgrub/symbol-table",
+    "portage-atom-resolvo/symbol-table",
+    "portage-repo/symbol-table",
+]
+mimalloc = ["dep:mimalloc"]
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+portage-atom = { path = "../portage-atom" }
+portage-metadata = { path = "../portage-metadata" }
+portage-repo = { path = "../portage-repo" }
+portage-atom-pubgrub = { path = "../portage-atom-pubgrub" }
+portage-atom-resolvo = { path = "../portage-atom-resolvo" }
+
+pubgrub = "0.4"
+resolvo = "0.10.2"
+pkgcraft = { path = "../../pkgcraft/crates/pkgcraft" }
+clap = { version = "4", features = ["derive"] }
+camino = "1"
+mimalloc = { version = "0.1.50", optional = true }
+dhat = { version = "0.3.3", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio = { version = "1", features = ["rt"] }
+
+[profile.profiling]
+inherits = "release"
+debug = 1
+lto = false
+
+[[bench]]
+name = "dep_parsing"
+harness = false
+
+[[bench]]
+name = "realworld_dep_parsing"
+harness = false
+
+[[bench]]
+name = "resolve"
+harness = false
+
+[[bench]]
+name = "dedup"
+harness = false
