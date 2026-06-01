@@ -166,6 +166,9 @@ pub enum Applet {
         ebuild_path: String,
         #[arg(required = true)]
         phase: Vec<String>,
+        /// Override the build work directory (default: /var/tmp/portage/<cat>/<pf>)
+        #[arg(short = 'w', long, value_name = "DIR")]
+        work_dir: Option<camino::Utf8PathBuf>,
     },
 
     #[command(about = "System maintenance and health checks")]

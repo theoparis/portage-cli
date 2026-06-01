@@ -7,7 +7,7 @@ use portage_metadata::Eapi;
 use regex::Regex;
 
 use super::util;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// PMS 7.3.1 regex for detecting EAPI before sourcing.
 ///
@@ -66,6 +66,45 @@ impl Ebuild {
     /// Read the raw ebuild file content.
     pub fn read_raw(&self) -> Result<String> {
         util::read_to_string(&self.path)
+    }
+
+    /// Construct an [`Ebuild`] directly from a `.ebuild` file path.
+    ///
+    /// The CPV is derived from the directory structure:
+    /// `<repo>/<category>/<pkg>/<pkg>-<ver>.ebuild`
+    pub fn from_path(path: &Utf8Path) -> Result<Self> {
+        let path = path
+            .canonicalize_utf8()
+            .unwrap_or_else(|_| path.to_owned());
+
+        let filename = path
+            .file_name()
+            .ok_or_else(|| Error::Shell("ebuild path has no filename".into()))?;
+        let stem = filename
+            .strip_suffix(".ebuild")
+            .ok_or_else(|| Error::Shell(format!("{filename:?} is not an .ebuild file")))?;
+
+        let cat_dir = path
+            .parent()
+            .and_then(|p| p.parent())
+            .ok_or_else(|| Error::Shell("ebuild path too short to contain category".into()))?;
+        let category = cat_dir
+            .file_name()
+            .ok_or_else(|| Error::Shell("cannot determine category from path".into()))?;
+
+        let cpv_str = format!("{category}/{stem}");
+        let cpv = Cpv::parse(&cpv_str)
+            .map_err(|e| Error::Shell(format!("invalid CPV {cpv_str:?}: {e}")))?;
+
+        Ok(Self::new(cpv, path))
+    }
+
+    /// Repository root inferred from the ebuild path.
+    ///
+    /// The structure is `<repo>/<cat>/<pkg>/<pkg>-<ver>.ebuild`, so the root
+    /// is three levels above the ebuild file.
+    pub fn repo_root(&self) -> Option<&Utf8Path> {
+        self.path.parent()?.parent()?.parent()
     }
 
     /// Detect the EAPI by regex-matching the ebuild text before sourcing.

@@ -1395,7 +1395,7 @@ impl EbuildShell {
     ///
     /// USE-conditional groups (`flag? ( ... )`) are evaluated against
     /// [`Self::use_flags`]; unconditional files are always included.
-    fn set_a_from_src_uri(&mut self) {
+    pub fn set_a_from_src_uri(&mut self) {
         let src_uri = self.get_var("SRC_URI").unwrap_or_default();
         if src_uri.is_empty() {
             self.set_var("A", "");
