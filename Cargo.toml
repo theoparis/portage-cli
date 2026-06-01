@@ -9,6 +9,7 @@ members = [
     "portage-atom-pubgrub",
     "portage-atom-resolvo",
     "portage-repo",
+    "portage-distfiles",
     "portage-vdb",
     "gentoo-stages",
     "benchmarks",
@@ -24,6 +25,7 @@ portage-metadata = { version = "0.7", path = "portage-metadata" }
 portage-atom-pubgrub = { version = "0.4", path = "portage-atom-pubgrub" }
 portage-atom-resolvo = { version = "0.7", path = "portage-atom-resolvo" }
 portage-repo = { path = "portage-repo" }
+portage-distfiles = { path = "portage-distfiles" }
 portage-vdb = { path = "portage-vdb" }
 
 # Shared external dependencies

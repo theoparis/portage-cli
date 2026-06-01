@@ -37,6 +37,7 @@ portage-atom = { workspace = true }
 portage-atom-pubgrub = { workspace = true }
 portage-metadata = { workspace = true }
 portage-repo = { workspace = true }
+portage-distfiles = { workspace = true }
 portage-vdb = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
