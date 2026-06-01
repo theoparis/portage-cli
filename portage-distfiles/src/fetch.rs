@@ -80,6 +80,11 @@ pub enum FetchStatus {
     AlreadyPresent,
     /// File was downloaded and verified successfully.
     Downloaded,
+    /// RESTRICT=fetch — the distfile must not be auto-fetched.
+    ///
+    /// The caller should run the ebuild's `pkg_nofetch` phase, which prints
+    /// manual download instructions.
+    FetchRestricted,
 }
 
 /// Downloads and verifies distfiles.
@@ -107,6 +112,12 @@ impl Fetcher {
         df: &Distfile,
         manifest: &Manifest,
     ) -> Result<FetchStatus> {
+        // RESTRICT=fetch: the ebuild forbids automatic downloading.
+        // Return immediately so the caller can run pkg_nofetch.
+        if df.restriction.as_deref() == Some("fetch") {
+            return Ok(FetchStatus::FetchRestricted);
+        }
+
         let dest = self.distdir.join(&df.filename);
 
         let manifest_entry = manifest_entry_for(manifest, &df.filename);

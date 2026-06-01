@@ -52,14 +52,33 @@ impl DistfileResolver {
     /// Resolve `SRC_URI` entries into distfiles given the active USE flags.
     ///
     /// USE-conditional groups are evaluated; `mirror://` URIs are expanded.
-    /// GENTOO_MIRRORS are appended as final fallback for every distfile.
+    /// Resolve `SRC_URI` entries into distfiles given the active USE flags.
+    ///
+    /// USE-conditional groups are evaluated; `mirror://` URIs are expanded.
+    /// GENTOO_MIRRORS are appended as a fallback for every distfile that is
+    /// not `mirror`-restricted.
     pub fn resolve(&self, entries: &[SrcUriEntry], use_flags: &HashSet<String>) -> Vec<Distfile> {
         let mut raw: Vec<(String, String, Option<String>)> = Vec::new();
         collect_uri_pairs(entries, use_flags, &mut raw);
 
         raw.into_iter()
             .map(|(url, filename, restriction)| {
-                let urls = self.expand_url(&url, &filename);
+                let mut urls = self.expand_url(&url, &filename);
+                // Append GENTOO_MIRRORS as a final fallback, but only when:
+                // - not mirror-restricted (EAPI 8 `mirror+` prefix), AND
+                // - not mirror://gentoo/ (expand_url already resolved those to
+                //   GENTOO_MIRRORS with the correct full path suffix).
+                if restriction.as_deref() != Some("mirror")
+                    && !url.starts_with("mirror://gentoo/")
+                {
+                    for mirror in &self.gentoo_mirrors {
+                        let mirror = mirror.trim_end_matches('/');
+                        let fallback = format!("{mirror}/distfiles/{filename}");
+                        if !urls.contains(&fallback) {
+                            urls.push(fallback);
+                        }
+                    }
+                }
                 Distfile { filename, urls, restriction }
             })
             .collect()
@@ -67,32 +86,31 @@ impl DistfileResolver {
 
     /// Expand a single URL to one or more concrete download URLs.
     ///
-    /// `mirror://name/path` is expanded via `thirdpartymirrors`. Every URL
-    /// also has GENTOO_MIRRORS appended as a last-resort fallback.
+    /// `mirror://gentoo/path` uses GENTOO_MIRRORS with the full path suffix.
+    /// `mirror://name/path` (other names) is expanded via `thirdpartymirrors`.
+    /// Direct URLs are returned as-is; GENTOO_MIRRORS fallback is added by
+    /// the caller (`resolve`) so it can be gated on the restriction flag.
     fn expand_url(&self, url: &str, filename: &str) -> Vec<String> {
-        let mut urls = Vec::new();
-
         if let Some(rest) = url.strip_prefix("mirror://") {
-            // mirror://name/path → look up name in thirdpartymirrors.
-            let (mirror_name, path) = rest.split_once('/').unwrap_or((rest, ""));
-            if let Some(bases) = self.thirdparty.get(mirror_name) {
-                for base in bases {
-                    let base = base.trim_end_matches('/');
-                    urls.push(format!("{base}/{path}"));
-                }
+            let (mirror_name, path) = rest.split_once('/').unwrap_or((rest, filename));
+            if mirror_name == "gentoo" {
+                // mirror://gentoo/path → GENTOO_MIRRORS with the full path suffix.
+                // Using the path (not just filename) preserves any subdirectory.
+                return self.gentoo_mirrors.iter()
+                    .map(|m| format!("{}/distfiles/{path}", m.trim_end_matches('/')))
+                    .collect();
             }
-            // If the mirror name is unknown, fall through to GENTOO_MIRRORS only.
+            if let Some(bases) = self.thirdparty.get(mirror_name) {
+                return bases.iter()
+                    .map(|base| format!("{}/{path}", base.trim_end_matches('/')))
+                    .collect();
+            }
+            // Unknown mirror name — no direct URLs; caller will add GENTOO_MIRRORS
+            // as a last-resort fallback (unless mirror-restricted).
+            vec![]
         } else {
-            urls.push(url.to_owned());
+            vec![url.to_owned()]
         }
-
-        // Append GENTOO_MIRRORS as final fallback: ${mirror}/distfiles/${filename}.
-        for mirror in &self.gentoo_mirrors {
-            let mirror = mirror.trim_end_matches('/');
-            urls.push(format!("{mirror}/distfiles/{filename}"));
-        }
-
-        urls
     }
 }
 
@@ -152,5 +170,59 @@ fn collect_uri_pairs(
                 collect_uri_pairs(entries, use_flags, out);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolver(gentoo_mirrors: &[&str]) -> DistfileResolver {
+        DistfileResolver::new(
+            vec![("kde".to_owned(), vec!["https://mirrors.kde.org/".to_owned()])],
+            gentoo_mirrors.iter().map(|s| s.to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn direct_url_gets_gentoo_fallback() {
+        let r = resolver(&["https://mirror.gentoo.org"]);
+        let entries = SrcUriEntry::parse("https://example.com/foo-1.0.tar.gz").unwrap();
+        let dfs = r.resolve(&entries, &HashSet::new());
+        assert_eq!(dfs[0].urls, [
+            "https://example.com/foo-1.0.tar.gz",
+            "https://mirror.gentoo.org/distfiles/foo-1.0.tar.gz",
+        ]);
+    }
+
+    #[test]
+    fn mirror_gentoo_uses_full_path() {
+        let r = resolver(&["https://mirror.gentoo.org"]);
+        let entries = SrcUriEntry::parse("mirror://gentoo/subdir/foo-1.0.tar.gz").unwrap();
+        let dfs = r.resolve(&entries, &HashSet::new());
+        // Full path preserved, not just filename.
+        assert_eq!(dfs[0].urls, ["https://mirror.gentoo.org/distfiles/subdir/foo-1.0.tar.gz"]);
+        assert_eq!(dfs[0].urls.len(), 1);
+    }
+
+    #[test]
+    fn mirror_restriction_suppresses_gentoo_fallback() {
+        let r = resolver(&["https://mirror.gentoo.org"]);
+        let entries = vec![SrcUriEntry::Renamed {
+            url: "https://proprietary.example.com/secret.tar.gz".to_owned(),
+            target: "secret.tar.gz".to_owned(),
+            restriction: Some("mirror".to_owned()),
+        }];
+        let dfs = r.resolve(&entries, &HashSet::new());
+        assert_eq!(dfs[0].urls, ["https://proprietary.example.com/secret.tar.gz"]);
+        assert_eq!(dfs[0].urls.len(), 1);
+    }
+
+    #[test]
+    fn thirdparty_mirror_expansion() {
+        let r = resolver(&[]);
+        let entries = SrcUriEntry::parse("mirror://kde/stable/frameworks/foo.tar.xz").unwrap();
+        let dfs = r.resolve(&entries, &HashSet::new());
+        assert_eq!(dfs[0].urls, ["https://mirrors.kde.org/stable/frameworks/foo.tar.xz"]);
     }
 }

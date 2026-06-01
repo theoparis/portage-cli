@@ -68,7 +68,7 @@ async fn run_one_phase(
     work_root: &Utf8Path,
 ) -> Result<()> {
     match phase.as_ref() {
-        "fetch" => run_fetch_stub(shell, ebuild, repo).await,
+        "fetch" => run_fetch_stub(shell, ebuild, repo, work_root).await,
         "clean" => run_clean(work_root),
         "merge" | "qmerge" => {
             eprintln!("em ebuild: '{phase}' is not yet implemented");
@@ -85,6 +85,7 @@ async fn run_fetch_stub(
     shell: &mut portage_repo::EbuildShell,
     ebuild: &Ebuild,
     repo: &Repository,
+    work_root: &Utf8Path,
 ) -> Result<()> {
     // Source the ebuild to populate SRC_URI, then compute $A.
     let sourced = shell
@@ -151,10 +152,15 @@ async fn run_fetch_stub(
     let results = fetcher.fetch_all(&distfiles, &manifest).await;
 
     let mut any_failed = false;
+    let mut any_restricted = false;
     for (df, result) in results {
         match result {
             Ok(FetchStatus::AlreadyPresent) => println!("fetch: {} (already present)", df.filename),
             Ok(FetchStatus::Downloaded) => println!("fetch: {} ok", df.filename),
+            Ok(FetchStatus::FetchRestricted) => {
+                eprintln!("fetch: {} is fetch-restricted (RESTRICT=fetch)", df.filename);
+                any_restricted = true;
+            }
             Err(e) => {
                 eprintln!("fetch: {} failed: {e}", df.filename);
                 any_failed = true;
@@ -165,8 +171,18 @@ async fn run_fetch_stub(
     // Suppress unused-variable warning on sourced metadata.
     let _ = sourced;
 
+    // Run pkg_nofetch whenever we can't auto-fetch — either due to RESTRICT=fetch
+    // or because all download attempts failed. pkg_nofetch prints manual download
+    // instructions; run_phase silently skips it if the function isn't defined.
+    if any_restricted || any_failed {
+        shell
+            .run_phase(ebuild, "nofetch", work_root.as_std_path())
+            .await
+            .map_err(|e| Error::Other(format!("pkg_nofetch failed: {e}")))?;
+    }
+
     if any_failed {
-        Err(Error::Other("one or more distfiles failed to fetch".into()))
+        Err(Error::Other("one or more distfiles could not be fetched".into()))
     } else {
         Ok(())
     }
