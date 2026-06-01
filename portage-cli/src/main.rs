@@ -2,6 +2,7 @@ mod cli;
 mod depgraph;
 mod error;
 mod maint;
+mod pkg;
 mod query;
 mod regen;
 mod search;
@@ -109,6 +110,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             eprintln!("mirror: args={:?}", args);
             Err(error::Error::NotImplemented("mirror".into()))
         }
+        Applet::Pkg { command } => pkg::run(command),
         Applet::Query { command } => run_query(command, globals),
         Applet::Clean { target } => run_clean(target),
         Applet::Use {

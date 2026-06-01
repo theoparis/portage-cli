@@ -44,7 +44,7 @@ pub struct PackageConf {
 enum Entry {
     /// Comment, blank line, or any line we can't parse as a data line.
     /// Reproduced verbatim on serialisation.
-    Opaque(Range<usize>),
+    Opaque(#[allow(dead_code)] Range<usize>),
     /// A `atom [value ...]` line.
     Data {
         /// Full byte span in `src` including the trailing `\n`.
@@ -72,33 +72,47 @@ pub struct Token {
 // ---------------------------------------------------------------------------
 
 impl PackageConf {
+    /// Load a single file.
+    pub fn load_file(path: &Utf8Path) -> Result<Self> {
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| Error::Io { path: path.to_path_buf().into_std_path_buf(), source: e })?;
+        Self::parse(src)
+    }
+
+    /// Load a directory, returning one `PackageConf` per file in alphabetical order.
+    pub fn load_dir(path: &Utf8Path) -> Result<Vec<(Utf8PathBuf, PackageConf)>> {
+        let mut files: Vec<Utf8PathBuf> = std::fs::read_dir(path)
+            .map_err(|e| Error::Io { path: path.to_path_buf().into_std_path_buf(), source: e })?
+            .flatten()
+            .filter_map(|e| {
+                let p = Utf8PathBuf::try_from(e.path()).ok()?;
+                let name = p.file_name()?;
+                if !name.starts_with('.') && p.is_file() { Some(p) } else { None }
+            })
+            .collect();
+        files.sort();
+
+        files.into_iter().map(|f| {
+            let pc = Self::load_file(&f)?;
+            Ok((f, pc))
+        }).collect()
+    }
+
     /// Load from a file path or a directory of files.
     ///
     /// Directory entries are read in alphabetical order and concatenated.
+    /// Use `load_dir` when you need per-file identity for editing.
     pub fn load(path: &Utf8Path) -> Result<Self> {
         if path.is_dir() {
-            let mut files: Vec<Utf8PathBuf> = std::fs::read_dir(path)
-                .map_err(|e| Error::Io { path: path.to_path_buf().into_std_path_buf(), source: e })?
-                .flatten()
-                .filter_map(|e| {
-                    let p = Utf8PathBuf::try_from(e.path()).ok()?;
-                    let name = p.file_name()?;
-                    if !name.starts_with('.') && p.is_file() { Some(p) } else { None }
-                })
-                .collect();
-            files.sort();
-
             let mut combined = String::new();
-            for f in &files {
-                let chunk = std::fs::read_to_string(f)
+            for f in Self::load_dir(path)?.into_iter().map(|(p, _)| p) {
+                let chunk = std::fs::read_to_string(&f)
                     .map_err(|e| Error::Io { path: f.to_path_buf().into_std_path_buf(), source: e })?;
                 combined.push_str(&chunk);
             }
             Self::parse(combined)
         } else {
-            let src = std::fs::read_to_string(path)
-                .map_err(|e| Error::Io { path: path.to_path_buf().into_std_path_buf(), source: e })?;
-            Self::parse(src)
+            Self::load_file(path)
         }
     }
 
@@ -124,9 +138,17 @@ impl PackageConf {
         })
     }
 
-    /// Find the data entry for `atom` (exact CPN or CPV match).
+    /// Find the first data entry whose CPN matches `atom`.
     pub fn find(&self, atom: &Dep) -> Option<EntryRef<'_>> {
         self.entries().find(|e| e.atom.cpn == atom.cpn)
+    }
+
+    /// Return all data entries whose CPN matches `atom`.
+    ///
+    /// Use this instead of `find` when a package may appear multiple times
+    /// with different version constraints (e.g. slot-pinned keyword entries).
+    pub fn find_all<'a>(&'a self, atom: &'a Dep) -> impl Iterator<Item = EntryRef<'a>> {
+        self.entries().filter(move |e| e.atom.cpn == atom.cpn)
     }
 
     /// Add or update a data line for `atom`.
@@ -257,6 +279,7 @@ fn parse_entries(src: &str) -> Vec<Entry> {
 // ---------------------------------------------------------------------------
 
 struct DataLineResult {
+    #[allow(dead_code)]
     span: Range<usize>,
     atom_span: Range<usize>,
     atom: Dep,

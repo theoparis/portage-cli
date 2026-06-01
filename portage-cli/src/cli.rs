@@ -245,6 +245,12 @@ pub enum Applet {
         make_conf: Option<camino::Utf8PathBuf>,
     },
 
+    #[command(about = "Edit per-package configuration (package.use, .keywords, .mask, .env)")]
+    Pkg {
+        #[command(subcommand)]
+        command: PkgCommand,
+    },
+
     #[command(about = "Rebuild packages with broken shared library deps")]
     Revdep {
         #[arg(trailing_var_arg = true)]
@@ -363,6 +369,61 @@ pub enum MaintCommand {
         /// Remove orphaned entries from the world file
         #[arg(short, long)]
         fix: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PkgCommand {
+    #[command(about = "Edit per-package USE flags in package.use")]
+    Use {
+        /// Package atom (e.g. sys-boot/grub or >=dev-libs/foo-1.0)
+        atom: String,
+        /// Add flags (written verbatim, e.g. truetype)
+        #[arg(short = 'a', long = "add", value_name = "FLAG")]
+        add: Vec<String>,
+        /// Subtract flags (written with leading '-', e.g. -themes)
+        #[arg(short = 's', long = "subtract", value_name = "FLAG")]
+        subtract: Vec<String>,
+        /// Drop flags entirely (removes both flag and -flag forms)
+        #[arg(short = 'd', long = "drop", value_name = "FLAG")]
+        drop: Vec<String>,
+        /// Target file inside package.use/ (default: <cat>-<pkg>)
+        #[arg(long, value_name = "FILE")]
+        path: Option<camino::Utf8PathBuf>,
+    },
+    #[command(about = "Edit per-package keywords in package.accept_keywords")]
+    Keyword {
+        atom: String,
+        #[arg(short = 'a', long = "add", value_name = "KW")]
+        add: Vec<String>,
+        #[arg(short = 's', long = "subtract", value_name = "KW")]
+        subtract: Vec<String>,
+        #[arg(short = 'd', long = "drop", value_name = "KW")]
+        drop: Vec<String>,
+        #[arg(long, value_name = "FILE")]
+        path: Option<camino::Utf8PathBuf>,
+    },
+    #[command(about = "Add/remove a package from package.mask")]
+    Mask {
+        atom: String,
+        /// Add the atom to package.mask
+        #[arg(short = 'a', long = "add")]
+        add: bool,
+        /// Remove the atom from package.mask
+        #[arg(short = 'd', long = "drop")]
+        drop: bool,
+        #[arg(long, value_name = "FILE")]
+        path: Option<camino::Utf8PathBuf>,
+    },
+    #[command(about = "Edit per-package env files in package.env")]
+    Env {
+        atom: String,
+        #[arg(short = 'a', long = "add", value_name = "ENVFILE")]
+        add: Vec<String>,
+        #[arg(short = 'd', long = "drop", value_name = "ENVFILE")]
+        drop: Vec<String>,
+        #[arg(long, value_name = "FILE")]
+        path: Option<camino::Utf8PathBuf>,
     },
 }
 
