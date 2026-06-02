@@ -128,36 +128,55 @@ fn load_repo(repo: &Repository) -> RepoData {
     }
 }
 
-fn target_package(data: &RepoData, dep: &Dep) -> PortagePackage {
-    match data.versions.get(&dep.cpn) {
-        Some(entries) => {
-            let mut slots: Vec<_> = entries
+/// Map a user-supplied dep atom to the `PortagePackage` the solver should
+/// resolve it against.
+///
+/// Only versions with acceptable keywords for `arch` are considered when
+/// selecting the slot, so we never ask the solver for a slot that has no
+/// resolvable versions.
+fn target_package(data: &RepoData, dep: &Dep, arch: &Arch) -> PortagePackage {
+    let entries = match data.versions.get(&dep.cpn) {
+        Some(e) => e,
+        None => return PortagePackage::unslotted(dep.cpn),
+    };
+
+    // Only consider versions that have acceptable keywords for this arch.
+    let arch_entries: Vec<_> = entries
+        .iter()
+        .filter(|(_, cache)| keyword_accepts(&cache.metadata.keywords, arch.as_str()))
+        .collect();
+
+    if arch_entries.is_empty() {
+        return PortagePackage::unslotted(dep.cpn);
+    }
+
+    let mut slots: Vec<_> = arch_entries
+        .iter()
+        .filter_map(|(_, cache)| {
+            let s = &cache.metadata.slot.slot;
+            if s.as_str().is_empty() { None } else { Some(*s) }
+        })
+        .collect();
+    slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    slots.dedup();
+
+    match slots.as_slice() {
+        [] => PortagePackage::unslotted(dep.cpn),
+        [sole] => PortagePackage::slotted(dep.cpn, *sole),
+        _ => {
+            // Multiple arch-compatible slots: pick the one containing the
+            // highest version.
+            let best = arch_entries
                 .iter()
-                .filter_map(|(_, cache)| {
+                .filter_map(|(cpv, cache)| {
                     let s = &cache.metadata.slot.slot;
-                    if s.as_str().is_empty() { None } else { Some(*s) }
+                    if s.as_str().is_empty() { None } else { Some((cpv.version.clone(), *s)) }
                 })
-                .collect();
-            slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-            slots.dedup();
-            match slots.as_slice() {
-                [] => PortagePackage::unslotted(dep.cpn),
-                [sole] => PortagePackage::slotted(dep.cpn, *sole),
-                _ => {
-                    let latest_slot = entries
-                        .iter()
-                        .filter_map(|(cpv, cache)| {
-                            let s = &cache.metadata.slot.slot;
-                            if s.as_str().is_empty() { None } else { Some((cpv.version.clone(), *s)) }
-                        })
-                        .max_by(|a, b| a.0.cmp(&b.0))
-                        .map(|(_, s)| s)
-                        .unwrap();
-                    PortagePackage::slotted(dep.cpn, latest_slot)
-                }
-            }
+                .max_by(|a, b| a.0.cmp(&b.0))
+                .map(|(_, s)| s)
+                .unwrap();
+            PortagePackage::slotted(dep.cpn, best)
         }
-        None => PortagePackage::unslotted(dep.cpn),
     }
 }
 
@@ -197,7 +216,7 @@ pub fn depgraph(
         let dep = Dep::parse(target).map_err(|e| {
             crate::error::Error::Other(format!("bad atom '{}': {}", target, e))
         })?;
-        let pkg = target_package(&data, &dep);
+        let pkg = target_package(&data, &dep, arch);
         let vs = match &dep.version {
             Some(v) => {
                 let op = dep.op.unwrap_or(Operator::GreaterOrEqual);
