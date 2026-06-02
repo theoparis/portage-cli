@@ -12,7 +12,7 @@ use crate::error::Error;
 ///
 /// Each instance corresponds to a directory under `/var/db/pkg/$CATEGORY/$PF/`.
 /// Fields are read lazily from the filesystem on first access.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InstalledPackage {
     path: Utf8PathBuf,
     cpv: Cpv,

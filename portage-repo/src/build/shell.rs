@@ -1306,6 +1306,45 @@ impl EbuildShell {
         self.shell.env_str(name).map(|cow| cow.into_owned())
     }
 
+    /// Snapshot all ebuild metadata variables into an [`EbuildEnv`].
+    ///
+    /// Call this after [`source_ebuild`](Self::source_ebuild) to capture the
+    /// stable per-package metadata before running any build phases.
+    pub fn collect_env(&self) -> crate::build::env::EbuildEnv {
+        let get = |name: &str| -> String {
+            self.get_var(name).unwrap_or_default()
+        };
+        let get_opt = |name: &str| -> Option<String> {
+            self.get_var(name).filter(|s| !s.is_empty())
+        };
+        let split = |name: &str| -> Vec<String> {
+            get(name).split_whitespace().map(str::to_owned).collect()
+        };
+
+        crate::build::env::EbuildEnv {
+            eapi: get("EAPI"),
+            slot: {
+                let s = get("SLOT");
+                if s.is_empty() { "0".to_string() } else { s }
+            },
+            iuse: split("IUSE"),
+            use_flags: split("USE"),
+            keywords: split("KEYWORDS"),
+            description: get("DESCRIPTION"),
+            homepage: get_opt("HOMEPAGE"),
+            license: get_opt("LICENSE"),
+            restrict: get_opt("RESTRICT"),
+            properties: get_opt("PROPERTIES"),
+            depend: get_opt("DEPEND"),
+            rdepend: get_opt("RDEPEND"),
+            bdepend: get_opt("BDEPEND"),
+            pdepend: get_opt("PDEPEND"),
+            idepend: get_opt("IDEPEND"),
+            defined_phases: split("DEFINED_PHASES"),
+            repository: get_opt("EBUILD_REPO"),
+        }
+    }
+
     /// Set a variable in the shell environment.
     fn set_var(&mut self, name: &str, value: &str) {
         let _ = self.shell.set_env_global(

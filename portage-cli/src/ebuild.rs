@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use portage_distfiles::{DistfileResolver, FetchConfig, FetchStatus, Fetcher};
 use portage_metadata::SrcUriEntry;
-use portage_repo::{Ebuild, MakeConf, Manifest, Repository, DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF};
+use portage_repo::{Ebuild, EbuildEnv, MakeConf, Manifest, Repository, DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF};
 use portage_vdb::{ContentsEntry, ContentsKind, MergeSpec, Vdb};
 
 use crate::error::{Error, Result};
@@ -204,37 +204,7 @@ async fn run_merge(
         .await
         .map_err(|e| Error::Other(format!("sourcing ebuild: {e}")))?;
 
-    // Collect metadata fields from the shell.
-    let slot = shell.get_var("SLOT").unwrap_or_else(|| "0".into());
-    let iuse_raw = shell.get_var("IUSE").unwrap_or_default();
-    let iuse: Vec<String> = iuse_raw.split_whitespace().map(str::to_owned).collect();
-    let use_flags: Vec<String> = shell
-        .get_var("USE")
-        .unwrap_or_default()
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect();
-    let keywords_raw = shell.get_var("KEYWORDS").unwrap_or_default();
-    let keywords: Vec<String> = keywords_raw.split_whitespace().map(str::to_owned).collect();
-    let description = shell.get_var("DESCRIPTION").unwrap_or_default();
-    let homepage = shell.get_var("HOMEPAGE").filter(|s| !s.is_empty());
-    let license = shell.get_var("LICENSE").filter(|s| !s.is_empty());
-    let restrict = shell.get_var("RESTRICT").filter(|s| !s.is_empty());
-    let properties = shell.get_var("PROPERTIES").filter(|s| !s.is_empty());
-    let depend = shell.get_var("DEPEND").filter(|s| !s.is_empty());
-    let rdepend = shell.get_var("RDEPEND").filter(|s| !s.is_empty());
-    let bdepend = shell.get_var("BDEPEND").filter(|s| !s.is_empty());
-    let pdepend = shell.get_var("PDEPEND").filter(|s| !s.is_empty());
-    let idepend = shell.get_var("IDEPEND").filter(|s| !s.is_empty());
-    let defined_phases_raw = shell.get_var("DEFINED_PHASES").unwrap_or_default();
-    let defined_phases: Vec<String> = defined_phases_raw
-        .split_whitespace()
-        .map(str::to_owned)
-        .collect();
-    let eapi = shell
-        .get_var("EAPI")
-        .unwrap_or_else(|| "0".into());
-    let repository = shell.get_var("EBUILD_REPO").filter(|s| !s.is_empty());
+    let env = shell.collect_env();
 
     // Run pkg_preinst (image dir is $D, real root is $ROOT).
     shell
@@ -246,44 +216,35 @@ async fn run_merge(
     let image_dir = work_root.join("image");
     let (contents, size) = walk_image(&image_dir, root)?;
 
+    // Check for file ownership conflicts before touching the VDB.
+    let vdb_root = vdb_root_for(root);
+    let vdb = open_or_create_vdb(&vdb_root)?;
+    let collisions = vdb
+        .find_collisions(&contents, None)
+        .map_err(|e| Error::Other(format!("collision check failed: {e}")))?;
+    if !collisions.is_empty() {
+        for c in &collisions {
+            eprintln!(
+                "collision: {} is already owned by {}",
+                c.path, c.owner
+            );
+        }
+        return Err(Error::Other(format!(
+            "{} file collision(s) detected — aborting merge",
+            collisions.len()
+        )));
+    }
+
     let build_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-
-    // Allocate VDB counter.
-    let vdb_root = vdb_root_for(root);
-    let vdb = open_or_create_vdb(&vdb_root)?;
     let counter = vdb.next_counter()?;
 
     let cpv = ebuild.cpv().clone();
-    let spec = MergeSpec {
-        cpv,
-        eapi,
-        slot,
-        use_flags,
-        iuse,
-        depend,
-        rdepend,
-        bdepend,
-        pdepend,
-        idepend,
-        keywords,
-        license,
-        description,
-        homepage,
-        restrict,
-        properties,
-        defined_phases,
-        repository,
-        contents,
-        build_time,
-        size,
-        counter,
-    };
+    let spec = merge_spec_from_env(env, cpv, contents, size, build_time, counter);
 
-    vdb.register(&spec)
-        .map_err(|e| Error::Other(format!("registering VDB entry: {e}")))?;
+    vdb.register(&spec)?;
 
     println!(
         "merge: {}/{}-{} registered (counter={counter})",
@@ -299,6 +260,41 @@ async fn run_merge(
         .map_err(|e| Error::Other(format!("pkg_postinst failed: {e}")))?;
 
     Ok(())
+}
+
+/// Build a [`MergeSpec`] from a collected [`EbuildEnv`] and install-time data.
+fn merge_spec_from_env(
+    env: EbuildEnv,
+    cpv: portage_atom::Cpv,
+    contents: Vec<ContentsEntry>,
+    size: u64,
+    build_time: u64,
+    counter: u64,
+) -> MergeSpec {
+    MergeSpec {
+        cpv,
+        eapi: env.eapi,
+        slot: env.slot,
+        use_flags: env.use_flags,
+        iuse: env.iuse,
+        depend: env.depend,
+        rdepend: env.rdepend,
+        bdepend: env.bdepend,
+        pdepend: env.pdepend,
+        idepend: env.idepend,
+        keywords: env.keywords,
+        license: env.license,
+        description: env.description,
+        homepage: env.homepage,
+        restrict: env.restrict,
+        properties: env.properties,
+        defined_phases: env.defined_phases,
+        repository: env.repository,
+        contents,
+        build_time,
+        size,
+        counter,
+    }
 }
 
 /// Walk `image_dir`, copy each entry under `dest_root`, and return the CONTENTS

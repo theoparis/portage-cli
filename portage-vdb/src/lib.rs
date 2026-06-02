@@ -17,6 +17,7 @@
 //! ```
 
 pub mod category;
+mod collision;
 mod contents;
 mod error;
 mod package;
@@ -24,6 +25,7 @@ mod vdb;
 mod write;
 
 pub use category::{Categories, CategoriesIter, Category, Packages, PackagesIter};
+pub use collision::Collision;
 pub use contents::{ContentsEntry, ContentsKind, format_contents};
 pub use error::Error;
 pub use package::InstalledPackage;

@@ -42,6 +42,7 @@ pub(crate) mod repo;
 pub mod source;
 
 pub use build::inherit;
+pub use build::EbuildEnv;
 
 pub use error::{Error, Result};
 
