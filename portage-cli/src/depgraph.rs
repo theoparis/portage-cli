@@ -6,10 +6,10 @@ use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, Operator, Version};
 use portage_atom_pubgrub::{
     DepClass, IUseDefault, PackageDeps, PackageRepository, PackageVersions,
-    PortageDependencyProvider, PortagePackage, PortageVersionSet, UseConfig,
+    PortageDependencyProvider, PortagePackage, PortageVersionSet, UseConfig, UseFlagState,
 };
 use portage_metadata::{CacheEntry, Keyword, Stability};
-use portage_repo::Repository;
+use portage_repo::{MakeConf, Repository, DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF};
 
 use crate::cli::DepgraphFormat;
 
@@ -189,7 +189,7 @@ pub fn depgraph(
     let data = load_repo(&repo);
 
     let adapter = Adapter { data: &data, arch };
-    let use_config = UseConfig::new();
+    let use_config = build_use_config();
     let mut provider = PortageDependencyProvider::new(adapter, use_config, &[]);
 
     let mut root_deps = Vec::new();
@@ -208,23 +208,7 @@ pub fn depgraph(
         root_deps.push((pkg, vs));
     }
 
-    let dropped = provider.dropped_deps();
-    if !dropped.is_empty() {
-        let mut cpns: Vec<String> = dropped
-            .iter()
-            .filter(|(pkg, _)| !pkg.is_virtual())
-            .map(|(pkg, _)| pkg.cpn().to_string())
-            .collect();
-        cpns.sort();
-        cpns.dedup();
-        if !cpns.is_empty() {
-            eprintln!(
-                "warning: {} dropped deps ({} unique CPNs)",
-                dropped.len(),
-                cpns.len()
-            );
-        }
-    }
+    report_dropped_deps(provider.dropped_deps(), &data, arch.as_str());
 
     let solution = provider
         .resolve_targets(root_deps)
@@ -249,6 +233,95 @@ pub fn depgraph(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// USE config
+// ---------------------------------------------------------------------------
+
+/// Build a [`UseConfig`] from the global `USE` setting in make.conf.
+///
+/// Flags listed without a `-` prefix are enabled; flags prefixed with `-` are
+/// disabled.  Flags not mentioned default to disabled, but IUSE defaults
+/// (`+flag`) are applied per-package at dep-conversion time by the solver.
+fn build_use_config() -> UseConfig {
+    let mut config = UseConfig::new();
+    let use_str = read_global_use();
+    for token in use_str.split_whitespace() {
+        if let Some(name) = token.strip_prefix('-') {
+            config.set(Interned::intern(name), UseFlagState::Disabled);
+        } else {
+            config.set(Interned::intern(token), UseFlagState::Enabled);
+        }
+    }
+    config
+}
+
+fn read_global_use() -> String {
+    for candidate in [DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF] {
+        let p = Utf8Path::new(candidate);
+        if p.exists() {
+            if let Ok(mc) = MakeConf::load(p) {
+                if let Some(val) = mc.get("USE") {
+                    return val.to_owned();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+// ---------------------------------------------------------------------------
+// Dropped-dep reporting
+// ---------------------------------------------------------------------------
+
+/// Report dropped deps, distinguishing truly-missing packages from packages
+/// that are in the repo but have no acceptable keyword for the target arch.
+///
+/// Arch-filtered drops are expected and produce only a summary count.
+/// Truly-missing packages (not in the repo at all) are listed by name since
+/// they may indicate a broken dep or a missing overlay.
+fn report_dropped_deps(
+    dropped: &[(PortagePackage, PortageVersionSet)],
+    data: &RepoData,
+    arch: &str,
+) {
+    let non_virtual: Vec<_> = dropped
+        .iter()
+        .filter(|(pkg, _)| !pkg.is_virtual())
+        .collect();
+
+    if non_virtual.is_empty() {
+        return;
+    }
+
+    let mut truly_missing: std::collections::BTreeSet<String> = Default::default();
+    let mut arch_filtered: std::collections::BTreeSet<String> = Default::default();
+
+    for (pkg, _) in &non_virtual {
+        let cpn_str = pkg.cpn().to_string();
+        if data.versions.contains_key(pkg.cpn()) {
+            arch_filtered.insert(cpn_str);
+        } else {
+            truly_missing.insert(cpn_str);
+        }
+    }
+
+    if !truly_missing.is_empty() {
+        eprintln!(
+            "warning: {} package(s) not found in repo: {}",
+            truly_missing.len(),
+            truly_missing.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    if !arch_filtered.is_empty() {
+        eprintln!(
+            "note: {} package(s) skipped (no keywords for {}): {}",
+            arch_filtered.len(),
+            arch,
+            arch_filtered.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

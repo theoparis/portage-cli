@@ -31,19 +31,27 @@ pub enum FetchStrategy {
 }
 
 /// Fetch and resume configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct FetchConfig {
     /// Primary fetch strategy.  Defaults to `Builtin`.
     pub strategy: FetchStrategy,
     /// Fallback command template used when the primary strategy fails.
-    ///
-    /// Typically set from `FETCHCOMMAND` in `make.conf`.
-    /// When `None`, failures are reported directly.
     pub fallback_command: Option<String>,
     /// Resume command template (`RESUMECOMMAND`).
-    ///
-    /// When `None`, partial files are re-downloaded from scratch.
     pub resume_command: Option<String>,
+    /// Maximum number of distfiles fetched concurrently.  Defaults to 4.
+    pub max_concurrent: usize,
+}
+
+impl Default for FetchConfig {
+    fn default() -> Self {
+        Self {
+            strategy: FetchStrategy::default(),
+            fallback_command: None,
+            resume_command: None,
+            max_concurrent: 4,
+        }
+    }
 }
 
 impl FetchConfig {
@@ -52,18 +60,16 @@ impl FetchConfig {
         fetch_command: Option<String>,
         resume_command: Option<String>,
     ) -> Self {
-        // If FETCHCOMMAND is set, use it as primary; reqwest becomes the
-        // fallback for clarity.  If unset, reqwest is always primary.
         match fetch_command {
             Some(cmd) => Self {
                 strategy: FetchStrategy::Command(cmd),
-                fallback_command: None,
                 resume_command,
+                ..Self::default()
             },
             None => Self {
                 strategy: FetchStrategy::Builtin,
-                fallback_command: None,
                 resume_command,
+                ..Self::default()
             },
         }
     }
@@ -88,6 +94,7 @@ pub enum FetchStatus {
 }
 
 /// Downloads and verifies distfiles.
+#[derive(Clone)]
 pub struct Fetcher {
     client: reqwest::Client,
     distdir: Utf8PathBuf,
@@ -174,18 +181,34 @@ impl Fetcher {
         Err(last_err.unwrap_or(Error::AllFailed { filename: df.filename.clone() }))
     }
 
-    /// Fetch all distfiles, returning per-file results.
+    /// Fetch all distfiles in parallel, returning per-file results in input order.
+    ///
+    /// Up to `config.max_concurrent` downloads run simultaneously.
+    /// Each result is paired with the originating [`Distfile`] reference.
     pub async fn fetch_all<'a>(
         &self,
         distfiles: &'a [Distfile],
         manifest: &Manifest,
     ) -> Vec<(&'a Distfile, Result<FetchStatus>)> {
-        let mut results = Vec::with_capacity(distfiles.len());
-        for df in distfiles {
-            let r = self.fetch_distfile(df, manifest).await;
-            results.push((df, r));
-        }
-        results
+        use futures_util::StreamExt;
+        use std::sync::Arc;
+
+        let fetcher = Arc::new(self.clone());
+        let manifest = Arc::new(manifest.clone());
+        let max = self.config.max_concurrent.max(1);
+
+        futures_util::stream::iter(distfiles)
+            .map(|df| {
+                let fetcher = Arc::clone(&fetcher);
+                let manifest = Arc::clone(&manifest);
+                async move {
+                    let r = fetcher.fetch_distfile(df, &manifest).await;
+                    (df, r)
+                }
+            })
+            .buffer_unordered(max)
+            .collect()
+            .await
     }
 
     // -----------------------------------------------------------------------
