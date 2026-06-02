@@ -1,7 +1,7 @@
 //! VDB write API: package registration (merge) and removal (unmerge).
 
 use camino::Utf8PathBuf;
-use portage_atom::Cpv;
+use portage_atom::{Cpn, Cpv, Pf};
 
 use crate::contents::{ContentsEntry, format_contents};
 use crate::error::Error;
@@ -138,6 +138,67 @@ impl Vdb {
         std::fs::remove_dir_all(&path)
             .map_err(|source| Error::Io { path, source })
     }
+
+    /// Find the installed package in the same main slot as the given CPN, if any.
+    ///
+    /// Used before a merge to detect slot conflicts that require replacing the
+    /// existing occupant.  Returns `None` if no package with this CPN is
+    /// installed in the given slot.
+    pub fn find_slot_occupant(
+        &self,
+        cpn: &Cpn,
+        slot_main: &str,
+    ) -> Result<Option<InstalledPackage>> {
+        let category = cpn.category.as_ref();
+        let package_name = cpn.package.as_ref();
+        let cat_dir = self.root().join(category);
+
+        if !cat_dir.is_dir() {
+            return Ok(None);
+        }
+
+        let read_dir = std::fs::read_dir(cat_dir.as_std_path())
+            .map_err(|source| Error::Io { path: cat_dir, source })?;
+
+        for entry in read_dir {
+            let entry = entry
+                .map_err(|source| Error::Io { path: self.root().to_path_buf(), source })?;
+            let pkg_path: Utf8PathBuf = match entry.path().try_into() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if !pkg_path.is_dir() {
+                continue;
+            }
+            let pf_str = match pkg_path.file_name() {
+                Some(n) => n,
+                None => continue,
+            };
+            let pf = match Pf::parse(pf_str) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if pf.package.as_ref() != package_name {
+                continue;
+            }
+            let cpv = Cpv::from_parts(category, package_name, pf.version);
+            let pkg = InstalledPackage::from_dir(&pkg_path, cpv);
+            let pkg_slot = match pkg.slot() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let pkg_slot_main = pkg_slot
+                .split_once('/')
+                .map(|(s, _)| s)
+                .unwrap_or(&pkg_slot)
+                .to_owned();
+            if pkg_slot_main == slot_main {
+                return Ok(Some(pkg));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -243,6 +304,50 @@ mod tests {
 
         vdb.unregister(&pkg).unwrap();
         assert!(!pkg.path().exists());
+    }
+
+    #[test]
+    fn find_slot_occupant_finds_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+        let vdb = Vdb::open(root).unwrap();
+
+        let cpv = Cpv::parse("dev-lang/python-3.11.9").unwrap();
+        let mut spec = make_spec(cpv.clone());
+        spec.slot = "3.11".into();
+        vdb.register(&spec).unwrap();
+
+        let cpn = cpv.cpn.clone();
+        let found = vdb.find_slot_occupant(&cpn, "3.11").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().cpv().to_string(), "dev-lang/python-3.11.9");
+    }
+
+    #[test]
+    fn find_slot_occupant_different_slot_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+        let vdb = Vdb::open(root).unwrap();
+
+        let cpv = Cpv::parse("dev-lang/python-3.11.9").unwrap();
+        let mut spec = make_spec(cpv.clone());
+        spec.slot = "3.11".into();
+        vdb.register(&spec).unwrap();
+
+        let cpn = cpv.cpn.clone();
+        let found = vdb.find_slot_occupant(&cpn, "3.12").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn find_slot_occupant_no_category_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+        let vdb = Vdb::open(root).unwrap();
+
+        let cpv = Cpv::parse("dev-lang/python-3.11.9").unwrap();
+        let cpn = cpv.cpn;
+        assert!(vdb.find_slot_occupant(&cpn, "3.11").unwrap().is_none());
     }
 
     #[test]

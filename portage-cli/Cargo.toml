@@ -44,6 +44,7 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 mimalloc = { workspace = true, optional = true }
 md5 = { workspace = true }
+bzip2 = { workspace = true }
 humansize = { workspace = true }
 humantime = { workspace = true }
 serde_json = { workspace = true }

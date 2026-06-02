@@ -1055,6 +1055,7 @@ impl EbuildShell {
         ebuild: &Ebuild,
         phase: &str,
         work_root: &Path,
+        root: &Path,
     ) -> Result<()> {
         let category = ebuild.category();
         let pn = ebuild.name();
@@ -1117,17 +1118,24 @@ impl EbuildShell {
         let (phase_val, func_name) = phase_to_func(phase);
         self.set_var("EBUILD_PHASE", phase_val);
         self.set_var("EBUILD_PHASE_FUNC", func_name);
-        self.set_var("ROOT", "/");
+        // Normalise root: always ends with '/'.
+        let root_str = {
+            let s = root.to_string_lossy();
+            if s.ends_with('/') { s.into_owned() } else { format!("{s}/") }
+        };
+        self.set_var("ROOT", &root_str);
         self.set_var("MERGE_TYPE", "source");
 
         if eapi >= Eapi::Three {
             self.set_var("EPREFIX", "");
             self.set_var("ED", &format!("{}/", d.display()));
-            self.set_var("EROOT", "/");
+            // EROOT = ROOT + EPREFIX; EPREFIX is always empty in Gentoo.
+            self.set_var("EROOT", &root_str);
         }
         if eapi >= Eapi::Seven {
-            self.set_var("SYSROOT", "/");
-            self.set_var("ESYSROOT", "/");
+            // SYSROOT = ROOT for native builds; BROOT is always the build host root.
+            self.set_var("SYSROOT", &root_str);
+            self.set_var("ESYSROOT", &root_str);
             self.set_var("BROOT", "/");
         }
 
