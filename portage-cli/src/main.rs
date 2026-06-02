@@ -66,11 +66,11 @@ fn run_emerge(cli: &cli::Cli) -> Result<()> {
 
 async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
     match applet {
-        Applet::Ebuild { ebuild_path, phase, work_dir } => {
+        Applet::Ebuild { ebuild_path, phase, work_dir, root } => {
             let repo_override = globals.repo.as_deref();
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(
-                    ebuild::run(ebuild_path, phase, work_dir.as_deref(), repo_override),
+                    ebuild::run(ebuild_path, phase, work_dir.as_deref(), repo_override, root),
                 )
             })
         }

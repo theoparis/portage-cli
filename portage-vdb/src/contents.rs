@@ -41,7 +41,38 @@ pub struct ContentsEntry {
     pub target: Option<Utf8PathBuf>,
 }
 
+/// Serialize a slice of entries back to a CONTENTS file string.
+pub fn format_contents(entries: &[ContentsEntry]) -> String {
+    let mut out = String::new();
+    for e in entries {
+        out.push_str(&e.format_line());
+        out.push('\n');
+    }
+    out
+}
+
 impl ContentsEntry {
+    /// Serialize this entry to a single CONTENTS line (no trailing newline).
+    pub fn format_line(&self) -> String {
+        match self.kind {
+            ContentsKind::Obj => format!(
+                "obj {} {} {}",
+                self.path,
+                self.md5.as_deref().unwrap_or("0"),
+                self.mtime.unwrap_or(0),
+            ),
+            ContentsKind::Dir => format!("dir {}", self.path),
+            ContentsKind::Sym => format!(
+                "sym {} -> {} {}",
+                self.path,
+                self.target.as_deref().map(|p| p.as_str()).unwrap_or(""),
+                self.mtime.unwrap_or(0),
+            ),
+            ContentsKind::Fifo => format!("fif {}", self.path),
+            ContentsKind::Dev => format!("dev {}", self.path),
+        }
+    }
+
     /// Parse a single line from a CONTENTS file.
     ///
     /// Returns `None` for blank lines.
@@ -152,6 +183,62 @@ mod tests {
             entry.target.as_deref(),
             Some(camino::Utf8Path::new("libfoo.so.1"))
         );
+    }
+
+    #[test]
+    fn format_obj() {
+        let e = ContentsEntry {
+            kind: ContentsKind::Obj,
+            path: Utf8PathBuf::from("/etc/foo"),
+            md5: Some("abc123".to_string()),
+            mtime: Some(100),
+            target: None,
+        };
+        assert_eq!(e.format_line(), "obj /etc/foo abc123 100");
+    }
+
+    #[test]
+    fn format_dir() {
+        let e = ContentsEntry {
+            kind: ContentsKind::Dir,
+            path: Utf8PathBuf::from("/etc"),
+            md5: None,
+            mtime: None,
+            target: None,
+        };
+        assert_eq!(e.format_line(), "dir /etc");
+    }
+
+    #[test]
+    fn format_sym() {
+        let e = ContentsEntry {
+            kind: ContentsKind::Sym,
+            path: Utf8PathBuf::from("/bin/sh"),
+            md5: None,
+            mtime: Some(200),
+            target: Some(Utf8PathBuf::from("bash")),
+        };
+        assert_eq!(e.format_line(), "sym /bin/sh -> bash 200");
+    }
+
+    #[test]
+    fn format_roundtrip() {
+        let lines = [
+            "obj /etc/foo abc123 100",
+            "dir /etc",
+            "sym /bin/sh -> bash 200",
+        ];
+        for line in lines {
+            let parsed = ContentsEntry::parse_line(line).unwrap();
+            assert_eq!(parsed.format_line(), line);
+        }
+    }
+
+    #[test]
+    fn format_contents_fn() {
+        let entries = ContentsEntry::parse("dir /etc\nobj /etc/foo abc123 100\n");
+        let out = format_contents(&entries);
+        assert_eq!(out, "dir /etc\nobj /etc/foo abc123 100\n");
     }
 
     #[test]

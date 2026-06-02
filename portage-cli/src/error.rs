@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("not implemented: {0}")]
     NotImplemented(String),
+    #[error("VDB error: {0}")]
+    Vdb(#[from] portage_vdb::Error),
     #[error("{0}")]
     Other(String),
 }

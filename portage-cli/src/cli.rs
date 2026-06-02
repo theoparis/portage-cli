@@ -169,6 +169,9 @@ pub enum Applet {
         /// Override the build work directory (default: /var/tmp/portage/<cat>/<pf>)
         #[arg(short = 'w', long, value_name = "DIR")]
         work_dir: Option<camino::Utf8PathBuf>,
+        /// Installation root for merge (default: /)
+        #[arg(long, value_name = "ROOT", default_value = "/")]
+        root: camino::Utf8PathBuf,
     },
 
     #[command(about = "System maintenance and health checks")]

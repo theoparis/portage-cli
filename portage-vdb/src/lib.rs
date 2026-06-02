@@ -21,12 +21,14 @@ mod contents;
 mod error;
 mod package;
 mod vdb;
+mod write;
 
 pub use category::{Categories, CategoriesIter, Category, Packages, PackagesIter};
-pub use contents::{ContentsEntry, ContentsKind};
+pub use contents::{ContentsEntry, ContentsKind, format_contents};
 pub use error::Error;
 pub use package::InstalledPackage;
 pub use vdb::{AllPackages, AllPackagesIter, Vdb};
+pub use write::MergeSpec;
 
 /// Convenience alias for results in this crate.
 pub type Result<T> = std::result::Result<T, Error>;

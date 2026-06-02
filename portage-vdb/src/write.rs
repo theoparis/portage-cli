@@ -1,0 +1,263 @@
+//! VDB write API: package registration (merge) and removal (unmerge).
+
+use camino::Utf8PathBuf;
+use portage_atom::Cpv;
+
+use crate::contents::{ContentsEntry, format_contents};
+use crate::error::Error;
+use crate::package::InstalledPackage;
+use crate::{Result, Vdb};
+
+/// All metadata needed to register a package in the VDB after a merge.
+///
+/// All string fields mirror their VDB flat-file counterparts.
+pub struct MergeSpec {
+    /// Parsed category/package-version.
+    pub cpv: Cpv,
+    /// EAPI string (e.g. `"8"`).
+    pub eapi: String,
+    /// Full SLOT value (e.g. `"0"` or `"0/5.1"`).
+    pub slot: String,
+    /// Active USE flags at build time.
+    pub use_flags: Vec<String>,
+    /// IUSE as declared by the ebuild (may include `+`/`-` defaults).
+    pub iuse: Vec<String>,
+    pub depend: Option<String>,
+    pub rdepend: Option<String>,
+    pub bdepend: Option<String>,
+    pub pdepend: Option<String>,
+    pub idepend: Option<String>,
+    pub keywords: Vec<String>,
+    pub license: Option<String>,
+    pub description: String,
+    pub homepage: Option<String>,
+    pub restrict: Option<String>,
+    pub properties: Option<String>,
+    /// Phase functions defined by the ebuild (e.g. `["configure", "install"]`).
+    pub defined_phases: Vec<String>,
+    /// Repository name (e.g. `"gentoo"`).
+    pub repository: Option<String>,
+    /// Installed file list (built by walking `$D`).
+    pub contents: Vec<ContentsEntry>,
+    /// Unix timestamp of the build.
+    pub build_time: u64,
+    /// Total installed size in bytes (sum of regular-file sizes).
+    pub size: u64,
+    /// Monotonically increasing VDB counter for this entry.
+    pub counter: u64,
+}
+
+impl Vdb {
+    /// Read and atomically increment the global VDB COUNTER.
+    ///
+    /// Lives at `{vdb_root}/COUNTER`.  Returns the *new* value.
+    /// If the file is absent the counter starts at 1.
+    pub fn next_counter(&self) -> Result<u64> {
+        let path = self.root().join("COUNTER");
+        let current: u64 = match std::fs::read_to_string(&path) {
+            Ok(s) => s.trim().parse().unwrap_or(0),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(source) => return Err(Error::Io { path, source }),
+        };
+        let next = current + 1;
+        std::fs::write(&path, format!("{next}\n"))
+            .map_err(|source| Error::Io { path, source })?;
+        Ok(next)
+    }
+
+    /// Register a merged package in the VDB.
+    ///
+    /// Creates `{vdb_root}/{category}/{pf}/` and writes all metadata flat files.
+    /// The caller must have already:
+    /// 1. Copied files from the image directory into the real root.
+    /// 2. Run `pkg_preinst`.
+    /// Call [`Vdb::next_counter`] to obtain the counter value before building `spec`.
+    pub fn register(&self, spec: &MergeSpec) -> Result<InstalledPackage> {
+        let category = spec.cpv.cpn.category.as_ref();
+        let pf = format!("{}-{}", spec.cpv.cpn.package.as_ref(), spec.cpv.version);
+        let pkg_dir = self.root().join(category).join(&pf);
+
+        std::fs::create_dir_all(&pkg_dir)
+            .map_err(|source| Error::Io { path: pkg_dir.clone(), source })?;
+
+        let write_field = |name: &str, content: String| -> Result<()> {
+            let p = pkg_dir.join(name);
+            std::fs::write(&p, content).map_err(|source| Error::Io { path: p, source })
+        };
+
+        // Required fields.
+        write_field("EAPI", format!("{}\n", spec.eapi))?;
+        write_field("CATEGORY", format!("{category}\n"))?;
+        write_field("SLOT", format!("{}\n", spec.slot))?;
+        write_field("USE", format!("{}\n", spec.use_flags.join(" ")))?;
+        write_field("IUSE", format!("{}\n", spec.iuse.join(" ")))?;
+        write_field("DESCRIPTION", format!("{}\n", spec.description))?;
+        write_field("BUILD_TIME", format!("{}\n", spec.build_time))?;
+        write_field("SIZE", format!("{}\n", spec.size))?;
+        write_field("COUNTER", format!("{}\n", spec.counter))?;
+        write_field("CONTENTS", format_contents(&spec.contents))?;
+
+        // Optional fields — omit file entirely when empty/absent.
+        if !spec.keywords.is_empty() {
+            write_field("KEYWORDS", format!("{}\n", spec.keywords.join(" ")))?;
+        }
+        macro_rules! write_opt {
+            ($field:expr, $val:expr) => {
+                if let Some(ref v) = $val {
+                    write_field($field, format!("{v}\n"))?;
+                }
+            };
+        }
+        write_opt!("LICENSE", spec.license);
+        write_opt!("HOMEPAGE", spec.homepage);
+        write_opt!("RESTRICT", spec.restrict);
+        write_opt!("PROPERTIES", spec.properties);
+        write_opt!("DEPEND", spec.depend);
+        write_opt!("RDEPEND", spec.rdepend);
+        write_opt!("BDEPEND", spec.bdepend);
+        write_opt!("PDEPEND", spec.pdepend);
+        write_opt!("IDEPEND", spec.idepend);
+        write_opt!("repository", spec.repository);
+
+        if !spec.defined_phases.is_empty() {
+            write_field(
+                "DEFINED_PHASES",
+                format!("{}\n", spec.defined_phases.join(" ")),
+            )?;
+        }
+
+        Ok(InstalledPackage::from_dir(&pkg_dir, spec.cpv.clone()))
+    }
+
+    /// Remove a package's VDB directory.
+    ///
+    /// Only removes the VDB entry — the caller is responsible for removing
+    /// installed files (from `CONTENTS`) before calling this.
+    pub fn unregister(&self, pkg: &InstalledPackage) -> Result<()> {
+        let path: Utf8PathBuf = pkg.path().to_path_buf();
+        std::fs::remove_dir_all(&path)
+            .map_err(|source| Error::Io { path, source })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use portage_atom::Cpv;
+
+    use crate::ContentsKind;
+
+    fn make_spec(cpv: Cpv) -> MergeSpec {
+        MergeSpec {
+            cpv,
+            eapi: "8".into(),
+            slot: "0".into(),
+            use_flags: vec!["readline".into(), "nls".into()],
+            iuse: vec!["+readline".into(), "+nls".into()],
+            depend: None,
+            rdepend: Some("sys-libs/readline".into()),
+            bdepend: None,
+            pdepend: None,
+            idepend: None,
+            keywords: vec!["amd64".into()],
+            license: Some("GPL-3+".into()),
+            description: "A test shell".into(),
+            homepage: None,
+            restrict: None,
+            properties: None,
+            defined_phases: vec!["configure".into(), "install".into()],
+            repository: Some("gentoo".into()),
+            contents: vec![
+                ContentsEntry {
+                    kind: ContentsKind::Dir,
+                    path: "/usr".into(),
+                    md5: None,
+                    mtime: None,
+                    target: None,
+                },
+                ContentsEntry {
+                    kind: ContentsKind::Obj,
+                    path: "/usr/bin/testsh".into(),
+                    md5: Some("deadbeef".into()),
+                    mtime: Some(1_700_000_000),
+                    target: None,
+                },
+            ],
+            build_time: 1_700_000_000,
+            size: 12345,
+            counter: 1,
+        }
+    }
+
+    #[test]
+    fn register_and_read_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+        let vdb = Vdb::open(root).unwrap();
+
+        let cpv = Cpv::parse("app-shells/testsh-1.0").unwrap();
+        let spec = make_spec(cpv.clone());
+
+        let pkg = vdb.register(&spec).unwrap();
+        assert_eq!(pkg.category(), "app-shells");
+        assert_eq!(pkg.pf(), "testsh-1.0");
+
+        // Read back metadata.
+        assert_eq!(pkg.eapi().unwrap().to_string(), "8");
+        assert_eq!(pkg.slot().unwrap(), "0");
+        assert_eq!(pkg.use_flags().unwrap(), vec!["readline", "nls"]);
+        assert_eq!(pkg.description().unwrap(), "A test shell");
+        assert_eq!(pkg.build_time().unwrap(), Some(1_700_000_000));
+        assert_eq!(pkg.size().unwrap(), Some(12345));
+        assert_eq!(pkg.counter().unwrap(), Some(1));
+        assert_eq!(pkg.repository().unwrap().as_deref(), Some("gentoo"));
+        assert_eq!(pkg.license().unwrap().as_deref(), Some("GPL-3+"));
+        assert_eq!(pkg.keywords().unwrap(), vec!["amd64"]);
+
+        let contents = pkg.contents().unwrap();
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0].kind, ContentsKind::Dir);
+        assert_eq!(contents[1].kind, ContentsKind::Obj);
+    }
+
+    #[test]
+    fn counter_increments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+        let vdb = Vdb::open(root).unwrap();
+
+        assert_eq!(vdb.next_counter().unwrap(), 1);
+        assert_eq!(vdb.next_counter().unwrap(), 2);
+        assert_eq!(vdb.next_counter().unwrap(), 3);
+    }
+
+    #[test]
+    fn unregister_removes_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+        let vdb = Vdb::open(root).unwrap();
+
+        let cpv = Cpv::parse("app-shells/testsh-1.0").unwrap();
+        let pkg = vdb.register(&make_spec(cpv)).unwrap();
+        assert!(pkg.path().is_dir());
+
+        vdb.unregister(&pkg).unwrap();
+        assert!(!pkg.path().exists());
+    }
+
+    #[test]
+    fn counter_persists_across_vdb_instances() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+
+        {
+            let vdb = Vdb::open(root.clone()).unwrap();
+            assert_eq!(vdb.next_counter().unwrap(), 1);
+            assert_eq!(vdb.next_counter().unwrap(), 2);
+        }
+        {
+            let vdb = Vdb::open(root).unwrap();
+            assert_eq!(vdb.next_counter().unwrap(), 3);
+        }
+    }
+}
