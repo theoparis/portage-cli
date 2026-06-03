@@ -251,26 +251,30 @@ fn load_installed() -> Vec<VdbEntry> {
 }
 
 
-/// Determine the emerge-style action tag for a package.
+/// Determine the emerge-style action tag and the currently-installed version.
 ///
-/// Compares `ver` against the installed version for the **same slot**.
-/// Cross-slot installs (e.g. installing rust-bin:1.89 when only :1.93 is
-/// present) are always `N` — they are new slot installations, not downgrades.
-///
-/// - `N` — this slot is not installed
-/// - `U` — upgrade within this slot
-/// - `D` — downgrade within this slot (rare but possible)
-fn action_tag(pkg: &PortagePackage, ver: &Version, installed: &HashMap<Cpn, HashMap<String, Version>>) -> &'static str {
+/// - `(N, None)` — this package/slot is not installed
+/// - `(NS, None)` — not installed in this slot, but other slots of the same
+///   package are (new slot alongside existing ones)
+/// - `(U, Some(old))` — upgrade within this slot
+/// - `(D, Some(old))` — downgrade within this slot
+/// - `(R, Some(old))` — same version, needs rebuild (changed USE flags)
+fn action_tag<'a>(
+    pkg: &PortagePackage,
+    ver: &Version,
+    installed: &'a HashMap<Cpn, HashMap<String, Version>>,
+) -> (&'static str, Option<&'a Version>) {
     let Some(by_slot) = installed.get(pkg.cpn()) else {
-        return "N";
+        return ("N", None);
     };
     let slot_key = pkg.slot()
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
     match by_slot.get(&slot_key) {
-        None => "N",
+        None => ("NS", None),
         Some(inst) => {
-            if ver > inst { "U" } else if ver < inst { "D" } else { "R" }
+            let tag = if ver > inst { "U" } else if ver < inst { "D" } else { "R" };
+            (tag, Some(inst))
         }
     }
 }
@@ -289,7 +293,7 @@ pub async fn depgraph(
     let repo = Repository::open(repo_path)
         .map_err(|e| crate::error::Error::Other(e.to_string()))?;
 
-    let (data, installed_entries, (use_config, use_expand)) = tokio::join!(
+    let (data, installed_entries, (use_config, use_expand, package_use)) = tokio::join!(
         load_repo(&repo),
         async { load_installed() },
         build_use_config(&repo),
@@ -309,7 +313,7 @@ pub async fn depgraph(
     }
 
     let adapter = Adapter { data: &data, arch };
-    let mut provider = PortageDependencyProvider::new(adapter, use_config.clone(), &[]);
+    let mut provider = PortageDependencyProvider::new(adapter, use_config.clone(), &package_use);
 
     // Register every installed package with the solver so it prefers the
     // already-installed version when the constraint is satisfied.  This makes
@@ -425,9 +429,9 @@ pub async fn depgraph(
 /// Returns `(UseConfig, use_expand_keys)` where `use_expand_keys` is the list
 /// of USE_EXPAND variable names (e.g. `["ABI_X86", "PERL_FEATURES", ...]`) for
 /// grouping flags in the output display.
-async fn build_use_config(repo: &Repository) -> (UseConfig, Vec<String>) {
-    let (use_str, use_expand) = compute_use_env(repo).await
-        .unwrap_or_default();
+async fn build_use_config(repo: &Repository) -> (UseConfig, Vec<String>, Vec<(Dep, Vec<String>)>) {
+    let (use_str, use_expand, package_use) = compute_use_env(repo).await
+        .unwrap_or_else(|| (String::new(), Vec::new(), Vec::new()));
     let mut config = UseConfig::new();
     for token in use_str.split_whitespace() {
         if let Some(name) = token.strip_prefix('-') {
@@ -436,10 +440,10 @@ async fn build_use_config(repo: &Repository) -> (UseConfig, Vec<String>) {
             config.set(Interned::intern(token), UseFlagState::Enabled);
         }
     }
-    (config, use_expand)
+    (config, use_expand, package_use)
 }
 
-async fn compute_use_env(repo: &Repository) -> Option<(String, Vec<String>)> {
+async fn compute_use_env(repo: &Repository) -> Option<(String, Vec<String>, Vec<(Dep, Vec<String>)>)> {
     let profile_path = std::fs::canonicalize("/etc/portage/make.profile").ok()?;
     let stack = ProfileStack::build(profile_path).ok()?;
     let mut shell = repo.shell().await.ok()?;
@@ -459,7 +463,48 @@ async fn compute_use_env(repo: &Repository) -> Option<(String, Vec<String>)> {
         .map(|s| s.to_string())
         .collect();
 
-    Some((use_str, use_expand))
+    // Per-package USE overrides: profile stack first, then /etc/portage/package.use.
+    let mut package_use = stack.package_use().unwrap_or_default();
+    package_use.extend(load_package_use("/etc/portage/package.use"));
+
+    Some((use_str, use_expand, package_use))
+}
+
+/// Parse a `package.use` file or directory into `(Dep, flags)` pairs.
+/// Silently skips unreadable files, unparseable atoms, and empty lines.
+fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Vec::new();
+    }
+    let files: Vec<_> = if p.is_dir() {
+        let mut v: Vec<_> = std::fs::read_dir(p)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file())
+            .collect();
+        v.sort();
+        v
+    } else {
+        vec![p.to_path_buf()]
+    };
+    let mut result = Vec::new();
+    for file in files {
+        let Ok(content) = std::fs::read_to_string(&file) else { continue };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            let mut parts = line.split_whitespace();
+            let Some(atom_str) = parts.next() else { continue };
+            let Ok(dep) = Dep::parse(atom_str) else { continue };
+            let flags: Vec<String> = parts.map(String::from).collect();
+            if !flags.is_empty() {
+                result.push((dep, flags));
+            }
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -521,17 +566,21 @@ fn report_dropped_deps(
 
 /// Format the USE flags and USE_EXPAND groups for pretty output.
 ///
-/// Each flag token is annotated with a suffix when a `UseFlagRequirement` is
-/// present for this package:
-/// - `flag*`  — flag must be **enabled** but is not (needs to be added)
-/// - `-flag%` — flag must be **disabled** but is enabled (needs to be removed)
+/// For reinstall (`R`) packages, flags with a `UseFlagRequirement` violation
+/// are annotated:
+/// - `flag*`  — must be enabled but isn't
+/// - `-flag%` — must be disabled but is enabled
 ///
-/// Flags matching a USE_EXPAND key are grouped into their own `KEY="..."` section.
-/// Returns an empty string when there are no flags.
+/// USE_EXPAND groups where every flag is disabled are suppressed (matching
+/// portage's behaviour of omitting e.g. `ABI_X86="-32 -64 -x32"` for
+/// packages that simply don't use multilib).
+///
+/// Returns an empty string when there are no flags to display.
 fn format_flags(
     cache: &CacheEntry,
     use_config: &UseConfig,
     use_expand: &[String],
+    is_reinstall: bool,
     req: Option<&UseFlagRequirement>,
 ) -> String {
     let mut base_flags: Vec<String> = Vec::new();
@@ -547,25 +596,39 @@ fn format_flags(
         let iuse_default_enabled =
             matches!(f.default, Some(portage_metadata::IUseDefault::Enabled));
         let interned = Interned::intern(name);
-        let enabled = match use_config.get_opt(&interned) {
+        let mut enabled = match use_config.get_opt(&interned) {
             Some(UseFlagState::Enabled) => true,
             Some(_) => false,
             None => iuse_default_enabled,
         };
-        let sign = if enabled { "" } else { "-" };
 
-        // Annotate flags that have a USE dep requirement attached.
-        let suffix = if let Some(r) = req {
-            if r.required_enabled.contains(&interned) {
-                "*" // must be enabled but isn't
-            } else if r.required_disabled.contains(&interned) {
-                "%" // must be disabled but is
+        // For new/upgrade packages: USE dep violations mean the flag WILL be
+        // set to the required value when the package is built, so show the
+        // intended state rather than the current (absent) state.
+        // For reinstall packages: show the current state with a change marker.
+        let suffix = if is_reinstall {
+            if let Some(r) = req {
+                if r.required_enabled.contains(&interned) {
+                    "*"
+                } else if r.required_disabled.contains(&interned) {
+                    "%"
+                } else {
+                    ""
+                }
             } else {
                 ""
             }
         } else {
+            if let Some(r) = req {
+                if r.required_enabled.contains(&interned) {
+                    enabled = true;
+                } else if r.required_disabled.contains(&interned) {
+                    enabled = false;
+                }
+            }
             ""
         };
+        let sign = if enabled { "" } else { "-" };
 
         let expand_match = use_expand.iter().find(|key| {
             let prefix = format!("{}_", key.to_lowercase());
@@ -589,6 +652,10 @@ fn format_flags(
         parts.push(format!("  USE=\"{}\"", base_flags.join(" ")));
     }
     for (key, tokens) in &expand_groups {
+        // Suppress groups where every flag is disabled — portage omits these.
+        if tokens.iter().all(|t| t.starts_with('-')) {
+            continue;
+        }
         parts.push(format!("  {}=\"{}\"", key, tokens.join(" ")));
     }
     parts.join("")
@@ -608,15 +675,16 @@ fn print_pretty(
 
     for (pkg, ver) in order {
         let cpn = pkg.cpn();
-        let tag = action_tag(pkg, ver, installed);
-        let repo = &data.repo_name;
+        let (tag, old_ver) = action_tag(pkg, ver, installed);
         let req = flag_reqs.get(pkg).copied();
+        let is_reinstall = tag == "R";
 
         let flag_str = find_cache(data, pkg, ver)
-            .map(|c| format_flags(c, use_config, use_expand, req))
+            .map(|c| format_flags(c, use_config, use_expand, is_reinstall, req))
             .unwrap_or_default();
 
-        println!("[ebuild  {tag:<6}] {cpn}-{ver}::{repo}{flag_str}");
+        let old = old_ver.map(|v| format!(" [{}]", v)).unwrap_or_default();
+        println!("[ebuild  {tag:<6}] {cpn}-{ver}{old}{flag_str}");
     }
 
     println!("\nTotal: {} package(s)", order.len());
@@ -648,10 +716,12 @@ fn print_json(
         .iter()
         .map(|(pkg, ver)| {
             let cpn = pkg.cpn();
-            let status = match action_tag(pkg, ver, installed) {
+            let (tag, old_ver) = action_tag(pkg, ver, installed);
+            let status = match tag {
                 "U" => "upgrade",
                 "D" => "downgrade",
                 "R" => "reinstall",
+                "NS" => "new_slot",
                 _ => "new",
             };
             let mut obj = serde_json::json!({
@@ -661,6 +731,9 @@ fn print_json(
                 "repo": data.repo_name,
                 "status": status,
             });
+            if let Some(old) = old_ver {
+                obj["old_version"] = serde_json::Value::String(old.to_string());
+            }
             if let Some(cache) = find_cache(data, pkg, ver) {
                 let slot = &cache.metadata.slot;
                 obj["slot"] = serde_json::Value::String(slot.slot.as_str().to_owned());
