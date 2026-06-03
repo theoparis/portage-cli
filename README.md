@@ -72,7 +72,8 @@ subcommands corresponding to the traditional tools.
 - **USE_EXPAND** — `PYTHON_TARGETS`, `CPU_FLAGS_ARM`, `ABI_X86`, etc. are expanded into flag tokens and grouped in output (e.g. `PYTHON_TARGETS="python3_13 python3_14"`)
 - **OR-group branch selection** — selects the branch whose USE dep constraints are already satisfied by the installed state and current USE config (avoids unnecessary rebuilds while respecting profile-mandated targets)
 - **Post-solve reinstall detection** — after solving, installed packages whose USE dep constraints are violated by the resolved set are flagged `R` (rebuild with changed USE), matching portage's basic `-p` output
-- **Action tags** — `N` new, `U` upgrade, `D` downgrade, `R` reinstall; slot-aware (cross-slot installs correctly show `N` not `D`)
+- **Action tags** — `N` new, `NS` new slot (alongside existing slots), `U` upgrade (with `[old_ver]`), `D` downgrade, `R` reinstall; slot-aware
+- **Profile + user `package.use`** — full profile stack `package.use` and `/etc/portage/package.use` loaded and applied per-package to the solver; USE dep violations on new packages show the intended (post-install) state rather than the absent current state
 - **Cycle handling** — BDEPEND bootstrap cycles (e.g. `xz-utils` ↔ `elt-patches`) are broken after Kahn's topological sort rather than silently dropping packages
 
 **Performance** (arm64, warm file cache):
@@ -87,9 +88,11 @@ subcommands corresponding to the traditional tools.
 Metadata cache entries are parsed in parallel (jwalk + chunked `spawn_blocking`). The PubGrub solver itself runs in 5–35 ms depending on solution size.
 
 **Gaps vs `emerge -p`:**
-- `NS` (new in new slot) action tag not yet distinguished from `N`
 - Global USE consistency propagation (portage's `--newuse` full scan) is not implemented; constraint-driven reinstall detection covers the same cases as basic `emerge -p`
 - Wrapper packages for old-slot BDEPEND (`autoconf-wrapper`, `gcc-config`, etc.) are not modelled
+- Flag ordering differs (em is alphabetical; portage groups enabled flags first)
+- Upgrade display shows all flags rather than only the changed ones
+- `(-flag)` parentheses for USE_EXPAND_IMPLICIT / arch-forced-off flags not yet rendered
 
 **Gaps vs equery:**
 - `uses` descriptions come from `profiles/use.desc` + `profiles/use.local.desc`.
