@@ -116,7 +116,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             Err(error::Error::NotImplemented("mirror".into()))
         }
         Applet::Pkg { command } => pkg::run(command),
-        Applet::Query { command } => run_query(command, globals),
+        Applet::Query { command } => run_query(command, globals).await,
         Applet::Clean { target } => run_clean(target),
         Applet::Use {
             add,
@@ -249,7 +249,7 @@ fn run_maint(command: &Option<MaintCommand>, globals: &cli::Cli) -> Result<()> {
     }
 }
 
-fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
+async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
     match command {
         QueryCommand::Belongs { file } => {
             let vdb = open_vdb(globals)?;
@@ -275,7 +275,7 @@ fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             if !repo_path.is_dir() {
                 return Err(error::Error::Other(format!("repo not found at {resolved}")));
             }
-            depgraph::depgraph(repo_path, &atoms, &globals.arch, *format)
+            depgraph::depgraph(repo_path, &atoms, &globals.arch, *format).await
         }
         QueryCommand::Files { atom } => {
             let vdb = open_vdb(globals)?;

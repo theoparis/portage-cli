@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
@@ -369,6 +369,120 @@ impl ProfileStack {
     pub fn package_use_stable_mask(&self) -> Result<Vec<(Dep, Vec<String>)>> {
         collect_atom_flags(self.profiles.iter().map(|p| p.package_use_stable_mask()))
     }
+}
+
+// ---------------------------------------------------------------------------
+// ProfileEnvLayer / ProfileEnv
+// ---------------------------------------------------------------------------
+
+/// Variables captured from a single `make.defaults` file, evaluated through
+/// a real bash shell.
+///
+/// Each profile level in the stack contributes one layer.  Keeping layers
+/// separate allows portage-style incremental accumulation (each level's
+/// `USE=` is a delta, not a bash replacement) and makes it easy to trace
+/// which profile introduced or removed a particular flag.
+///
+/// Layers are produced by [`ProfileStack::profile_env`] (defined in
+/// `portage_repo::build::profile`, which has access to [`EbuildShell`]).
+#[derive(Debug, Clone)]
+pub struct ProfileEnvLayer {
+    /// Absolute path to the `make.defaults` file this layer was read from.
+    pub path: PathBuf,
+    /// Variables contributed by this file.
+    /// Each value is the raw string as seen by the shell after the file ran;
+    /// cross-layer accumulation is handled by [`ProfileEnv::merge`].
+    pub(crate) vars: HashMap<String, String>,
+}
+
+impl ProfileEnvLayer {
+    /// Get the value of a variable from this layer.
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.vars.get(name).map(String::as_str)
+    }
+
+    /// All variable names set in this layer.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.vars.keys().map(String::as_str)
+    }
+}
+
+/// The stacked profile environment across all layers of a [`ProfileStack`].
+///
+/// Each [`ProfileEnvLayer`] corresponds to one `make.defaults` file.
+/// Variables are not yet merged; call [`merge`](Self::merge) or the
+/// higher-level helpers to collapse them with portage-style incremental
+/// semantics.
+#[derive(Debug, Clone, Default)]
+pub struct ProfileEnv {
+    /// Layers in resolution order: root ancestors first, leaf last.
+    pub layers: Vec<ProfileEnvLayer>,
+}
+
+impl ProfileEnv {
+    /// Merge a space-separated list variable across all layers using
+    /// portage-style incremental semantics.
+    ///
+    /// Each layer's value is split on whitespace; tokens prefixed with `-`
+    /// remove previously accumulated tokens.
+    pub fn merge(&self, var: &str) -> Vec<String> {
+        merge_flag_lists(self.layers.iter().filter_map(|l| l.get(var)))
+    }
+
+    /// The `USE_EXPAND` variable names after merging all layers.
+    pub fn use_expand_keys(&self) -> Vec<String> {
+        self.merge("USE_EXPAND")
+    }
+
+    /// All effective USE flags, including values from `USE_EXPAND` variables
+    /// expanded as `lowercase_key_value` tokens, and `USE_EXPAND_UNPREFIXED`
+    /// variables expanded directly.
+    ///
+    /// This is the final profile-level USE; `make.conf` and `use.force`/`use.mask`
+    /// have not yet been applied.
+    pub fn use_flags(&self) -> Vec<String> {
+        let mut flags = self.merge("USE");
+
+        for key in self.merge("USE_EXPAND_UNPREFIXED") {
+            for v in self.merge(&key) {
+                if !flags.contains(&v) {
+                    flags.push(v);
+                }
+            }
+        }
+
+        for key in self.use_expand_keys() {
+            let prefix = key.to_lowercase();
+            for v in self.merge(&key) {
+                let flag = format!("{prefix}_{v}");
+                if !flags.contains(&flag) {
+                    flags.push(flag);
+                }
+            }
+        }
+
+        flags
+    }
+}
+
+/// Merge space-separated flag lists with incremental semantics.
+///
+/// Tokens prefixed with `-` remove previously accumulated tokens.
+pub(crate) fn merge_flag_lists<'a>(iter: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut acc: Vec<String> = Vec::new();
+    for val in iter {
+        for token in val.split_whitespace() {
+            if let Some(name) = token.strip_prefix('-') {
+                if seen.remove(name) {
+                    acc.retain(|f| f != name);
+                }
+            } else if seen.insert(token.to_string()) {
+                acc.push(token.to_string());
+            }
+        }
+    }
+    acc
 }
 
 /// Recursively collect profiles depth-first, ancestors before self.

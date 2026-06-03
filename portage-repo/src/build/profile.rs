@@ -5,11 +5,11 @@
 //! dependency from the repo module into the build module.  They live here
 //! instead and are added to `Profile` / `ProfileStack` via second impl blocks.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::shell::EbuildShell;
 use crate::error::Result;
-use crate::repo::profile::{Profile, ProfileStack};
+use crate::repo::profile::{merge_flag_lists, Profile, ProfileEnv, ProfileEnvLayer, ProfileStack};
 
 impl Profile {
     /// Source this profile's `make.defaults` into the shell, if present.
@@ -37,6 +37,126 @@ impl ProfileStack {
         Ok(())
     }
 
+    /// Build the layered profile environment by sourcing each `make.defaults`
+    /// through brush with per-layer isolation.
+    ///
+    /// Each file is sourced in the **same** shell (preserving cross-file
+    /// variable visibility for non-incremental vars like `EAPI`, computed
+    /// paths, etc.).  Before each file the incremental variables (`USE`,
+    /// `USE_EXPAND`, and every key listed in `USE_EXPAND`) are reset to
+    /// empty so the file's own assignments are captured as a clean delta.
+    /// After sourcing, the accumulated values are restored into the shell
+    /// for the next file to reference via `${USE}`, `${PYTHON_TARGETS}`, etc.
+    ///
+    /// When this method returns the shell holds the fully-accumulated profile
+    /// state, ready for `make.conf` to be sourced on top.
+    pub async fn profile_env(&self, shell: &mut EbuildShell) -> Result<ProfileEnv> {
+        let mut layers: Vec<ProfileEnvLayer> = Vec::new();
+        // External accumulator: keeps the merged state per incremental var.
+        let mut acc: HashMap<String, String> = HashMap::new();
+
+        for profile in self.profiles() {
+            let path = profile.path().join("make.defaults");
+            if !path.is_file() {
+                continue;
+            }
+
+            // Determine which vars to isolate for this layer.
+            // Start with the fixed incremental vars, then add all currently
+            // known USE_EXPAND keys so their values are also captured cleanly.
+            let mut incr: Vec<String> = vec![
+                "USE".into(),
+                "USE_EXPAND".into(),
+                "USE_EXPAND_UNPREFIXED".into(),
+            ];
+            let expand_now = acc
+                .get("USE_EXPAND")
+                .cloned()
+                .unwrap_or_default();
+            for key in expand_now.split_whitespace() {
+                if !incr.contains(&key.to_string()) {
+                    incr.push(key.to_string());
+                }
+            }
+            let unprefixed_now = acc
+                .get("USE_EXPAND_UNPREFIXED")
+                .cloned()
+                .unwrap_or_default();
+            for key in unprefixed_now.split_whitespace() {
+                if !incr.contains(&key.to_string()) {
+                    incr.push(key.to_string());
+                }
+            }
+
+            // Reset all incremental vars to empty so this file's assignments
+            // are its pure contribution, not a replacement of accumulated state.
+            let reset: String = incr
+                .iter()
+                .map(|v| format!("{}=\"\"\n", v))
+                .collect();
+            shell.run_string(&reset).await?;
+
+            // Source the file through brush — all bash features available,
+            // cross-file non-incremental vars (set by earlier files) are visible.
+            shell.source_make_defaults(&path).await?;
+
+            // Capture this layer's contributions.
+            let mut vars: HashMap<String, String> = HashMap::new();
+
+            // Collect the fixed incremental vars.
+            for var in &incr {
+                if let Some(val) = shell.get_var(var) {
+                    if !val.is_empty() {
+                        vars.insert(var.clone(), val);
+                    }
+                }
+            }
+            // Discover any new USE_EXPAND keys this file introduced.
+            let new_expand = shell.get_var("USE_EXPAND").unwrap_or_default();
+            for key in new_expand.split_whitespace() {
+                if !incr.contains(&key.to_string()) {
+                    if let Some(val) = shell.get_var(key) {
+                        if !val.is_empty() {
+                            vars.insert(key.to_string(), val);
+                        }
+                    }
+                }
+            }
+            // Same for USE_EXPAND_UNPREFIXED keys.
+            let new_unprefixed = shell.get_var("USE_EXPAND_UNPREFIXED").unwrap_or_default();
+            for key in new_unprefixed.split_whitespace() {
+                if !incr.contains(&key.to_string()) {
+                    if let Some(val) = shell.get_var(key) {
+                        if !val.is_empty() {
+                            vars.insert(key.to_string(), val);
+                        }
+                    }
+                }
+            }
+
+            // Merge this layer's contributions into the external accumulator.
+            for (var, val) in &vars {
+                let prev = acc.get(var.as_str()).cloned().unwrap_or_default();
+                let merged = merge_flag_lists(
+                    [prev.as_str(), val.as_str()].into_iter(),
+                );
+                acc.insert(var.clone(), merged.join(" "));
+            }
+
+            // Restore the accumulated state into the shell so the next file
+            // sees the full inherited environment.
+            let restore: String = acc
+                .iter()
+                .map(|(k, v)| format!("{}={}\n", k, shell_quote(v)))
+                .collect();
+            shell.run_string(&restore).await?;
+
+            layers.push(ProfileEnvLayer { path, vars });
+        }
+
+        Ok(ProfileEnv { layers })
+    }
+
     /// Configure a shell with this profile stack's effective USE flags.
     ///
     /// See [`configure_shell`] for the full description.
@@ -52,12 +172,20 @@ impl ProfileStack {
 /// Configure a shell with the effective USE flags from a profile stack.
 ///
 /// `extra_confs` is a list of additional shell scripts (e.g.
-/// `/etc/portage/make.conf`) sourced **after** the `make.defaults` chain but
+/// `/etc/portage/make.conf`) sourced **after** the profile env is applied but
 /// **before** `use.force`/`use.mask` are applied.
 ///
+/// Both profile `make.defaults` and `extra_confs` are treated as incremental:
+/// `USE="..."` in any of these files adds tokens to the accumulated set rather
+/// than replacing it — the same semantics portage applies through its own
+/// config parser.  Files that use `USE="${USE} more"` also work correctly.
+///
 /// Computation order:
-/// 1. Profile `make.defaults` (ancestor → leaf)
-/// 2. Each `extra_confs` script in order
+/// 1. Each `make.defaults` sourced through brush with per-layer USE isolation
+///    (see [`ProfileStack::profile_env`]); after all layers the shell holds
+///    the fully-accumulated profile state
+/// 2. Each `extra_confs` script sourced through brush with the same
+///    incremental treatment (e.g. make.conf `USE="ssl"` adds ssl to profile USE)
 /// 3. `USE_EXPAND_UNPREFIXED` values expanded directly into USE
 /// 4. `USE_EXPAND` values expanded with lowercase prefix
 /// 5. Profile `use.force` — unconditional add
@@ -69,10 +197,15 @@ pub async fn configure_shell(
     stack: &ProfileStack,
     extra_confs: &[&std::path::Path],
 ) -> Result<()> {
-    stack.make_defaults(shell).await?;
+    // Source each make.defaults through brush with per-layer USE isolation.
+    // After this call the shell has the fully-accumulated profile USE and
+    // all USE_EXPAND variables set, ready for make.conf.
+    let ProfileEnv { layers: _ } = stack.profile_env(shell).await?;
 
+    // Source each extra conf (make.conf, etc.) with the same incremental
+    // treatment: reset incremental vars, source the file, merge contributions.
     for conf in extra_confs {
-        shell.source_make_defaults(conf).await?;
+        source_incremental(shell, conf).await?;
     }
 
     let mut flags = collect_use_flags(shell);
@@ -89,6 +222,90 @@ pub async fn configure_shell(
 
     let flag_refs: Vec<&str> = flags.iter().map(String::as_str).collect();
     shell.set_use_flags(&flag_refs)
+}
+
+/// Source a single config file (e.g. `make.conf`) with incremental USE semantics.
+///
+/// Before sourcing, the incremental vars (`USE` and all known `USE_EXPAND`
+/// keys) are reset to empty so the file's own assignments represent its pure
+/// contribution.  After sourcing, those contributions are merged back into
+/// the accumulated shell state using [`merge_flag_lists`].
+async fn source_incremental(
+    shell: &mut EbuildShell,
+    path: &std::path::Path,
+) -> Result<()> {
+    // Collect the set of incremental vars to isolate.
+    let mut incr: Vec<String> =
+        vec!["USE".into(), "USE_EXPAND".into(), "USE_EXPAND_UNPREFIXED".into()];
+    let expand = shell.get_var("USE_EXPAND").unwrap_or_default();
+    for key in expand.split_whitespace() {
+        if !incr.contains(&key.to_string()) {
+            incr.push(key.to_string());
+        }
+    }
+    let unprefixed = shell.get_var("USE_EXPAND_UNPREFIXED").unwrap_or_default();
+    for key in unprefixed.split_whitespace() {
+        if !incr.contains(&key.to_string()) {
+            incr.push(key.to_string());
+        }
+    }
+
+    // Save current accumulated values and reset vars to empty.
+    let saved: HashMap<String, String> = incr
+        .iter()
+        .filter_map(|v| shell.get_var(v).map(|val| (v.clone(), val)))
+        .collect();
+
+    let reset: String = incr
+        .iter()
+        .map(|v| format!("{}=\"\"\n", v))
+        .collect();
+    shell.run_string(&reset).await?;
+
+    // Source the file through brush.
+    shell.source_make_defaults(path).await?;
+
+    // Collect this file's contributions.
+    let mut contributed: HashMap<String, String> = HashMap::new();
+    for var in &incr {
+        if let Some(val) = shell.get_var(var) {
+            if !val.is_empty() {
+                contributed.insert(var.clone(), val);
+            }
+        }
+    }
+    // Pick up any new USE_EXPAND keys the file introduced.
+    let new_expand = shell.get_var("USE_EXPAND").unwrap_or_default();
+    for key in new_expand.split_whitespace() {
+        if !incr.contains(&key.to_string()) {
+            if let Some(val) = shell.get_var(key) {
+                if !val.is_empty() {
+                    contributed.insert(key.to_string(), val);
+                }
+            }
+        }
+    }
+
+    // Merge contributions with saved state and restore.
+    let mut merged_acc: HashMap<String, String> = saved;
+    for (var, new_val) in &contributed {
+        let prev = merged_acc.get(var.as_str()).cloned().unwrap_or_default();
+        let merged = merge_flag_lists([prev.as_str(), new_val.as_str()].into_iter());
+        merged_acc.insert(var.clone(), merged.join(" "));
+    }
+
+    let restore: String = merged_acc
+        .iter()
+        .map(|(k, v)| format!("{}={}\n", k, shell_quote(v)))
+        .collect();
+    shell.run_string(&restore).await?;
+
+    Ok(())
+}
+
+/// Quote a value for use in a bash assignment (`VAR="..."` form).
+fn shell_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn collect_use_flags(shell: &EbuildShell) -> Vec<String> {
@@ -264,5 +481,28 @@ mod tests {
             flags.contains("forced"),
             "use.force overrides make.conf removal"
         );
+    }
+
+    /// Two-layer profile: base sets unicode, child sets crypt — both must survive.
+    #[tokio::test]
+    async fn configure_shell_two_layer_use_accumulation() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let base = make_profile(&dir, "base", &[]);
+        std::fs::write(base.join("make.defaults"), "USE=\"unicode acl\"\n").unwrap();
+        let leaf = make_profile(&dir, "leaf", &["../base"]);
+        // Overwrites USE (no ${USE}) — this is the bug pattern we're fixing.
+        std::fs::write(leaf.join("make.defaults"), "USE=\"crypt ssl\"\n").unwrap();
+
+        let stack = ProfileStack::build(leaf).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        configure_shell(&mut shell, &stack, &[]).await.unwrap();
+
+        let use_val = shell.get_var("USE").unwrap_or_default();
+        let flags: HashSet<&str> = use_val.split_whitespace().collect();
+        assert!(flags.contains("unicode"), "unicode from base must survive");
+        assert!(flags.contains("acl"), "acl from base must survive");
+        assert!(flags.contains("crypt"), "crypt from leaf must be present");
+        assert!(flags.contains("ssl"), "ssl from leaf must be present");
     }
 }

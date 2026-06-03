@@ -493,4 +493,107 @@ mod tests {
             assert_eq!(dep.to_string(), input, "round-trip failed for: {input}");
         }
     }
+
+    // H1: slot-equals operator combined with use deps — the exact forms that
+    // appear in texlive-core's RDEPEND and caused missing transitive deps.
+    #[test]
+    fn slot_equals_with_use_deps() {
+        // `:=[use1,use2]` — slot equals operator + use constraints
+        let dep = Dep::parse(">=media-libs/harfbuzz-1.4.5:=[icu,graphite]").unwrap();
+        assert_eq!(dep.op, Some(Operator::GreaterOrEqual));
+        match dep.slot_dep.as_ref().unwrap() {
+            SlotDep::Operator(SlotOperator::Equal) => {}
+            other => panic!("expected SlotDep::Operator(Equal), got {other:?}"),
+        }
+        let use_deps = dep.use_deps.as_ref().unwrap();
+        assert_eq!(use_deps.len(), 2);
+        assert_eq!(dep.to_string(), ">=media-libs/harfbuzz-1.4.5:=[icu,graphite]");
+    }
+
+    #[test]
+    fn slot_number_equals_operator() {
+        // `:0=` — explicit slot + equals operator (libpng style)
+        let dep = Dep::parse(">=media-libs/libpng-1.2.43-r2:0=").unwrap();
+        assert_eq!(dep.op, Some(Operator::GreaterOrEqual));
+        match dep.slot_dep.as_ref().unwrap() {
+            SlotDep::Slot {
+                slot: Some(s),
+                op: Some(SlotOperator::Equal),
+            } => assert_eq!(s.slot.as_str(), "0"),
+            other => panic!("expected slotted equals, got {other:?}"),
+        }
+        assert_eq!(dep.to_string(), ">=media-libs/libpng-1.2.43-r2:0=");
+    }
+
+    #[test]
+    fn slot_equals_alone() {
+        // simple `:=` with no use deps (zlib, zziplib, kpathsea style)
+        for atom in ["virtual/zlib:=", "dev-libs/zziplib:=", ">=dev-libs/kpathsea-6.4.0:="] {
+            let dep = Dep::parse(atom).unwrap();
+            match dep.slot_dep.as_ref().unwrap() {
+                SlotDep::Operator(SlotOperator::Equal) => {}
+                other => panic!("{atom}: expected SlotDep::Operator(Equal), got {other:?}"),
+            }
+            assert_eq!(dep.to_string(), atom, "round-trip failed for {atom}");
+        }
+    }
+
+    #[test]
+    fn slot_number_only() {
+        // `:2` — specific slot, no operator (freetype style)
+        let dep = Dep::parse("media-libs/freetype:2").unwrap();
+        match dep.slot_dep.as_ref().unwrap() {
+            SlotDep::Slot {
+                slot: Some(s),
+                op: None,
+            } => assert_eq!(s.slot.as_str(), "2"),
+            other => panic!("expected slotted no-op, got {other:?}"),
+        }
+        assert_eq!(dep.to_string(), "media-libs/freetype:2");
+    }
+
+    #[test]
+    fn use_dep_without_slot() {
+        // `pkg[use]` — use constraint, no slot (gd style)
+        let dep = Dep::parse("media-libs/gd[png]").unwrap();
+        assert!(dep.slot_dep.is_none());
+        let use_deps = dep.use_deps.as_ref().unwrap();
+        assert_eq!(use_deps.len(), 1);
+        assert_eq!(dep.to_string(), "media-libs/gd[png]");
+    }
+
+    #[test]
+    fn texlive_core_rdepend_atoms_parse() {
+        // Every atom form appearing in app-text/texlive-core-2024-r2 RDEPEND.
+        // If any of these fail to parse, the entire cache entry is silently dropped
+        // and all transitive deps vanish — which is Hypothesis H1.
+        let atoms = [
+            "sci-libs/mpfi",
+            "virtual/zlib:=",
+            ">=media-libs/harfbuzz-1.4.5:=[icu,graphite]",
+            ">=media-libs/libpng-1.2.43-r2:0=",
+            "media-libs/gd[png]",
+            "media-gfx/graphite2:=",
+            "media-gfx/potrace:=",
+            ">=x11-libs/cairo-1.12",
+            ">=x11-libs/pixman-0.18",
+            "dev-libs/zziplib:=",
+            "app-text/libpaper:=",
+            "dev-libs/gmp:=",
+            "dev-libs/mpfr:=",
+            ">=dev-libs/ptexenc-1.4.6",
+            "media-libs/freetype:2",
+            ">=dev-libs/icu-50:=",
+            ">=dev-libs/kpathsea-6.4.0:=",
+            "virtual/perl-Getopt-Long",
+            "dev-perl/File-HomeDir",
+            "dev-perl/Log-Dispatch",
+            "dev-perl/Unicode-LineBreak",
+            "dev-perl/YAML-Tiny",
+            // USE-conditional deps tested at DepEntry level, not Dep level
+        ];
+        for atom in atoms {
+            Dep::parse(atom).unwrap_or_else(|e| panic!("failed to parse '{atom}': {e}"));
+        }
+    }
 }

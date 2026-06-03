@@ -3,7 +3,8 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Dep, Version};
+use portage_atom::{Cpn, Dep, UseDefault, UseDepKind, Version};
+use crate::use_config::UseFlagState;
 use pubgrub::{
     Dependencies, DependencyConstraints, DependencyProvider, PackageResolutionStatistics,
     SelectedDependencies, VersionSet,
@@ -63,6 +64,18 @@ pub struct InstalledPackage {
     pub version: Version,
     /// How to treat this package during resolution.
     pub policy: InstalledPolicy,
+    /// USE flags that were active (enabled) when this package was built.
+    ///
+    /// Used to evaluate USE dep constraints on OR-group branches so the solver
+    /// can prefer branches that are already satisfied without a rebuild.
+    pub active_use: Vec<Interned<DefaultInterner>>,
+    /// IUSE flags declared by this installed package (flag names without `+`/`-` prefix).
+    ///
+    /// Required because the repository may not carry the exact installed version
+    /// any more (e.g. glib-2.84.4-r2 installed while the repo only has r5).  In
+    /// that case `PackageData.iuse` has no entry for the installed version, so we
+    /// fall back to the VDB-recorded IUSE to avoid false-positive reinstall reports.
+    pub iuse: Vec<Interned<DefaultInterner>>,
 }
 
 /// Build a per-CPV `UseConfig` by starting from the global config and applying
@@ -93,6 +106,35 @@ fn apply_package_use<'a>(
     Cow::Owned(cfg)
 }
 
+/// USE flag changes required on a package by the resolved dependency set.
+///
+/// Produced by the post-solve validation pass in
+/// [`PortageDependencyProvider::resolve_targets`].
+///
+/// For **installed** packages the required changes were not yet applied, so the
+/// package must be rebuilt — this corresponds to portage's `R` action.
+///
+/// For **new** packages the required flags should be set when the package is
+/// built.  Since our solver does not yet enforce USE dep constraints at build
+/// time, these are reported as informational annotations.
+#[derive(Debug, Clone)]
+pub struct UseFlagRequirement {
+    /// The package the requirements apply to.
+    pub package: PortagePackage,
+    /// The currently-installed (or selected) version.
+    pub version: Version,
+    /// If set, the package should be **upgraded** to this version rather than
+    /// rebuilt at `version`.  Present when the installed version is superseded
+    /// by a newer repo version whose constraints drove the requirement.
+    pub upgrade_to: Option<Version>,
+    /// USE flags that must be **enabled** — required by at least one constraint
+    /// but not yet active (installed: violated now; new: may not be set by config).
+    pub required_enabled: Vec<Interned<DefaultInterner>>,
+    /// USE flags that must be **disabled** — forbidden by at least one constraint
+    /// but currently active.
+    pub required_disabled: Vec<Interned<DefaultInterner>>,
+}
+
 /// A PubGrub `DependencyProvider` backed by a portage package repository.
 ///
 /// Pre-computes all dependency information at construction time, then serves
@@ -101,7 +143,18 @@ pub struct PortageDependencyProvider {
     pub(crate) packages: HashMap<PortagePackage, PackageData>,
     pub(crate) installed: HashMap<PortagePackage, (Version, InstalledPolicy)>,
     pub(crate) installed_cpns: HashSet<Cpn>,
+    pub(crate) installed_use: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
+    pub(crate) installed_iuse: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
     pub(crate) dropped_deps: Vec<(PortagePackage, PortageVersionSet)>,
+    /// Global USE configuration, retained for post-solve validation of
+    /// non-installed packages (where VDB flags are not available).
+    pub(crate) use_config: UseConfig,
+    /// USE flag requirements collected by the post-solve validation pass.
+    ///
+    /// Covers both reinstall cases (`R`: installed packages with violated
+    /// constraints) and informational cases (`N`/`U`: new packages whose
+    /// required flags may not be set by the current global config).
+    pub(crate) use_flag_requirements: Vec<UseFlagRequirement>,
 }
 
 impl PortageDependencyProvider {
@@ -114,8 +167,7 @@ impl PortageDependencyProvider {
     /// constraint, so `>=dev-libs/foo-2.0 flag` only affects matching versions.
     pub fn new<R: PackageRepository>(
         repo: R,
-        use_config: UseConfig,
-        package_use: &[(Dep, Vec<String>)],
+        use_config: UseConfig,        package_use: &[(Dep, Vec<String>)],
     ) -> Self {
         let mut packages = HashMap::new();
         let mut cpn_slots: HashMap<portage_atom::Cpn, Vec<Interned<DefaultInterner>>> =
@@ -264,7 +316,11 @@ impl PortageDependencyProvider {
             packages,
             installed: HashMap::new(),
             installed_cpns: HashSet::new(),
+            installed_use: HashMap::new(),
+            installed_iuse: HashMap::new(),
             dropped_deps,
+            use_config,
+            use_flag_requirements: Vec::new(),
         }
     }
 
@@ -273,8 +329,33 @@ impl PortageDependencyProvider {
     /// **Favored** packages are preferred during version selection but may be
     /// upgraded if a dependency requires it. **Locked** packages are pinned to
     /// their exact installed version.
+    ///
+    /// If the installed version is not present in the repository (e.g. an older
+    /// version was removed from the tree), it is registered with empty
+    /// dependencies so PubGrub can select it.  Without this, PubGrub would
+    /// call `get_dependencies` for the installed version, receive `Unavailable`,
+    /// and fall back to the newest repository version — defeating the Favor
+    /// policy.
     pub fn add_installed(&mut self, installed: InstalledPackage) {
         self.installed_cpns.insert(*installed.package.cpn());
+
+        // Ensure the installed version exists in self.packages so PubGrub can
+        // use it even when it has been removed from the repository tree.
+        if let Some(pkg_data) = self.packages.get_mut(&installed.package) {
+            if !pkg_data.versions.contains_key(&installed.version) {
+                let vd = VersionDeps::from_by_class(vec![vec![], vec![], vec![], vec![], vec![]]);
+                pkg_data.versions.insert(installed.version.clone(), vd);
+            }
+        }
+
+        if !installed.active_use.is_empty() {
+            self.installed_use
+                .insert(installed.package.clone(), installed.active_use);
+        }
+        if !installed.iuse.is_empty() {
+            self.installed_iuse
+                .insert(installed.package.clone(), installed.iuse);
+        }
         self.installed
             .insert(installed.package, (installed.version, installed.policy));
     }
@@ -371,6 +452,12 @@ impl PortageDependencyProvider {
 
         let solution = pubgrub::resolve(self, root.clone(), root_ver)?;
         self.packages.remove(&root);
+
+        // Post-solve: collect USE flag requirements for all packages.  Must run
+        // before filtering virtuals because per-branch constraints live in
+        // Choice/SlotChoice nodes.
+        self.use_flag_requirements = self.compute_use_flag_requirements(&solution);
+
         Ok(solution
             .into_iter()
             .filter(|(p, _)| !p.is_virtual())
@@ -399,6 +486,351 @@ impl PortageDependencyProvider {
             }
         }
         false
+    }
+}
+
+
+/// Evaluate a single USE dep given the dep's effective state and the parent's
+/// flag state (for Conditional/Equal kinds).
+///
+/// Returns `Some(requires_enabled)` when the constraint fires and is violated,
+/// `None` when it is satisfied or the condition does not apply.
+fn eval_violated_use_dep(
+    kind: UseDepKind,
+    dep_effective_enabled: bool,
+    parent_flag_enabled: bool,
+) -> Option<bool> {
+    match kind {
+        UseDepKind::Enabled => {
+            (!dep_effective_enabled).then_some(true)
+        }
+        UseDepKind::Disabled => {
+            dep_effective_enabled.then_some(false)
+        }
+        // [flag?]: if parent has flag → dep must have flag
+        UseDepKind::Conditional => {
+            (parent_flag_enabled && !dep_effective_enabled).then_some(true)
+        }
+        // [!flag?]: if parent lacks flag → dep must have flag
+        UseDepKind::ConditionalInverse => {
+            (!parent_flag_enabled && !dep_effective_enabled).then_some(true)
+        }
+        // [flag=]: dep must match parent
+        UseDepKind::Equal => {
+            (dep_effective_enabled != parent_flag_enabled).then_some(parent_flag_enabled)
+        }
+        // [!flag=]: dep must be opposite of parent
+        UseDepKind::EqualInverse => {
+            let required = !parent_flag_enabled;
+            (dep_effective_enabled == parent_flag_enabled).then_some(required)
+        }
+    }
+}
+
+impl PortageDependencyProvider {
+    /// Walk the full PubGrub solution (including virtual choice packages) and
+    /// collect USE flag requirements for every package that has at least one
+    /// violated or unsatisfied USE dep constraint.
+    ///
+    /// **Installed packages** are compared against their VDB-recorded active USE
+    /// flags; only violated constraints are collected (the flag needs to change).
+    ///
+    /// **Non-installed packages** (being freshly built) are compared against the
+    /// global `use_config`; requirements where the flag might not be set by the
+    /// current configuration are collected as informational annotations.
+    ///
+    /// The full solution (with virtual nodes) is required so that per-branch
+    /// USE dep constraints from OR-group choices are also checked.
+    fn compute_use_flag_requirements(
+        &self,
+        solution: &SelectedDependencies<PortagePackage, Version>,
+    ) -> Vec<UseFlagRequirement> {
+        // Accumulate per target: (version, enable_set, disable_set).
+        let mut by_target: HashMap<
+            PortagePackage,
+            (Version, std::collections::BTreeSet<Interned<DefaultInterner>>,
+                      std::collections::BTreeSet<Interned<DefaultInterner>>),
+        > = HashMap::new();
+        // Installed packages that should be upgraded to a newer repo version
+        // rather than rebuilt at the installed version.  Keyed by the installed
+        // package; value is the newer version to build instead.
+        let mut upgrade_to: HashMap<PortagePackage, Version> = HashMap::new();
+
+        // Iterate to fixpoint:
+        // 1. Conditional deps cascade — when package A needs flag X, A's own
+        //    `B[X(-)?]` deps fire, requiring B to have X as well.
+        // 2. When an installed package gains a violation, check if a newer repo
+        //    version exists whose constraints should also be expanded (upgrade
+        //    the package rather than rebuilding the old version).
+        loop {
+            let prev_total: usize = by_target
+                .values()
+                .map(|(_, e, d)| e.len() + d.len())
+                .sum();
+            let prev_upgrades = upgrade_to.len();
+
+            // -- main solution packages --
+            for (pkg, ver) in solution.iter() {
+                let Some(data) = self.packages.get(pkg) else {
+                    continue;
+                };
+                let Some(udeps) = data.use_deps.get(ver) else {
+                    continue;
+                };
+
+                for constraint in udeps {
+                    let (target_pkg, vs) = &constraint.target;
+                    if target_pkg.is_virtual() {
+                        continue;
+                    }
+
+                    // Resolve target version and whether it is installed.
+                    let (target_ver, is_installed) =
+                        if let Some((inst_ver, _)) = self.installed.get(target_pkg) {
+                            if vs.contains(inst_ver) {
+                                (inst_ver, true)
+                            } else {
+                                continue;
+                            }
+                        } else if let Some(sol_ver) = solution.get(target_pkg) {
+                            if vs.contains(sol_ver) {
+                                (sol_ver, false)
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        };
+
+                    for ud in &constraint.use_deps {
+                        // Parent's flag state: currently active OR will be enabled
+                        // after this build run (already in by_target.required_enabled).
+                        let parent_flag_enabled = if self.installed.contains_key(pkg) {
+                            self.installed_use
+                                .get(pkg)
+                                .map_or(false, |u| u.contains(&ud.flag))
+                                || by_target
+                                    .get(pkg)
+                                    .map_or(false, |(_, e, _)| e.contains(&ud.flag))
+                        } else {
+                            self.use_config.get(&ud.flag) == UseFlagState::Enabled
+                        };
+
+                        let dep_effective_enabled = if is_installed {
+                            let active = self
+                                .installed_use
+                                .get(target_pkg)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            let iuse = self
+                                .packages
+                                .get(target_pkg)
+                                .and_then(|d| d.iuse.get(target_ver))
+                                .map(Vec::as_slice)
+                                .or_else(|| {
+                                    self.installed_iuse.get(target_pkg).map(Vec::as_slice)
+                                })
+                                .unwrap_or(&[]);
+                            let in_iuse = iuse.contains(&ud.flag);
+                            if in_iuse {
+                                active.contains(&ud.flag)
+                            } else {
+                                matches!(ud.default, Some(UseDefault::Enabled))
+                            }
+                        } else {
+                            self.use_config.get(&ud.flag) == UseFlagState::Enabled
+                        };
+
+                        if let Some(requires_enabled) = eval_violated_use_dep(
+                            ud.kind,
+                            dep_effective_enabled,
+                            parent_flag_enabled,
+                        ) {
+                            let entry = by_target
+                                .entry(target_pkg.clone())
+                                .or_insert_with(|| {
+                                    (
+                                        target_ver.clone(),
+                                        std::collections::BTreeSet::new(),
+                                        std::collections::BTreeSet::new(),
+                                    )
+                                });
+                            if requires_enabled {
+                                entry.1.insert(ud.flag);
+                            } else {
+                                entry.2.insert(ud.flag);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // -- upgrade expansion --
+            // For each installed package with violations, check whether a newer
+            // repo version exists.  If so, record the upgrade and process the
+            // newer version's USE dep constraints in the next fixpoint iteration.
+            let installed_with_violations: Vec<(PortagePackage, Version)> = by_target
+                .iter()
+                .filter(|(pkg, _)| self.installed.contains_key(pkg))
+                .filter(|(pkg, _)| !upgrade_to.contains_key(*pkg))
+                .filter_map(|(pkg, (inst_ver, _, _))| {
+                    self.packages
+                        .get(pkg)
+                        .and_then(|d| d.versions.keys().filter(|v| v > &inst_ver).max())
+                        .map(|new_ver| (pkg.clone(), new_ver.clone()))
+                })
+                .collect();
+
+            for (pkg, new_ver) in installed_with_violations {
+                upgrade_to.insert(pkg.clone(), new_ver.clone());
+
+                // Expand the newer version's USE dep constraints.
+                let Some(data) = self.packages.get(&pkg) else { continue };
+                let Some(udeps) = data.use_deps.get(&new_ver) else { continue };
+
+                // The "parent" is the upgraded package itself.
+                let parent_is_installed = self.installed.contains_key(&pkg);
+                for constraint in udeps {
+                    let (target_pkg, vs) = &constraint.target;
+                    if target_pkg.is_virtual() { continue; }
+                    let (target_ver, is_installed) =
+                        if let Some((inst_ver, _)) = self.installed.get(target_pkg) {
+                            if vs.contains(inst_ver) { (inst_ver, true) } else { continue }
+                        } else if let Some(sol_ver) = solution.get(target_pkg) {
+                            if vs.contains(sol_ver) { (sol_ver, false) } else { continue }
+                        } else { continue };
+
+                    for ud in &constraint.use_deps {
+                        let parent_flag_enabled = if parent_is_installed {
+                            self.installed_use.get(&pkg).map_or(false, |u| u.contains(&ud.flag))
+                                || by_target.get(&pkg).map_or(false, |(_, e, _)| e.contains(&ud.flag))
+                        } else {
+                            self.use_config.get(&ud.flag) == UseFlagState::Enabled
+                        };
+
+                        let dep_effective_enabled = if is_installed {
+                            let active = self.installed_use.get(target_pkg).map(Vec::as_slice).unwrap_or(&[]);
+                            let iuse = self.packages.get(target_pkg)
+                                .and_then(|d| d.iuse.get(target_ver))
+                                .map(Vec::as_slice)
+                                .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
+                                .unwrap_or(&[]);
+                            let in_iuse = iuse.contains(&ud.flag);
+                            if in_iuse { active.contains(&ud.flag) }
+                            else { matches!(ud.default, Some(UseDefault::Enabled)) }
+                        } else {
+                            self.use_config.get(&ud.flag) == UseFlagState::Enabled
+                        };
+
+                        if let Some(req_en) = eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled) {
+                            let entry = by_target.entry(target_pkg.clone()).or_insert_with(|| {
+                                (target_ver.clone(), std::collections::BTreeSet::new(), std::collections::BTreeSet::new())
+                            });
+                            if req_en { entry.1.insert(ud.flag); } else { entry.2.insert(ud.flag); }
+                        }
+                    }
+                }
+            }
+
+            let new_total: usize = by_target
+                .values()
+                .map(|(_, e, d)| e.len() + d.len())
+                .sum();
+            if new_total == prev_total && upgrade_to.len() == prev_upgrades {
+                break;
+            }
+        }
+
+        by_target
+            .into_iter()
+            .map(|(pkg, (ver, enable, disable))| UseFlagRequirement {
+                package: pkg.clone(),
+                version: ver,
+                upgrade_to: upgrade_to.remove(&pkg),
+                required_enabled: enable.into_iter().collect(),
+                required_disabled: disable.into_iter().collect(),
+            })
+            .collect()
+    }
+
+    /// Return all USE flag requirements collected by the post-solve validation pass.
+    ///
+    /// Includes both reinstall candidates (`R`) and informational annotations
+    /// for newly-installed packages.  Populated by [`resolve_targets`].
+    pub fn use_flag_requirements(&self) -> &[UseFlagRequirement] {
+        &self.use_flag_requirements
+    }
+
+    /// Return only the requirements that correspond to reinstalls: installed
+    /// packages whose current USE flags violate at least one constraint from the
+    /// resolved set.
+    pub fn reinstall_deps(&self) -> Vec<&UseFlagRequirement> {
+        self.use_flag_requirements
+            .iter()
+            .filter(|r| self.installed.contains_key(&r.package))
+            .collect()
+    }
+
+    /// Check whether all USE dep constraints for an OR-group branch are
+    /// consistent with the desired final state of the installed packages.
+    ///
+    /// A flag is treated as "effectively enabled" when it is either:
+    /// - currently active in the installed VDB, OR
+    /// - in the package's IUSE and enabled in the global `use_config`
+    ///   (i.e. the profile / make.conf wants it enabled after the next build).
+    ///
+    /// This means branch selection picks branches that are consistent with the
+    /// *desired* state, not just the *current* installed state.  Branches that
+    /// conflict with the global config are de-prioritised, allowing the
+    /// post-solve violation pass to then flag the specific flags that need to
+    /// change.
+    ///
+    /// Returns `true` when every constraint is either satisfied (under the
+    /// above definition) or refers to a package not yet installed.
+    fn use_dep_branch_satisfied(&self, udeps: &[convert::UseDepConstraint]) -> bool {
+        for constraint in udeps {
+            let (target_pkg, vs) = &constraint.target;
+            let Some((inst_ver, _)) = self.installed.get(target_pkg) else {
+                continue; // not installed → can't verify, don't veto
+            };
+            if !vs.contains(inst_ver) {
+                continue;
+            }
+            let active = self
+                .installed_use
+                .get(target_pkg)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let iuse = self
+                .packages
+                .get(target_pkg)
+                .and_then(|d| d.iuse.get(inst_ver))
+                .map(Vec::as_slice)
+                .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
+                .unwrap_or(&[]);
+            for ud in &constraint.use_deps {
+                let in_iuse = iuse.contains(&ud.flag);
+                // Desired final state: flag is active now OR the global config
+                // wants it enabled AND the package supports it (flag is in IUSE).
+                let dep_effective_enabled = if in_iuse {
+                    active.contains(&ud.flag)
+                        || self.use_config.get(&ud.flag) == UseFlagState::Enabled
+                } else {
+                    matches!(ud.default, Some(UseDefault::Enabled))
+                };
+                // Parent's flag state: use global config as approximation
+                // (OR groups are almost always in newly-installed packages).
+                let parent_flag_enabled =
+                    self.use_config.get(&ud.flag) == UseFlagState::Enabled;
+                // A violated constraint means this branch is not satisfiable.
+                if eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled)
+                    .is_some()
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 
@@ -456,10 +888,101 @@ impl DependencyProvider for PortageDependencyProvider {
             }
         }
 
-        // For OR-group choice packages, prefer branches that lead to installed packages.
-        // Only applied when installed packages exist and some-but-not-all branches match,
-        // so ties (all/none installed) fall through to the default highest-version pick.
+        // For OR-group / slot-choice packages, prefer branches that lead to
+        // an already-installed package.
         if package.is_virtual() && !self.installed_cpns.is_empty() {
+            // Check each candidate directly against self.installed.
+            // deps_reach_installed only checks CPNs, which produces false positives
+            // for multi-slot packages (every slot appears "installed" if any slot
+            // is), causing the heuristic to never fire and the solver to fall
+            // back to picking the highest synthetic version (= oldest slot).
+            let direct_installed: Vec<bool> = candidates
+                .iter()
+                .map(|&ver| {
+                    data.versions
+                        .get(ver)
+                        .is_some_and(|vd| {
+                            if let Dependencies::Available(ref cs) = vd.merged {
+                                cs.iter().any(|(pkg, _)| self.installed.contains_key(pkg))
+                            } else {
+                                false
+                            }
+                        })
+                })
+                .collect();
+            let directly_installed_count = direct_installed.iter().filter(|&&x| x).count();
+
+            if directly_installed_count > 0 {
+                if matches!(package, PortagePackage::SlotChoice { .. }) {
+                    // Slot choices use n-i version numbering: first (oldest) slot gets
+                    // the highest synthetic version.  Use min() to pick the newest
+                    // installed slot regardless of how many are installed.
+                    let best = candidates
+                        .iter()
+                        .copied()
+                        .zip(direct_installed.iter().copied())
+                        .filter(|(_, has)| *has)
+                        .map(|(v, _)| v)
+                        .min()
+                        .cloned();
+                    return Ok(best);
+                }
+
+                // For OR-group Choice packages: among the installed branches, prefer
+                // those that already satisfy all USE dep constraints.  A branch that
+                // is installed AND use-satisfied avoids unnecessary package rebuilds.
+                //
+                // Example: librsvg BDEPEND has || ( (python:3.14 docutils[p3.14(-)]) ... )
+                // Both python:3.14 and python:3.13 are installed, so both branches pass
+                // the simple installed-preference check and we'd fall through to max()
+                // (= first listed, python:3.14).  But if docutils only has p3.13 enabled,
+                // the p3.14 branch's USE dep is unsatisfied — we should pick p3.13 instead.
+                if matches!(package, PortagePackage::Choice { .. }) {
+                    let installed_and_use_sat: Vec<bool> = candidates
+                        .iter()
+                        .zip(direct_installed.iter())
+                        .map(|(&ver, &inst)| {
+                            inst && data
+                                .use_deps
+                                .get(ver)
+                                .map(|ud| self.use_dep_branch_satisfied(ud))
+                                .unwrap_or(true)
+                        })
+                        .collect();
+                    let sat_count = installed_and_use_sat.iter().filter(|&&s| s).count();
+                    // Only intervene when some (not all) installed branches satisfy USE
+                    // deps — if none satisfy, we can't do better so fall through.
+                    if sat_count > 0 && sat_count < candidates.len() {
+                        let best = candidates
+                            .iter()
+                            .copied()
+                            .zip(installed_and_use_sat.iter().copied())
+                            .filter(|(_, s)| *s)
+                            .map(|(v, _)| v)
+                            .max()
+                            .cloned();
+                        return Ok(best);
+                    }
+                }
+
+                if directly_installed_count < candidates.len() {
+                    // OR group with some (not all) branches installed: prefer
+                    // the highest-version installed branch (= first listed).
+                    let best = candidates
+                        .into_iter()
+                        .zip(direct_installed)
+                        .filter(|(_, has)| *has)
+                        .map(|(v, _)| v)
+                        .max()
+                        .cloned();
+                    return Ok(best);
+                }
+                // All branches installed: fall through to default max() pick
+                // (= first listed alternative, stable behaviour).
+            }
+
+            // No directly-installed branch found; fall back to CPN-level
+            // heuristic for nested OR groups with non-direct install paths.
             let has_installed: Vec<bool> = candidates
                 .iter()
                 .map(|&ver| {
@@ -496,13 +1019,29 @@ impl DependencyProvider for PortageDependencyProvider {
                 package
             )));
         };
-        match data.versions.get(version) {
-            Some(vd) => Ok(vd.merged.clone()),
-            None => Ok(Dependencies::Unavailable(format!(
+        let Some(vd) = data.versions.get(version) else {
+            return Ok(Dependencies::Unavailable(format!(
                 "version not found: {}@{}",
                 package, version
-            ))),
+            )));
+        };
+
+        // For installed packages at their installed version, skip build-time
+        // deps (DEPEND = index 0, BDEPEND = index 2).  The package is already
+        // built; re-solving its build deps would drag in bootstrap toolchain
+        // packages (old gcc to build new gcc, etc.) that portage never shows.
+        // Only RDEPEND (1), PDEPEND (3), and IDEPEND (4) matter at install time.
+        if self.installed.get(package).is_some_and(|(inst, _)| inst == version) {
+            let runtime: DependencyConstraints<PortagePackage, PortageVersionSet> =
+                vd.by_class[1].iter()  // RDEPEND
+                    .chain(vd.by_class[3].iter())  // PDEPEND
+                    .chain(vd.by_class[4].iter())  // IDEPEND
+                    .cloned()
+                    .collect();
+            return Ok(Dependencies::Available(runtime));
         }
+
+        Ok(vd.merged.clone())
     }
 }
 
@@ -526,6 +1065,13 @@ fn register_virtual_choices(
                 by_class: vec![vec![], vec![], vec![], vec![], vec![]],
             };
             entry.versions.insert(ver, vd);
+        }
+        // Store per-branch USE dep constraints so choose_version() can evaluate
+        // which OR-group branch is already satisfied without rebuilds.
+        for (ver, udeps) in vc.branch_use_deps {
+            if !udeps.is_empty() {
+                entry.use_deps.insert(ver, udeps);
+            }
         }
     }
 }
@@ -784,6 +1330,8 @@ mod tests {
             package: openssl,
             version: Version::parse("3.0.0").unwrap(),
             policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
         });
 
         let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
@@ -834,6 +1382,8 @@ mod tests {
             package: openssl,
             version: Version::parse("3.0.0").unwrap(),
             policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
         });
 
         let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
@@ -884,6 +1434,8 @@ mod tests {
             package: openssl,
             version: Version::parse("3.0.0").unwrap(),
             policy: InstalledPolicy::Lock,
+            active_use: vec![],
+            iuse: vec![],
         });
 
         let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
@@ -942,6 +1494,8 @@ mod tests {
             ),
             version: Version::parse("1.0").unwrap(),
             policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
         });
 
         let consumer_pkg = PortagePackage::slotted(
@@ -1004,6 +1558,8 @@ mod tests {
                 package: PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern("0")),
                 version: Version::parse("1.0").unwrap(),
                 policy: InstalledPolicy::Favor,
+                active_use: vec![],
+                iuse: vec![],
             });
         }
 
@@ -1081,6 +1637,8 @@ mod tests {
             ),
             version: Version::parse("1.0").unwrap(),
             policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
         });
 
         let consumer_pkg = PortagePackage::slotted(
@@ -1106,6 +1664,229 @@ mod tests {
             "installed B should be chosen over non-installed A"
         );
         assert!(!a_in_sol, "non-installed A should not appear in solution");
+    }
+
+    #[test]
+    fn or_group_prefers_branch_satisfying_use_deps() {
+        // Mirrors the librsvg BDEPEND case:
+        //   || ( ( python:3.14  docutils[python_targets_python3_14(-)] )
+        //        ( python:3.13  docutils[python_targets_python3_13(-)] ) )
+        // Both python slots are installed.  docutils has python_targets_python3_13
+        // enabled but python_targets_python3_14 disabled.
+        // Expected: solver picks branch 2 (python:3.13) since its USE dep is satisfied.
+        let mut repo = InMemoryRepository::new();
+
+        // python:3.14 — installed
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-lang/python-3.14.0").unwrap(),
+            Some(Interned::intern("3.14")),
+            None,
+            empty_deps(),
+        );
+        // python:3.13 — installed
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-lang/python-3.13.0").unwrap(),
+            Some(Interned::intern("3.13")),
+            None,
+            empty_deps(),
+        );
+        // docutils — has both python_targets flags in IUSE, only p3.13 enabled
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-python/docutils-0.21.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![
+                Interned::intern("python_targets_python3_13"),
+                Interned::intern("python_targets_python3_14"),
+            ],
+            empty_deps(),
+        );
+
+        // consumer has the OR group via an AllOf pair (simplified encoding)
+        repo.add_version(
+            portage_atom::Cpv::parse("media-libs/librsvg-2.60.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                bdepend: DepEntry::parse(
+                    "|| ( \
+                       ( dev-lang/python:3.14 dev-python/docutils[python_targets_python3_14(-)] ) \
+                       ( dev-lang/python:3.13 dev-python/docutils[python_targets_python3_13(-)] ) \
+                     )",
+                )
+                .unwrap(),
+                depend: vec![],
+                rdepend: vec![],
+                pdepend: vec![],
+                idepend: vec![],
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+
+        // Install python:3.14, python:3.13, and docutils with p3.13 active
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::slotted(
+                Cpn::parse("dev-lang/python").unwrap(),
+                Interned::intern("3.14"),
+            ),
+            version: Version::parse("3.14.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
+        });
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::slotted(
+                Cpn::parse("dev-lang/python").unwrap(),
+                Interned::intern("3.13"),
+            ),
+            version: Version::parse("3.13.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
+        });
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::slotted(
+                Cpn::parse("dev-python/docutils").unwrap(),
+                Interned::intern("0"),
+            ),
+            version: Version::parse("0.21.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            // Only python3_13 is enabled; python3_14 is in IUSE but disabled
+            active_use: vec![Interned::intern("python_targets_python3_13")],
+            iuse: vec![
+                Interned::intern("python_targets_python3_13"),
+                Interned::intern("python_targets_python3_14"),
+            ],
+        });
+
+        let librsvg = PortagePackage::slotted(
+            Cpn::parse("media-libs/librsvg").unwrap(),
+            Interned::intern("0"),
+        );
+        let solution = provider
+            .resolve_targets(vec![(librsvg, PortageVersionSet::any())])
+            .unwrap();
+
+        let has = |pkg: &str, slot: &str| {
+            solution
+                .get(&PortagePackage::slotted(
+                    Cpn::parse(pkg).unwrap(),
+                    Interned::intern(slot),
+                ))
+                .is_some()
+        };
+
+        assert!(
+            has("dev-lang/python", "3.13"),
+            "branch 2 (python:3.13) should be chosen since docutils p3.13 USE dep is satisfied"
+        );
+        assert!(
+            !has("dev-lang/python", "3.14"),
+            "branch 1 (python:3.14) should not be chosen — docutils p3.14 USE dep is NOT satisfied"
+        );
+    }
+
+    #[test]
+    fn reinstall_deps_detected_for_direct_use_dep_violation() {
+        // Package A (newly installed) has a direct RDEPEND on B[flag].
+        // B is already installed but with flag disabled → B must be rebuilt (R).
+        let mut repo = InMemoryRepository::new();
+
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-python/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![Interned::intern("flag")],
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                rdepend: DepEntry::parse("dev-python/b[flag]").unwrap(),
+                depend: vec![],
+                bdepend: vec![],
+                pdepend: vec![],
+                idepend: vec![],
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+
+        // B is installed but flag is disabled
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::slotted(
+                Cpn::parse("dev-python/b").unwrap(),
+                Interned::intern("0"),
+            ),
+            version: Version::parse("1.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![],  // flag NOT active
+            iuse: vec![Interned::intern("flag")],
+        });
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        let reinstall = provider.reinstall_deps();
+        assert_eq!(reinstall.len(), 1, "B must be flagged for reinstall");
+        assert_eq!(reinstall[0].package.cpn().package.as_str(), "b");
+    }
+
+    #[test]
+    fn reinstall_deps_empty_when_use_dep_satisfied() {
+        // Same setup as above, but B is installed with flag enabled → no reinstall.
+        let mut repo = InMemoryRepository::new();
+
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-python/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![Interned::intern("flag")],
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                rdepend: DepEntry::parse("dev-python/b[flag]").unwrap(),
+                depend: vec![],
+                bdepend: vec![],
+                pdepend: vec![],
+                idepend: vec![],
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::slotted(
+                Cpn::parse("dev-python/b").unwrap(),
+                Interned::intern("0"),
+            ),
+            version: Version::parse("1.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![Interned::intern("flag")],  // flag IS active
+            iuse: vec![Interned::intern("flag")],
+        });
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        assert!(
+            provider.reinstall_deps().is_empty(),
+            "no reinstall needed when USE dep is already satisfied"
+        );
     }
 
     #[test]

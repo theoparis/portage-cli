@@ -66,6 +66,6 @@ pub use repo::UseDb;
 pub use repo::UseExpand;
 pub use repo::{CacheEntries, CacheEntriesIter, Ebuilds, EbuildsIter, ProfileUpdate, Repository};
 pub use repo::{Manifest, ManifestEntry};
-pub use repo::{Profile, ProfileDesc, ProfileStack, ProfileStatus};
+pub use repo::{Profile, ProfileDesc, ProfileEnv, ProfileEnvLayer, ProfileStack, ProfileStatus};
 pub use repo::{RepoEntry, ReposConf};
 pub use source::{SourceContext, SourceOpts, source_parallel, source_single};

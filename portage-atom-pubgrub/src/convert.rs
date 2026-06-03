@@ -25,6 +25,11 @@ pub(crate) struct VirtualChoice {
     pub package: PortagePackage,
     /// (version, dependencies for that version).
     pub versions: Vec<(Version, Vec<(PortagePackage, PortageVersionSet)>)>,
+    /// Per-branch USE dep constraints, indexed parallel to `versions`.
+    ///
+    /// Stored separately so `choose_version` can check USE dep satisfiability
+    /// per branch without those constraints leaking into the parent's dep list.
+    pub branch_use_deps: Vec<(Version, Vec<UseDepConstraint>)>,
 }
 
 /// Result of converting a dependency tree.
@@ -228,6 +233,7 @@ impl ConvertCtx<'_> {
                                 (Version::parse("0").unwrap(), off_deps),
                                 (Version::parse("1").unwrap(), on_deps),
                             ],
+                            branch_use_deps: vec![],
                         });
                         self.requirements
                             .push((virtual_pkg, PortageVersionSet::any()));
@@ -386,6 +392,7 @@ impl ConvertCtx<'_> {
                 self.virtual_choices.push(VirtualChoice {
                     package: choice_pkg.clone(),
                     versions,
+                    branch_use_deps: vec![],
                 });
                 self.requirements
                     .push((choice_pkg, PortageVersionSet::any()));
@@ -399,31 +406,42 @@ impl ConvertCtx<'_> {
 
         let n = children.len();
         let mut versions = Vec::new();
+        let mut branch_use_deps: Vec<(Version, Vec<UseDepConstraint>)> = Vec::new();
 
         if allow_none {
             versions.push((Version::new(&[0]), vec![]));
+            branch_use_deps.push((Version::new(&[0]), vec![]));
         }
 
         for (i, child) in children.iter().enumerate() {
             let ver_num = n - i;
             let saved_reqs = std::mem::take(&mut self.requirements);
             let saved_blockers = std::mem::take(&mut self.blockers);
+            // Save use_deps so they don't leak into the parent's dep list.
+            // USE dep constraints from inside an OR branch only apply when
+            // that branch is chosen — they must stay per-branch.
+            let saved_use_deps = std::mem::take(&mut self.use_deps);
 
             self.convert_entry(child);
 
             let deps = std::mem::take(&mut self.requirements);
             let choice_blockers = std::mem::take(&mut self.blockers);
+            let this_branch_use_deps = std::mem::take(&mut self.use_deps);
 
             self.requirements = saved_reqs;
             self.blockers = saved_blockers;
+            self.use_deps = saved_use_deps;
             self.blockers.extend(choice_blockers);
 
-            versions.push((Version::new(&[ver_num as u64]), deps));
+            let ver = Version::new(&[ver_num as u64]);
+            versions.push((ver.clone(), deps));
+            branch_use_deps.push((ver, this_branch_use_deps));
         }
 
         self.virtual_choices.push(VirtualChoice {
             package: pkg.clone(),
             versions,
+            branch_use_deps,
         });
         self.requirements.push((pkg, PortageVersionSet::any()));
     }

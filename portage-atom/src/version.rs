@@ -873,4 +873,71 @@ mod tests {
             "hash/equality must agree for identical versions"
         );
     }
+
+    // H2: `_p<N>` suffix with large N values and revisions, as seen in kpathsea
+    // (`6.4.0_p20240311-r1`) and other TeX packages.  These must compare as
+    // GREATER than the base version so `>=6.4.0` matches `6.4.0_p20240311-r1`.
+    #[test]
+    fn p_suffix_large_number_is_greater_than_base() {
+        let base   = Version::parse("6.4.0").unwrap();
+        let patched = Version::parse("6.4.0_p20240311").unwrap();
+        let revised = Version::parse("6.4.0_p20240311-r1").unwrap();
+        assert!(patched > base,   "6.4.0_p20240311 must be > 6.4.0");
+        assert!(revised > patched, "6.4.0_p20240311-r1 must be > 6.4.0_p20240311");
+        assert!(revised > base,   "6.4.0_p20240311-r1 must be > 6.4.0");
+    }
+
+    #[test]
+    fn ge_constraint_matches_p_suffix_versions() {
+        // Simulates the `>=dev-libs/kpathsea-6.4.0` constraint.
+        let constraint = Version::parse("6.4.0").unwrap();
+        for candidate in [
+            "6.4.0_p20230311",
+            "6.4.0_p20240311",
+            "6.4.0_p20240311-r1",
+            "6.5.0",
+        ] {
+            let v = Version::parse(candidate).unwrap();
+            assert!(
+                v >= constraint,
+                "{candidate} must satisfy >=6.4.0 but comparison says otherwise"
+            );
+        }
+        // Strictly less — should NOT match
+        for candidate in ["6.3.5", "6.3.5_p20230311", "6.4.0_alpha"] {
+            let v = Version::parse(candidate).unwrap();
+            assert!(
+                v < constraint,
+                "{candidate} should NOT satisfy >=6.4.0"
+            );
+        }
+    }
+
+    #[test]
+    fn ge_constraint_large_major_matches() {
+        // `>=media-libs/harfbuzz-1.4.5` must be satisfied by `12.3.2`.
+        let constraint = Version::parse("1.4.5").unwrap();
+        let candidate  = Version::parse("12.3.2").unwrap();
+        assert!(candidate >= constraint, "12.3.2 must satisfy >=1.4.5");
+    }
+
+    #[test]
+    fn texlive_package_versions_parse() {
+        // Versions used by texlive packages — some have large `_p` date suffixes.
+        let versions = [
+            "2024",
+            "2024-r1",
+            "2024-r2",
+            "2024_p72890",
+            "2024_p71912",
+            "1.2.43-r2",   // libpng
+            "6.4.0_p20240311",
+            "6.4.0_p20240311-r1",
+            "1.4.5",       // harfbuzz lower bound
+            "12.3.2",      // harfbuzz installed version
+        ];
+        for v in versions {
+            Version::parse(v).unwrap_or_else(|e| panic!("failed to parse version '{v}': {e}"));
+        }
+    }
 }

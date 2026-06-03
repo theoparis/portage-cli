@@ -59,6 +59,11 @@ impl UseConfig {
             .unwrap_or(UseFlagState::Disabled)
     }
 
+    /// Return `Some(state)` if the flag is explicitly set, `None` if absent.
+    pub fn get_opt(&self, flag: &Interned<DefaultInterner>) -> Option<UseFlagState> {
+        self.flags.get(flag).copied()
+    }
+
     /// Get the state of a flag, falling back to an IUSE default if the flag
     /// is not explicitly configured.
     ///

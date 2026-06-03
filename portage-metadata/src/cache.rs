@@ -850,4 +850,69 @@ _eclasses_=foo\taabb\tbar\tccdd\tbaz\teeff
         );
         assert_eq!(entry.md5.as_deref(), raw.field("_md5_"));
     }
+
+    // H3: texlive-core's cache entry must parse without error.
+    // If any field fails to parse, the entire entry is silently skipped
+    // (let Ok(entry) = entry else { continue }) and ALL its transitive deps vanish.
+    #[test]
+    fn texlive_core_cache_entry_parses() {
+        // Verbatim content from metadata/md5-cache/app-text/texlive-core-2024-r2.
+        // Key concern: RDEPEND contains `:=[use,use]` combined slot+use atoms
+        // and USE-conditional blocks — any parse failure silently drops the entry.
+        let raw = "\
+BDEPEND=sys-apps/ed sys-devel/flex virtual/pkgconfig >=app-portage/elt-patches-20250306
+DEFINED_PHASES=configure install postinst postrm prepare setup
+DESCRIPTION=A complete TeX distribution
+EAPI=8
+HOMEPAGE=https://tug.org/texlive/
+IUSE=cjk X doc source tk +luajittex xetex xindy
+KEYWORDS=~alpha ~amd64 ~arm ~arm64 ~hppa ~loong ~ppc ~ppc64 ~riscv ~s390 ~sparc ~x86
+LICENSE=MIT
+RDEPEND=X? ( x11-libs/libX11 x11-libs/libXmu ) sci-libs/mpfi virtual/zlib:= >=media-libs/harfbuzz-1.4.5:=[icu,graphite] >=media-libs/libpng-1.2.43-r2:0= media-libs/gd[png] media-gfx/graphite2:= media-gfx/potrace:= >=x11-libs/cairo-1.12 >=x11-libs/pixman-0.18 dev-libs/zziplib:= app-text/libpaper:= dev-libs/gmp:= dev-libs/mpfr:= >=dev-libs/ptexenc-1.4.6 xetex? ( >=app-text/teckit-2.5.10 media-libs/fontconfig ) xindy? ( dev-lisp/clisp:= ) media-libs/freetype:2 >=dev-libs/icu-50:= >=dev-libs/kpathsea-6.4.0:= virtual/perl-Getopt-Long dev-perl/File-HomeDir dev-perl/Log-Dispatch dev-perl/Unicode-LineBreak dev-perl/YAML-Tiny tk? ( dev-lang/tk dev-perl/Tk )
+SLOT=0
+SRC_URI=https://mirrors.ctan.org/systems/texlive/Source/texlive-20240311-source.tar.xz
+_md5_=abc123";
+        let entry = CacheEntry::parse(raw).unwrap_or_else(|e| {
+            panic!("texlive-core cache entry failed to parse: {e}\n\nRaw:\n{raw}")
+        });
+        // Spot-check that RDEPEND was actually parsed.
+        assert!(!entry.metadata.rdepend.is_empty(), "RDEPEND should not be empty");
+        assert_eq!(entry.metadata.iuse.len(), 8);  // cjk X doc source tk luajittex xetex xindy
+        assert!(
+            entry.metadata.iuse.iter().any(|iu| iu.name() == "luajittex"),
+            "luajittex must be in IUSE"
+        );
+    }
+
+    #[test]
+    fn kpathsea_cache_entry_parses() {
+        // Verbatim content from metadata/md5-cache/dev-libs/kpathsea-6.4.0_p20240311-r1.
+        // Key concern: SLOT=0/6.4.0 (subslot) and ~x64-macos / ~x64-solaris keywords.
+        let raw = "\
+BDEPEND=>=app-portage/elt-patches-20250306
+DEFINED_PHASES=configure install postinst postrm prepare
+DESCRIPTION=Path searching library for TeX-related files
+EAPI=8
+IUSE=doc source static-libs
+KEYWORDS=~alpha amd64 arm arm64 ~hppa ~loong ~mips ppc ppc64 ~riscv ~s390 ~sparc x86 ~x64-macos ~x64-solaris
+LICENSE=LGPL-2.1
+RDEPEND=virtual/tmpfiles
+SLOT=0/6.4.0
+SRC_URI=https://example.com/kpathsea.tar.xz
+_md5_=abc123";
+        let entry = CacheEntry::parse(raw).unwrap_or_else(|e| {
+            panic!("kpathsea cache entry failed to parse: {e}\n\nRaw:\n{raw}")
+        });
+        // Subslot must be preserved.
+        assert_eq!(entry.metadata.slot.slot.as_str(), "0");
+        assert_eq!(
+            entry.metadata.slot.subslot.map(|s| s.as_str().to_owned()),
+            Some("6.4.0".to_string())
+        );
+        // Exotic keywords like ~x64-macos must NOT cause a parse error.
+        assert!(
+            entry.metadata.keywords.len() >= 10,
+            "all keywords including ~x64-macos should parse"
+        );
+    }
 }

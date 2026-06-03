@@ -28,7 +28,7 @@ mod version_set;
 pub use error::{Error, Result};
 pub use graph::{DepClass, DepEdge};
 pub use package::PortagePackage;
-pub use provider::{InstalledPackage, InstalledPolicy, PortageDependencyProvider};
+pub use provider::{InstalledPackage, InstalledPolicy, PortageDependencyProvider, UseFlagRequirement};
 pub use repository::{
     IUseDefault, InMemoryRepository, PackageDeps, PackageRepository, PackageVersions,
 };

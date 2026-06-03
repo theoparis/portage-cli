@@ -54,7 +54,7 @@ subcommands corresponding to the traditional tools.
 | `belongs` | `b` | Working — file → owning package via VDB CONTENTS |
 | `check` | `k` | Working — MD5 checksum + mtime verification |
 | `depends` | `d` | Working — reverse-dep search in metadata cache |
-| `depgraph` | `g` | Working — full dep tree via SAT solver |
+| `depgraph` | `g` | Working — full dep tree via PubGrub solver, portage-compatible output |
 | `files` | `f` | Working — all files installed by a package |
 | `has` | `a` | Working — VDB field search across installed packages |
 | `hasuse` | `h` | Working — packages with a given USE flag in IUSE |
@@ -64,6 +64,32 @@ subcommands corresponding to the traditional tools.
 | `size` | `s` | Working — installed size + build timestamp |
 | `uses` | `u` | Working — IUSE flags with descriptions + installed status |
 | `which` | `w` | Working — path to best matching ebuild |
+
+**`em query depgraph` feature summary:**
+
+- **VDB awareness** — installed packages are registered with `InstalledPolicy::Favor`; already-installed exact CPVs are filtered from output; build-time deps (DEPEND/BDEPEND) are skipped for installed packages (already built)
+- **Profile USE flags** — `make.defaults` files are sourced through brush with per-layer isolation (each file's USE assignments are its pure delta, merged with portage-style incremental semantics); `make.conf` receives the same treatment so bare `USE="…"` in make.conf correctly *adds* flags rather than replacing the profile's defaults
+- **USE_EXPAND** — `PYTHON_TARGETS`, `CPU_FLAGS_ARM`, `ABI_X86`, etc. are expanded into flag tokens and grouped in output (e.g. `PYTHON_TARGETS="python3_13 python3_14"`)
+- **OR-group branch selection** — selects the branch whose USE dep constraints are already satisfied by the installed state and current USE config (avoids unnecessary rebuilds while respecting profile-mandated targets)
+- **Post-solve reinstall detection** — after solving, installed packages whose USE dep constraints are violated by the resolved set are flagged `R` (rebuild with changed USE), matching portage's basic `-p` output
+- **Action tags** — `N` new, `U` upgrade, `D` downgrade, `R` reinstall; slot-aware (cross-slot installs correctly show `N` not `D`)
+- **Cycle handling** — BDEPEND bootstrap cycles (e.g. `xz-utils` ↔ `elt-patches`) are broken after Kahn's topological sort rather than silently dropping packages
+
+**Performance** (arm64, warm file cache):
+
+| Target | `emerge -p` | `em query depgraph` |
+|--------|------------:|--------------------:|
+| `www-client/firefox` | 3.6 s | **0.88 s** |
+| `app-text/texlive` | 2.3 s | **0.89 s** |
+| `dev-lang/rust` | 1.8 s | **0.90 s** |
+| `sys-devel/gcc` | 1.6 s | **0.91 s** |
+
+Metadata cache entries are parsed in parallel (jwalk + chunked `spawn_blocking`). The PubGrub solver itself runs in 5–35 ms depending on solution size.
+
+**Gaps vs `emerge -p`:**
+- `NS` (new in new slot) action tag not yet distinguished from `N`
+- Global USE consistency propagation (portage's `--newuse` full scan) is not implemented; constraint-driven reinstall detection covers the same cases as basic `emerge -p`
+- Wrapper packages for old-slot BDEPEND (`autoconf-wrapper`, `gcc-config`, etc.) are not modelled
 
 **Gaps vs equery:**
 - `uses` descriptions come from `profiles/use.desc` + `profiles/use.local.desc`.

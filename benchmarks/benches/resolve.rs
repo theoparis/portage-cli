@@ -392,6 +392,8 @@ fn load_installed(vdb_path: &str) -> Vec<InstalledPackage> {
                 package: PortagePackage::slotted(cpv.cpn, slot),
                 version: cpv.version,
                 policy: InstalledPolicy::Favor,
+                active_use: vec![],
+                iuse: vec![],
             });
         }
     }
