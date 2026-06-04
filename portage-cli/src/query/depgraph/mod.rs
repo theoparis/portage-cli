@@ -22,6 +22,7 @@ pub async fn depgraph(
     atoms: &[String],
     arch: &Arch,
     format: DepgraphFormat,
+    verbose: bool,
 ) -> anyhow::Result<()> {
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
@@ -79,7 +80,9 @@ pub async fn depgraph(
         root_deps.push((pkg, vs));
     }
 
-    output::report_dropped_deps(provider.dropped_deps(), &data, arch.as_str());
+    if verbose {
+        output::report_dropped_deps(provider.dropped_deps(), &data, arch.as_str());
+    }
 
     let solution = provider
         .resolve_targets(root_deps)
