@@ -562,6 +562,8 @@ pub enum DepgraphFormat {
     Pretty,
     /// Machine-parsable JSON
     Json,
+    /// cargo tree style dependency tree
+    Tree,
 }
 
 fn parse_arch(s: &str) -> std::result::Result<Arch, String> {

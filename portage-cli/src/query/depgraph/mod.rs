@@ -23,6 +23,7 @@ pub async fn depgraph(
     arch: &Arch,
     format: DepgraphFormat,
     verbose: bool,
+    empty: bool,
 ) -> anyhow::Result<()> {
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
@@ -51,18 +52,20 @@ pub async fn depgraph(
     let adapter = repo::Adapter { data: &data, arch };
     let mut provider = PortageDependencyProvider::new(adapter, use_config.clone(), &package_use);
 
-    for e in &installed_entries {
-        let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
-            Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
-            None => PortagePackage::unslotted(e.cpn),
-        };
-        provider.add_installed(SolverInstalledPackage {
-            package: pkg,
-            version: e.version.clone(),
-            policy: InstalledPolicy::Favor,
-            active_use: e.active_use.clone(),
-            iuse: e.iuse.clone(),
-        });
+    if !empty {
+        for e in &installed_entries {
+            let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
+                None => PortagePackage::unslotted(e.cpn),
+            };
+            provider.add_installed(SolverInstalledPackage {
+                package: pkg,
+                version: e.version.clone(),
+                policy: InstalledPolicy::Favor,
+                active_use: e.active_use.clone(),
+                iuse: e.iuse.clone(),
+            });
+        }
     }
 
     let mut root_deps = Vec::new();
@@ -84,6 +87,7 @@ pub async fn depgraph(
         output::report_dropped_deps(provider.dropped_deps(), &data, arch.as_str());
     }
 
+    let root_pkgs: Vec<PortagePackage> = root_deps.iter().map(|(p, _)| p.clone()).collect();
     let solution = provider
         .resolve_targets(root_deps)
         .map_err(|e| anyhow::anyhow!("resolution failed: {:?}", e))?;
@@ -133,6 +137,25 @@ pub async fn depgraph(
         }
         DepgraphFormat::Json => {
             output::print_json(&data, &order, &edges, &installed, &flag_reqs)
+        }
+        DepgraphFormat::Tree => {
+            // Find the version chosen by the solver for each requested root.
+            // Prefer edges (covers installed-when-empty-tree), then order (new installs).
+            let roots: Vec<_> = root_pkgs
+                .iter()
+                .filter_map(|pkg| {
+                    let ver = edges
+                        .iter()
+                        .find_map(|e| {
+                            if &e.from.0 == pkg { Some(e.from.1.clone()) }
+                            else if &e.to.0 == pkg { Some(e.to.1.clone()) }
+                            else { None }
+                        })
+                        .or_else(|| order.iter().find(|(p, _)| p == pkg).map(|(_, v)| v.clone()));
+                    ver.map(|v| (pkg.clone(), v))
+                })
+                .collect();
+            output::print_tree(&roots, &edges, &installed_cpvs)
         }
     }
 

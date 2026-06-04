@@ -204,7 +204,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             if !repo_path.is_dir() {
                 bail!("repo not found at {resolved}");
             }
-            query::depgraph::depgraph(repo_path, &atoms, &globals.arch, *format, globals.verbose).await
+            query::depgraph::depgraph(repo_path, &atoms, &globals.arch, *format, globals.verbose, globals.emptytree).await
         }
         QueryCommand::Files { atom } => {
             let vdb = open_vdb(globals)?;

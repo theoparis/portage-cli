@@ -298,3 +298,119 @@ pub(super) fn print_json(
 
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }
+
+const C_DIM: Style = Style::new().effects(Effects::DIMMED);
+
+pub(super) fn print_tree(
+    roots: &[(PortagePackage, Version)],
+    edges: &[portage_atom_pubgrub::DepEdge],
+    installed_cpvs: &std::collections::HashSet<Cpv>,
+) {
+    // version map: package -> version (from edges, covers all non-virtual nodes)
+    let mut version_map: HashMap<&PortagePackage, &Version> = HashMap::new();
+    for e in edges {
+        version_map.insert(&e.from.0, &e.from.1);
+        version_map.insert(&e.to.0, &e.to.1);
+    }
+    // also insert roots in case they have no outgoing edges
+    for (pkg, ver) in roots {
+        version_map.entry(pkg).or_insert(ver);
+    }
+
+    // children map: package -> ordered list of (package, version) deps
+    let mut children: HashMap<&PortagePackage, Vec<(&PortagePackage, &Version)>> = HashMap::new();
+    for e in edges {
+        let ver = version_map.get(&e.to.0).copied().unwrap_or(&e.to.1);
+        children.entry(&e.from.0).or_default().push((&e.to.0, ver));
+    }
+    // deduplicate children (same package may appear via multiple dep classes)
+    for kids in children.values_mut() {
+        kids.dedup_by_key(|(pkg, _)| *pkg);
+    }
+
+    let mut out = anstream::stdout();
+    let mut visited: std::collections::HashSet<*const PortagePackage> = Default::default();
+
+    for (i, (pkg, ver)) in roots.iter().enumerate() {
+        let is_last = i == roots.len() - 1;
+        tree_node(
+            &mut out,
+            pkg,
+            ver,
+            &children,
+            installed_cpvs,
+            "",
+            is_last,
+            true,
+            &mut visited,
+        );
+    }
+}
+
+fn tree_node(
+    out: &mut impl std::io::Write,
+    pkg: &PortagePackage,
+    ver: &Version,
+    children: &HashMap<&PortagePackage, Vec<(&PortagePackage, &Version)>>,
+    installed_cpvs: &std::collections::HashSet<Cpv>,
+    prefix: &str,
+    is_last: bool,
+    is_root: bool,
+    visited: &mut std::collections::HashSet<*const PortagePackage>,
+) {
+    let already = !visited.insert(pkg as *const _);
+    let cpn = pkg.cpn();
+    let is_installed = installed_cpvs.contains(&Cpv::new(*cpn, ver.clone()));
+
+    let connector = if is_root {
+        ""
+    } else if is_last {
+        "└── "
+    } else {
+        "├── "
+    };
+
+    if is_installed {
+        writeln!(
+            out,
+            "{prefix}{connector}{C_DIM}{cpn}-{ver}{C_DIM:#}{}",
+            if already { " (*)" } else { "" }
+        )
+        .ok();
+    } else {
+        writeln!(
+            out,
+            "{prefix}{connector}{C_PKG}{cpn}-{ver}{C_PKG:#}{}",
+            if already { format!(" {C_DIM}(*){C_DIM:#}") } else { String::new() }
+        )
+        .ok();
+    }
+
+    if already {
+        return;
+    }
+
+    let kids = children.get(pkg).map(|v| v.as_slice()).unwrap_or(&[]);
+    let child_prefix = if is_root {
+        prefix.to_string()
+    } else if is_last {
+        format!("{prefix}    ")
+    } else {
+        format!("{prefix}│   ")
+    };
+
+    for (i, (child, child_ver)) in kids.iter().enumerate() {
+        let child_is_last = i == kids.len() - 1;
+        tree_node(
+            out,
+            child,
+            child_ver,
+            children,
+            installed_cpvs,
+            &child_prefix,
+            child_is_last,
+            false,
+            visited,
+        );
+    }
+}
