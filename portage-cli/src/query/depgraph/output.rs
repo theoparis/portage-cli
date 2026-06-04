@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::io::Write as _;
 
+use anstyle::{AnsiColor, Effects, Style};
 use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
@@ -7,6 +9,17 @@ use portage_atom_pubgrub::{
     apply_package_use,
 };
 use portage_metadata::CacheEntry;
+
+// emerge color scheme: bold green for keywords/atoms/tags, bold red/blue for flags
+const C_PKG: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)))
+    .effects(Effects::BOLD);
+const C_ON: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)))
+    .effects(Effects::BOLD);
+const C_OFF: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Blue)))
+    .effects(Effects::BOLD);
 
 use super::installed::action_tag;
 use super::repo::{RepoData, find_cache};
@@ -112,19 +125,27 @@ fn format_flags(
             name.starts_with(prefix.as_str())
         });
 
+        let paint = |s: String, on: bool| -> String {
+            if on {
+                format!("{C_ON}{s}{C_ON:#}")
+            } else {
+                format!("{C_OFF}{s}{C_OFF:#}")
+            }
+        };
+
         if let Some(key) = expand_match {
             let prefix = format!("{}_", key.to_lowercase());
             let short = &name[prefix.len()..];
             let bucket = expand_groups.entry(key.as_str()).or_default();
             if enabled {
-                bucket.0.push(format!("{short}{suffix}"));
+                bucket.0.push(paint(format!("{short}{suffix}"), true));
             } else {
-                bucket.1.push(format!("-{short}{suffix}"));
+                bucket.1.push(paint(format!("-{short}{suffix}"), false));
             }
         } else if enabled {
-            base_flags.0.push(format!("{name}{suffix}"));
+            base_flags.0.push(paint(format!("{name}{suffix}"), true));
         } else {
-            base_flags.1.push(format!("-{name}{suffix}"));
+            base_flags.1.push(paint(format!("-{name}{suffix}"), false));
         }
     }
 
@@ -160,8 +181,10 @@ pub(super) fn print_pretty(
     use_expand_hidden: &[String],
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
 ) {
-    println!("These are the packages that would be merged, in order:\n");
-    println!("Calculating dependencies... done!");
+    let mut out = anstream::stdout();
+
+    writeln!(out, "{C_PKG}These are the packages that would be merged, in order:{C_PKG:#}\n").ok();
+    writeln!(out, "Calculating dependencies... done!").ok();
 
     for (pkg, ver) in order {
         let cpn = pkg.cpn();
@@ -176,10 +199,14 @@ pub(super) fn print_pretty(
             .unwrap_or_default();
 
         let old = old_ver.map(|v| format!(" [{}]", v)).unwrap_or_default();
-        println!("[ebuild  {tag:<6}] {cpn}-{ver}{old}{flag_str}");
+        let pad = " ".repeat(6usize.saturating_sub(tag.len()));
+        writeln!(
+            out,
+            "[{C_PKG}ebuild{C_PKG:#}  {C_PKG}{tag}{C_PKG:#}{pad}] {C_PKG}{cpn}-{ver}{C_PKG:#}{old}{flag_str}",
+        ).ok();
     }
 
-    println!("\nTotal: {} package(s)", order.len());
+    writeln!(out, "\nTotal: {} package(s)", order.len()).ok();
 }
 
 fn class_str(c: DepClass) -> &'static str {

@@ -32,6 +32,8 @@ symbol-table = [
 
 [dependencies]
 anyhow = { workspace = true }
+anstream = "1"
+anstyle = "1"
 camino = { workspace = true }
 gentoo-core = { workspace = true }
 portage-atom = { workspace = true }
