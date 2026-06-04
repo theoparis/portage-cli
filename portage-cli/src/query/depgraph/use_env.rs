@@ -2,6 +2,8 @@ use portage_atom::Dep;
 use portage_atom_pubgrub::{UseConfig, UseFlagState};
 use portage_repo::{ProfileStack, Repository, DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF};
 
+type Result<T> = anyhow::Result<T>;
+
 /// Resolved USE environment for the solver and display.
 pub(super) struct UseEnv {
     pub config: UseConfig,
@@ -14,32 +16,22 @@ pub(super) struct UseEnv {
     /// Masked packages from the profile stack and `/etc/portage/package.mask`.
     pub package_mask: Vec<Dep>,
     /// Effective ACCEPT_KEYWORDS tokens (e.g. `["arm64", "~arm64"]`).
-    /// Empty means fall back to accepting stable+testing (tool default).
     pub accept_keywords: Vec<String>,
     /// Effective ACCEPT_LICENSE tokens (e.g. `["*"]` or `["MIT", "GPL-2"]`).
-    /// Defaults to `["*"]` (accept everything) when unavailable.
     pub accept_license: Vec<String>,
 }
 
-pub(super) async fn build_use_env(repo: &Repository) -> UseEnv {
-    let Some(env) = compute_use_env(repo).await else {
-        return UseEnv {
-            config: UseConfig::new(),
-            expand: Vec::new(),
-            expand_hidden: Vec::new(),
-            package_use: Vec::new(),
-            package_mask: Vec::new(),
-            accept_keywords: Vec::new(),
-            accept_license: vec!["*".to_string()],
-        };
-    };
-    env
+pub(super) async fn build_use_env(repo: &Repository) -> Result<UseEnv> {
+    compute_use_env(repo).await
 }
 
-async fn compute_use_env(repo: &Repository) -> Option<UseEnv> {
-    let profile_path = std::fs::canonicalize("/etc/portage/make.profile").ok()?;
-    let stack = ProfileStack::build(profile_path).ok()?;
-    let mut shell = repo.shell().await.ok()?;
+async fn compute_use_env(repo: &Repository) -> Result<UseEnv> {
+    let profile_path = std::fs::canonicalize("/etc/portage/make.profile")
+        .map_err(|e| anyhow::anyhow!("cannot resolve /etc/portage/make.profile: {e}"))?;
+    let stack = ProfileStack::build(profile_path)
+        .map_err(|e| anyhow::anyhow!("failed to build profile stack: {e}"))?;
+    let mut shell = repo.shell().await
+        .map_err(|e| anyhow::anyhow!("failed to start ebuild shell: {e}"))?;
 
     let make_conf: Option<std::path::PathBuf> = [DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF]
         .iter()
@@ -47,7 +39,8 @@ async fn compute_use_env(repo: &Repository) -> Option<UseEnv> {
         .map(std::path::PathBuf::from);
 
     let confs: Vec<&std::path::Path> = make_conf.as_deref().into_iter().collect();
-    let flags = stack.use_flags(&mut shell, &confs).await.ok()?;
+    let flags = stack.use_flags(&mut shell, &confs).await
+        .map_err(|e| anyhow::anyhow!("failed to evaluate USE flags: {e}"))?;
 
     let split_var = |name: &str| -> Vec<String> {
         shell
@@ -77,7 +70,7 @@ async fn compute_use_env(repo: &Repository) -> Option<UseEnv> {
     let mut package_mask = stack.package_mask().unwrap_or_default();
     package_mask.extend(load_dep_list("/etc/portage/package.mask"));
 
-    Some(UseEnv { config, expand, expand_hidden, package_use, package_mask, accept_keywords, accept_license })
+    Ok(UseEnv { config, expand, expand_hidden, package_use, package_mask, accept_keywords, accept_license })
 }
 
 fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {

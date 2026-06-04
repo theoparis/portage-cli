@@ -33,11 +33,12 @@ pub async fn depgraph(
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
 
-    let (data, installed_entries, use_env) = tokio::join!(
+    let (data, installed_entries, use_env_result) = tokio::join!(
         repo::load_repo(&repo),
         async { installed::load_installed() },
         use_env::build_use_env(&repo),
     );
+    let use_env = use_env_result?;
     let use_env::UseEnv {
         config: use_config,
         expand: use_expand,
