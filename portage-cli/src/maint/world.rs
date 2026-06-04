@@ -1,10 +1,10 @@
+use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use portage_atom::Dep;
 use portage_vdb::Vdb;
 
-use crate::error::{Error, Result};
-use crate::query::which::dep_matches_cpv;
 use super::sets::KnownSets;
+use crate::query::which::dep_matches_cpv;
 
 const DEFAULT_WORLD: &str = "/var/lib/portage/world";
 
@@ -23,12 +23,7 @@ pub fn run(vdb: &Vdb, fix: bool, root: Option<&Utf8Path>) -> Result<()> {
         &mut total_orphaned,
         &mut total_invalid,
     )?;
-    check_world_sets_file(
-        &world_sets_path(root),
-        &known_sets,
-        fix,
-        &mut total_orphaned,
-    )?;
+    check_world_sets_file(&world_sets_path(root), &known_sets, fix, &mut total_orphaned)?;
 
     if total_orphaned == 0 && total_invalid == 0 {
         println!("World files are consistent.");
@@ -51,9 +46,8 @@ fn check_world_file(
     orphaned_count: &mut usize,
     invalid_count: &mut usize,
 ) -> Result<()> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        Error::Other(format!("reading {}: {}", path, e))
-    })?;
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {path}"))?;
 
     let mut orphaned: Vec<String> = Vec::new();
     let mut invalid: Vec<String> = Vec::new();
@@ -100,8 +94,7 @@ fn check_world_file(
 
     if fix && (!orphaned.is_empty() || !invalid.is_empty()) {
         let new_content = kept.join("\n") + "\n";
-        std::fs::write(path, new_content)
-            .map_err(|e| Error::Other(format!("writing {path}: {e}")))?;
+        std::fs::write(path, new_content).with_context(|| format!("writing {path}"))?;
         println!("Fixed {path}.");
     }
 
@@ -117,9 +110,8 @@ fn check_world_sets_file(
     if !path.exists() {
         return Ok(());
     }
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        Error::Other(format!("reading {}: {}", path, e))
-    })?;
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {path}"))?;
 
     let mut orphaned: Vec<String> = Vec::new();
     let mut kept: Vec<&str> = Vec::new();
@@ -145,8 +137,7 @@ fn check_world_sets_file(
 
     if fix && !orphaned.is_empty() {
         let new_content = kept.join("\n") + "\n";
-        std::fs::write(path, new_content)
-            .map_err(|e| Error::Other(format!("writing {path}: {e}")))?;
+        std::fs::write(path, new_content).with_context(|| format!("writing {path}"))?;
         println!("Fixed {path}.");
     }
 

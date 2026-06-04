@@ -1,27 +1,23 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
+use anyhow::{Context, Result, anyhow};
+use portage_atom::Dep;
 use portage_metadata::IUseDefault;
 use portage_repo::Repository;
 use portage_vdb::Vdb;
 
 use super::which::dep_matches_cpv;
-use crate::error::{Error, Result};
 use crate::vdb::find_packages;
-use portage_atom::Dep;
 
 pub fn run(repo_path: &Path, vdb: Option<&Vdb>, atoms: &[String]) -> Result<()> {
-    let repo = Repository::open(repo_path).map_err(|e| Error::Other(e.to_string()))?;
+    let repo = Repository::open(repo_path)?;
     let use_db = repo.use_db().unwrap_or_else(|_| portage_repo::UseDb::default());
 
-    let ebuilds: Vec<_> = repo
-        .ebuilds()
-        .map_err(|e| Error::Other(e.to_string()))?
-        .into_iter()
-        .collect();
+    let ebuilds: Vec<_> = repo.ebuilds()?.into_iter().collect();
 
     for raw in atoms {
-        let dep = Dep::parse(raw).map_err(|e| Error::Other(format!("bad atom '{raw}': {e}")))?;
+        let dep = Dep::parse(raw).with_context(|| format!("bad atom '{raw}'"))?;
 
         let mut matches: Vec<_> = ebuilds
             .iter()
@@ -38,12 +34,9 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, atoms: &[String]) -> Result<()> 
         let best = matches.last().unwrap();
         let cpv = best.cpv();
         let entry = repo
-            .cache_entry(cpv)
-            .map_err(|e| Error::Other(e.to_string()))?
-            .ok_or_else(|| Error::Other(format!("no cache entry for {cpv} — run `em regen`")))?;
+            .cache_entry(cpv)?
+            .ok_or_else(|| anyhow!("no cache entry for {cpv} — run `em regen`"))?;
 
-        // Load per-package metadata.xml use_flags as fallback for packages
-        // not yet represented in use.local.desc (e.g. overlay packages).
         let xml_flags: BTreeMap<String, String> = best
             .path()
             .parent()

@@ -1,5 +1,4 @@
 mod cli;
-mod depgraph;
 mod ebuild;
 mod error;
 mod maint;
@@ -16,6 +15,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::str::FromStr;
 
+use anyhow::{Context, bail};
 use clap::Parser;
 use error::Result;
 
@@ -61,136 +61,97 @@ fn run_emerge(cli: &cli::Cli) -> Result<()> {
             println!("{atom}");
         }
     }
-    Err(error::Error::NotImplemented("emerge".into()))
+    bail!("not implemented: emerge")
 }
 
 async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
     match applet {
         Applet::Ebuild { ebuild_path, phase, work_dir, root } => {
             let repo_override = globals.repo.as_deref();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(
-                    ebuild::run(ebuild_path, phase, work_dir.as_deref(), repo_override, root),
-                )
-            })
+            ebuild::run(ebuild_path, phase, work_dir.as_deref(), repo_override, root).await
         }
         Applet::Maint { command } => run_maint(command, globals),
         Applet::Portageq { command, args } => {
             eprintln!("portageq: command={} args={:?}", command, args);
-            Err(error::Error::NotImplemented("portageq".into()))
+            bail!("not implemented: portageq")
         }
         Applet::Sync { repos } => {
             eprintln!("sync: repos={:?}", repos);
-            Err(error::Error::NotImplemented("sync".into()))
+            bail!("not implemented: sync")
         }
         Applet::Depclean { atoms } => {
             let parsed = parse_atoms(atoms);
             eprintln!("depclean: atoms={:?}", parsed);
-            Err(error::Error::NotImplemented("depclean".into()))
+            bail!("not implemented: depclean")
         }
-        Applet::Regen {
-            repos,
-            output,
-            repos_dir,
-            jobs,
-            dedup,
-        } => {
+        Applet::Regen { repos, output, repos_dir, jobs, dedup } => {
             let resolved = globals.repo_path();
             let repo_path = repos.first().map(|r| r.as_str()).unwrap_or(&resolved);
-            regen::run(
-                repo_path,
-                repos_dir.as_deref(),
-                output.clone(),
-                *jobs,
-                *dedup,
-            )
-            .await
+            regen::run(repo_path, repos_dir.as_deref(), output.clone(), *jobs, *dedup).await
         }
         Applet::Quickpkg { atoms } => {
             let parsed = parse_atoms(atoms);
             eprintln!("quickpkg: atoms={:?}", parsed);
-            Err(error::Error::NotImplemented("quickpkg".into()))
+            bail!("not implemented: quickpkg")
         }
         Applet::Mirror { args } => {
             eprintln!("mirror: args={:?}", args);
-            Err(error::Error::NotImplemented("mirror".into()))
+            bail!("not implemented: mirror")
         }
         Applet::Pkg { command } => pkg::run(command),
         Applet::Query { command } => run_query(command, globals).await,
         Applet::Clean { target } => run_clean(target),
-        Applet::Use {
-            add,
-            remove,
-            make_conf,
-        } => use_flags::run(add, remove, make_conf.as_deref()),
+        Applet::Use { add, remove, make_conf } => {
+            use_flags::run(add, remove, make_conf.as_deref())
+        }
         Applet::Revdep { args } => {
             eprintln!("revdep: args={:?}", args);
-            Err(error::Error::NotImplemented("revdep".into()))
+            bail!("not implemented: revdep")
         }
         Applet::Read { args } => {
             eprintln!("read: args={:?}", args);
-            Err(error::Error::NotImplemented("read".into()))
+            bail!("not implemented: read")
         }
         Applet::News { command } => run_news(command),
         Applet::Glsa { command } => run_glsa(command),
         Applet::Log { command } => run_log(command),
         Applet::Grep { pattern, paths } => {
             eprintln!("grep: pattern={} paths={:?}", pattern, paths);
-            Err(error::Error::NotImplemented("grep".into()))
+            bail!("not implemented: grep")
         }
-        Applet::Search {
-            all,
-            desc,
-            name_only,
-            homepage,
-            pattern,
-        } => {
-            search::run(
-                &globals.search_repos(),
-                pattern.as_deref(),
-                *all,
-                *desc,
-                *name_only,
-                *homepage,
-            )
-            .await
+        Applet::Search { all, desc, name_only, homepage, pattern } => {
+            search::run(&globals.search_repos(), pattern.as_deref(), *all, *desc, *name_only, *homepage).await
         }
         Applet::Atom { atoms } => run_atom(atoms),
         Applet::Select { module, args } => {
             eprintln!("select: module={} args={:?}", module, args);
-            Err(error::Error::NotImplemented("select".into()))
+            bail!("not implemented: select")
         }
         Applet::Dispatch => {
             eprintln!("dispatch-conf");
-            Err(error::Error::NotImplemented("dispatch-conf".into()))
+            bail!("not implemented: dispatch-conf")
         }
         Applet::Etc => {
             eprintln!("etc-update");
-            Err(error::Error::NotImplemented("etc-update".into()))
+            bail!("not implemented: etc-update")
         }
         Applet::Env => {
             eprintln!("env-update");
-            Err(error::Error::NotImplemented("env-update".into()))
+            bail!("not implemented: env-update")
         }
     }
 }
 
 fn run_maint(command: &Option<MaintCommand>, globals: &cli::Cli) -> Result<()> {
     match command {
-        None => Err(error::Error::NotImplemented(
-            "emaint (no subcommand)".into(),
-        )),
-        Some(MaintCommand::All) => Err(error::Error::NotImplemented("emaint all".into())),
-        Some(MaintCommand::Binhost) => Err(error::Error::NotImplemented("emaint binhost".into())),
-        Some(MaintCommand::Cleanconfmem) => {
-            Err(error::Error::NotImplemented("emaint cleanconfmem".into()))
-        }
-        Some(MaintCommand::Cleanresume) => {
-            Err(error::Error::NotImplemented("emaint cleanresume".into()))
-        }
-        Some(MaintCommand::Logs) => Err(error::Error::NotImplemented("emaint logs".into())),
-        Some(MaintCommand::Merges) => Err(error::Error::NotImplemented("emaint merges".into())),
-        Some(MaintCommand::Movebin) => Err(error::Error::NotImplemented("emaint movebin".into())),
+        None => bail!("not implemented: emaint (no subcommand)"),
+        Some(MaintCommand::All) => bail!("not implemented: emaint all"),
+        Some(MaintCommand::Binhost) => bail!("not implemented: emaint binhost"),
+        Some(MaintCommand::Cleanconfmem) => bail!("not implemented: emaint cleanconfmem"),
+        Some(MaintCommand::Cleanresume) => bail!("not implemented: emaint cleanresume"),
+        Some(MaintCommand::Logs) => bail!("not implemented: emaint logs"),
+        Some(MaintCommand::Merges) => bail!("not implemented: emaint merges"),
+        Some(MaintCommand::Movebin) => bail!("not implemented: emaint movebin"),
         Some(MaintCommand::Moveinst) => {
             let vdb = open_vdb(globals)?;
             let resolved = globals.repo_path();
@@ -200,38 +161,7 @@ fn run_maint(command: &Option<MaintCommand>, globals: &cli::Cli) -> Result<()> {
         Some(MaintCommand::RegenUse { output }) => {
             let resolved = globals.repo_path();
             let repo_path = camino::Utf8Path::new(&resolved);
-            let repo = portage_repo::Repository::open(repo_path)
-                .map_err(|e| error::Error::Other(e.to_string()))?;
-            let use_db = portage_repo::UseDb::build_local_from_repo(&repo)
-                .map_err(|e| error::Error::Other(e.to_string()))?;
-            let pkg_count = use_db.packages_with_local_flags().count();
-            let flag_count: usize = use_db
-                .packages_with_local_flags()
-                .filter_map(|cpn| use_db.local_flags(cpn))
-                .map(|m| m.len())
-                .sum();
-            match output.as_deref() {
-                Some("-") => {
-                    use_db
-                        .write_use_local_desc_to(std::io::stdout().lock())
-                        .map_err(|e| error::Error::Other(e.to_string()))?;
-                }
-                Some(path) => {
-                    let out_path = camino::Utf8Path::new(path);
-                    use_db
-                        .write_use_local_desc(out_path)
-                        .map_err(|e| error::Error::Other(e.to_string()))?;
-                    eprintln!("Wrote {flag_count} use flags ({pkg_count} packages) to {path}.");
-                }
-                None => {
-                    let out_path = repo.path().join("profiles/use.local.desc");
-                    use_db
-                        .write_use_local_desc(&out_path)
-                        .map_err(|e| error::Error::Other(e.to_string()))?;
-                    eprintln!("Wrote {flag_count} use flags ({pkg_count} packages) to {out_path}.");
-                }
-            }
-            Ok(())
+            maint::regen_use::run(repo_path, output.as_deref())
         }
         Some(MaintCommand::Revisions { repos }) => {
             let root = globals.root.as_deref().map(camino::Utf8Path::new);
@@ -239,7 +169,7 @@ fn run_maint(command: &Option<MaintCommand>, globals: &cli::Cli) -> Result<()> {
         }
         Some(MaintCommand::Sync { repos }) => {
             eprintln!("emaint: sync repos={:?}", repos);
-            Err(error::Error::NotImplemented("emaint sync".into()))
+            bail!("not implemented: emaint sync")
         }
         Some(MaintCommand::World { fix }) => {
             let vdb = open_vdb(globals)?;
@@ -266,16 +196,14 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             let parsed = parse_atoms(atom);
             let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
             if atoms.is_empty() {
-                return Err(error::Error::NotImplemented(
-                    "equery depgraph: no valid atoms".into(),
-                ));
+                bail!("equery depgraph: no valid atoms");
             }
             let resolved = globals.repo_path();
             let repo_path = camino::Utf8Path::new(&resolved);
             if !repo_path.is_dir() {
-                return Err(error::Error::Other(format!("repo not found at {resolved}")));
+                bail!("repo not found at {resolved}");
             }
-            depgraph::depgraph(repo_path, &atoms, &globals.arch, *format).await
+            query::depgraph::depgraph(repo_path, &atoms, &globals.arch, *format).await
         }
         QueryCommand::Files { atom } => {
             let vdb = open_vdb(globals)?;
@@ -301,11 +229,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
         }
         QueryCommand::Meta { atom } => {
             let vdb = open_vdb(globals).ok();
-            query::meta::run(
-                &std::path::PathBuf::from(globals.repo_path()),
-                vdb.as_ref(),
-                atom,
-            )
+            query::meta::run(&std::path::PathBuf::from(globals.repo_path()), vdb.as_ref(), atom)
         }
         QueryCommand::Size { atom } => {
             let vdb = open_vdb(globals)?;
@@ -313,11 +237,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
         }
         QueryCommand::Uses { atom } => {
             let vdb = open_vdb(globals).ok();
-            query::uses::run(
-                &std::path::PathBuf::from(globals.repo_path()),
-                vdb.as_ref(),
-                atom,
-            )
+            query::uses::run(&std::path::PathBuf::from(globals.repo_path()), vdb.as_ref(), atom)
         }
         QueryCommand::Which { atom } => {
             query::which::run(&std::path::PathBuf::from(globals.repo_path()), atom)
@@ -327,51 +247,51 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
 
 fn run_clean(target: &Option<CleanTarget>) -> Result<()> {
     match target {
-        None => Err(error::Error::NotImplemented("eclean (no target)".into())),
-        Some(CleanTarget::Dist) => Err(error::Error::NotImplemented("eclean dist".into())),
-        Some(CleanTarget::Pkg) => Err(error::Error::NotImplemented("eclean pkg".into())),
+        None => bail!("not implemented: eclean (no target)"),
+        Some(CleanTarget::Dist) => bail!("not implemented: eclean dist"),
+        Some(CleanTarget::Pkg) => bail!("not implemented: eclean pkg"),
     }
 }
 
 fn run_news(command: &Option<NewsCommand>) -> Result<()> {
     match command {
-        None => Err(error::Error::NotImplemented("news (no subcommand)".into())),
-        Some(NewsCommand::Count) => Err(error::Error::NotImplemented("news count".into())),
-        Some(NewsCommand::List) => Err(error::Error::NotImplemented("news list".into())),
+        None => bail!("not implemented: news (no subcommand)"),
+        Some(NewsCommand::Count) => bail!("not implemented: news count"),
+        Some(NewsCommand::List) => bail!("not implemented: news list"),
         Some(NewsCommand::Read { id }) => {
             eprintln!("news: read {:?}", id);
-            Err(error::Error::NotImplemented("news read".into()))
+            bail!("not implemented: news read")
         }
-        Some(NewsCommand::Purge) => Err(error::Error::NotImplemented("news purge".into())),
+        Some(NewsCommand::Purge) => bail!("not implemented: news purge"),
     }
 }
 
 fn run_glsa(command: &Option<GlsaCommand>) -> Result<()> {
     match command {
-        None => Err(error::Error::NotImplemented("glsa (no subcommand)".into())),
-        Some(GlsaCommand::List) => Err(error::Error::NotImplemented("glsa list".into())),
+        None => bail!("not implemented: glsa (no subcommand)"),
+        Some(GlsaCommand::List) => bail!("not implemented: glsa list"),
         Some(GlsaCommand::Check { ids }) => {
             eprintln!("glsa: check {:?}", ids);
-            Err(error::Error::NotImplemented("glsa check".into()))
+            bail!("not implemented: glsa check")
         }
         Some(GlsaCommand::Fix { ids }) => {
             eprintln!("glsa: fix {:?}", ids);
-            Err(error::Error::NotImplemented("glsa fix".into()))
+            bail!("not implemented: glsa fix")
         }
     }
 }
 
 fn run_log(command: &Option<LogCommand>) -> Result<()> {
     match command {
-        None => Err(error::Error::NotImplemented("log (no subcommand)".into())),
-        Some(LogCommand::Current) => Err(error::Error::NotImplemented("log current".into())),
+        None => bail!("not implemented: log (no subcommand)"),
+        Some(LogCommand::Current) => bail!("not implemented: log current"),
         Some(LogCommand::List { limit }) => {
             eprintln!("log: list limit={:?}", limit);
-            Err(error::Error::NotImplemented("log list".into()))
+            bail!("not implemented: log list")
         }
         Some(LogCommand::Time { atom }) => {
             eprintln!("log: time atom={:?}", atom);
-            Err(error::Error::NotImplemented("log time".into()))
+            bail!("not implemented: log time")
         }
     }
 }
@@ -389,7 +309,7 @@ fn open_vdb(globals: &cli::Cli) -> Result<portage_vdb::Vdb> {
                 .unwrap_or_else(|| "/var/db/pkg".to_string())
         });
     portage_vdb::Vdb::open(vdb_path.as_str())
-        .map_err(|e| error::Error::Other(format!("failed to open VDB at {}: {}", vdb_path, e)))
+        .with_context(|| format!("failed to open VDB at {vdb_path}"))
 }
 
 fn run_atom(atoms: &[String]) -> Result<()> {

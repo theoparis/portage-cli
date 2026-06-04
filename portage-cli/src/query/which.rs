@@ -1,22 +1,17 @@
 use std::cmp::Ordering;
 use std::path::Path;
 
+use anyhow::{Context, Result};
 use portage_atom::{Cpv, Dep, Operator};
 use portage_repo::Repository;
 
-use crate::error::{Error, Result};
-
 pub fn run(repo_path: &Path, atoms: &[String]) -> Result<()> {
-    let repo = Repository::open(repo_path).map_err(|e| Error::Other(e.to_string()))?;
+    let repo = Repository::open(repo_path)?;
 
-    let ebuilds: Vec<_> = repo
-        .ebuilds()
-        .map_err(|e| Error::Other(e.to_string()))?
-        .into_iter()
-        .collect();
+    let ebuilds: Vec<_> = repo.ebuilds()?.into_iter().collect();
 
     for raw in atoms {
-        let dep = Dep::parse(raw).map_err(|e| Error::Other(format!("bad atom '{raw}': {e}")))?;
+        let dep = Dep::parse(raw).with_context(|| format!("bad atom '{raw}'"))?;
 
         let best = ebuilds
             .iter()

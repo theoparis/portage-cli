@@ -1,4 +1,5 @@
 pub mod check;
+pub mod depgraph;
 pub mod depends;
 pub mod has;
 pub mod hasuse;

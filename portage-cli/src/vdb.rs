@@ -1,13 +1,10 @@
 use std::time::{Duration, UNIX_EPOCH};
 
+use anyhow::{Result, anyhow};
 use camino::{Utf8Path, Utf8PathBuf};
 use humansize::{BINARY, format_size};
-
 use portage_vdb::Vdb;
 
-use crate::error::{Error, Result};
-
-/// `em query belongs <file>...` — find which package owns a file.
 pub fn query_belongs(vdb: &Vdb, files: &[String]) -> Result<()> {
     for file_str in files {
         let path = Utf8Path::new(file_str);
@@ -27,7 +24,6 @@ pub fn query_belongs(vdb: &Vdb, files: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `em query files <atom>...` — list files owned by matching installed packages.
 pub fn query_files(vdb: &Vdb, atoms: &[String]) -> Result<()> {
     for raw in atoms {
         let matched = find_packages(vdb, raw);
@@ -51,7 +47,6 @@ pub fn query_files(vdb: &Vdb, atoms: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// `em query size <atom>...` — show disk usage of matching installed packages.
 pub fn query_size(vdb: &Vdb, atoms: &[String]) -> Result<()> {
     for raw in atoms {
         let matched = find_packages(vdb, raw);
@@ -70,7 +65,7 @@ fn print_pkg_size(pkg: &portage_vdb::InstalledPackage) -> Result<()> {
     let size_str = match pkg.size() {
         Ok(Some(bytes)) => format_size(bytes, BINARY),
         Ok(None) => "size unknown".to_string(),
-        Err(e) => return Err(Error::Other(format!("{}: {}", pkg, e))),
+        Err(e) => return Err(anyhow!("{}: {}", pkg, e)),
     };
 
     let built_str = match pkg.build_time() {

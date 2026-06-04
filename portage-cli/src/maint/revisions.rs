@@ -1,11 +1,9 @@
+use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
-
-use crate::error::{Error, Result};
 
 const REPO_REVISIONS: &str = "var/lib/portage/repo_revisions";
 
-/// Purge the repo_revisions file, which tracks git commit hashes from previous
-/// syncs.  Matches `emaint revisions` behaviour.
+/// Purge the repo_revisions file (emaint revisions behaviour).
 ///
 /// Without `repos`, the entire file is deleted.  With `repos`, only those
 /// specific repo entries are removed from the JSON object.
@@ -18,9 +16,7 @@ pub fn run(repos: &[String], root: Option<&Utf8Path>) -> Result<()> {
     }
 
     if repos.is_empty() {
-        std::fs::remove_file(&path).map_err(|e| {
-            Error::Other(format!("removing {path}: {e}"))
-        })?;
+        std::fs::remove_file(&path).with_context(|| format!("removing {path}"))?;
         println!("Purged {path}.");
     } else {
         purge_repos(&path, repos)?;
@@ -31,11 +27,10 @@ pub fn run(repos: &[String], root: Option<&Utf8Path>) -> Result<()> {
 
 fn purge_repos(path: &Utf8Path, repos: &[String]) -> Result<()> {
     let content = std::fs::read_to_string(path)
-        .map_err(|e| Error::Other(format!("reading {path}: {e}")))?;
+        .with_context(|| format!("reading {path}"))?;
 
     let mut map: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&content)
-            .map_err(|e| Error::Other(format!("parsing {path}: {e}")))?;
+        serde_json::from_str(&content).with_context(|| format!("parsing {path}"))?;
 
     let mut removed = Vec::new();
     for repo in repos {
@@ -51,14 +46,11 @@ fn purge_repos(path: &Utf8Path, repos: &[String]) -> Result<()> {
     }
 
     if map.is_empty() {
-        std::fs::remove_file(path)
-            .map_err(|e| Error::Other(format!("removing {path}: {e}")))?;
+        std::fs::remove_file(path).with_context(|| format!("removing {path}"))?;
         println!("Purged {path} (empty after removing {}).", removed.join(", "));
     } else {
-        let out = serde_json::to_string(&map)
-            .map_err(|e| Error::Other(format!("serialising: {e}")))?;
-        std::fs::write(path, out)
-            .map_err(|e| Error::Other(format!("writing {path}: {e}")))?;
+        let out = serde_json::to_string(&map).context("serialising")?;
+        std::fs::write(path, out).with_context(|| format!("writing {path}"))?;
         println!("Removed {} from {path}.", removed.join(", "));
     }
 

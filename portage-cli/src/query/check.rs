@@ -1,8 +1,8 @@
 //! `em query check` — verify checksums and mtimes of installed package files.
 
+use anyhow::{Context, Result};
 use portage_vdb::{ContentsKind, InstalledPackage, Vdb};
 
-use crate::error::{Error, Result};
 use crate::vdb::find_packages;
 
 pub fn run(vdb: &Vdb, atoms: &[String]) -> Result<()> {
@@ -22,7 +22,7 @@ pub fn run(vdb: &Vdb, atoms: &[String]) -> Result<()> {
 fn check_package(pkg: &InstalledPackage) -> Result<()> {
     let entries = pkg
         .contents()
-        .map_err(|e| Error::Other(format!("{pkg}: {e}")))?;
+        .with_context(|| format!("{pkg}"))?;
 
     let mut ok: u32 = 0;
     let mut fail: u32 = 0;
@@ -83,7 +83,6 @@ fn check_package(pkg: &InstalledPackage) -> Result<()> {
                     }
                 }
             }
-            // Directories, fifos and device nodes carry no checksum.
             ContentsKind::Dir | ContentsKind::Fifo | ContentsKind::Dev => {}
         }
     }
@@ -121,14 +120,12 @@ mod tests {
     fn check_passes_for_correct_obj() {
         let tmp = tempdir().unwrap();
 
-        // Create a real file whose MD5 we know
         let file_dir = tmp.path().join("actual");
         fs::create_dir_all(&file_dir).unwrap();
         let file_path = file_dir.join("hello.txt");
         fs::write(&file_path, b"hello\n").unwrap();
 
         let digest = format!("{:x}", md5::compute(b"hello\n"));
-        // Grab the mtime so CONTENTS is consistent
         let mtime = file_path
             .metadata()
             .unwrap()
@@ -138,12 +135,7 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        let contents = format!(
-            "obj {} {} {}\n",
-            file_path.display(),
-            digest,
-            mtime
-        );
+        let contents = format!("obj {} {} {}\n", file_path.display(), digest, mtime);
         let vdb = make_vdb_pkg(
             tmp.path(),
             "app-shells",

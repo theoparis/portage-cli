@@ -1,24 +1,20 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use anyhow::{Context, Result};
+use portage_atom::Dep;
 use portage_metadata::Stability;
 use portage_repo::Repository;
 
 use super::which::dep_matches_cpv;
-use crate::error::{Error, Result};
-use portage_atom::Dep;
 
 pub fn run(repo_path: &Path, atoms: &[String]) -> Result<()> {
-    let repo = Repository::open(repo_path).map_err(|e| Error::Other(e.to_string()))?;
+    let repo = Repository::open(repo_path)?;
 
-    let ebuilds: Vec<_> = repo
-        .ebuilds()
-        .map_err(|e| Error::Other(e.to_string()))?
-        .into_iter()
-        .collect();
+    let ebuilds: Vec<_> = repo.ebuilds()?.into_iter().collect();
 
     for raw in atoms {
-        let dep = Dep::parse(raw).map_err(|e| Error::Other(format!("bad atom '{raw}': {e}")))?;
+        let dep = Dep::parse(raw).with_context(|| format!("bad atom '{raw}'"))?;
 
         let mut matches: Vec<_> = ebuilds
             .iter()
@@ -32,7 +28,6 @@ pub fn run(repo_path: &Path, atoms: &[String]) -> Result<()> {
 
         matches.sort_by(|a, b| a.cpv().version.cmp(&b.cpv().version));
 
-        // Collect all arches seen across versions
         let mut all_arches: std::collections::BTreeSet<String> = Default::default();
         let mut version_keywords: Vec<(String, BTreeMap<String, Stability>)> = Vec::new();
 
@@ -51,7 +46,6 @@ pub fn run(repo_path: &Path, atoms: &[String]) -> Result<()> {
             version_keywords.push((cpv.to_string(), kw_map));
         }
 
-        // Header
         let arches: Vec<String> = all_arches.into_iter().collect();
         let col_w = arches.iter().map(|a| a.len()).max().unwrap_or(4).max(4);
         let ver_w = version_keywords

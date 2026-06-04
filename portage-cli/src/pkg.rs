@@ -1,9 +1,9 @@
+use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use portage_atom::Dep;
 use portage_repo::PackageConf;
 
 use crate::cli::PkgCommand;
-use crate::error::{Error, Result};
 
 pub fn run(command: &PkgCommand) -> Result<()> {
     match command {
@@ -22,10 +22,6 @@ pub fn run(command: &PkgCommand) -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Valued entries (package.use / package.accept_keywords / package.env)
-// ---------------------------------------------------------------------------
-
 fn edit_valued(
     atom_str: &str,
     add: &[String],
@@ -35,16 +31,15 @@ fn edit_valued(
     conf_name: &str,
 ) -> Result<()> {
     let atom = Dep::parse(atom_str)
-        .map_err(|e| Error::Other(format!("invalid atom {atom_str:?}: {e}")))?;
+        .with_context(|| format!("invalid atom {atom_str:?}"))?;
 
     let base = Utf8Path::new("/etc/portage").join(conf_name);
     let no_edit = add.is_empty() && subtract.is_empty() && drop.is_empty();
 
     if base.is_dir() {
         let mut all = PackageConf::load_dir(&base)
-            .map_err(|e| Error::Other(format!("reading {base}: {e}")))?;
+            .with_context(|| format!("reading {base}"))?;
 
-        // Find which files already contain this atom.
         let matches: Vec<usize> = all
             .iter()
             .enumerate()
@@ -59,14 +54,12 @@ fn edit_valued(
 
         match matches.len() {
             0 => {
-                // New entry — write to path_override or <base>/<cat>-<pkg>.
                 let target = resolve_new_path(&base, &atom, path_override);
                 let mut pc = if target.exists() {
                     PackageConf::load_file(&target)
-                        .map_err(|e| Error::Other(format!("reading {target}: {e}")))?
+                        .with_context(|| format!("reading {target}"))?
                 } else {
-                    PackageConf::parse(String::new())
-                        .map_err(|e| Error::Other(format!("{e}")))?
+                    PackageConf::parse(String::new())?
                 };
                 let current: Vec<String> = vec![];
                 let new_values = apply_flags(current, add, subtract, drop);
@@ -75,8 +68,7 @@ fn edit_valued(
                 } else {
                     let refs: Vec<&str> = new_values.iter().map(String::as_str).collect();
                     pc.set(&atom, &refs);
-                    pc.save(&target)
-                        .map_err(|e| Error::Other(format!("writing {target}: {e}")))?;
+                    pc.save(&target).with_context(|| format!("writing {target}"))?;
                     println!("{atom} {}", new_values.join(" "));
                 }
             }
@@ -97,17 +89,15 @@ fn edit_valued(
                     eprintln!("  {}", all[i].0);
                 }
                 eprintln!("Specify --path to edit one explicitly.");
-                return Err(Error::Other(format!("ambiguous entries for {atom}")));
+                bail!("ambiguous entries for {atom}");
             }
         }
     } else {
-        // Single-file mode.
         let mut pc = if base.exists() {
             PackageConf::load_file(&base)
-                .map_err(|e| Error::Other(format!("reading {base}: {e}")))?
+                .with_context(|| format!("reading {base}"))?
         } else {
-            PackageConf::parse(String::new())
-                .map_err(|e| Error::Other(format!("{e}")))?
+            PackageConf::parse(String::new())?
         };
 
         if no_edit {
@@ -130,9 +120,6 @@ fn update_valued_entry(
     drop: &[String],
     conf_name: &str,
 ) -> Result<()> {
-    // If multiple versioned entries share this CPN and the user gave a bare
-    // CPN atom, editing just the first would silently ignore the others.
-    // Require a more specific atom in that case.
     let all_entries: Vec<_> = pc.find_all(atom).collect();
     if all_entries.len() > 1 && atom.version.is_none() {
         eprintln!("error: multiple entries for {atom} in {}:", file.file_name().unwrap_or("?"));
@@ -145,7 +132,7 @@ fn update_valued_entry(
             }
         }
         eprintln!("Use a versioned atom to edit a specific entry.");
-        return Err(Error::Other(format!("ambiguous CPN for {atom}")));
+        bail!("ambiguous CPN for {atom}");
     }
 
     let current: Vec<String> = all_entries
@@ -165,8 +152,7 @@ fn update_valued_entry(
         println!("{atom} {}", new_values.join(" "));
     }
 
-    pc.save(file)
-        .map_err(|e| Error::Other(format!("writing {file}: {e}")))
+    pc.save(file).with_context(|| format!("writing {file}"))
 }
 
 fn show_valued_dir(
@@ -210,10 +196,6 @@ fn show_valued_single(pc: &PackageConf, atom: &Dep, file: &Utf8Path, conf_name: 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Mask (presence-only entries)
-// ---------------------------------------------------------------------------
-
 fn edit_mask(
     atom_str: &str,
     add: bool,
@@ -221,13 +203,13 @@ fn edit_mask(
     path_override: Option<&Utf8Path>,
 ) -> Result<()> {
     let atom = Dep::parse(atom_str)
-        .map_err(|e| Error::Other(format!("invalid atom {atom_str:?}: {e}")))?;
+        .with_context(|| format!("invalid atom {atom_str:?}"))?;
 
     let base = Utf8Path::new("/etc/portage/package.mask");
 
     if base.is_dir() {
         let mut all = PackageConf::load_dir(base)
-            .map_err(|e| Error::Other(format!("reading {base}: {e}")))?;
+            .with_context(|| format!("reading {base}"))?;
 
         let matches: Vec<usize> = all
             .iter()
@@ -237,7 +219,6 @@ fn edit_mask(
             .collect();
 
         if !add && !drop {
-            // Show mode.
             if matches.is_empty() {
                 println!("package.mask: {atom} is not masked");
             } else {
@@ -255,8 +236,7 @@ fn edit_mask(
                 1 => {
                     let (ref file, ref mut pc) = all[matches[0]];
                     pc.remove(&atom);
-                    pc.save(file)
-                        .map_err(|e| Error::Other(format!("writing {file}: {e}")))?;
+                    pc.save(file).with_context(|| format!("writing {file}"))?;
                     println!("removed {atom} from {}", file.file_name().unwrap_or("?"));
                 }
                 _ => {
@@ -265,35 +245,31 @@ fn edit_mask(
                         eprintln!("  {}", all[i].0);
                     }
                     eprintln!("Specify --path to edit one explicitly.");
-                    return Err(Error::Other(format!("ambiguous mask entries for {atom}")));
+                    bail!("ambiguous mask entries for {atom}");
                 }
             }
         } else {
-            // add
             let target = resolve_new_path(base, &atom, path_override);
             let mut pc = if target.exists() {
                 PackageConf::load_file(&target)
-                    .map_err(|e| Error::Other(format!("reading {target}: {e}")))?
+                    .with_context(|| format!("reading {target}"))?
             } else {
-                PackageConf::parse(String::new())
-                    .map_err(|e| Error::Other(format!("{e}")))?
+                PackageConf::parse(String::new())?
             };
             if pc.find(&atom).is_some() {
                 println!("package.mask: {atom} already masked in {}", target.file_name().unwrap_or("?"));
             } else {
                 pc.set(&atom, &[]);
-                pc.save(&target)
-                    .map_err(|e| Error::Other(format!("writing {target}: {e}")))?;
+                pc.save(&target).with_context(|| format!("writing {target}"))?;
                 println!("masked {atom} in {}", target.file_name().unwrap_or("?"));
             }
         }
     } else {
         let mut pc = if base.exists() {
             PackageConf::load_file(base)
-                .map_err(|e| Error::Other(format!("reading {base}: {e}")))?
+                .with_context(|| format!("reading {base}"))?
         } else {
-            PackageConf::parse(String::new())
-                .map_err(|e| Error::Other(format!("{e}")))?
+            PackageConf::parse(String::new())?
         };
 
         if !add && !drop {
@@ -307,16 +283,14 @@ fn edit_mask(
 
         if drop {
             if pc.remove(&atom) {
-                pc.save(base)
-                    .map_err(|e| Error::Other(format!("writing {base}: {e}")))?;
+                pc.save(base).with_context(|| format!("writing {base}"))?;
                 println!("removed {atom} from package.mask");
             } else {
                 println!("package.mask: {atom} not found");
             }
         } else {
             pc.set(&atom, &[]);
-            pc.save(base)
-                .map_err(|e| Error::Other(format!("writing {base}: {e}")))?;
+            pc.save(base).with_context(|| format!("writing {base}"))?;
             println!("masked {atom}");
         }
     }
@@ -324,15 +298,6 @@ fn edit_mask(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Merge add/subtract/drop into an existing flag list.
-///
-/// - add:      remove any existing `flag` and `-flag`, then push `flag`
-/// - subtract: remove any existing `flag` and `-flag`, then push `-flag`
-/// - drop:     remove both `flag` and `-flag` without adding anything
 fn apply_flags(mut values: Vec<String>, add: &[String], subtract: &[String], drop: &[String]) -> Vec<String> {
     for op in add.iter().chain(subtract).chain(drop) {
         let base = op.trim_start_matches('-');
@@ -352,10 +317,6 @@ fn apply_flags(mut values: Vec<String>, add: &[String], subtract: &[String], dro
     values
 }
 
-/// Resolve the target path for a new entry under a directory.
-///
-/// If `path_override` names a relative path it is joined under `base_dir`.
-/// Otherwise the default `<cat>-<pkg>` filename is used.
 fn resolve_new_path(base_dir: &Utf8Path, atom: &Dep, path_override: Option<&Utf8Path>) -> Utf8PathBuf {
     if let Some(p) = path_override {
         if p.is_absolute() {

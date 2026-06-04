@@ -1,20 +1,19 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use anyhow::{Context, Result};
 use portage_atom::{Dep, DepEntry};
 use portage_repo::Repository;
 
-use crate::error::{Error, Result};
-
 pub fn run(repo_path: &Path, atoms: &[String]) -> Result<()> {
-    let repo = Repository::open(repo_path).map_err(|e| Error::Other(e.to_string()))?;
+    let repo = Repository::open(repo_path)?;
 
     for raw in atoms {
-        let target = Dep::parse(raw).map_err(|e| Error::Other(format!("bad atom '{raw}': {e}")))?;
+        let target = Dep::parse(raw).with_context(|| format!("bad atom '{raw}'"))?;
 
         let mut matches: BTreeSet<String> = BTreeSet::new();
 
-        for ebuild in repo.ebuilds().map_err(|e| Error::Other(e.to_string()))? {
+        for ebuild in repo.ebuilds()? {
             let cpv = ebuild.cpv();
             let Ok(Some(entry)) = repo.cache_entry(cpv) else {
                 continue;
@@ -37,7 +36,6 @@ pub fn run(repo_path: &Path, atoms: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Recursively check whether any atom in `entries` matches `target` by CPN.
 fn tree_contains(target: &Dep, entries: &[DepEntry]) -> bool {
     entries.iter().any(|e| entry_matches(target, e))
 }

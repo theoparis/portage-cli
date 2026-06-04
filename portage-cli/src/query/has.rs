@@ -11,17 +11,12 @@
 //!   em query has repository      — packages with any repository set
 //!   em query has USE lto         — packages built with the `lto` USE flag
 
+use anyhow::{Result, bail};
 use portage_vdb::Vdb;
-
-use crate::error::{Error, Result};
 
 pub fn run(vdb: &Vdb, args: &[String]) -> Result<()> {
     let (field, value) = match args {
-        [] => {
-            return Err(Error::Other(
-                "em query has: expected <FIELD> [VALUE]".into(),
-            ));
-        }
+        [] => bail!("em query has: expected <FIELD> [VALUE]"),
         [field] => (field.as_str(), None),
         [field, value, ..] => (field.as_str(), Some(value.as_str())),
     };
@@ -48,16 +43,9 @@ pub fn run(vdb: &Vdb, args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Match `want` against a raw VDB field value.
-///
-/// Space-separated fields (USE, IUSE, DEPEND, …) are matched token-by-token so
-/// `lto` doesn't accidentally match `no-lto`.  Single-value fields (SLOT,
-/// repository, EAPI, …) are matched as a trimmed equality check.
 fn field_matches(raw: &str, want: &str) -> bool {
-    // If the raw value has spaces it's a list field — match whole tokens.
     if raw.contains(' ') {
         raw.split_whitespace().any(|token| {
-            // Strip leading +/- (IUSE defaults) before comparing.
             token.trim_start_matches(['+', '-']) == want
         })
     } else {
@@ -73,7 +61,7 @@ mod tests {
     fn field_matches_list() {
         assert!(field_matches("net nls readline", "nls"));
         assert!(!field_matches("net nls readline", "nl"));
-        assert!(field_matches("+net +nls", "nls")); // strips IUSE default prefix
+        assert!(field_matches("+net +nls", "nls"));
     }
 
     #[test]

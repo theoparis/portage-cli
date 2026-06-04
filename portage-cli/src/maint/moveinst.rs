@@ -1,18 +1,10 @@
+use anyhow::{Context, Result};
 use camino::Utf8Path;
 use portage_vdb::Vdb;
 
-use crate::error::{Error, Result};
-
-/// A parsed entry from a `profiles/updates/` file.
 enum UpdateEntry {
-    /// `move old-cat/old-pkg new-cat/new-pkg`
     Move { from: String, to: String },
-    /// `slotmove cat/pkg old-slot new-slot`
-    SlotMove {
-        cpn: String,
-        from_slot: String,
-        to_slot: String,
-    },
+    SlotMove { cpn: String, from_slot: String, to_slot: String },
 }
 
 /// Detect installed packages that are affected by package moves recorded in
@@ -33,7 +25,6 @@ pub fn run(repo_path: &Utf8Path, vdb: &Vdb) -> Result<()> {
         return Ok(());
     }
 
-    // Index installed packages by CPN for fast lookup.
     let installed: Vec<_> = vdb.packages().into_iter().collect();
 
     let mut any = false;
@@ -51,11 +42,7 @@ pub fn run(repo_path: &Utf8Path, vdb: &Vdb) -> Result<()> {
                     println!("move:     {old_cpv}  →  {new_cpv}");
                 }
             }
-            UpdateEntry::SlotMove {
-                cpn,
-                from_slot,
-                to_slot,
-            } => {
+            UpdateEntry::SlotMove { cpn, from_slot, to_slot } => {
                 let affected: Vec<_> = installed
                     .iter()
                     .filter(|pkg| {
@@ -83,13 +70,11 @@ pub fn run(repo_path: &Utf8Path, vdb: &Vdb) -> Result<()> {
     Ok(())
 }
 
-/// Parse all `profiles/updates/*` files and collect move entries.
-/// Files are processed in alphabetical order (quarter-named: 1Q-2020, etc.).
 fn load_moves(updates_dir: &Utf8Path) -> Result<Vec<UpdateEntry>> {
     let mut entries = Vec::new();
 
     let mut files: Vec<_> = std::fs::read_dir(updates_dir)
-        .map_err(|e| Error::Other(format!("reading {}: {}", updates_dir, e)))?
+        .with_context(|| format!("reading {updates_dir}"))?
         .flatten()
         .filter_map(|e| {
             let path = e.path();
@@ -105,7 +90,7 @@ fn load_moves(updates_dir: &Utf8Path) -> Result<Vec<UpdateEntry>> {
 
     for file in &files {
         let content = std::fs::read_to_string(file)
-            .map_err(|e| Error::Other(format!("reading {}: {}", file, e)))?;
+            .with_context(|| format!("reading {file}"))?;
 
         for line in content.lines() {
             let line = line.trim();

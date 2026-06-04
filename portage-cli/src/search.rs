@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 
+use anyhow::{Result, bail};
 use portage_atom::{Cpn, Cpv};
 use portage_metadata::RawCacheEntry;
 use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
-
-use crate::error::{Error, Result};
 
 pub async fn run(
     repo_paths: &[std::path::PathBuf],
@@ -15,7 +14,7 @@ pub async fn run(
     homepage: bool,
 ) -> Result<()> {
     if repo_paths.is_empty() {
-        return Err(Error::Other("no repositories configured".into()));
+        bail!("no repositories configured");
     }
     let mut repos: Vec<Repository> = Vec::with_capacity(repo_paths.len());
     for p in repo_paths {
@@ -25,7 +24,7 @@ pub async fn run(
         }
     }
     if repos.is_empty() {
-        return Err(Error::Other("no usable repositories".into()));
+        bail!("no usable repositories");
     }
     let pat = pattern.unwrap_or("");
 
@@ -36,9 +35,6 @@ pub async fn run(
     }
 }
 
-/// ASCII-only case-insensitive `haystack.contains(needle)` — zero-alloc.
-/// Non-ASCII bytes compare exactly. Matches the behaviour of `strcasestr`
-/// that qsearch (and most C portage tools) use.
 fn contains_ci(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
@@ -51,16 +47,6 @@ fn contains_ci(haystack: &str, needle: &str) -> bool {
     hb.windows(nb.len()).any(|w| w.eq_ignore_ascii_case(nb))
 }
 
-/// Name-mode: enumerate category/package directories across every repo
-/// (each repo's `profiles/categories` → `Category::packages()`). Reads
-/// the metadata cache only when we actually have to print something
-/// other than the cpn — and only for matched packages.
-///
-/// Walking the porttree (not `metadata/md5-cache/`) is the correct
-/// source here: overlays like crossdev list their categories in
-/// `profiles/categories` and symlink their package dirs at gentoo's
-/// originals without ever populating md5-cache for them; qsearch
-/// surfaces those (with empty descriptions) and so do we.
 fn run_name(
     repos: &[Repository],
     pat: &str,
@@ -69,7 +55,6 @@ fn run_name(
     homepage: bool,
 ) -> Result<()> {
     let pat_has_slash = pat.contains('/');
-    // value: (cpn, repo_index_of_first_sighting)
     let mut matched: BTreeMap<String, (Cpn, usize)> = BTreeMap::new();
     for (idx, repo) in repos.iter().enumerate() {
         for cat in repo.categories() {
@@ -124,12 +109,6 @@ fn latest_entry_info(repo: &Repository, cpn: &Cpn, homepage: bool) -> String {
     }
 }
 
-/// Description mode: walks every cache entry across every repo via the
-/// parallel reader, keeps the highest cpv per cpn, then filters on
-/// description content (case-insensitive, matching qsearch's `-S`
-/// behaviour — description-only, no name fallback). `RawCacheEntry`
-/// skips atom-tree parsing — we only need DESCRIPTION (and optionally
-/// HOMEPAGE).
 async fn run_desc(
     repos: &[Repository],
     pat: &str,
@@ -137,18 +116,11 @@ async fn run_desc(
     name_only: bool,
     homepage: bool,
 ) -> Result<()> {
-    // latest_per_cpn drops older versions and overlay-duplicates at
-    // discovery time, so we never pay to read-and-parse them.
     let opts = CacheReadOpts {
         latest_per_cpn: true,
         ..Default::default()
     };
 
-    // The closure runs on a worker that owns the file text only for the
-    // duration of the call, so values we want to keep must be cloned.
-    // Filter and pick the single field we'll actually print inside the
-    // closure: non-matches return None (zero allocs); matches allocate
-    // exactly one String.
     let pat_owned = pat.to_string();
     let mut entries: Vec<(Cpv, Option<String>)> =
         cache_entries_parallel(repos, &opts, move |text| {
@@ -171,8 +143,6 @@ async fn run_desc(
         .filter_map(|(cpv, r)| r.ok().flatten().map(|info| (cpv, info)))
         .collect();
 
-    // Sort for deterministic output order (HashMap from latest_per_cpn
-    // hands back arbitrary insertion order).
     entries.sort_by(|(a, _), (b, _)| {
         a.cpn
             .category

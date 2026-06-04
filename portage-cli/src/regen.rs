@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
+use anyhow::{Context, Result, bail};
 use portage_repo::{RegenOpts, Repository, SourceOpts, regen_cache};
-
-use crate::error::{Error, Result};
 
 pub async fn run(
     repo_path: &str,
@@ -12,17 +11,15 @@ pub async fn run(
     dedup: bool,
 ) -> Result<()> {
     let (repo, masters) = if let Some(dir) = repos_dir {
-        Repository::open_with_masters(repo_path, dir)
-            .map_err(|e| Error::Other(format!("open repo: {e}")))?
+        Repository::open_with_masters(repo_path, dir).context("open repo")?
     } else {
-        let repo =
-            Repository::open(repo_path).map_err(|e| Error::Other(format!("open repo: {e}")))?;
+        let repo = Repository::open(repo_path).context("open repo")?;
         (repo, vec![])
     };
 
     let ebuilds: Vec<_> = repo
         .ebuilds()
-        .map_err(|e| Error::Other(format!("list ebuilds: {e}")))?
+        .context("list ebuilds")?
         .into_iter()
         .collect();
 
@@ -37,11 +34,11 @@ pub async fn run(
         eprint!("\r[{done}/{total}]");
     })
     .await
-    .map_err(|e| Error::Other(format!("regen: {e}")))?;
+    .context("regen")?;
 
     eprintln!();
     if stats.errors > 0 {
-        return Err(Error::Other(format!("{} sourcing errors", stats.errors)));
+        bail!("{} sourcing errors", stats.errors);
     }
     Ok(())
 }

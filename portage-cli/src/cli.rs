@@ -562,5 +562,5 @@ pub enum DepgraphFormat {
 }
 
 fn parse_arch(s: &str) -> std::result::Result<Arch, String> {
-    Ok(Arch::from_str(s).unwrap())
+    Arch::from_str(s).map_err(|e| e.to_string())
 }

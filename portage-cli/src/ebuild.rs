@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::{Context, Result, bail};
 use bzip2::Compression;
 use bzip2::write::BzEncoder;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -12,12 +13,6 @@ use portage_repo::{
 };
 use portage_vdb::{ContentsEntry, ContentsKind, InstalledPackage, MergeSpec, Vdb};
 
-use crate::error::{Error, Result};
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
 pub async fn run(
     ebuild_path: &str,
     phases: &[String],
@@ -27,18 +22,18 @@ pub async fn run(
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
     let ebuild = Ebuild::from_path(path)
-        .map_err(|e| Error::Other(format!("loading {ebuild_path}: {e}")))?;
+        .with_context(|| format!("loading {ebuild_path}"))?;
 
     let repo_root = match repo_override {
         Some(r) => Utf8PathBuf::from(r),
         None => ebuild
             .repo_root()
-            .ok_or_else(|| Error::Other("cannot determine repo root from ebuild path".into()))?
+            .ok_or_else(|| anyhow::anyhow!("cannot determine repo root from ebuild path"))?
             .to_owned(),
     };
 
     let repo = Repository::open(repo_root.as_std_path())
-        .map_err(|e| Error::Other(format!("opening repo at {repo_root}: {e}")))?;
+        .with_context(|| format!("opening repo at {repo_root}"))?;
 
     let work_root = match work_dir {
         Some(p) => p.to_owned(),
@@ -48,16 +43,11 @@ pub async fn run(
         }
     };
 
-    let mut shell = repo
-        .shell()
-        .await
-        .map_err(|e| Error::Other(format!("creating shell: {e}")))?;
+    let mut shell = repo.shell().await.context("creating shell")?;
 
     if let Some(use_val) = read_use_from_make_conf() {
         let flags: Vec<&str> = use_val.split_whitespace().collect();
-        shell
-            .set_use_flags(&flags)
-            .map_err(|e| Error::Other(format!("setting USE flags: {e}")))?;
+        shell.set_use_flags(&flags).context("setting USE flags")?;
     }
 
     for phase in phases {
@@ -79,19 +69,13 @@ async fn run_one_phase(
     match phase.as_ref() {
         "fetch" => run_fetch(shell, ebuild, repo, work_root).await,
         "clean" => run_clean(work_root),
-        "merge" | "qmerge" => {
-            run_merge(shell, ebuild, repo_root, work_root, root).await
-        }
+        "merge" | "qmerge" => run_merge(shell, ebuild, repo_root, work_root, root).await,
         _ => shell
             .run_phase(ebuild, phase, work_root.as_std_path(), root.as_std_path())
             .await
-            .map_err(|e| Error::Other(format!("phase {phase} failed: {e}"))),
+            .with_context(|| format!("phase {phase} failed")),
     }
 }
-
-// ---------------------------------------------------------------------------
-// fetch
-// ---------------------------------------------------------------------------
 
 async fn run_fetch(
     shell: &mut portage_repo::EbuildShell,
@@ -102,7 +86,7 @@ async fn run_fetch(
     let sourced = shell
         .source_ebuild(ebuild)
         .await
-        .map_err(|e| Error::Other(format!("sourcing ebuild: {e}")))?;
+        .context("sourcing ebuild")?;
     shell.set_a_from_src_uri();
 
     let src_uri_str = shell.get_var("SRC_URI").unwrap_or_default();
@@ -117,8 +101,7 @@ async fn run_fetch(
         return Ok(());
     }
 
-    let entries = SrcUriEntry::parse(&src_uri_str)
-        .map_err(|e| Error::Other(format!("parsing SRC_URI: {e}")))?;
+    let entries = SrcUriEntry::parse(&src_uri_str).context("parsing SRC_URI")?;
 
     let use_flags: HashSet<String> = shell
         .get_var("USE")
@@ -129,7 +112,7 @@ async fn run_fetch(
 
     let gentoo_mirrors = gentoo_mirrors_list();
     let resolver = DistfileResolver::from_repo(repo, gentoo_mirrors)
-        .map_err(|e| Error::Other(format!("loading mirrors: {e}")))?;
+        .context("loading mirrors")?;
     let distfiles = resolver.resolve(&entries, &use_flags);
 
     if distfiles.is_empty() {
@@ -144,10 +127,8 @@ async fn run_fetch(
         .filter(|p| p.exists());
     let manifest = match manifest_path {
         Some(ref p) => {
-            let raw = std::fs::read_to_string(p)
-                .map_err(|e| Error::Other(format!("reading Manifest: {e}")))?;
-            Manifest::parse(&raw)
-                .map_err(|e| Error::Other(format!("parsing Manifest: {e}")))?
+            let raw = std::fs::read_to_string(p).context("reading Manifest")?;
+            Manifest::parse(&raw).context("parsing Manifest")?
         }
         None => Manifest { entries: vec![] },
     };
@@ -157,7 +138,7 @@ async fn run_fetch(
     let fetcher = Fetcher::new(distdir.clone(), config);
 
     std::fs::create_dir_all(distdir.as_std_path())
-        .map_err(|e| Error::Other(format!("creating distdir {distdir}: {e}")))?;
+        .with_context(|| format!("creating distdir {distdir}"))?;
 
     let results = fetcher.fetch_all(&distfiles, &manifest).await;
 
@@ -165,9 +146,7 @@ async fn run_fetch(
     let mut any_restricted = false;
     for (df, result) in results {
         match result {
-            Ok(FetchStatus::AlreadyPresent) => {
-                println!("fetch: {} (already present)", df.filename)
-            }
+            Ok(FetchStatus::AlreadyPresent) => println!("fetch: {} (already present)", df.filename),
             Ok(FetchStatus::Downloaded) => println!("fetch: {} ok", df.filename),
             Ok(FetchStatus::FetchRestricted) => {
                 eprintln!("fetch: {} is fetch-restricted (RESTRICT=fetch)", df.filename);
@@ -184,28 +163,16 @@ async fn run_fetch(
 
     if any_restricted || any_failed {
         shell
-            .run_phase(
-                ebuild,
-                "nofetch",
-                work_root.as_std_path(),
-                Path::new("/"),
-            )
+            .run_phase(ebuild, "nofetch", work_root.as_std_path(), Path::new("/"))
             .await
-            .map_err(|e| Error::Other(format!("pkg_nofetch failed: {e}")))?;
+            .context("pkg_nofetch failed")?;
     }
 
     if any_failed {
-        Err(Error::Other(
-            "one or more distfiles could not be fetched".into(),
-        ))
-    } else {
-        Ok(())
+        bail!("one or more distfiles could not be fetched");
     }
+    Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// merge / qmerge
-// ---------------------------------------------------------------------------
 
 async fn run_merge(
     shell: &mut portage_repo::EbuildShell,
@@ -214,64 +181,47 @@ async fn run_merge(
     work_root: &Utf8Path,
     root: &Utf8Path,
 ) -> Result<()> {
-    // Ensure temp dir exists so we can write the environment dump there.
     let temp_dir = work_root.join("temp");
     std::fs::create_dir_all(temp_dir.as_std_path())
-        .map_err(|e| Error::Other(format!("creating temp dir: {e}")))?;
+        .context("creating temp dir")?;
 
-    // Source ebuild to capture metadata and phase functions.
-    shell
-        .source_ebuild(ebuild)
-        .await
-        .map_err(|e| Error::Other(format!("sourcing ebuild: {e}")))?;
+    shell.source_ebuild(ebuild).await.context("sourcing ebuild")?;
     let env = shell.collect_env();
 
-    // Capture environment for environment.bz2 while phase functions are loaded.
     let env_dump = capture_environment(shell, work_root).await;
 
-    // Open (or create) the VDB now so we can query the slot occupant.
     let vdb_root = vdb_root_for(root);
     let vdb = open_or_create_vdb(&vdb_root)?;
 
-    // Detect same-slot replacement: the package currently in this slot (if any).
     let slot_main = env.slot_main().to_owned();
     let old_pkg = vdb
         .find_slot_occupant(&ebuild.cpv().cpn, &slot_main)
-        .map_err(|e| Error::Other(format!("slot conflict query failed: {e}")))?
-        .filter(|old| old.cpv() != ebuild.cpv()); // ignore re-merge of exact same version
+        .context("slot conflict query failed")?
+        .filter(|old| old.cpv() != ebuild.cpv());
 
-    // Run pkg_preinst for the new package (image dir = $D, target = $ROOT).
     shell
         .run_phase(ebuild, "preinst", work_root.as_std_path(), root.as_std_path())
         .await
-        .map_err(|e| Error::Other(format!("pkg_preinst failed: {e}")))?;
+        .context("pkg_preinst failed")?;
 
-    // Copy image → root, build CONTENTS list.
     let image_dir = work_root.join("image");
     let (contents, size) = walk_image(&image_dir, root)?;
 
-    // Collision check — exclude the slot occupant we're about to replace.
     let exclude_cpv = old_pkg.as_ref().map(|p| p.cpv().clone());
     let collisions = vdb
         .find_collisions(&contents, exclude_cpv.as_ref())
-        .map_err(|e| Error::Other(format!("collision check failed: {e}")))?;
+        .context("collision check failed")?;
     if !collisions.is_empty() {
         for c in &collisions {
             eprintln!("collision: {} is already owned by {}", c.path, c.owner);
         }
-        return Err(Error::Other(format!(
-            "{} file collision(s) detected — aborting merge",
-            collisions.len()
-        )));
+        bail!("{} file collision(s) detected — aborting merge", collisions.len());
     }
 
-    // Replace the slot occupant if present: prerm → remove unique files →
-    // unregister → postrm.
     if let Some(ref old) = old_pkg {
         unmerge_slot_occupant(shell, old, repo_root, work_root, root, &vdb, &contents).await?;
     }
 
-    // Register new VDB entry.
     let build_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -280,7 +230,6 @@ async fn run_merge(
     let spec = merge_spec_from_env(env, ebuild.cpv().clone(), contents, size, build_time, counter);
     let installed = vdb.register(&spec)?;
 
-    // Write environment.bz2 into the VDB entry.
     if let Ok(ref data) = env_dump {
         if let Err(e) = write_environment_bz2(&installed, data) {
             eprintln!("warning: could not write environment.bz2: {e}");
@@ -294,17 +243,14 @@ async fn run_merge(
         ebuild.version()
     );
 
-    // Run pkg_postinst for the new package.
     shell
         .run_phase(ebuild, "postinst", work_root.as_std_path(), root.as_std_path())
         .await
-        .map_err(|e| Error::Other(format!("pkg_postinst failed: {e}")))?;
+        .context("pkg_postinst failed")?;
 
     Ok(())
 }
 
-/// Run pkg_prerm on the old slot occupant, remove files unique to it, unregister
-/// it from the VDB, then run pkg_postrm.
 async fn unmerge_slot_occupant(
     shell: &mut portage_repo::EbuildShell,
     old_pkg: &InstalledPackage,
@@ -314,7 +260,6 @@ async fn unmerge_slot_occupant(
     vdb: &Vdb,
     new_contents: &[ContentsEntry],
 ) -> Result<()> {
-    // Find the old version's ebuild in the repo (it may have been removed from the tree).
     let old_pn = old_pkg.cpv().cpn.package.as_ref();
     let old_pvr = old_pkg.cpv().version.to_string();
     let old_pf = format!("{old_pn}-{old_pvr}");
@@ -338,70 +283,49 @@ async fn unmerge_slot_occupant(
         None
     };
 
-    // Work root for old package phases (created fresh — prerm/postrm don't need sources).
     let old_work_root = work_root
         .parent()
         .unwrap_or(work_root)
         .join(format!("{old_pf}.old"));
     std::fs::create_dir_all(old_work_root.join("temp").as_std_path())
-        .map_err(|e| Error::Other(format!("creating old work root: {e}")))?;
+        .context("creating old work root")?;
 
-    // pkg_prerm — try loading from environment.bz2 if ebuild is gone.
     let old_sourced = match &old_ebuild {
         Some(e) => {
             shell
                 .run_phase(e, "prerm", old_work_root.as_std_path(), root.as_std_path())
                 .await
-                .map_err(|e| Error::Other(format!("pkg_prerm failed: {e}")))?;
+                .context("pkg_prerm failed")?;
             true
         }
-        None => {
-            try_run_phase_from_env_bz2(shell, old_pkg, "prerm", &old_work_root, root).await
-        }
+        None => try_run_phase_from_env_bz2(shell, old_pkg, "prerm", &old_work_root, root).await,
     };
 
-    // Remove files that belong only to the old package (new package will not replace them).
-    let old_contents = old_pkg
-        .contents()
-        .map_err(|e| Error::Other(format!("reading old CONTENTS: {e}")))?;
+    let old_contents = old_pkg.contents().context("reading old CONTENTS")?;
     remove_old_unique_files(&old_contents, new_contents, root)?;
 
-    // Unregister old VDB entry.
-    vdb.unregister(old_pkg)
-        .map_err(|e| Error::Other(format!("unregistering old package: {e}")))?;
+    vdb.unregister(old_pkg).context("unregistering old package")?;
 
-    // pkg_postrm.
     if old_sourced {
         match &old_ebuild {
             Some(e) => {
                 shell
                     .run_phase(e, "postrm", old_work_root.as_std_path(), root.as_std_path())
                     .await
-                    .map_err(|e| Error::Other(format!("pkg_postrm failed: {e}")))?;
+                    .context("pkg_postrm failed")?;
             }
             None => {
-                let _ = try_run_phase_from_env_bz2(
-                    shell,
-                    old_pkg,
-                    "postrm",
-                    &old_work_root,
-                    root,
-                )
-                .await;
+                let _ = try_run_phase_from_env_bz2(shell, old_pkg, "postrm", &old_work_root, root)
+                    .await;
             }
         }
     }
 
-    // Clean up old work root (best effort).
     let _ = std::fs::remove_dir_all(old_work_root.as_std_path());
 
     Ok(())
 }
 
-/// Attempt to source `environment.bz2` from the VDB entry and run a phase.
-///
-/// Returns `true` if the environment was loaded and the phase ran, `false` if
-/// `environment.bz2` is absent or could not be decompressed (warning is printed).
 async fn try_run_phase_from_env_bz2(
     shell: &mut portage_repo::EbuildShell,
     pkg: &InstalledPackage,
@@ -414,7 +338,6 @@ async fn try_run_phase_from_env_bz2(
         return false;
     }
 
-    // Decompress to a temp file then source it.
     let temp_env = work_root.join("temp/environment.old");
     let compressed = match std::fs::read(env_bz2.as_std_path()) {
         Ok(d) => d,
@@ -441,14 +364,12 @@ async fn try_run_phase_from_env_bz2(
         return false;
     }
 
-    // Run the phase function directly (it's now defined in the shell).
     let func = match phase {
         "prerm" => "pkg_prerm",
         "postrm" => "pkg_postrm",
         other => other,
     };
 
-    // Set up the minimal variables needed by pkg_* phases.
     let root_str = {
         let s = root.as_str();
         if s.ends_with('/') { s.to_owned() } else { format!("{s}/") }
@@ -465,11 +386,6 @@ async fn try_run_phase_from_env_bz2(
     true
 }
 
-/// Remove files that are in `old_contents` but NOT in `new_contents`.
-///
-/// Files/symlinks common to both are left in place (they were overwritten
-/// during `walk_image`). Directories are removed only if empty.
-/// All removals are best-effort — warnings are printed on failure.
 fn remove_old_unique_files(
     old_contents: &[ContentsEntry],
     new_contents: &[ContentsEntry],
@@ -477,7 +393,6 @@ fn remove_old_unique_files(
 ) -> Result<()> {
     let new_paths: HashSet<&Utf8PathBuf> = new_contents.iter().map(|e| &e.path).collect();
 
-    // Reverse order: files before their parent directories.
     for entry in old_contents.iter().rev() {
         if new_paths.contains(&entry.path) {
             continue;
@@ -494,7 +409,6 @@ fn remove_old_unique_files(
                 }
             }
             ContentsKind::Dir => {
-                // Only remove if empty — other packages may share the directory.
                 let _ = std::fs::remove_dir(dest.as_std_path());
             }
             _ => {}
@@ -503,24 +417,16 @@ fn remove_old_unique_files(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// clean
-// ---------------------------------------------------------------------------
-
 fn run_clean(work_root: &Utf8Path) -> Result<()> {
     if work_root.exists() {
         std::fs::remove_dir_all(work_root)
-            .map_err(|e| Error::Other(format!("cleaning {work_root}: {e}")))?;
+            .with_context(|| format!("cleaning {work_root}"))?;
         println!("clean: removed {work_root}");
     } else {
         println!("clean: {work_root} does not exist, nothing to do");
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// image walk
-// ---------------------------------------------------------------------------
 
 fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<ContentsEntry>, u64)> {
     if !image_dir.exists() {
@@ -534,39 +440,38 @@ fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<Content
 
     while let Some(dir) = queue.pop_front() {
         let read_dir = std::fs::read_dir(dir.as_std_path())
-            .map_err(|e| Error::Other(format!("reading image dir {dir}: {e}")))?;
+            .with_context(|| format!("reading image dir {dir}"))?;
 
         for entry in read_dir {
-            let entry =
-                entry.map_err(|e| Error::Other(format!("reading dir entry: {e}")))?;
+            let entry = entry.context("reading dir entry")?;
             let src_path: Utf8PathBuf = entry
                 .path()
                 .try_into()
-                .map_err(|_| Error::Other("non-UTF-8 path in image".into()))?;
+                .map_err(|_| anyhow::anyhow!("non-UTF-8 path in image"))?;
 
             let rel = src_path
                 .strip_prefix(image_dir)
-                .map_err(|_| Error::Other(format!("path escape: {src_path}")))?;
+                .map_err(|_| anyhow::anyhow!("path escape: {src_path}"))?;
             let installed = Utf8PathBuf::from("/").join(rel);
             let dest_path = dest_root.join(rel);
 
             let meta = std::fs::symlink_metadata(src_path.as_std_path())
-                .map_err(|e| Error::Other(format!("stat {src_path}: {e}")))?;
+                .with_context(|| format!("stat {src_path}"))?;
 
             if meta.file_type().is_symlink() {
                 let raw_target = std::fs::read_link(src_path.as_std_path())
-                    .map_err(|e| Error::Other(format!("readlink {src_path}: {e}")))?;
+                    .with_context(|| format!("readlink {src_path}"))?;
                 let target: Utf8PathBuf = raw_target
                     .try_into()
-                    .map_err(|_| Error::Other("non-UTF-8 symlink target".into()))?;
+                    .map_err(|_| anyhow::anyhow!("non-UTF-8 symlink target"))?;
                 if dest_path.exists()
                     || std::fs::symlink_metadata(dest_path.as_std_path()).is_ok()
                 {
                     std::fs::remove_file(dest_path.as_std_path())
-                        .map_err(|e| Error::Other(format!("removing {dest_path}: {e}")))?;
+                        .with_context(|| format!("removing {dest_path}"))?;
                 }
                 std::os::unix::fs::symlink(target.as_std_path(), dest_path.as_std_path())
-                    .map_err(|e| Error::Other(format!("symlink {dest_path}: {e}")))?;
+                    .with_context(|| format!("symlink {dest_path}"))?;
                 let mtime = meta
                     .modified()
                     .ok()
@@ -581,7 +486,7 @@ fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<Content
                 });
             } else if meta.is_dir() {
                 std::fs::create_dir_all(dest_path.as_std_path())
-                    .map_err(|e| Error::Other(format!("mkdir {dest_path}: {e}")))?;
+                    .with_context(|| format!("mkdir {dest_path}"))?;
                 contents.push(ContentsEntry {
                     kind: ContentsKind::Dir,
                     path: installed,
@@ -593,16 +498,16 @@ fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<Content
             } else if meta.is_file() {
                 if let Some(parent) = dest_path.parent() {
                     std::fs::create_dir_all(parent.as_std_path())
-                        .map_err(|e| Error::Other(format!("mkdir {parent}: {e}")))?;
+                        .with_context(|| format!("mkdir {parent}"))?;
                 }
                 std::fs::copy(src_path.as_std_path(), dest_path.as_std_path())
-                    .map_err(|e| Error::Other(format!("copy {src_path} → {dest_path}: {e}")))?;
+                    .with_context(|| format!("copy {src_path} → {dest_path}"))?;
                 std::fs::set_permissions(dest_path.as_std_path(), meta.permissions())
-                    .map_err(|e| Error::Other(format!("chmod {dest_path}: {e}")))?;
+                    .with_context(|| format!("chmod {dest_path}"))?;
 
                 total_size += meta.len();
                 let data = std::fs::read(dest_path.as_std_path())
-                    .map_err(|e| Error::Other(format!("reading {dest_path}: {e}")))?;
+                    .with_context(|| format!("reading {dest_path}"))?;
                 let md5_str = format!("{:x}", md5::compute(&data));
                 let mtime = meta
                     .modified()
@@ -623,20 +528,11 @@ fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<Content
     Ok((contents, total_size))
 }
 
-// ---------------------------------------------------------------------------
-// Environment capture (Gap 3)
-// ---------------------------------------------------------------------------
-
-/// Dump all shell variables and functions to a temp file and return the raw bytes.
-///
-/// Used to populate `environment.bz2` in the VDB entry so that `pkg_prerm` /
-/// `pkg_postrm` can run later even if the ebuild has been removed from the tree.
 async fn capture_environment(
     shell: &mut portage_repo::EbuildShell,
     work_root: &Utf8Path,
 ) -> std::result::Result<Vec<u8>, String> {
     let dump_path = work_root.join("temp/environment");
-    // Escape single quotes in the path (unlikely but safe).
     let path_escaped = dump_path.as_str().replace('\'', "'\\''");
     shell
         .run_string(&format!(
@@ -647,23 +543,16 @@ async fn capture_environment(
     std::fs::read(dump_path.as_std_path()).map_err(|e| format!("reading env dump: {e}"))
 }
 
-/// Write `environment.bz2` into the VDB directory for `pkg`.
 fn write_environment_bz2(pkg: &InstalledPackage, env_data: &[u8]) -> Result<()> {
     use std::io::Write;
 
     let path = pkg.path().join("environment.bz2");
     let mut encoder = BzEncoder::new(Vec::new(), Compression::best());
-    encoder
-        .write_all(env_data)
-        .map_err(|e| Error::Other(format!("compressing environment: {e}")))?;
-    let compressed = encoder
-        .finish()
-        .map_err(|e| Error::Other(format!("finalizing bzip2: {e}")))?;
-    std::fs::write(path.as_std_path(), compressed)
-        .map_err(|e| Error::Other(format!("writing environment.bz2: {e}")))
+    encoder.write_all(env_data).context("compressing environment")?;
+    let compressed = encoder.finish().context("finalizing bzip2")?;
+    std::fs::write(path.as_std_path(), compressed).context("writing environment.bz2")
 }
 
-/// Decompress a bzip2 blob and return the raw bytes.
 fn decompress_bzip2(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
     use bzip2::read::BzDecoder;
     use std::io::Read;
@@ -675,10 +564,6 @@ fn decompress_bzip2(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
         .map_err(|e| format!("bzip2 decompress: {e}"))?;
     Ok(out)
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn merge_spec_from_env(
     env: EbuildEnv,
@@ -725,9 +610,9 @@ fn vdb_root_for(root: &Utf8Path) -> Utf8PathBuf {
 fn open_or_create_vdb(path: &Utf8Path) -> Result<Vdb> {
     if !path.exists() {
         std::fs::create_dir_all(path.as_std_path())
-            .map_err(|e| Error::Other(format!("creating VDB at {path}: {e}")))?;
+            .with_context(|| format!("creating VDB at {path}"))?;
     }
-    Vdb::open(path).map_err(|e| Error::Other(format!("opening VDB at {path}: {e}")))
+    Vdb::open(path).with_context(|| format!("opening VDB at {path}"))
 }
 
 fn gentoo_mirrors_list() -> Vec<String> {
@@ -779,10 +664,6 @@ fn read_use_from_make_conf() -> Option<String> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,24 +685,11 @@ mod tests {
         let (contents, size) = walk_image(&image, &root).unwrap();
 
         assert!(root.join("usr/bin/testprog").exists());
-        assert!(root
-            .join("usr/bin/tp")
-            .as_std_path()
-            .symlink_metadata()
-            .is_ok());
+        assert!(root.join("usr/bin/tp").as_std_path().symlink_metadata().is_ok());
 
-        let dirs: Vec<_> = contents
-            .iter()
-            .filter(|e| e.kind == ContentsKind::Dir)
-            .collect();
-        let objs: Vec<_> = contents
-            .iter()
-            .filter(|e| e.kind == ContentsKind::Obj)
-            .collect();
-        let syms: Vec<_> = contents
-            .iter()
-            .filter(|e| e.kind == ContentsKind::Sym)
-            .collect();
+        let dirs: Vec<_> = contents.iter().filter(|e| e.kind == ContentsKind::Dir).collect();
+        let objs: Vec<_> = contents.iter().filter(|e| e.kind == ContentsKind::Obj).collect();
+        let syms: Vec<_> = contents.iter().filter(|e| e.kind == ContentsKind::Sym).collect();
         assert!(!dirs.is_empty());
         assert_eq!(objs.len(), 1);
         assert_eq!(syms.len(), 1);
@@ -860,7 +728,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::try_from(tmp.path().to_owned()).unwrap();
 
-        // Create files that simulate installed content.
         fs::create_dir_all(root.join("usr/bin").as_std_path()).unwrap();
         fs::write(root.join("usr/bin/old-only").as_std_path(), b"old").unwrap();
         fs::write(root.join("usr/bin/shared").as_std_path(), b"shared").unwrap();
@@ -898,10 +765,8 @@ mod tests {
 
         remove_old_unique_files(&old_contents, &new_contents, &root).unwrap();
 
-        // old-only should be gone, shared should still be there.
         assert!(!root.join("usr/bin/old-only").exists());
         assert!(root.join("usr/bin/shared").exists());
-        // Dir should still exist (not empty — shared is still there).
         assert!(root.join("usr/bin").exists());
     }
 }

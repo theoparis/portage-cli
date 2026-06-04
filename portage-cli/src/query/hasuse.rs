@@ -1,17 +1,16 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use anyhow::Result;
 use portage_repo::Repository;
 
-use crate::error::{Error, Result};
-
 pub fn run(repo_path: &Path, flags: &[String]) -> Result<()> {
-    let repo = Repository::open(repo_path).map_err(|e| Error::Other(e.to_string()))?;
+    let repo = Repository::open(repo_path)?;
 
     for flag in flags {
         let mut seen: BTreeSet<String> = BTreeSet::new();
 
-        for ebuild in repo.ebuilds().map_err(|e| Error::Other(e.to_string()))? {
+        for ebuild in repo.ebuilds()? {
             let cpv = ebuild.cpv();
             let cpn = cpv.cpn.to_string();
             if seen.contains(&cpn) {

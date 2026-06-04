@@ -3,26 +3,22 @@
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
+use anyhow::{Context, Result, anyhow};
 use humansize::{BINARY, format_size};
 use portage_atom::Dep;
 use portage_repo::Repository;
 use portage_vdb::Vdb;
 
 use super::which::dep_matches_cpv;
-use crate::error::{Error, Result};
 use crate::vdb::find_packages;
 
 pub fn run(repo_path: &Path, vdb: Option<&Vdb>, atoms: &[String]) -> Result<()> {
-    let repo = Repository::open(repo_path).map_err(|e| Error::Other(e.to_string()))?;
+    let repo = Repository::open(repo_path)?;
 
-    let ebuilds: Vec<_> = repo
-        .ebuilds()
-        .map_err(|e| Error::Other(e.to_string()))?
-        .into_iter()
-        .collect();
+    let ebuilds: Vec<_> = repo.ebuilds()?.into_iter().collect();
 
     for raw in atoms {
-        let dep = Dep::parse(raw).map_err(|e| Error::Other(format!("bad atom '{raw}': {e}")))?;
+        let dep = Dep::parse(raw).with_context(|| format!("bad atom '{raw}'"))?;
 
         let mut matches: Vec<_> = ebuilds
             .iter()
@@ -38,14 +34,11 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, atoms: &[String]) -> Result<()> 
         let best = matches.last().unwrap();
         let cpv = best.cpv();
 
-        // Repo cache entry
         let entry = repo
-            .cache_entry(cpv)
-            .map_err(|e| Error::Other(e.to_string()))?
-            .ok_or_else(|| Error::Other(format!("no cache entry for {cpv} — run `em regen`")))?;
+            .cache_entry(cpv)?
+            .ok_or_else(|| anyhow!("no cache entry for {cpv} — run `em regen`"))?;
         let m = &entry.metadata;
 
-        // metadata.xml — maintainers, longdescription, per-flag USE descriptions
         let pkg_meta = repo
             .category(cpv.cpn.category.as_ref())
             .and_then(|c| c.packages().into_iter().find(|p| p.name() == cpv.cpn.package.as_ref()))
@@ -53,46 +46,37 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, atoms: &[String]) -> Result<()> 
 
         println!(" * {cpv}");
 
-        // Maintainers (from metadata.xml)
         if let Some(ref pm) = pkg_meta {
             for maint in &pm.maintainers {
                 println!("   Maintainer:  {}", maint.display());
             }
         }
 
-        // Homepage
         if !m.homepage.is_empty() {
             println!("   Homepage:    {}", m.homepage.join(" "));
         }
 
-        // Description
         println!("   Description: {}", m.description);
 
-        // Long description (from metadata.xml)
         if let Some(ref pm) = pkg_meta {
             if let Some(ref ld) = pm.longdescription {
-                // Wrap at ~72 chars
                 for line in wrap(ld, 72) {
                     println!("                {line}");
                 }
             }
         }
 
-        // License
         if let Some(ref lic) = m.license {
             println!("   License:     {lic}");
         }
 
-        // Slot
         println!("   Slot:        {}", m.slot);
 
-        // Keywords (current arch status)
         if !m.keywords.is_empty() {
             let kws: Vec<String> = m.keywords.iter().map(|k| k.to_string()).collect();
             println!("   Keywords:    {}", kws.join(" "));
         }
 
-        // Installed info from VDB
         if let Some(vdb) = vdb {
             let installed = find_packages(vdb, &cpv.cpn.to_string());
             if !installed.is_empty() {
@@ -128,7 +112,6 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, atoms: &[String]) -> Result<()> 
     Ok(())
 }
 
-/// Naive word-wrap at `width` characters.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();

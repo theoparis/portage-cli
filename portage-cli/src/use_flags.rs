@@ -1,12 +1,7 @@
+use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
-
 use portage_repo::{DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF, MakeConf};
 
-use crate::error::{Error, Result};
-
-/// Add and/or remove USE flags from make.conf, then show the result.
-///
-/// With no flags to add or remove, just prints the current USE value.
 pub fn run(add: &[String], remove: &[String], make_conf: Option<&Utf8Path>) -> Result<()> {
     let path = resolve_path(make_conf)?;
 
@@ -15,7 +10,7 @@ pub fn run(add: &[String], remove: &[String], make_conf: Option<&Utf8Path>) -> R
     }
 
     let mut mc = MakeConf::load(&path)
-        .map_err(|e| Error::Other(format!("reading {}: {e}", path)))?;
+        .with_context(|| format!("reading {path}"))?;
 
     let current = mc.get("USE").unwrap_or("").to_string();
     let mut flags: Vec<String> = current.split_whitespace().map(str::to_string).collect();
@@ -27,7 +22,6 @@ pub fn run(add: &[String], remove: &[String], make_conf: Option<&Utf8Path>) -> R
 
     for flag in add {
         let flag = flag.trim_start_matches('+');
-        // Remove any existing occurrence (including -flag negation) first.
         flags.retain(|f| {
             f != flag && f != &format!("+{flag}") && f != &format!("-{flag}")
         });
@@ -36,16 +30,14 @@ pub fn run(add: &[String], remove: &[String], make_conf: Option<&Utf8Path>) -> R
 
     let new_use = flags.join(" ");
     mc.set("USE", &new_use);
-    mc.save(&path)
-        .map_err(|e| Error::Other(format!("writing {}: {e}", path)))?;
+    mc.save(&path).with_context(|| format!("writing {path}"))?;
 
     println!("USE=\"{}\"", new_use);
     Ok(())
 }
 
 fn show(path: &Utf8Path) -> Result<()> {
-    let mc = MakeConf::load(path)
-        .map_err(|e| Error::Other(format!("reading {}: {e}", path)))?;
+    let mc = MakeConf::load(path).with_context(|| format!("reading {path}"))?;
 
     match mc.get("USE") {
         Some(val) => println!("USE=\"{}\"", val),
@@ -64,8 +56,9 @@ fn resolve_path(override_path: Option<&Utf8Path>) -> Result<Utf8PathBuf> {
             return Ok(p.to_owned());
         }
     }
-    Err(Error::Other(format!(
+    bail!(
         "no make.conf found at {} or {}",
-        DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF
-    )))
+        DEFAULT_MAKE_CONF,
+        LEGACY_MAKE_CONF
+    )
 }
