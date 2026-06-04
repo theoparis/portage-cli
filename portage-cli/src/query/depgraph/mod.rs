@@ -1,6 +1,7 @@
 mod conflicts;
 mod installed;
 mod output;
+mod package_use;
 mod repo;
 mod use_env;
 
@@ -25,6 +26,7 @@ pub async fn depgraph(
     format: DepgraphFormat,
     verbose: bool,
     empty: bool,
+    autounmask_write: bool,
 ) -> anyhow::Result<()> {
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
@@ -144,6 +146,19 @@ pub async fn depgraph(
         .iter()
         .map(|r| (&r.package, r))
         .collect();
+
+    // Report required USE changes (portage-style) and optionally write package.use entries.
+    {
+        let all_reqs: Vec<_> = provider.use_flag_requirements().to_vec();
+        let pkg_use_entries = package_use::build_entries(&all_reqs, atoms);
+        if !pkg_use_entries.is_empty() {
+            package_use::report(&pkg_use_entries);
+            if autounmask_write {
+                let pkg_use_dir = camino::Utf8Path::new("/etc/portage/package.use");
+                package_use::write(&pkg_use_entries, pkg_use_dir)?;
+            }
+        }
+    }
 
     match format {
         DepgraphFormat::Pretty => {

@@ -149,6 +149,9 @@ pub struct UseFlagRequirement {
     /// USE flags that must be **disabled** — forbidden by at least one constraint
     /// but currently active.
     pub required_disabled: Vec<Interned<DefaultInterner>>,
+    /// The package(s) that imposed the USE dep constraints (CPN strings).
+    /// Used to generate `package.use` comments.
+    pub required_by: Vec<String>,
 }
 
 /// A PubGrub `DependencyProvider` backed by a portage package repository.
@@ -604,11 +607,13 @@ impl PortageDependencyProvider {
         &self,
         solution: &SelectedDependencies<PortagePackage, Version>,
     ) -> Vec<UseFlagRequirement> {
-        // Accumulate per target: (version, enable_set, disable_set).
+        // Accumulate per target: (version, enable_set, disable_set, requirers).
         let mut by_target: HashMap<
             PortagePackage,
-            (Version, std::collections::BTreeSet<Interned<DefaultInterner>>,
-                      std::collections::BTreeSet<Interned<DefaultInterner>>),
+            (Version,
+             std::collections::BTreeSet<Interned<DefaultInterner>>,
+             std::collections::BTreeSet<Interned<DefaultInterner>>,
+             std::collections::BTreeSet<String>),
         > = HashMap::new();
         // Installed packages that should be upgraded to a newer repo version
         // rather than rebuilt at the installed version.  Keyed by the installed
@@ -624,7 +629,7 @@ impl PortageDependencyProvider {
         loop {
             let prev_total: usize = by_target
                 .values()
-                .map(|(_, e, d)| e.len() + d.len())
+                .map(|(_, e, d, _)| e.len() + d.len())
                 .sum();
             let prev_upgrades = upgrade_to.len();
 
@@ -670,7 +675,7 @@ impl PortageDependencyProvider {
                                 .map_or(false, |u| u.contains(&ud.flag))
                                 || by_target
                                     .get(pkg)
-                                    .map_or(false, |(_, e, _)| e.contains(&ud.flag))
+                                    .map_or(false, |(_, e, _, _)| e.contains(&ud.flag))
                         } else {
                             self.use_config.get(&ud.flag) == UseFlagState::Enabled
                         };
@@ -712,12 +717,16 @@ impl PortageDependencyProvider {
                                         target_ver.clone(),
                                         std::collections::BTreeSet::new(),
                                         std::collections::BTreeSet::new(),
+                                        std::collections::BTreeSet::new(),
                                     )
                                 });
                             if requires_enabled {
                                 entry.1.insert(ud.flag);
                             } else {
                                 entry.2.insert(ud.flag);
+                            }
+                            if !pkg.is_virtual() {
+                                entry.3.insert(constraint.parent_cpn_str.clone());
                             }
                         }
                     }
@@ -732,7 +741,7 @@ impl PortageDependencyProvider {
                 .iter()
                 .filter(|(pkg, _)| self.installed.contains_key(pkg))
                 .filter(|(pkg, _)| !upgrade_to.contains_key(*pkg))
-                .filter_map(|(pkg, (inst_ver, _, _))| {
+                .filter_map(|(pkg, (inst_ver, _, _, _))| {
                     self.packages
                         .get(pkg)
                         .and_then(|d| d.versions.keys().filter(|v| v > &inst_ver).max())
@@ -762,7 +771,7 @@ impl PortageDependencyProvider {
                     for ud in &constraint.use_deps {
                         let parent_flag_enabled = if parent_is_installed {
                             self.installed_use.get(&pkg).map_or(false, |u| u.contains(&ud.flag))
-                                || by_target.get(&pkg).map_or(false, |(_, e, _)| e.contains(&ud.flag))
+                                || by_target.get(&pkg).map_or(false, |(_, e, _, _)| e.contains(&ud.flag))
                         } else {
                             self.use_config.get(&ud.flag) == UseFlagState::Enabled
                         };
@@ -783,9 +792,10 @@ impl PortageDependencyProvider {
 
                         if let Some(req_en) = eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled) {
                             let entry = by_target.entry(target_pkg.clone()).or_insert_with(|| {
-                                (target_ver.clone(), std::collections::BTreeSet::new(), std::collections::BTreeSet::new())
+                                (target_ver.clone(), std::collections::BTreeSet::new(), std::collections::BTreeSet::new(), std::collections::BTreeSet::new())
                             });
                             if req_en { entry.1.insert(ud.flag); } else { entry.2.insert(ud.flag); }
+                            entry.3.insert(constraint.parent_cpn_str.clone());
                         }
                     }
                 }
@@ -793,7 +803,7 @@ impl PortageDependencyProvider {
 
             let new_total: usize = by_target
                 .values()
-                .map(|(_, e, d)| e.len() + d.len())
+                .map(|(_, e, d, _)| e.len() + d.len())
                 .sum();
             if new_total == prev_total && upgrade_to.len() == prev_upgrades {
                 break;
@@ -802,12 +812,13 @@ impl PortageDependencyProvider {
 
         by_target
             .into_iter()
-            .map(|(pkg, (ver, enable, disable))| UseFlagRequirement {
+            .map(|(pkg, (ver, enable, disable, requirers))| UseFlagRequirement {
                 package: pkg.clone(),
                 version: ver,
                 upgrade_to: upgrade_to.remove(&pkg),
                 required_enabled: enable.into_iter().collect(),
                 required_disabled: disable.into_iter().collect(),
+                required_by: requirers.into_iter().collect(),
             })
             .collect()
     }

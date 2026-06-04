@@ -57,6 +57,10 @@ pub struct Cli {
     #[arg(short = 'u', long)]
     pub update: bool,
 
+    /// Write required USE changes to /etc/portage/package.use/
+    #[arg(long)]
+    pub autounmask_write: bool,
+
     #[arg(short = '1', long = "oneshot")]
     pub oneshot: bool,
 
