@@ -205,7 +205,17 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 bail!("repo not found at {resolved}");
             }
             let root = globals.root.as_deref().map(camino::Utf8Path::new);
-            query::depgraph::depgraph(repo_path, &atoms, &globals.arch, *format, globals.verbose, globals.emptytree, globals.autounmask_write, root).await
+            query::depgraph::depgraph(query::depgraph::DepgraphOpts {
+                repo_path,
+                atoms: &atoms,
+                arch: &globals.arch,
+                format: *format,
+                verbose: globals.verbose,
+                empty: globals.emptytree,
+                autounmask: globals.autounmask,
+                autounmask_write: globals.autounmask_write,
+                root,
+            }).await
         }
         QueryCommand::Files { atom } => {
             let vdb = open_vdb(globals)?;

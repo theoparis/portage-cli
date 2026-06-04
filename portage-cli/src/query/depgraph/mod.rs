@@ -20,16 +20,20 @@ use portage_repo::Repository;
 
 use crate::cli::DepgraphFormat;
 
-pub async fn depgraph(
-    repo_path: &Utf8Path,
-    atoms: &[String],
-    arch: &Arch,
-    format: DepgraphFormat,
-    verbose: bool,
-    empty: bool,
-    autounmask_write: bool,
-    root: Option<&Utf8Path>,
-) -> anyhow::Result<()> {
+pub struct DepgraphOpts<'a> {
+    pub repo_path: &'a Utf8Path,
+    pub atoms: &'a [String],
+    pub arch: &'a Arch,
+    pub format: DepgraphFormat,
+    pub verbose: bool,
+    pub empty: bool,
+    pub autounmask: bool,
+    pub autounmask_write: bool,
+    pub root: Option<&'a Utf8Path>,
+}
+
+pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
+    let DepgraphOpts { repo_path, atoms, arch, format, verbose, empty, autounmask, autounmask_write, root } = opts;
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
 
@@ -194,7 +198,9 @@ pub async fn depgraph(
         .join("etc/portage");
 
     // Report in order of severity: mask → keywords → USE → license.
-    if !autounmask_candidates.is_empty() {
+    // Dropped-dep autounmask is only shown when explicitly requested —
+    // a successful solve means nothing is actually blocked.
+    if (autounmask || autounmask_write) && !autounmask_candidates.is_empty() {
         autounmask::report(&autounmask_candidates);
         if autounmask_write {
             autounmask::write(&autounmask_candidates, &portage_dir)?;
