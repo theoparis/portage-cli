@@ -23,8 +23,8 @@ fn next_choice_id() -> u64 {
 pub(crate) struct VirtualChoice {
     /// The virtual package to register in the provider.
     pub package: PortagePackage,
-    /// (version, dependencies for that version).
-    pub versions: Vec<(Version, Vec<(PortagePackage, PortageVersionSet)>)>,
+    /// (version, dependencies for that version with optional gating flag).
+    pub versions: Vec<(Version, Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>)>,
     /// Per-branch USE dep constraints, indexed parallel to `versions`.
     ///
     /// Stored separately so `choose_version` can check USE dep satisfiability
@@ -35,8 +35,8 @@ pub(crate) struct VirtualChoice {
 /// Result of converting a dependency tree.
 #[derive(Clone)]
 pub(crate) struct ConversionResult {
-    /// Direct dependency constraints.
-    pub requirements: Vec<(PortagePackage, PortageVersionSet)>,
+    /// Direct dependency constraints with the outermost gating USE flag, if any.
+    pub requirements: Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>,
     /// Blocker atoms for post-solve validation.
     pub blockers: Vec<Dep>,
     /// Virtual choice packages to register in the provider.
@@ -125,6 +125,7 @@ pub fn convert_deps(
         use_deps: Vec::new(),
         repo_constraints: Vec::new(),
         slot_operator_deps: Vec::new(),
+        gating_flag: None,
     };
 
     for entry in entries {
@@ -146,12 +147,14 @@ struct ConvertCtx<'a> {
     use_config: &'a UseConfig,
     slot_map: &'a SlotMap,
     iuse_defaults: &'a HashMap<Interned<DefaultInterner>, IUseDefault>,
-    requirements: Vec<(PortagePackage, PortageVersionSet)>,
+    requirements: Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>,
     blockers: Vec<Dep>,
     virtual_choices: Vec<VirtualChoice>,
     use_deps: Vec<UseDepConstraint>,
     repo_constraints: Vec<RepoConstraint>,
     slot_operator_deps: Vec<SlotOperatorDep>,
+    /// The outermost eagerly-evaluated USE flag currently gating deps, if any.
+    gating_flag: Option<Interned<DefaultInterner>>,
 }
 
 impl ConvertCtx<'_> {
@@ -175,9 +178,14 @@ impl ConvertCtx<'_> {
                 match state {
                     UseFlagState::Enabled => {
                         if !negate {
+                            let prev = self.gating_flag.take();
+                            if prev.is_none() {
+                                self.gating_flag = Some(*flag);
+                            }
                             for child in children {
                                 self.convert_entry(child);
                             }
+                            self.gating_flag = prev;
                         }
                     }
                     UseFlagState::Disabled => {
@@ -236,7 +244,7 @@ impl ConvertCtx<'_> {
                             branch_use_deps: vec![],
                         });
                         self.requirements
-                            .push((virtual_pkg, PortageVersionSet::any()));
+                            .push((virtual_pkg, PortageVersionSet::any(), self.gating_flag));
                     }
                 }
             }
@@ -273,7 +281,7 @@ impl ConvertCtx<'_> {
                     let pkg = PortagePackage::slotted(*cpn, slot.slot);
                     self.collect_post_solve(&pkg, &version_set, dep);
                     self.collect_slot_op(&pkg, &version_set, *op, Some(slot.slot));
-                    self.requirements.push((pkg, version_set));
+                    self.requirements.push((pkg, version_set, self.gating_flag));
                 }
                 SlotDep::Slot { slot: None, op } => {
                     self.collect_slot_op_unslotted(cpn, &version_set, *op);
@@ -371,22 +379,23 @@ impl ConvertCtx<'_> {
         match target_slots {
             None | Some([]) => {
                 self.requirements
-                    .push((PortagePackage::unslotted(*cpn), version_set));
+                    .push((PortagePackage::unslotted(*cpn), version_set, self.gating_flag));
             }
             Some([(_, sole_pkg)]) => {
-                self.requirements.push((sole_pkg.clone(), version_set));
+                self.requirements.push((sole_pkg.clone(), version_set, self.gating_flag));
             }
             Some(slots) => {
                 let id = next_choice_id();
                 let choice_pkg =
                     PortagePackage::slot_choice(Interned::intern(&format!("slot_{id}")));
                 let n = slots.len();
-                let versions: Vec<(Version, Vec<(PortagePackage, PortageVersionSet)>)> = slots
+                let gf = self.gating_flag;
+                let versions: Vec<(Version, Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>)> = slots
                     .iter()
                     .enumerate()
                     .map(|(i, (_, slot_pkg))| {
                         let ver = Version::new(&[(n - i) as u64]);
-                        (ver, vec![(slot_pkg.clone(), version_set.clone())])
+                        (ver, vec![(slot_pkg.clone(), version_set.clone(), gf)])
                     })
                     .collect();
                 self.virtual_choices.push(VirtualChoice {
@@ -394,8 +403,9 @@ impl ConvertCtx<'_> {
                     versions,
                     branch_use_deps: vec![],
                 });
+                // The slot-choice virtual itself is gated by the same flag.
                 self.requirements
-                    .push((choice_pkg, PortageVersionSet::any()));
+                    .push((choice_pkg, PortageVersionSet::any(), self.gating_flag));
             }
         }
     }
@@ -409,7 +419,7 @@ impl ConvertCtx<'_> {
         let mut branch_use_deps: Vec<(Version, Vec<UseDepConstraint>)> = Vec::new();
 
         if allow_none {
-            versions.push((Version::new(&[0]), vec![]));
+            versions.push((Version::new(&[0]), vec![]));  // empty: no deps for "none" branch
             branch_use_deps.push((Version::new(&[0]), vec![]));
         }
 
@@ -443,7 +453,8 @@ impl ConvertCtx<'_> {
             versions,
             branch_use_deps,
         });
-        self.requirements.push((pkg, PortageVersionSet::any()));
+        // The choice virtual itself carries the current gating flag.
+        self.requirements.push((pkg, PortageVersionSet::any(), self.gating_flag));
     }
 }
 

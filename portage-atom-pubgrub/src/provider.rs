@@ -31,16 +31,18 @@ pub enum InstalledPolicy {
 pub(crate) struct VersionDeps {
     /// Merged deps for PubGrub's DependencyProvider trait.
     pub(crate) merged: Dependencies<PortagePackage, PortageVersionSet, String>,
-    /// Per-class converted deps.
+    /// Per-class converted deps with optional gating USE flag.
     /// Index: 0=DEPEND, 1=RDEPEND, 2=BDEPEND, 3=PDEPEND, 4=IDEPEND
-    pub(crate) by_class: Vec<Vec<(PortagePackage, PortageVersionSet)>>,
+    pub(crate) by_class: Vec<Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>>,
 }
 
 impl VersionDeps {
     /// Build from pre-extracted per-class requirements.  `by_class` is moved
-    /// in directly; `merged` is collected from a flattened view of it.
-    fn from_by_class(by_class: Vec<Vec<(PortagePackage, PortageVersionSet)>>) -> Self {
-        let merged = Dependencies::Available(by_class.iter().flatten().cloned().collect());
+    /// in directly; `merged` is collected from a flattened view of it (flag stripped).
+    fn from_by_class(by_class: Vec<Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>>) -> Self {
+        let merged = Dependencies::Available(
+            by_class.iter().flatten().map(|(p, vs, _)| (p.clone(), vs.clone())).collect()
+        );
         Self { merged, by_class }
     }
 }
@@ -86,6 +88,7 @@ pub struct InstalledPackage {
 pub fn apply_package_use<'a>(
     base: &'a UseConfig,
     cpv: &portage_atom::Cpv,
+    slot: Option<Interned<DefaultInterner>>,
     package_use: &[(Dep, Vec<String>)],
 ) -> Cow<'a, UseConfig> {
     if package_use.is_empty() {
@@ -93,7 +96,7 @@ pub fn apply_package_use<'a>(
     }
     let mut cfg = base.clone();
     for (dep, flags) in package_use {
-        if crate::validate::dep_matches_cpv(dep, cpv) {
+        if crate::validate::dep_matches_cpv(dep, cpv, slot) {
             for flag in flags {
                 let name = flag.strip_prefix('+').unwrap_or(flag);
                 if let Some(stripped) = name.strip_prefix('-') {
@@ -244,7 +247,7 @@ impl PortageDependencyProvider {
                     &meta.deps.idepend,
                 ];
 
-                let cpv_use_cfg = apply_package_use(&use_config, &cpv, package_use);
+                let cpv_use_cfg = apply_package_use(&use_config, &cpv, meta.slot, package_use);
 
                 let class_results: [convert::ConversionResult; 5] = dep_classes.map(|entries| {
                     convert::convert_deps(
@@ -261,7 +264,7 @@ impl PortageDependencyProvider {
                 let mut all_repo_constraints = Vec::new();
                 let mut all_virtual_choices = Vec::new();
                 let mut all_slot_operator_deps = Vec::new();
-                let mut by_class: Vec<Vec<(PortagePackage, PortageVersionSet)>> =
+                let mut by_class: Vec<Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>> =
                     Vec::with_capacity(5);
 
                 for result in class_results {
@@ -369,7 +372,7 @@ impl PortageDependencyProvider {
                     *constraints = kept.into_iter().collect();
                 }
                 for class in &mut vd.by_class {
-                    class.retain(|(pkg, _)| known.contains(pkg));
+                    class.retain(|(pkg, _, _)| known.contains(pkg));
                 }
             }
         }
@@ -493,10 +496,13 @@ impl PortageDependencyProvider {
         let root_ver = Version::parse("0").unwrap();
 
         let constraints: DependencyConstraints<PortagePackage, PortageVersionSet> =
-            targets.iter().cloned().collect();
+            targets.iter().map(|(p, vs)| (p.clone(), vs.clone())).collect();
+        // Root targets have no gating flag.
+        let targets_with_flag: Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)> =
+            targets.into_iter().map(|(p, vs)| (p, vs, None)).collect();
         let vd = VersionDeps {
             merged: Dependencies::Available(constraints),
-            by_class: vec![targets, vec![], vec![], vec![], vec![]],
+            by_class: vec![targets_with_flag, vec![], vec![], vec![], vec![]],
         };
         let entry = self
             .packages
@@ -1106,7 +1112,7 @@ impl DependencyProvider for PortageDependencyProvider {
                 vd.by_class[1].iter()  // RDEPEND
                     .chain(vd.by_class[3].iter())  // PDEPEND
                     .chain(vd.by_class[4].iter())  // IDEPEND
-                    .cloned()
+                    .map(|(p, vs, _)| (p.clone(), vs.clone()))
                     .collect();
             return Ok(Dependencies::Available(runtime));
         }
@@ -1130,10 +1136,11 @@ fn register_virtual_choices(
             slot_operator_deps: BTreeMap::new(),
         });
         for (ver, deps) in vc.versions {
-            let vd = VersionDeps {
-                merged: Dependencies::Available(deps.into_iter().collect()),
-                by_class: vec![vec![], vec![], vec![], vec![], vec![]],
-            };
+            let merged = Dependencies::Available(
+                deps.iter().map(|(p, vs, _)| (p.clone(), vs.clone())).collect()
+            );
+            let by_class = vec![deps, vec![], vec![], vec![], vec![]];
+            let vd = VersionDeps { merged, by_class };
             entry.versions.insert(ver, vd);
         }
         // Store per-branch USE dep constraints so choose_version() can evaluate

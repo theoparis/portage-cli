@@ -150,7 +150,7 @@ pub async fn depgraph(
     // Report required USE changes (portage-style) and optionally write package.use entries.
     {
         let all_reqs: Vec<_> = provider.use_flag_requirements().to_vec();
-        let pkg_use_entries = package_use::build_entries(&all_reqs, atoms);
+        let pkg_use_entries = package_use::build_entries(&all_reqs, atoms, &edges);
         if !pkg_use_entries.is_empty() {
             package_use::report(&pkg_use_entries);
             if autounmask_write {

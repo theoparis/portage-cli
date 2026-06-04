@@ -569,9 +569,9 @@ fn bench_solution_size(c: &mut Criterion) {
             // Count drops per package name and show top 20
             let mut counts: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
-            for (pkg, _) in dropped {
-                if !pkg.is_virtual() {
-                    *counts.entry(pkg.cpn().to_string()).or_default() += 1;
+            for d in dropped {
+                if !d.package.is_virtual() {
+                    *counts.entry(d.package.cpn().to_string()).or_default() += 1;
                 }
             }
             let mut counts_vec: Vec<_> = counts.into_iter().collect();

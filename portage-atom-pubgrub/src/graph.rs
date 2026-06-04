@@ -32,6 +32,8 @@ pub struct DepEdge {
     pub to: (PortagePackage, Version),
     /// Which dependency class this edge belongs to.
     pub class: DepClass,
+    /// The USE flag in `from` that gates this dep, if it was inside `flag? ( dep )`.
+    pub via_use_flag: Option<portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>>,
 }
 
 impl PortageDependencyProvider {
@@ -75,7 +77,7 @@ impl PortageDependencyProvider {
             };
 
             for (class_idx, &class) in classes.iter().enumerate() {
-                for (dep_pkg, dep_vs) in &vd.by_class[class_idx] {
+                for (dep_pkg, dep_vs, gating_flag) in &vd.by_class[class_idx] {
                     if dep_pkg.is_virtual() {
                         continue;
                     }
@@ -86,6 +88,7 @@ impl PortageDependencyProvider {
                                     from: (pkg.clone(), version.clone()),
                                     to: (sol_pkg.clone(), sol_ver.clone()),
                                     class,
+                                    via_use_flag: *gating_flag,
                                 });
                             }
                         }

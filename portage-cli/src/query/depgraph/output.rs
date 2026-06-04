@@ -218,7 +218,7 @@ pub(super) fn print_pretty(
         let is_reinstall = tag == "R";
 
         let cpv = Cpv::new(*cpn, ver.clone());
-        let effective_use = apply_package_use(use_config, &cpv, package_use);
+        let effective_use = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
         let flag_str = find_cache(data, pkg, ver)
             .map(|c| format_flags(c, &effective_use, use_expand, use_expand_hidden, is_reinstall, req))
             .unwrap_or_default();
