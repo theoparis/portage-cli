@@ -11,6 +11,14 @@ pub(super) struct UseEnv {
     pub expand_hidden: Vec<String>,
     /// Per-package USE flag overrides from the profile and `/etc/portage/package.use`.
     pub package_use: Vec<(Dep, Vec<String>)>,
+    /// Masked packages from the profile stack and `/etc/portage/package.mask`.
+    pub package_mask: Vec<Dep>,
+    /// Effective ACCEPT_KEYWORDS tokens (e.g. `["arm64", "~arm64"]`).
+    /// Empty means fall back to accepting stable+testing (tool default).
+    pub accept_keywords: Vec<String>,
+    /// Effective ACCEPT_LICENSE tokens (e.g. `["*"]` or `["MIT", "GPL-2"]`).
+    /// Defaults to `["*"]` (accept everything) when unavailable.
+    pub accept_license: Vec<String>,
 }
 
 pub(super) async fn build_use_env(repo: &Repository) -> UseEnv {
@@ -20,6 +28,9 @@ pub(super) async fn build_use_env(repo: &Repository) -> UseEnv {
             expand: Vec::new(),
             expand_hidden: Vec::new(),
             package_use: Vec::new(),
+            package_mask: Vec::new(),
+            accept_keywords: Vec::new(),
+            accept_license: vec!["*".to_string()],
         };
     };
     env
@@ -49,6 +60,11 @@ async fn compute_use_env(repo: &Repository) -> Option<UseEnv> {
 
     let expand = split_var("USE_EXPAND");
     let expand_hidden = split_var("USE_EXPAND_HIDDEN");
+    let accept_keywords = split_var("ACCEPT_KEYWORDS");
+    let accept_license = {
+        let v = split_var("ACCEPT_LICENSE");
+        if v.is_empty() { vec!["*".to_string()] } else { v }
+    };
 
     let mut config = UseConfig::new();
     for flag in flags {
@@ -58,7 +74,10 @@ async fn compute_use_env(repo: &Repository) -> Option<UseEnv> {
     let mut package_use = stack.package_use().unwrap_or_default();
     package_use.extend(load_package_use("/etc/portage/package.use"));
 
-    Some(UseEnv { config, expand, expand_hidden, package_use })
+    let mut package_mask = stack.package_mask().unwrap_or_default();
+    package_mask.extend(load_dep_list("/etc/portage/package.mask"));
+
+    Some(UseEnv { config, expand, expand_hidden, package_use, package_mask, accept_keywords, accept_license })
 }
 
 fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {
@@ -98,6 +117,46 @@ fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {
             let flags: Vec<String> = parts.map(String::from).collect();
             if !flags.is_empty() {
                 result.push((dep, flags));
+            }
+        }
+    }
+    result
+}
+
+/// Load a simple atom list (one dep per line, `#` comments, optionally a directory).
+pub(super) fn load_dep_list(path: &str) -> Vec<Dep> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Vec::new();
+    }
+    let files: Vec<_> = if p.is_dir() {
+        let mut v: Vec<_> = std::fs::read_dir(p)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file())
+            .collect();
+        v.sort();
+        v
+    } else {
+        vec![p.to_path_buf()]
+    };
+    let mut result = Vec::new();
+    for file in files {
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Strip leading '-' for incremental removal entries — skip removals here
+            if line.starts_with('-') {
+                continue;
+            }
+            if let Ok(dep) = Dep::parse(line) {
+                result.push(dep);
             }
         }
     }

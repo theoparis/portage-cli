@@ -1,3 +1,4 @@
+mod autounmask;
 mod conflicts;
 mod installed;
 mod output;
@@ -37,7 +38,15 @@ pub async fn depgraph(
         async { installed::load_installed() },
         use_env::build_use_env(&repo),
     );
-    let use_env::UseEnv { config: use_config, expand: use_expand, expand_hidden: use_expand_hidden, package_use } = use_env;
+    let use_env::UseEnv {
+        config: use_config,
+        expand: use_expand,
+        expand_hidden: use_expand_hidden,
+        package_use,
+        package_mask,
+        accept_keywords,
+        accept_license,
+    } = use_env;
 
     let installed_cpvs: std::collections::HashSet<Cpv> = installed_entries
         .iter()
@@ -53,7 +62,13 @@ pub async fn depgraph(
             .insert(slot_key, e.version.clone());
     }
 
-    let adapter = repo::Adapter { data: &data, arch };
+    let adapter = repo::Adapter {
+        data: &data,
+        arch,
+        accept_keywords: &accept_keywords,
+        package_mask: &package_mask,
+        accept_license: &accept_license,
+    };
     let mut provider = PortageDependencyProvider::new(adapter, use_config.clone(), &package_use);
 
     if !empty {
@@ -76,7 +91,9 @@ pub async fn depgraph(
     for target in atoms {
         let dep = Dep::parse(target)
             .map_err(|e| anyhow::anyhow!("bad atom '{target}': {e}"))?;
-        let pkg = repo::target_package(&data, &dep, arch);
+        let pkg = repo::target_package(
+            &data, &dep, arch, &accept_keywords, &package_mask, &accept_license,
+        );
         let vs = match &dep.version {
             Some(v) => {
                 let op = dep.op.unwrap_or(Operator::GreaterOrEqual);
@@ -90,6 +107,16 @@ pub async fn depgraph(
     if verbose {
         output::report_dropped_deps(provider.dropped_deps(), &data, arch.as_str());
     }
+
+    // Autounmask: detect filtered candidates from dropped deps before solving.
+    let autounmask_candidates = repo::find_autounmask_candidates(
+        &data,
+        provider.dropped_deps(),
+        arch.as_str(),
+        &accept_keywords,
+        &package_mask,
+        &accept_license,
+    );
 
     let root_pkgs: Vec<PortagePackage> = root_deps.iter().map(|(p, _)| p.clone()).collect();
     let solution = provider
@@ -148,19 +175,27 @@ pub async fn depgraph(
         .map(|r| (&r.package, r))
         .collect();
 
-    // Report required USE changes (portage-style) and optionally write package.use entries.
+    let portage_dir = root
+        .unwrap_or(camino::Utf8Path::new("/"))
+        .join("etc/portage");
+
+    // Report required USE changes and optionally write package.use entries.
     {
         let all_reqs: Vec<_> = provider.use_flag_requirements().to_vec();
         let pkg_use_entries = package_use::build_entries(&all_reqs, atoms, &edges);
         if !pkg_use_entries.is_empty() {
             package_use::report(&pkg_use_entries);
             if autounmask_write {
-                let pkg_use_dir_buf = root
-                    .unwrap_or(camino::Utf8Path::new("/"))
-                    .join("etc/portage/package.use");
-                let pkg_use_dir = pkg_use_dir_buf.as_path();
-                package_use::write(&pkg_use_entries, pkg_use_dir)?;
+                package_use::write(&pkg_use_entries, &portage_dir.join("package.use"))?;
             }
+        }
+    }
+
+    // Report autounmask (keyword/mask/license) and optionally write.
+    if !autounmask_candidates.is_empty() {
+        autounmask::report(&autounmask_candidates);
+        if autounmask_write {
+            autounmask::write(&autounmask_candidates, &portage_dir)?;
         }
     }
 
@@ -172,8 +207,6 @@ pub async fn depgraph(
             output::print_json(&data, &order, &edges, &installed, &flag_reqs)
         }
         DepgraphFormat::Tree => {
-            // Find the version chosen by the solver for each requested root.
-            // Prefer edges (covers installed-when-empty-tree), then order (new installs).
             let roots: Vec<_> = root_pkgs
                 .iter()
                 .filter_map(|pkg| {
