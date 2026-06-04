@@ -1,3 +1,4 @@
+mod conflicts;
 mod installed;
 mod output;
 mod repo;
@@ -117,6 +118,19 @@ pub async fn depgraph(
             })
             .collect();
         order.extend(to_reinstall);
+    }
+
+    // Post-solve: check installed packages' constraints against proposed changes.
+    {
+        let proposed: HashMap<Cpn, Version> = order
+            .iter()
+            .filter(|(pkg, _)| !pkg.is_virtual())
+            .map(|(pkg, ver)| (*pkg.cpn(), ver.clone()))
+            .collect();
+        let slot_conflicts = conflicts::find_conflicts(&installed_entries, &proposed);
+        if !slot_conflicts.is_empty() {
+            output::report_conflicts(&slot_conflicts);
+        }
     }
 
     let edges: Vec<_> = provider

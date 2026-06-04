@@ -1,6 +1,5 @@
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Dep, SlotOperator, UseDepKind, Version};
-use pubgrub::VersionSet;
 
 use crate::error::Error;
 use crate::package::PortagePackage;

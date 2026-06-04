@@ -29,6 +29,12 @@ impl PortageVersionSet {
         &self.0
     }
 
+    /// Returns `true` if the given version is in this set.
+    pub fn contains(&self, v: &Version) -> bool {
+        use pubgrub::VersionSet;
+        <Self as VersionSet>::contains(self, v)
+    }
+
     /// Convert a PMS operator, glob flag, and version to a version set.
     ///
     /// See [PMS 8.3.1](https://projects.gentoo.org/pms/9/pms.html#version_specs).

@@ -24,6 +24,36 @@ const C_OFF: Style = Style::new()
 use super::installed::action_tag;
 use super::repo::{RepoData, find_cache};
 
+pub(super) fn report_conflicts(conflicts: &[super::conflicts::Conflict]) {
+    use std::collections::BTreeMap;
+    // Group by the package whose version is in conflict.
+    let mut by_target: BTreeMap<String, Vec<&super::conflicts::Conflict>> = BTreeMap::new();
+    for c in conflicts {
+        by_target
+            .entry(c.dep.cpn.to_string())
+            .or_default()
+            .push(c);
+    }
+    let mut out = anstream::stderr();
+    writeln!(out, "\n{C_OFF}!!!{C_OFF:#} Slot conflict(s) detected:\n").ok();
+    for (target, cs) in &by_target {
+        writeln!(out, "  {C_PKG}{target}{C_PKG:#}").ok();
+        for c in cs {
+            writeln!(
+                out,
+                "    ({C_PKG}{}-{}{C_PKG:#}, installed) requires {C_OFF}{}{C_OFF:#}",
+                c.installed_cpn, c.installed_ver, c.dep,
+            ).ok();
+            writeln!(
+                out,
+                "    proposed: {C_PKG}{target}-{}{C_PKG:#}",
+                c.proposed_ver,
+            ).ok();
+        }
+        writeln!(out).ok();
+    }
+}
+
 pub(super) fn report_dropped_deps(dropped: &[DroppedDep], data: &RepoData, arch: &str) {
     // These are || alternatives bypassed by resolution — not failures.
     // Deduplicate by package and merge their alternatives across all occurrences.

@@ -1,7 +1,6 @@
 use std::collections::{BinaryHeap, HashMap};
 
 use portage_atom::{Cpn, Version};
-use pubgrub::VersionSet;
 
 use crate::package::PortagePackage;
 use crate::provider::PortageDependencyProvider;

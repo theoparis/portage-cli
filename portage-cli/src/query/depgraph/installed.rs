@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use portage_atom::DepEntry;
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Version};
 use portage_atom_pubgrub::PortagePackage;
@@ -11,6 +12,8 @@ pub(super) struct VdbEntry {
     pub(super) version: Version,
     pub(super) active_use: Vec<Interned<DefaultInterner>>,
     pub(super) iuse: Vec<Interned<DefaultInterner>>,
+    /// RDEPEND + DEPEND as stored in the VDB (pre-USE evaluation).
+    pub(super) deps: Vec<DepEntry>,
 }
 
 pub(super) fn load_installed() -> Vec<VdbEntry> {
@@ -32,12 +35,19 @@ pub(super) fn load_installed() -> Vec<VdbEntry> {
                 .into_iter()
                 .map(|f| Interned::intern(f.trim_start_matches(['+', '-'])))
                 .collect();
+            let mut deps: Vec<DepEntry> = Vec::new();
+            for field in [pkg.rdepend(), pkg.depend()] {
+                if let Ok(Some(entries)) = field {
+                    deps.extend(entries);
+                }
+            }
             VdbEntry {
                 cpn: *pkg.cpn(),
                 slot: pkg.slot_main().ok(),
                 version: pkg.cpv().version.clone(),
                 active_use,
                 iuse,
+                deps,
             }
         })
         .collect()

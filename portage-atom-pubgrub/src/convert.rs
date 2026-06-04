@@ -450,7 +450,6 @@ impl ConvertCtx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pubgrub::VersionSet as _;
 
     fn empty_slots() -> SlotMap {
         HashMap::new()

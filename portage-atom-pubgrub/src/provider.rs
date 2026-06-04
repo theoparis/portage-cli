@@ -7,7 +7,7 @@ use portage_atom::{Cpn, Dep, UseDefault, UseDepKind, Version};
 use crate::use_config::UseFlagState;
 use pubgrub::{
     Dependencies, DependencyConstraints, DependencyProvider, PackageResolutionStatistics,
-    SelectedDependencies, VersionSet,
+    SelectedDependencies,
 };
 
 use crate::convert;
