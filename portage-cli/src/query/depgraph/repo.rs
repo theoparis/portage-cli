@@ -323,6 +323,40 @@ pub(super) fn target_package(
     }
 }
 
+/// Collect all dependency CPNs referenced in a package version's raw dep data.
+///
+/// Walks the full dep tree (across all dep classes, through all conditional and
+/// group nodes) so that masked transitive deps are captured regardless of USE
+/// flag state at detection time.
+pub(super) fn cpns_for(data: &RepoData, cpn: &Cpn, ver: &Version) -> Vec<Cpn> {
+    use portage_atom::DepEntry;
+
+    fn walk(entries: &[DepEntry], out: &mut Vec<Cpn>) {
+        for e in entries {
+            match e {
+                DepEntry::Atom(dep) if dep.blocker.is_none() => out.push(dep.cpn),
+                DepEntry::UseConditional { children, .. }
+                | DepEntry::AnyOf(children)
+                | DepEntry::AllOf(children)
+                | DepEntry::ExactlyOneOf(children)
+                | DepEntry::AtMostOneOf(children) => walk(children, out),
+                _ => {}
+            }
+        }
+    }
+
+    let Some(entries) = data.versions.get(cpn) else { return vec![] };
+    let Some((_, cache)) = entries.iter().find(|(cpv, _)| &cpv.version == ver) else {
+        return vec![];
+    };
+    let meta = &cache.metadata;
+    let mut out = Vec::new();
+    for deps in [&meta.depend, &meta.rdepend, &meta.bdepend, &meta.pdepend, &meta.idepend] {
+        walk(deps, &mut out);
+    }
+    out
+}
+
 pub(super) fn find_cache<'a>(
     data: &'a RepoData,
     pkg: &portage_atom_pubgrub::PortagePackage,

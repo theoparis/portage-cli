@@ -27,13 +27,14 @@ pub struct DepgraphOpts<'a> {
     pub format: DepgraphFormat,
     pub verbose: bool,
     pub empty: bool,
-    pub autounmask: bool,
+    #[allow(dead_code)]
+    pub autounmask: bool,  // reserved for future --autounmask display-only mode
     pub autounmask_write: bool,
     pub root: Option<&'a Utf8Path>,
 }
 
 pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
-    let DepgraphOpts { repo_path, atoms, arch, format, verbose, empty, autounmask, autounmask_write, root } = opts;
+    let DepgraphOpts { repo_path, atoms, arch, format, verbose, empty, autounmask: _, autounmask_write, root } = opts;
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
 
@@ -128,17 +129,15 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         .resolve_targets(root_deps)
         .map_err(|e| anyhow::anyhow!("resolution failed: {:?}", e))?;
 
-    // Drop autounmask candidates whose CPN is already satisfied by the solution
-    // (e.g. an older installed version of a virtual satisfies the dep — newer
-    // masked versions were dropped but aren't blocking anything).
+    // A candidate is only actionable if:
+    // 1. Its CPN is not already in the solution (an available version satisfies the dep).
+    // 2. Its CPN is referenced in the raw dep data of at least one package in the
+    //    NEW install plan — deps of already-installed packages were already satisfied
+    //    when those packages were built and don't need fixing now.
     let solution_cpns: std::collections::HashSet<Cpn> = solution
         .iter()
         .filter(|(p, _)| !p.is_virtual())
         .map(|(p, _)| *p.cpn())
-        .collect();
-    let autounmask_candidates: Vec<_> = autounmask_candidates
-        .into_iter()
-        .filter(|c| !solution_cpns.contains(&c.cpv.cpn))
         .collect();
 
     let mut order: Vec<_> = provider
@@ -197,10 +196,23 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         .unwrap_or(camino::Utf8Path::new("/"))
         .join("etc/portage");
 
+    // CPNs referenced in the raw dep data of newly-installed packages.
+    let new_needed_cpns: std::collections::HashSet<Cpn> = order
+        .iter()
+        .filter(|(pkg, _)| !pkg.is_virtual())
+        .flat_map(|(pkg, ver)| repo::cpns_for(&data, pkg.cpn(), ver))
+        .collect();
+
+    let autounmask_candidates: Vec<_> = autounmask_candidates
+        .into_iter()
+        .filter(|c| {
+            !solution_cpns.contains(&c.cpv.cpn)
+                && new_needed_cpns.contains(&c.cpv.cpn)
+        })
+        .collect();
+
     // Report in order of severity: mask → keywords → USE → license.
-    // Dropped-dep autounmask is only shown when explicitly requested —
-    // a successful solve means nothing is actually blocked.
-    if (autounmask || autounmask_write) && !autounmask_candidates.is_empty() {
+    if !autounmask_candidates.is_empty() {
         autounmask::report(&autounmask_candidates);
         if autounmask_write {
             autounmask::write(&autounmask_candidates, &portage_dir)?;
