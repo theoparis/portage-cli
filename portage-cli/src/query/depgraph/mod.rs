@@ -27,6 +27,7 @@ pub async fn depgraph(
     verbose: bool,
     empty: bool,
     autounmask_write: bool,
+    root: Option<&Utf8Path>,
 ) -> anyhow::Result<()> {
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
@@ -154,7 +155,10 @@ pub async fn depgraph(
         if !pkg_use_entries.is_empty() {
             package_use::report(&pkg_use_entries);
             if autounmask_write {
-                let pkg_use_dir = camino::Utf8Path::new("/etc/portage/package.use");
+                let pkg_use_dir_buf = root
+                    .unwrap_or(camino::Utf8Path::new("/"))
+                    .join("etc/portage/package.use");
+                let pkg_use_dir = pkg_use_dir_buf.as_path();
                 package_use::write(&pkg_use_entries, pkg_use_dir)?;
             }
         }
