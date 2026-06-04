@@ -351,6 +351,11 @@ pub(super) fn find_autounmask_candidates(
         if dep.package.is_virtual() {
             continue;
         }
+        // || group with available alternatives: the solver picked one of them,
+        // no need to unmask/keyword the dropped branch.
+        if !dep.alternatives.is_empty() {
+            continue;
+        }
         let cpn = dep.package.cpn();
         let Some(entries) = data.versions.get(cpn) else {
             continue;

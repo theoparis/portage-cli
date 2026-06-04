@@ -124,6 +124,19 @@ pub async fn depgraph(
         .resolve_targets(root_deps)
         .map_err(|e| anyhow::anyhow!("resolution failed: {:?}", e))?;
 
+    // Drop autounmask candidates whose CPN is already satisfied by the solution
+    // (e.g. an older installed version of a virtual satisfies the dep — newer
+    // masked versions were dropped but aren't blocking anything).
+    let solution_cpns: std::collections::HashSet<Cpn> = solution
+        .iter()
+        .filter(|(p, _)| !p.is_virtual())
+        .map(|(p, _)| *p.cpn())
+        .collect();
+    let autounmask_candidates: Vec<_> = autounmask_candidates
+        .into_iter()
+        .filter(|c| !solution_cpns.contains(&c.cpv.cpn))
+        .collect();
+
     let mut order: Vec<_> = provider
         .install_order(&solution)
         .into_iter()
