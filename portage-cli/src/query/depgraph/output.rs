@@ -11,13 +11,13 @@ use portage_atom_pubgrub::{
 use portage_metadata::CacheEntry;
 
 // emerge color scheme: bold green for keywords/atoms/tags, bold red/blue for flags
-const C_PKG: Style = Style::new()
+pub(super) const C_PKG: Style = Style::new()
     .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)))
     .effects(Effects::BOLD);
-const C_ON: Style = Style::new()
+pub(super) const C_ON: Style = Style::new()
     .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)))
     .effects(Effects::BOLD);
-const C_OFF: Style = Style::new()
+pub(super) const C_OFF: Style = Style::new()
     .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Blue)))
     .effects(Effects::BOLD);
 
@@ -329,7 +329,7 @@ pub(super) fn print_json(
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }
 
-const C_DIM: Style = Style::new().effects(Effects::DIMMED);
+pub(super) const C_DIM: Style = Style::new().effects(Effects::DIMMED);
 
 pub(super) fn print_tree(
     roots: &[(PortagePackage, Version)],

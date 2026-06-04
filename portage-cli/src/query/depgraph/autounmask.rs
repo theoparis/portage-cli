@@ -65,36 +65,46 @@ fn format_line(e: &Entry) -> String {
     }
 }
 
-/// Print keyword changes to stderr in portage style.
+/// Print autounmask changes to stderr in portage style.
+/// Order: mask → keywords → license (most fundamental first).
 pub(super) fn report(candidates: &[AutounmaskCandidate]) {
-    let kw = build_entries(candidates, "keywords");
+    use super::output::{C_DIM, C_ON, C_PKG};
+
     let unmask = build_entries(candidates, "unmask");
+    let kw = build_entries(candidates, "keywords");
     let lic = build_entries(candidates, "license");
 
-    if kw.is_empty() && unmask.is_empty() && lic.is_empty() {
+    if unmask.is_empty() && kw.is_empty() && lic.is_empty() {
         return;
     }
 
     let mut out = anstream::stderr();
-    if !kw.is_empty() {
-        writeln!(out, "\nThe following keyword changes are necessary to proceed:").ok();
-        writeln!(out, " (see \"package.accept_keywords\" in the portage(5) man page for more details)").ok();
-        for e in &kw {
-            writeln!(out, "{}", format_line(e)).ok();
-        }
-    }
+
     if !unmask.is_empty() {
-        writeln!(out, "\nThe following mask changes are necessary to proceed:").ok();
+        writeln!(out, "\n{C_PKG}The following mask changes are necessary to proceed:{C_PKG:#}").ok();
         writeln!(out, " (see \"package.unmask\" in the portage(5) man page for more details)").ok();
         for e in &unmask {
-            writeln!(out, "{}", format_line(e)).ok();
+            writeln!(out, "{C_PKG}{}{C_PKG:#}", e.atom).ok();
+        }
+    }
+    if !kw.is_empty() {
+        writeln!(out, "\n{C_PKG}The following keyword changes are necessary to proceed:{C_PKG:#}").ok();
+        writeln!(out, " (see \"package.accept_keywords\" in the portage(5) man page for more details)").ok();
+        for e in &kw {
+            let token_str = e.tokens.iter()
+                .map(|t| format!("{C_ON}{t}{C_ON:#}"))
+                .collect::<Vec<_>>().join(" ");
+            writeln!(out, "{C_PKG}{}{C_PKG:#} {token_str}", e.atom).ok();
         }
     }
     if !lic.is_empty() {
-        writeln!(out, "\nThe following license changes are necessary to proceed:").ok();
+        writeln!(out, "\n{C_PKG}The following license changes are necessary to proceed:{C_PKG:#}").ok();
         writeln!(out, " (see \"package.license\" in the portage(5) man page for more details)").ok();
         for e in &lic {
-            writeln!(out, "{}", format_line(e)).ok();
+            let token_str = e.tokens.iter()
+                .map(|t| format!("{C_DIM}{t}{C_DIM:#}"))
+                .collect::<Vec<_>>().join(" ");
+            writeln!(out, "{C_PKG}{}{C_PKG:#} {token_str}", e.atom).ok();
         }
     }
 }

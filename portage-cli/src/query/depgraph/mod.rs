@@ -193,7 +193,14 @@ pub async fn depgraph(
         .unwrap_or(camino::Utf8Path::new("/"))
         .join("etc/portage");
 
-    // Report required USE changes and optionally write package.use entries.
+    // Report in order of severity: mask → keywords → USE → license.
+    if !autounmask_candidates.is_empty() {
+        autounmask::report(&autounmask_candidates);
+        if autounmask_write {
+            autounmask::write(&autounmask_candidates, &portage_dir)?;
+        }
+    }
+
     {
         let all_reqs: Vec<_> = provider.use_flag_requirements().to_vec();
         let pkg_use_entries = package_use::build_entries(&all_reqs, atoms, &edges);
@@ -202,14 +209,6 @@ pub async fn depgraph(
             if autounmask_write {
                 package_use::write(&pkg_use_entries, &portage_dir.join("package.use"))?;
             }
-        }
-    }
-
-    // Report autounmask (keyword/mask/license) and optionally write.
-    if !autounmask_candidates.is_empty() {
-        autounmask::report(&autounmask_candidates);
-        if autounmask_write {
-            autounmask::write(&autounmask_candidates, &portage_dir)?;
         }
     }
 
