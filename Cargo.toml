@@ -32,6 +32,7 @@ portage-vdb = { path = "portage-vdb" }
 anyhow = "1"
 bon = "3"
 camino = "1"
+colorchoice-clap = "1"
 cfg-if = "1.0.4"
 clap = { version = "4", features = ["derive"] }
 criterion = "0.7"

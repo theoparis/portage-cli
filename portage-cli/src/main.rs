@@ -36,6 +36,7 @@ fn parse_atoms(raw: &[String]) -> Vec<portage_atom::Dep> {
 #[tokio::main]
 async fn main() {
     let cli = cli::Cli::parse();
+    cli.color.write_global();
 
     let result = match &cli.applet {
         Some(applet) => run_applet(applet, &cli).await,

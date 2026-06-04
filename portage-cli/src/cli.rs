@@ -24,6 +24,9 @@ const fn cli_styles() -> Styles {
     styles = cli_styles()
 )]
 pub struct Cli {
+    #[command(flatten)]
+    pub color: colorchoice_clap::Color,
+
     #[arg(short = 'p', long)]
     pub pretend: bool,
 
