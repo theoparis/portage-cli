@@ -36,9 +36,9 @@ pub(super) fn keyword_accepts(keywords: &[Keyword], arch: &str, accept_keywords:
         return true;
     }
     if accept_keywords.is_empty() {
+        // No ACCEPT_KEYWORDS loaded; the profile baseline is stable-only.
         return keywords.iter().any(|kw| {
-            kw.arch.as_str() == arch
-                && matches!(kw.stability, Stability::Stable | Stability::Testing)
+            kw.arch.as_str() == arch && kw.stability == Stability::Stable
         });
     }
     keywords.iter().any(|kw| {
