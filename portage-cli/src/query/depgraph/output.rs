@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use portage_atom::interner::Interned;
-use portage_atom::{Cpn, Version};
+use portage_atom::{Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
     DepClass, PortagePackage, PortageVersionSet, UseConfig, UseFlagRequirement, UseFlagState,
+    apply_package_use,
 };
 use portage_metadata::CacheEntry;
 
@@ -57,15 +58,18 @@ fn format_flags(
     cache: &CacheEntry,
     use_config: &UseConfig,
     use_expand: &[String],
+    use_expand_hidden: &[String],
     is_reinstall: bool,
     req: Option<&UseFlagRequirement>,
 ) -> String {
-    let mut base_flags: Vec<String> = Vec::new();
-    let mut expand_groups: std::collections::BTreeMap<&str, Vec<String>> =
+    // Each entry: (enabled_tokens, disabled_tokens).  BTreeMap keeps groups sorted.
+    let mut base_flags: (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    let mut expand_groups: std::collections::BTreeMap<&str, (Vec<String>, Vec<String>)> =
         std::collections::BTreeMap::new();
 
     let mut flags: Vec<_> = cache.metadata.iuse.iter().collect();
     flags.sort_by_key(|f| f.name());
+    flags.dedup_by_key(|f| f.name());
 
     for f in flags {
         let name = f.name();
@@ -103,8 +107,6 @@ fn format_flags(
             }
             ""
         };
-        let sign = if enabled { "" } else { "-" };
-
         let expand_match = use_expand.iter().find(|key| {
             let prefix = format!("{}_", key.to_lowercase());
             name.starts_with(prefix.as_str())
@@ -113,27 +115,39 @@ fn format_flags(
         if let Some(key) = expand_match {
             let prefix = format!("{}_", key.to_lowercase());
             let short = &name[prefix.len()..];
-            expand_groups
-                .entry(key.as_str())
-                .or_default()
-                .push(format!("{sign}{short}{suffix}"));
+            let bucket = expand_groups.entry(key.as_str()).or_default();
+            if enabled {
+                bucket.0.push(format!("{short}{suffix}"));
+            } else {
+                bucket.1.push(format!("-{short}{suffix}"));
+            }
+        } else if enabled {
+            base_flags.0.push(format!("{name}{suffix}"));
         } else {
-            base_flags.push(format!("{sign}{name}{suffix}"));
+            base_flags.1.push(format!("-{name}{suffix}"));
         }
     }
 
+    let join_bucket = |(on, off): &(Vec<String>, Vec<String>)| -> String {
+        on.iter().chain(off.iter()).cloned().collect::<Vec<_>>().join(" ")
+    };
+
     let mut parts = Vec::new();
-    if !base_flags.is_empty() {
-        parts.push(format!("  USE=\"{}\"", base_flags.join(" ")));
+    let base_str = join_bucket(&base_flags);
+    if !base_str.is_empty() {
+        parts.push(format!("USE=\"{base_str}\""));
     }
-    for (key, tokens) in &expand_groups {
-        // Suppress groups where every flag is disabled — portage omits these.
-        if tokens.iter().all(|t| t.starts_with('-')) {
+    for (key, bucket) in &expand_groups {
+        if use_expand_hidden.iter().any(|h| h == *key) {
             continue;
         }
-        parts.push(format!("  {}=\"{}\"", key, tokens.join(" ")));
+        parts.push(format!("{}=\"{}\"", key, join_bucket(bucket)));
     }
-    parts.join("")
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", parts.join(" "))
+    }
 }
 
 pub(super) fn print_pretty(
@@ -141,7 +155,9 @@ pub(super) fn print_pretty(
     order: &[(PortagePackage, Version)],
     installed: &HashMap<Cpn, HashMap<String, Version>>,
     use_config: &UseConfig,
+    package_use: &[(Dep, Vec<String>)],
     use_expand: &[String],
+    use_expand_hidden: &[String],
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
 ) {
     println!("These are the packages that would be merged, in order:\n");
@@ -153,8 +169,10 @@ pub(super) fn print_pretty(
         let req = flag_reqs.get(pkg).copied();
         let is_reinstall = tag == "R";
 
+        let cpv = Cpv::new(*cpn, ver.clone());
+        let effective_use = apply_package_use(use_config, &cpv, package_use);
         let flag_str = find_cache(data, pkg, ver)
-            .map(|c| format_flags(c, use_config, use_expand, is_reinstall, req))
+            .map(|c| format_flags(c, &effective_use, use_expand, use_expand_hidden, is_reinstall, req))
             .unwrap_or_default();
 
         let old = old_ver.map(|v| format!(" [{}]", v)).unwrap_or_default();

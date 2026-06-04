@@ -1,28 +1,31 @@
-use portage_atom::interner::Interned;
 use portage_atom::Dep;
 use portage_atom_pubgrub::{UseConfig, UseFlagState};
 use portage_repo::{ProfileStack, Repository, DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF};
 
-pub(super) async fn build_use_config(
-    repo: &Repository,
-) -> (UseConfig, Vec<String>, Vec<(Dep, Vec<String>)>) {
-    let Some((use_str, use_expand, package_use)) = compute_use_env(repo).await else {
-        return (UseConfig::new(), Vec::new(), Vec::new());
-    };
-    let mut config = UseConfig::new();
-    for token in use_str.split_whitespace() {
-        if let Some(name) = token.strip_prefix('-') {
-            config.set(Interned::intern(name), UseFlagState::Disabled);
-        } else {
-            config.set(Interned::intern(token), UseFlagState::Enabled);
-        }
-    }
-    (config, use_expand, package_use)
+/// Resolved USE environment for the solver and display.
+pub(super) struct UseEnv {
+    pub config: UseConfig,
+    /// Keys from `USE_EXPAND` — used to group expanded flags in display.
+    pub expand: Vec<String>,
+    /// Keys from `USE_EXPAND_HIDDEN` — groups to suppress in display.
+    pub expand_hidden: Vec<String>,
+    /// Per-package USE flag overrides from the profile and `/etc/portage/package.use`.
+    pub package_use: Vec<(Dep, Vec<String>)>,
 }
 
-async fn compute_use_env(
-    repo: &Repository,
-) -> Option<(String, Vec<String>, Vec<(Dep, Vec<String>)>)> {
+pub(super) async fn build_use_env(repo: &Repository) -> UseEnv {
+    let Some(env) = compute_use_env(repo).await else {
+        return UseEnv {
+            config: UseConfig::new(),
+            expand: Vec::new(),
+            expand_hidden: Vec::new(),
+            package_use: Vec::new(),
+        };
+    };
+    env
+}
+
+async fn compute_use_env(repo: &Repository) -> Option<UseEnv> {
     let profile_path = std::fs::canonicalize("/etc/portage/make.profile").ok()?;
     let stack = ProfileStack::build(profile_path).ok()?;
     let mut shell = repo.shell().await.ok()?;
@@ -33,20 +36,29 @@ async fn compute_use_env(
         .map(std::path::PathBuf::from);
 
     let confs: Vec<&std::path::Path> = make_conf.as_deref().into_iter().collect();
-    stack.configure_shell(&mut shell, &confs).await.ok()?;
+    let flags = stack.use_flags(&mut shell, &confs).await.ok()?;
 
-    let use_str = shell.get_var("USE").unwrap_or_default();
-    let use_expand: Vec<String> = shell
-        .get_var("USE_EXPAND")
-        .unwrap_or_default()
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
+    let split_var = |name: &str| -> Vec<String> {
+        shell
+            .get_var(name)
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+
+    let expand = split_var("USE_EXPAND");
+    let expand_hidden = split_var("USE_EXPAND_HIDDEN");
+
+    let mut config = UseConfig::new();
+    for flag in flags {
+        config.set(flag, UseFlagState::Enabled);
+    }
 
     let mut package_use = stack.package_use().unwrap_or_default();
     package_use.extend(load_package_use("/etc/portage/package.use"));
 
-    Some((use_str, use_expand, package_use))
+    Some(UseEnv { config, expand, expand_hidden, package_use })
 }
 
 fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {

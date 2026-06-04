@@ -26,11 +26,12 @@ pub async fn depgraph(
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
 
-    let (data, installed_entries, (use_config, use_expand, package_use)) = tokio::join!(
+    let (data, installed_entries, use_env) = tokio::join!(
         repo::load_repo(&repo),
         async { installed::load_installed() },
-        use_env::build_use_config(&repo),
+        use_env::build_use_env(&repo),
     );
+    let use_env::UseEnv { config: use_config, expand: use_expand, expand_hidden: use_expand_hidden, package_use } = use_env;
 
     let installed_cpvs: std::collections::HashSet<Cpv> = installed_entries
         .iter()
@@ -125,7 +126,7 @@ pub async fn depgraph(
 
     match format {
         DepgraphFormat::Pretty => {
-            output::print_pretty(&data, &order, &installed, &use_config, &use_expand, &flag_reqs)
+            output::print_pretty(&data, &order, &installed, &use_config, &package_use, &use_expand, &use_expand_hidden, &flag_reqs)
         }
         DepgraphFormat::Json => {
             output::print_json(&data, &order, &edges, &installed, &flag_reqs)
