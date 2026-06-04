@@ -11,8 +11,9 @@ the installed package database.
 > **Note**: For a more mature Rust-based alternative, see
 > [Pkgcraft](https://pkgcraft.github.io/).
 
-> **Warning**: This codebase was largely AI-generated and has not yet been
-> thoroughly audited. Use at your own risk.
+> **Warning**: This codebase is currently mainly slop-coded and has not yet been
+> thoroughly audited, some crates are already polished up to a degree and perform
+> correctly. Use at your own risk.
 
 ## The `em` binary
 
