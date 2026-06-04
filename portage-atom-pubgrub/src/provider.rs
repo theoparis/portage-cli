@@ -79,10 +79,11 @@ pub struct InstalledPackage {
 }
 
 /// Build a per-CPV `UseConfig` by starting from the global config and applying
-/// any matching `package_use` entries in order.
+/// Apply per-package USE flag overrides on top of a base [`UseConfig`].
 ///
-/// Returns `Borrowed(base)` when `package_use` is empty to avoid a clone per CPV.
-fn apply_package_use<'a>(
+/// Scans `package_use` in order and applies any entries whose atom matches
+/// `cpv`.  Returns `Borrowed(base)` when no entries match to avoid a clone.
+pub fn apply_package_use<'a>(
     base: &'a UseConfig,
     cpv: &portage_atom::Cpv,
     package_use: &[(Dep, Vec<String>)],

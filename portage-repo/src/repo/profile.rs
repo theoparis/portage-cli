@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use gentoo_core::Arch;
 use portage_atom::Dep;
+use portage_atom::interner::{DefaultInterner, Interned};
 use portage_metadata::Eapi;
 
 use super::util;
@@ -368,6 +369,44 @@ impl ProfileStack {
     /// Accumulated `package.use.stable.mask` entries from the full stack.
     pub fn package_use_stable_mask(&self) -> Result<Vec<(Dep, Vec<String>)>> {
         collect_atom_flags(self.profiles.iter().map(|p| p.package_use_stable_mask()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UseFlags
+// ---------------------------------------------------------------------------
+
+/// The effective resolved USE flags for a package build environment.
+///
+/// Contains only enabled flags — USE_EXPAND expansions applied,
+/// `use.force` added, `use.mask` removed, environment layer applied.
+///
+/// Produced by [`ProfileStack::use_flags`] (defined in
+/// `portage_repo::build::profile`, which has access to [`EbuildShell`]).
+#[derive(Debug, Clone, Default)]
+pub struct UseFlags(pub(crate) Vec<Interned<DefaultInterner>>);
+
+impl UseFlags {
+    /// Iterate over the enabled flag names.
+    pub fn iter(&self) -> impl Iterator<Item = &Interned<DefaultInterner>> {
+        self.0.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl IntoIterator for UseFlags {
+    type Item = Interned<DefaultInterner>;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 

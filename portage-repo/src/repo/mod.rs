@@ -17,7 +17,7 @@ pub use layout::LayoutConf;
 pub use manifest::{Manifest, ManifestEntry};
 pub use package::Package;
 pub use pkgmetadata::{Maintainer, MaintainerKind, PkgMetadata};
-pub use profile::{Profile, ProfileDesc, ProfileEnv, ProfileEnvLayer, ProfileStack, ProfileStatus};
+pub use profile::{Profile, ProfileDesc, ProfileEnv, ProfileEnvLayer, ProfileStack, ProfileStatus, UseFlags};
 pub use repos_conf::{RepoEntry, ReposConf};
 pub use repository::{
     CacheEntries, CacheEntriesIter, Ebuilds, EbuildsIter, ProfileUpdate, Repository,

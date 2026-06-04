@@ -7,9 +7,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use portage_atom::interner::{DefaultInterner, Interned};
+
 use super::shell::EbuildShell;
 use crate::error::Result;
-use crate::repo::profile::{merge_flag_lists, Profile, ProfileEnv, ProfileEnvLayer, ProfileStack};
+use crate::repo::profile::{merge_flag_lists, Profile, ProfileEnv, ProfileEnvLayer, ProfileStack, UseFlags};
 
 impl Profile {
     /// Source this profile's `make.defaults` into the shell, if present.
@@ -35,6 +37,22 @@ impl ProfileStack {
             p.make_defaults(shell).await?;
         }
         Ok(())
+    }
+
+    /// Resolve the effective USE flags for this profile stack.
+    ///
+    /// Sources profile `make.defaults`, extra confs (e.g. `/etc/portage/make.conf`),
+    /// then applies the process-environment layer, `use.force`, and `use.mask`.
+    ///
+    /// Returns enabled-only flags as interned strings.  The shell's bash state is
+    /// updated as a side-effect (necessary for bash evaluation); the Rust-side
+    /// `use_flags` HashSet is **not** set — call [`configure_shell`] for that.
+    pub async fn use_flags(
+        &self,
+        shell: &mut EbuildShell,
+        extra_confs: &[&std::path::Path],
+    ) -> Result<UseFlags> {
+        resolve_use_flags(shell, self, extra_confs).await
     }
 
     /// Build the layered profile environment by sourcing each `make.defaults`
@@ -67,6 +85,8 @@ impl ProfileStack {
             let mut incr: Vec<String> = vec![
                 "USE".into(),
                 "USE_EXPAND".into(),
+                "USE_EXPAND_HIDDEN".into(),
+                "USE_EXPAND_IMPLICIT".into(),
                 "USE_EXPAND_UNPREFIXED".into(),
             ];
             let expand_now = acc
@@ -171,42 +191,51 @@ impl ProfileStack {
 
 /// Configure a shell with the effective USE flags from a profile stack.
 ///
-/// `extra_confs` is a list of additional shell scripts (e.g.
-/// `/etc/portage/make.conf`) sourced **after** the profile env is applied but
-/// **before** `use.force`/`use.mask` are applied.
+/// Calls [`resolve_use_flags`] then sets the Rust-side `use_flags` HashSet so
+/// the `use()` / `usev()` / `usex()` builtins work correctly during phase execution.
 ///
-/// Both profile `make.defaults` and `extra_confs` are treated as incremental:
-/// `USE="..."` in any of these files adds tokens to the accumulated set rather
-/// than replacing it — the same semantics portage applies through its own
-/// config parser.  Files that use `USE="${USE} more"` also work correctly.
-///
-/// Computation order:
-/// 1. Each `make.defaults` sourced through brush with per-layer USE isolation
-///    (see [`ProfileStack::profile_env`]); after all layers the shell holds
-///    the fully-accumulated profile state
-/// 2. Each `extra_confs` script sourced through brush with the same
-///    incremental treatment (e.g. make.conf `USE="ssl"` adds ssl to profile USE)
-/// 3. `USE_EXPAND_UNPREFIXED` values expanded directly into USE
-/// 4. `USE_EXPAND` values expanded with lowercase prefix
-/// 5. Profile `use.force` — unconditional add
-/// 6. Profile `use.mask` — unconditional remove
-///
-/// See [PMS 5.2](https://projects.gentoo.org/pms/9/pms.html#profiles).
+/// See [`resolve_use_flags`] for the full evaluation order.
 pub async fn configure_shell(
     shell: &mut EbuildShell,
     stack: &ProfileStack,
     extra_confs: &[&std::path::Path],
 ) -> Result<()> {
-    // Source each make.defaults through brush with per-layer USE isolation.
-    // After this call the shell has the fully-accumulated profile USE and
-    // all USE_EXPAND variables set, ready for make.conf.
+    let flags = resolve_use_flags(shell, stack, extra_confs).await?;
+    let refs: Vec<&str> = flags.iter().map(|f| f.as_str()).collect();
+    shell.set_use_flags(&refs)
+}
+
+/// Resolve the effective USE flags for a profile stack without setting the
+/// Rust-side execution state.
+///
+/// `extra_confs` is a list of additional shell scripts (e.g.
+/// `/etc/portage/make.conf`) sourced **after** the profile env is applied but
+/// **before** `use.force`/`use.mask` are applied.
+///
+/// Computation order:
+/// 1. Each `make.defaults` sourced through brush with per-layer USE isolation
+///    (see [`ProfileStack::profile_env`])
+/// 2. Each `extra_confs` script sourced with the same incremental treatment
+/// 3. Process-environment layer: `USE`, `USE_EXPAND` keys, and
+///    `USE_EXPAND_UNPREFIXED` keys read from `std::env` and merged
+/// 4. `USE_EXPAND_UNPREFIXED` values expanded directly into USE
+/// 5. `USE_EXPAND` values expanded with lowercase prefix
+/// 6. Profile `use.force` — unconditional add
+/// 7. Profile `use.mask` — unconditional remove
+///
+/// The shell's bash state is updated as a side-effect.
+async fn resolve_use_flags(
+    shell: &mut EbuildShell,
+    stack: &ProfileStack,
+    extra_confs: &[&std::path::Path],
+) -> Result<UseFlags> {
     let ProfileEnv { layers: _ } = stack.profile_env(shell).await?;
 
-    // Source each extra conf (make.conf, etc.) with the same incremental
-    // treatment: reset incremental vars, source the file, merge contributions.
     for conf in extra_confs {
         source_incremental(shell, conf).await?;
     }
+
+    apply_env_layer(shell).await?;
 
     let mut flags = collect_use_flags(shell);
 
@@ -220,8 +249,48 @@ pub async fn configure_shell(
     let mask: HashSet<String> = stack.use_mask()?.into_iter().collect();
     flags.retain(|f| !mask.contains(f.as_str()));
 
-    let flag_refs: Vec<&str> = flags.iter().map(String::as_str).collect();
-    shell.set_use_flags(&flag_refs)
+    Ok(UseFlags(
+        flags
+            .iter()
+            .map(|f| Interned::<DefaultInterner>::intern(f.as_str()))
+            .collect(),
+    ))
+}
+
+/// Merge process-environment USE variables into the shell as a final incremental layer.
+///
+/// Reads `USE`, all `USE_EXPAND` keys, and all `USE_EXPAND_UNPREFIXED` keys from
+/// `std::env`.  Any present values are merged with the accumulated shell state using
+/// the same incremental semantics as profile layers (tokens prefixed with `-` remove).
+///
+/// This is how `PYTHON_TARGETS=python3_15 em cat/pkg` adds a target without
+/// replacing the full flag set, mirroring how `CC=my-cc` is applied in `init_build_env`.
+async fn apply_env_layer(shell: &mut EbuildShell) -> Result<()> {
+    let use_expand = shell.get_var("USE_EXPAND").unwrap_or_default();
+    let unprefixed = shell.get_var("USE_EXPAND_UNPREFIXED").unwrap_or_default();
+
+    let mut vars = vec!["USE".to_string()];
+    for k in use_expand.split_whitespace() {
+        vars.push(k.to_string());
+    }
+    for k in unprefixed.split_whitespace() {
+        if !vars.contains(&k.to_string()) {
+            vars.push(k.to_string());
+        }
+    }
+
+    let mut restore = String::new();
+    for var in &vars {
+        if let Ok(env_val) = std::env::var(var) {
+            let existing = shell.get_var(var).unwrap_or_default();
+            let merged = merge_flag_lists([existing.as_str(), env_val.as_str()].into_iter());
+            restore += &format!("{}={}\n", var, shell_quote(&merged.join(" ")));
+        }
+    }
+    if !restore.is_empty() {
+        shell.run_string(&restore).await?;
+    }
+    Ok(())
 }
 
 /// Source a single config file (e.g. `make.conf`) with incremental USE semantics.
@@ -235,8 +304,13 @@ async fn source_incremental(
     path: &std::path::Path,
 ) -> Result<()> {
     // Collect the set of incremental vars to isolate.
-    let mut incr: Vec<String> =
-        vec!["USE".into(), "USE_EXPAND".into(), "USE_EXPAND_UNPREFIXED".into()];
+    let mut incr: Vec<String> = vec![
+        "USE".into(),
+        "USE_EXPAND".into(),
+        "USE_EXPAND_HIDDEN".into(),
+        "USE_EXPAND_IMPLICIT".into(),
+        "USE_EXPAND_UNPREFIXED".into(),
+    ];
     let expand = shell.get_var("USE_EXPAND").unwrap_or_default();
     for key in expand.split_whitespace() {
         if !incr.contains(&key.to_string()) {
