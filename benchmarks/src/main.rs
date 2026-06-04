@@ -288,8 +288,8 @@ mod pubgrub_solver {
         if !dropped.is_empty() {
             let mut cpns: Vec<String> = dropped
                 .iter()
-                .filter(|(pkg, _)| !pkg.is_virtual())
-                .map(|(pkg, _)| format!("{}", pkg.cpn()))
+                .filter(|d| !d.package.is_virtual())
+                .map(|d| d.package.cpn().to_string())
                 .collect();
             cpns.sort();
             cpns.dedup();

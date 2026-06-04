@@ -5,7 +5,7 @@ use anstyle::{AnsiColor, Effects, Style};
 use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
-    DepClass, PortagePackage, PortageVersionSet, UseConfig, UseFlagRequirement, UseFlagState,
+    DepClass, DroppedDep, PortagePackage, UseConfig, UseFlagRequirement, UseFlagState,
     apply_package_use,
 };
 use portage_metadata::CacheEntry;
@@ -24,46 +24,41 @@ const C_OFF: Style = Style::new()
 use super::installed::action_tag;
 use super::repo::{RepoData, find_cache};
 
-pub(super) fn report_dropped_deps(
-    dropped: &[(PortagePackage, PortageVersionSet)],
-    data: &RepoData,
-    arch: &str,
-) {
-    let non_virtual: Vec<_> = dropped
-        .iter()
-        .filter(|(pkg, _)| !pkg.is_virtual())
-        .collect();
+pub(super) fn report_dropped_deps(dropped: &[DroppedDep], data: &RepoData, arch: &str) {
+    // These are || alternatives bypassed by resolution — not failures.
+    // Deduplicate by package and merge their alternatives across all occurrences.
+    use std::collections::BTreeMap;
+    let mut by_pkg: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut in_tree: std::collections::HashMap<String, bool> = Default::default();
 
-    if non_virtual.is_empty() {
-        return;
-    }
-
-    let mut truly_missing: std::collections::BTreeSet<String> = Default::default();
-    let mut arch_filtered: std::collections::BTreeSet<String> = Default::default();
-
-    for (pkg, _) in &non_virtual {
-        let cpn_str = pkg.cpn().to_string();
-        if data.versions.contains_key(pkg.cpn()) {
-            arch_filtered.insert(cpn_str);
-        } else {
-            truly_missing.insert(cpn_str);
+    for d in dropped {
+        if d.package.is_virtual() {
+            continue;
         }
+        let pkg_str = d.package.cpn_str();
+        let alts = by_pkg.entry(pkg_str.clone()).or_default();
+        for a in &d.alternatives {
+            if !a.is_virtual() {
+                alts.insert(a.cpn_str());
+            }
+        }
+        in_tree
+            .entry(pkg_str)
+            .or_insert_with(|| data.versions.contains_key(d.package.cpn()));
     }
 
-    if !truly_missing.is_empty() {
-        eprintln!(
-            "warning: {} package(s) not found in repo: {}",
-            truly_missing.len(),
-            truly_missing.into_iter().collect::<Vec<_>>().join(", ")
-        );
-    }
-    if !arch_filtered.is_empty() {
-        eprintln!(
-            "note: {} package(s) skipped (no keywords for {}): {}",
-            arch_filtered.len(),
-            arch,
-            arch_filtered.into_iter().collect::<Vec<_>>().join(", ")
-        );
+    for (pkg_str, alts) in &by_pkg {
+        let reason = if *in_tree.get(pkg_str.as_str()).unwrap_or(&false) {
+            format!("no {arch} keywords")
+        } else {
+            "not in tree".to_string()
+        };
+        let alt_str = if alts.is_empty() {
+            String::new()
+        } else {
+            format!(", alternatives: {}", alts.iter().cloned().collect::<Vec<_>>().join(" | "))
+        };
+        eprintln!("note: dropped {pkg_str} ({reason}){alt_str}");
     }
 }
 

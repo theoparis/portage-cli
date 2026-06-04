@@ -107,6 +107,21 @@ pub fn apply_package_use<'a>(
     Cow::Owned(cfg)
 }
 
+/// A dependency that was dropped because no versions were available.
+///
+/// Dropped deps are always alternatives inside an `||` dep group — a
+/// successful resolution means the other branch was chosen instead.
+#[derive(Debug, Clone)]
+pub struct DroppedDep {
+    /// The package that was dropped.
+    pub package: PortagePackage,
+    /// The version range that was requested.
+    pub version_set: PortageVersionSet,
+    /// Other real packages in the same `||` group that were available.
+    /// Empty when the dep was not inside a `||` (direct unconditional dep).
+    pub alternatives: Vec<PortagePackage>,
+}
+
 /// USE flag changes required on a package by the resolved dependency set.
 ///
 /// Produced by the post-solve validation pass in
@@ -146,7 +161,7 @@ pub struct PortageDependencyProvider {
     pub(crate) installed_cpns: HashSet<Cpn>,
     pub(crate) installed_use: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
     pub(crate) installed_iuse: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
-    pub(crate) dropped_deps: Vec<(PortagePackage, PortageVersionSet)>,
+    pub(crate) dropped_deps: Vec<DroppedDep>,
     /// Global USE configuration, retained for post-solve validation of
     /// non-installed packages (where VDB flags are not available).
     pub(crate) use_config: UseConfig,
@@ -297,6 +312,41 @@ impl PortageDependencyProvider {
         // `NoVersions` for any missing package and immediately declare the
         // problem unsolvable.
         let known: HashSet<PortagePackage> = packages.keys().cloned().collect();
+
+        // Build a map from each real package to the other real packages in the
+        // same || group (Choice node).  Used to populate DroppedDep::alternatives.
+        let mut or_alternatives: HashMap<PortagePackage, Vec<PortagePackage>> = HashMap::new();
+        for (pkg, data) in packages.iter_mut() {
+            if !matches!(pkg, PortagePackage::Choice { .. }) {
+                continue;
+            }
+            let mut branch_deps: Vec<PortagePackage> = Vec::new();
+            for vd in data.versions.values_mut() {
+                if let Dependencies::Available(constraints) = &mut vd.merged {
+                    let taken = std::mem::take(constraints);
+                    let items: Vec<_> = taken.into_iter().collect();
+                    for (dep, _) in &items {
+                        if !dep.is_virtual() {
+                            branch_deps.push(dep.clone());
+                        }
+                    }
+                    *constraints = items.into_iter().collect();
+                }
+            }
+            for i in 0..branch_deps.len() {
+                let others: Vec<_> = branch_deps
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, d)| d.clone())
+                    .collect();
+                or_alternatives
+                    .entry(branch_deps[i].clone())
+                    .or_default()
+                    .extend(others);
+            }
+        }
+
         let mut dropped_deps = Vec::new();
         for data in packages.values_mut() {
             for vd in data.versions.values_mut() {
@@ -304,7 +354,15 @@ impl PortageDependencyProvider {
                     let taken = std::mem::take(constraints);
                     let (kept, dropped): (Vec<_>, Vec<_>) =
                         taken.into_iter().partition(|(pkg, _)| known.contains(pkg));
-                    dropped_deps.extend(dropped);
+                    dropped_deps.extend(dropped.into_iter().map(|(pkg, vs)| {
+                        let alternatives = or_alternatives
+                            .get(&pkg)
+                            .map(|alts| {
+                                alts.iter().filter(|a| known.contains(a)).cloned().collect()
+                            })
+                            .unwrap_or_default();
+                        DroppedDep { package: pkg, version_set: vs, alternatives }
+                    }));
                     *constraints = kept.into_iter().collect();
                 }
                 for class in &mut vd.by_class {
@@ -367,7 +425,7 @@ impl PortageDependencyProvider {
     /// Each entry is the `(package, version_set)` that could not be resolved.
     /// Callers should inspect this list to detect typos or genuinely missing
     /// packages rather than silently accepting an incomplete solution.
-    pub fn dropped_deps(&self) -> &[(PortagePackage, PortageVersionSet)] {
+    pub fn dropped_deps(&self) -> &[DroppedDep] {
         &self.dropped_deps
     }
 
