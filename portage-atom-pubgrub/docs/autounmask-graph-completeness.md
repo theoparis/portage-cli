@@ -246,6 +246,67 @@ things worse). Strategy:
   `--autounmask-backtrack` hint).
 - Hard-cap iterations to guarantee termination.
 
+### 5.6 Strategy seam: two discoverable approaches to benchmark
+
+The `Relaxations` abstraction makes `resolve` a **pure function of `(repo-view,
+relaxations)`**. Everything downstream of relaxation discovery — the relaxed
+`Adapter`, the forced-USE provider, the final solve, the report/write — is
+shared. The *only* thing that varies is **how the relaxation set is produced**.
+That is the seam:
+
+```rust
+/// Produces the relaxation set to feed the final resolve.
+trait RelaxationStrategy {
+    fn discover(
+        &self,
+        ctx: &ResolveCtx,           // data, arch, accept_*, package_mask, use_config, ...
+        roots: &[(PortagePackage, PortageVersionSet)],
+    ) -> Relaxations;
+}
+```
+
+Two implementations, benchmarkable head-to-head because they share all other
+machinery and emit the same `Relaxations` shape:
+
+**A. Iterative relaxation (fixpoint).** §5.4. Resolve → collect the deps/USE
+violations that became droppable *this* round → add to the set → resolve again →
+stop at fixpoint. Discovers relaxations breadth-first as the graph grows.
+- Cost: `K` resolves, where `K` = depth of the relaxation cascade (for firefox,
+  expected ~2–4).
+- Precision: relaxes **exactly** the minimal reachable set — never suggests a
+  change for a package that isn't in the final graph.
+
+**B. Single-shot hypothesis (two-pass).** Pass 1 walks the target's full
+dependency closure over the *unfiltered* `RepoData` (which `load_repo` already
+holds), and for every reachable package decides up front whether it would need a
+keyword/mask/license/USE relaxation — building the entire `Relaxations` set in
+one analysis pass. Pass 2 does a single relaxed resolve.
+- Cost: **2 resolves**, independent of cascade depth.
+- Risk: **over-relaxation.** The pass-1 walk must evaluate USE conditionals to
+  avoid descending into branches that won't be active; a naïve closure walk will
+  pull in packages (and emit autounmask changes) that the real solve would never
+  select. Pruning the walk correctly is effectively re-implementing part of the
+  solver's USE evaluation, and any residual over-relaxation must be reconciled
+  against the final solution before emitting changes (drop relaxations for CPNs
+  absent from the solve).
+
+**What to measure.**
+- Wall-clock and resolve-count on a basket (firefox, a `kde-meta`/`gnome`-class
+  target, a plain leaf, a deep-cascade target).
+- **Correctness**: does the emitted relaxation/autounmask set exactly match
+  `emerge`'s? Approach A is the reference for minimality; B is checked for
+  over-relaxation (extra suggestions) and under-relaxation (missed, if the
+  pruning is too aggressive).
+- Stability: same output across runs (both must sort deterministically).
+
+**Hypothesis.** A is correct-by-construction and likely fast enough (`K` small,
+each resolve already sub-3s). B trades a bounded 2-pass cost for the hard problem
+of an accurate hypothesis walk; it only wins if `K` turns out large or per-resolve
+cost dominates. Build the seam, implement A first (it doubles as B's correctness
+oracle), then implement B and benchmark. Wire the chosen strategy behind a flag
+(e.g. `PORTAGE_CLI_RELAX_STRATEGY=iterative|single`) so the benchmark harness can
+select it without recompiling.
+
 ## 6. Termination & determinism
 
 - The relaxation set is **monotonically growing** (we only ever add). Each
@@ -287,16 +348,22 @@ things worse). Strategy:
 
 1. **Phase 0 — confirm drop path** (§3.2 step 0). Instrument, capture the real
    reason cairo et al. leave `known`. ~half a day. *Gates the rest.*
-2. **Phase 1 — keyword/mask/license relaxation.** Thread `Relaxations` (the
-   three CPV sets only) through `Adapter`, add the fixpoint loop, no USE forcing
-   yet. Validates the loop machinery on the simpler filter-drop case. Pick a
-   target whose completeness needs only a keyword change to test.
+2. **Phase 1 — relaxation seam + keyword/mask/license relaxation.** Define
+   `Relaxations` and the `RelaxationStrategy` seam (§5.6); make `resolve` a pure
+   function of `(view, relaxations)`. Thread the three CPV sets through `Adapter`
+   and implement **strategy A (iterative)** with no USE forcing yet. Validates
+   the loop machinery on the simpler filter-drop case; pick a target whose
+   completeness needs only a keyword change to test.
 3. **Phase 2 — USE forcing.** Add `forced_use` to the provider (conversion-time
    application + don't-drop-on-`[flag]`), and the 3b promotion of USE-dep
    violations against droppable targets. This is what unblocks firefox.
-4. **Phase 3 — failure handling & caps** (§5.5), conflict detection (§7), and
+4. **Phase 3 — strategy B + benchmark.** Implement **strategy B (single-shot
+   hypothesis)** behind the same seam, with A as the correctness oracle. Build
+   the benchmark harness (§5.6 "What to measure"), select via
+   `PORTAGE_CLI_RELAX_STRATEGY`. Decide the default from the numbers.
+5. **Phase 4 — failure handling & caps** (§5.5), conflict detection (§7), and
    the `--autounmask`-off semantics (§7 last bullet).
-5. **Phase 4 — validate against `emerge -p`** for a basket of targets; diff
+6. **Phase 5 — validate against `emerge -p`** for a basket of targets; diff
    package sets to zero.
 
 ## 9. Testing
