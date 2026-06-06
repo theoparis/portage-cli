@@ -232,7 +232,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
 
     match format {
         DepgraphFormat::Pretty => {
-            output::print_pretty(&data, &order, &installed, &use_config, &package_use, &use_expand, &use_expand_hidden, &flag_reqs)
+            output::print_pretty(&data, &order, &installed, &use_config, &package_use, &use_expand, &use_expand_hidden, &flag_reqs, verbose)
         }
         DepgraphFormat::Json => {
             output::print_json(&data, &order, &edges, &installed, &flag_reqs)

@@ -196,6 +196,58 @@ fn format_flags(
     }
 }
 
+/// Build the `:slot/subslot::repo` suffix shown in verbose mode.
+///
+/// Mirrors portage: show `:slot/subslot` when the subslot differs from the
+/// slot, else `:slot` when the slot isn't the default `0`, else nothing —
+/// always followed by `::repo`.
+fn slot_repo_suffix(cache: &CacheEntry, repo_name: &str) -> String {
+    let slot = cache.metadata.slot.slot.as_str();
+    let subslot = cache.metadata.slot.subslot.map(|s| s.as_str().to_string());
+    let mut s = String::new();
+    match subslot {
+        Some(sub) if sub != slot => s.push_str(&format!(":{slot}/{sub}")),
+        _ if slot != "0" => s.push_str(&format!(":{slot}")),
+        _ => {}
+    }
+    s.push_str(&format!("::{repo_name}"));
+    s
+}
+
+/// Render the emerge-style `Total:` breakdown, e.g.
+/// `Total: 26 packages (20 new, 1 upgrade, 5 reinstalls)`.
+fn total_line(
+    order: &[(PortagePackage, Version)],
+    installed: &HashMap<Cpn, HashMap<String, Version>>,
+) -> String {
+    let (mut new, mut new_slot, mut up, mut down, mut re) = (0, 0, 0, 0, 0);
+    for (pkg, ver) in order {
+        match action_tag(pkg, ver, installed).0 {
+            "N" => new += 1,
+            "NS" => new_slot += 1,
+            "U" => up += 1,
+            "D" => down += 1,
+            "R" => re += 1,
+            _ => {}
+        }
+    }
+    let plural = |n: usize, s: &str| format!("{n} {s}{}", if n == 1 { "" } else { "s" });
+    let mut parts = Vec::new();
+    if new > 0 { parts.push(format!("{new} new")); }
+    if new_slot > 0 { parts.push(plural(new_slot, "in new slot")); }
+    if up > 0 { parts.push(plural(up, "upgrade")); }
+    if down > 0 { parts.push(plural(down, "downgrade")); }
+    if re > 0 { parts.push(plural(re, "reinstall")); }
+
+    let n = order.len();
+    let pkgs = if n == 1 { "package" } else { "packages" };
+    if parts.is_empty() {
+        format!("\nTotal: {n} {pkgs}")
+    } else {
+        format!("\nTotal: {n} {pkgs} ({})", parts.join(", "))
+    }
+}
+
 pub(super) fn print_pretty(
     data: &RepoData,
     order: &[(PortagePackage, Version)],
@@ -205,6 +257,7 @@ pub(super) fn print_pretty(
     use_expand: &[String],
     use_expand_hidden: &[String],
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
+    verbose: bool,
 ) {
     let mut out = anstream::stdout();
 
@@ -216,22 +269,36 @@ pub(super) fn print_pretty(
         let (tag, old_ver) = action_tag(pkg, ver, installed);
         let req = flag_reqs.get(pkg).copied();
         let is_reinstall = tag == "R";
+        let cache = find_cache(data, pkg, ver);
 
-        let cpv = Cpv::new(*cpn, ver.clone());
-        let effective_use = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
-        let flag_str = find_cache(data, pkg, ver)
-            .map(|c| format_flags(c, &effective_use, use_expand, use_expand_hidden, is_reinstall, req))
-            .unwrap_or_default();
+        // Verbose mode shows USE/expand flags and the slot/subslot::repo suffix;
+        // plain mode mirrors `emerge -p` and lists just the versioned atom.
+        let (flag_str, slot_repo) = if verbose {
+            let cpv = Cpv::new(*cpn, ver.clone());
+            let effective_use = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
+            let flags = cache
+                .map(|c| format_flags(c, &effective_use, use_expand, use_expand_hidden, is_reinstall, req))
+                .unwrap_or_default();
+            let suffix = cache
+                .map(|c| slot_repo_suffix(c, &data.repo_name))
+                .unwrap_or_default();
+            (flags, suffix)
+        } else {
+            (String::new(), String::new())
+        };
 
         let old = old_ver.map(|v| format!(" [{}]", v)).unwrap_or_default();
         let pad = " ".repeat(6usize.saturating_sub(tag.len()));
         writeln!(
             out,
-            "[{C_PKG}ebuild{C_PKG:#}  {C_PKG}{tag}{C_PKG:#}{pad}] {C_PKG}{cpn}-{ver}{C_PKG:#}{old}{flag_str}",
+            "[{C_PKG}ebuild{C_PKG:#}  {C_PKG}{tag}{C_PKG:#}{pad}] {C_PKG}{cpn}-{ver}{slot_repo}{C_PKG:#}{old}{flag_str}",
         ).ok();
     }
 
-    writeln!(out, "\nTotal: {} package(s)", order.len()).ok();
+    // emerge only prints the Total line in verbose mode.
+    if verbose {
+        writeln!(out, "{}", total_line(order, installed)).ok();
+    }
 }
 
 fn class_str(c: DepClass) -> &'static str {
