@@ -3,7 +3,8 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Dep, UseDefault, UseDepKind, Version};
+use portage_atom::{Cpn, Cpv, Dep, UseDefault, UseDepKind, Version};
+use crate::repository::IUseDefault;
 use crate::use_config::UseFlagState;
 use pubgrub::{
     Dependencies, DependencyConstraints, DependencyProvider, PackageResolutionStatistics,
@@ -52,6 +53,8 @@ pub(crate) struct PackageData {
     pub(crate) blockers: BTreeMap<Version, Vec<Dep>>,
     pub(crate) use_deps: BTreeMap<Version, Vec<convert::UseDepConstraint>>,
     pub(crate) iuse: BTreeMap<Version, Vec<Interned<DefaultInterner>>>,
+    pub(crate) iuse_defaults:
+        BTreeMap<Version, HashMap<Interned<DefaultInterner>, IUseDefault>>,
     pub(crate) repo: BTreeMap<Version, Interned<DefaultInterner>>,
     pub(crate) repo_constraints: BTreeMap<Version, Vec<convert::RepoConstraint>>,
     pub(crate) slot_operator_deps: BTreeMap<Version, Vec<convert::SlotOperatorDep>>,
@@ -171,6 +174,9 @@ pub struct PortageDependencyProvider {
     /// Global USE configuration, retained for post-solve validation of
     /// non-installed packages (where VDB flags are not available).
     pub(crate) use_config: UseConfig,
+    /// Per-package USE overrides (`package.use`), retained so post-solve
+    /// validation can compute the same effective USE the build would see.
+    pub(crate) package_use: Vec<(Dep, Vec<String>)>,
     /// USE flag requirements collected by the post-solve validation pass.
     ///
     /// Covers both reinstall cases (`R`: installed packages with violated
@@ -282,6 +288,7 @@ impl PortageDependencyProvider {
                     blockers: BTreeMap::new(),
                     use_deps: BTreeMap::new(),
                     iuse: BTreeMap::new(),
+                    iuse_defaults: BTreeMap::new(),
                     repo: BTreeMap::new(),
                     repo_constraints: BTreeMap::new(),
                     slot_operator_deps: BTreeMap::new(),
@@ -296,6 +303,9 @@ impl PortageDependencyProvider {
                 }
                 if !meta.iuse.is_empty() {
                     entry.iuse.insert(ver.clone(), meta.iuse);
+                }
+                if !meta.iuse_defaults.is_empty() {
+                    entry.iuse_defaults.insert(ver.clone(), meta.iuse_defaults);
                 }
                 if let Some(r) = meta.repo {
                     entry.repo.insert(ver.clone(), r);
@@ -385,6 +395,7 @@ impl PortageDependencyProvider {
             installed_iuse: HashMap::new(),
             dropped_deps,
             use_config,
+            package_use: package_use.to_vec(),
             use_flag_requirements: Vec::new(),
         }
     }
@@ -512,6 +523,7 @@ impl PortageDependencyProvider {
                 blockers: BTreeMap::new(),
                 use_deps: BTreeMap::new(),
                 iuse: BTreeMap::new(),
+                iuse_defaults: BTreeMap::new(),
                 repo: BTreeMap::new(),
                 repo_constraints: BTreeMap::new(),
                 slot_operator_deps: BTreeMap::new(),
@@ -683,7 +695,7 @@ impl PortageDependencyProvider {
                                     .get(pkg)
                                     .map_or(false, |(_, e, _, _)| e.contains(&ud.flag))
                         } else {
-                            self.use_config.get(&ud.flag) == UseFlagState::Enabled
+                            self.effective_flag_new(pkg, ver, &ud.flag, None)
                         };
 
                         let dep_effective_enabled = if is_installed {
@@ -708,7 +720,7 @@ impl PortageDependencyProvider {
                                 matches!(ud.default, Some(UseDefault::Enabled))
                             }
                         } else {
-                            self.use_config.get(&ud.flag) == UseFlagState::Enabled
+                            self.effective_flag_new(target_pkg, target_ver, &ud.flag, ud.default)
                         };
 
                         if let Some(requires_enabled) = eval_violated_use_dep(
@@ -779,7 +791,7 @@ impl PortageDependencyProvider {
                             self.installed_use.get(&pkg).map_or(false, |u| u.contains(&ud.flag))
                                 || by_target.get(&pkg).map_or(false, |(_, e, _, _)| e.contains(&ud.flag))
                         } else {
-                            self.use_config.get(&ud.flag) == UseFlagState::Enabled
+                            self.effective_flag_new(&pkg, &new_ver, &ud.flag, None)
                         };
 
                         let dep_effective_enabled = if is_installed {
@@ -793,7 +805,7 @@ impl PortageDependencyProvider {
                             if in_iuse { active.contains(&ud.flag) }
                             else { matches!(ud.default, Some(UseDefault::Enabled)) }
                         } else {
-                            self.use_config.get(&ud.flag) == UseFlagState::Enabled
+                            self.effective_flag_new(target_pkg, target_ver, &ud.flag, ud.default)
                         };
 
                         if let Some(req_en) = eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled) {
@@ -863,6 +875,38 @@ impl PortageDependencyProvider {
     ///
     /// Returns `true` when every constraint is either satisfied (under the
     /// above definition) or refers to a package not yet installed.
+    /// Effective state of `flag` on a non-installed package version that will be
+    /// freshly built.  Mirrors what the build will actually see: `package.use`
+    /// and global USE applied on top of the ebuild's IUSE defaults.  For a flag
+    /// outside the package's IUSE, only the dep's own `(+)`/`(-)` default applies.
+    fn effective_flag_new(
+        &self,
+        pkg: &PortagePackage,
+        ver: &Version,
+        flag: &Interned<DefaultInterner>,
+        dep_default: Option<UseDefault>,
+    ) -> bool {
+        let data = self.packages.get(pkg);
+        let in_iuse = data
+            .and_then(|d| d.iuse.get(ver))
+            .is_some_and(|i| i.contains(flag));
+        if !in_iuse {
+            return matches!(dep_default, Some(UseDefault::Enabled));
+        }
+        let cpv = Cpv::new(*pkg.cpn(), ver.clone());
+        let cfg = apply_package_use(&self.use_config, &cpv, pkg.slot(), &self.package_use);
+        match cfg.get_opt(flag) {
+            Some(UseFlagState::Enabled) => true,
+            Some(UseFlagState::Disabled) => false,
+            // Not explicitly set (absent or solver-decided) → fall back to the
+            // ebuild's IUSE default (`+flag`).
+            Some(UseFlagState::SolverDecided) | None => data
+                .and_then(|d| d.iuse_defaults.get(ver))
+                .and_then(|m| m.get(flag))
+                .is_some_and(|d| matches!(d, IUseDefault::Enabled)),
+        }
+    }
+
     fn use_dep_branch_satisfied(&self, udeps: &[convert::UseDepConstraint]) -> bool {
         for constraint in udeps {
             let (target_pkg, vs) = &constraint.target;
@@ -1131,6 +1175,7 @@ fn register_virtual_choices(
             blockers: BTreeMap::new(),
             use_deps: BTreeMap::new(),
             iuse: BTreeMap::new(),
+            iuse_defaults: BTreeMap::new(),
             repo: BTreeMap::new(),
             repo_constraints: BTreeMap::new(),
             slot_operator_deps: BTreeMap::new(),

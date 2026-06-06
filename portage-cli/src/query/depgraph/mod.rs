@@ -240,7 +240,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
 
     {
         let all_reqs: Vec<_> = provider.use_flag_requirements().to_vec();
-        let pkg_use_entries = package_use::build_entries(&all_reqs, atoms, &edges);
+        let pkg_use_entries = package_use::build_entries(&all_reqs, atoms, &edges, &use_config, &package_use);
         if (autounmask || autounmask_write) && !pkg_use_entries.is_empty() {
             package_use::report(&pkg_use_entries);
             if autounmask_write {

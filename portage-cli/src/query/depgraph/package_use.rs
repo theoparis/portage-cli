@@ -2,8 +2,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write as _;
 
 use camino::Utf8Path;
-use portage_atom::Version;
-use portage_atom_pubgrub::{DepEdge, UseFlagRequirement};
+use portage_atom::{Cpv, Dep, Version};
+use portage_atom_pubgrub::{
+    DepEdge, UseConfig, UseFlagRequirement, UseFlagState, apply_package_use,
+};
 
 /// Entries to write into `/etc/portage/package.use`.
 pub(super) struct PackageUseEntry {
@@ -27,6 +29,8 @@ pub(super) fn build_entries(
     flag_reqs: &[UseFlagRequirement],
     root_atoms: &[String],
     edges: &[DepEdge],
+    use_config: &UseConfig,
+    package_use: &[(Dep, Vec<String>)],
 ) -> Vec<PackageUseEntry> {
     // Pre-compute once for all requirements.
     let adj = build_adjacency(edges);
@@ -55,12 +59,25 @@ pub(super) fn build_entries(
             .unwrap_or_default();
         let atom = format!(">={}-{}{}", cpn, ver_str(ver), slot_suffix);
 
+        // A flag belongs in package.use only if the global config does not
+        // already set it the way the requirement needs.  A flag already enabled
+        // (e.g. a PYTHON_TARGETS member in the profile) just triggers a rebuild,
+        // shown via the `*` USE marker — it is not an autounmask change.
+        let cpv = Cpv::new(*cpn, ver.clone());
+        let eff = apply_package_use(use_config, &cpv, req.package.slot(), package_use);
         let mut flags: Vec<String> = Vec::new();
         for f in &req.required_enabled {
-            flags.push(f.as_str().to_string());
+            if eff.get_opt(f) != Some(UseFlagState::Enabled) {
+                flags.push(f.as_str().to_string());
+            }
         }
         for f in &req.required_disabled {
-            flags.push(format!("-{}", f.as_str()));
+            if eff.get_opt(f) != Some(UseFlagState::Disabled) {
+                flags.push(format!("-{}", f.as_str()));
+            }
+        }
+        if flags.is_empty() {
+            continue;
         }
 
         let comments = build_comments(req, root_atoms, &root_cpns, &adj);
