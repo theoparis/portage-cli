@@ -27,21 +27,20 @@ pub struct DepgraphOpts<'a> {
     pub format: DepgraphFormat,
     pub verbose: bool,
     pub empty: bool,
-    #[allow(dead_code)]
-    pub autounmask: bool,  // reserved for future --autounmask display-only mode
+    pub autounmask: bool,
     pub autounmask_write: bool,
     pub root: Option<&'a Utf8Path>,
 }
 
 pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
-    let DepgraphOpts { repo_path, atoms, arch, format, verbose, empty, autounmask: _, autounmask_write, root } = opts;
+    let DepgraphOpts { repo_path, atoms, arch, format, verbose, empty, autounmask, autounmask_write, root } = opts;
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
 
     let (data, installed_entries, use_env_result) = tokio::join!(
         repo::load_repo(&repo),
         async { installed::load_installed() },
-        use_env::build_use_env(&repo),
+        use_env::build_use_env(&repo, root),
     );
     let use_env = use_env_result?;
     let use_env::UseEnv {
@@ -212,7 +211,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         .collect();
 
     // Report in order of severity: mask → keywords → USE → license.
-    if !autounmask_candidates.is_empty() {
+    // --autounmask: show; --autounmask-write: show + write.
+    if (autounmask || autounmask_write) && !autounmask_candidates.is_empty() {
         autounmask::report(&autounmask_candidates);
         if autounmask_write {
             autounmask::write(&autounmask_candidates, &portage_dir)?;
@@ -222,7 +222,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
     {
         let all_reqs: Vec<_> = provider.use_flag_requirements().to_vec();
         let pkg_use_entries = package_use::build_entries(&all_reqs, atoms, &edges);
-        if !pkg_use_entries.is_empty() {
+        if (autounmask || autounmask_write) && !pkg_use_entries.is_empty() {
             package_use::report(&pkg_use_entries);
             if autounmask_write {
                 package_use::write(&pkg_use_entries, &portage_dir.join("package.use"))?;
