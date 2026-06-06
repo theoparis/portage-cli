@@ -431,5 +431,10 @@ pub(super) fn find_autounmask_candidates(
         }
     }
 
+    // A CPV may appear from multiple DroppedDep entries; its reasons are
+    // determined solely by its own metadata, so we keep the first occurrence.
+    let mut seen: HashSet<String> = HashSet::new();
+    candidates.retain(|c| seen.insert(c.cpv.to_string()));
+
     candidates
 }

@@ -14,11 +14,7 @@ struct Entry {
 }
 
 fn filename(cpv: &portage_atom::Cpv) -> String {
-    format!(
-        "{}-{}",
-        cpv.cpn.category.as_str().replace('/', "-"),
-        cpv.cpn.package.as_str()
-    )
+    format!("{}-{}", cpv.cpn.category.as_str(), cpv.cpn.package.as_str())
 }
 
 fn atom(cpv: &portage_atom::Cpv, slot: Option<portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>>) -> String {

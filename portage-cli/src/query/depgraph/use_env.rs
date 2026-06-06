@@ -1,6 +1,7 @@
+use camino::Utf8Path;
 use portage_atom::Dep;
 use portage_atom_pubgrub::{UseConfig, UseFlagState};
-use portage_repo::{ProfileStack, Repository, DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF};
+use portage_repo::{ProfileStack, Repository};
 
 type Result<T> = anyhow::Result<T>;
 
@@ -21,24 +22,32 @@ pub(super) struct UseEnv {
     pub accept_license: Vec<String>,
 }
 
-pub(super) async fn build_use_env(repo: &Repository) -> Result<UseEnv> {
-    compute_use_env(repo).await
+pub(super) async fn build_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<UseEnv> {
+    compute_use_env(repo, root).await
 }
 
-async fn compute_use_env(repo: &Repository) -> Result<UseEnv> {
-    let profile_path = std::fs::canonicalize("/etc/portage/make.profile")
-        .map_err(|e| anyhow::anyhow!("cannot resolve /etc/portage/make.profile: {e}"))?;
+async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<UseEnv> {
+    let portage_dir = root.unwrap_or(Utf8Path::new("/")).join("etc/portage");
+    let root_dir = root.unwrap_or(Utf8Path::new("/"));
+
+    let profile_link = portage_dir.join("make.profile");
+    let profile_path = std::fs::canonicalize(profile_link.as_std_path())
+        .map_err(|e| anyhow::anyhow!("cannot resolve {profile_link}: {e}"))?;
     let stack = ProfileStack::build(profile_path)
         .map_err(|e| anyhow::anyhow!("failed to build profile stack: {e}"))?;
     let mut shell = repo.shell().await
         .map_err(|e| anyhow::anyhow!("failed to start ebuild shell: {e}"))?;
 
-    let make_conf: Option<std::path::PathBuf> = [DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF]
+    let make_conf_candidates = [
+        root_dir.join("etc/portage/make.conf"),
+        root_dir.join("etc/make.conf"),
+    ];
+    let confs: Vec<&std::path::Path> = make_conf_candidates
         .iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .map(std::path::PathBuf::from);
+        .filter(|p| p.as_std_path().exists())
+        .map(|p| p.as_std_path())
+        .collect();
 
-    let confs: Vec<&std::path::Path> = make_conf.as_deref().into_iter().collect();
     let flags = stack.use_flags(&mut shell, &confs).await
         .map_err(|e| anyhow::anyhow!("failed to evaluate USE flags: {e}"))?;
 
@@ -65,10 +74,10 @@ async fn compute_use_env(repo: &Repository) -> Result<UseEnv> {
     }
 
     let mut package_use = stack.package_use().unwrap_or_default();
-    package_use.extend(load_package_use("/etc/portage/package.use"));
+    package_use.extend(load_package_use(portage_dir.join("package.use").as_str()));
 
     let mut package_mask = stack.package_mask().unwrap_or_default();
-    package_mask.extend(load_dep_list("/etc/portage/package.mask"));
+    package_mask.extend(load_dep_list(portage_dir.join("package.mask").as_str()));
 
     Ok(UseEnv { config, expand, expand_hidden, package_use, package_mask, accept_keywords, accept_license })
 }
