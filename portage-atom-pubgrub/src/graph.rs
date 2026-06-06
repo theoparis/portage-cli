@@ -102,80 +102,237 @@ impl PortageDependencyProvider {
 
     /// Compute an installation order from a solution.
     ///
-    /// Returns packages in topological order respecting DEPEND and BDEPEND:
-    /// build-time dependencies appear before the packages that need them.
-    /// RDEPEND, PDEPEND, and IDEPEND do not constrain build order here.
+    /// Returns packages in topological order: a dependency is merged before the
+    /// package that needs it.  Both build-time (DEPEND/BDEPEND) and runtime
+    /// (RDEPEND) edges constrain the order, so e.g. the requested target lands
+    /// after the libraries it links and runs against.  PDEPEND (merged *after*
+    /// the parent) and IDEPEND (install-time only) do not constrain it.
     ///
-    /// If the build-time dep graph contains cycles (e.g. bootstrap cycles such
-    /// as `xz-utils` ↔ `elt-patches` both needing libtool patches), the
-    /// cyclic packages are appended after the topologically sorted portion in
-    /// an arbitrary but deterministic order. This mirrors portage's behavior
-    /// of breaking circular deps rather than refusing to produce output.
+    /// RDEPEND introduces cycles far more often than build deps alone (e.g.
+    /// `gtk+` ↔ its icon-theme/at-spi runtime deps).  Portage resolves these by
+    /// treating runtime edges as *soft*: when the graph stalls in a cycle, soft
+    /// edges are dropped to break it while hard build-time edges are preserved.
+    /// We do the same — only if a genuine hard (build-time) cycle remains, as
+    /// with bootstrap cycles (`xz-utils` ↔ `elt-patches`), do we fall back to a
+    /// deterministic lexicographic tie-break.
     pub fn install_order(
         &self,
         solution: &pubgrub::SelectedDependencies<PortagePackage, Version>,
     ) -> Vec<(PortagePackage, Version)> {
         let graph = self.dependency_graph(solution);
 
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-        let mut adj: HashMap<String, Vec<String>> = HashMap::new();
-        let mut key_of: HashMap<String, (PortagePackage, Version)> = HashMap::new();
+        // Index nodes deterministically (sorted by key) so SCC discovery and all
+        // tie-breaks are reproducible.
+        let mut node_pv: Vec<(String, (PortagePackage, Version))> = solution
+            .iter()
+            .map(|(pkg, ver)| (format!("{}-{}", pkg, ver), (pkg.clone(), ver.clone())))
+            .collect();
+        node_pv.sort_by(|a, b| a.0.cmp(&b.0));
+        let n = node_pv.len();
+        let idx: HashMap<&str, usize> =
+            node_pv.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
 
-        for (pkg, ver) in solution.iter() {
-            let key = format!("{}-{}", pkg, ver);
-            in_degree.entry(key.clone()).or_insert(0);
-            adj.entry(key.clone()).or_default();
-            key_of.insert(key, (pkg.clone(), ver.clone()));
+        // Adjacency: dependency → dependent ("dependency comes first").
+        // `succ_all` = hard (DEPEND/BDEPEND) + soft (RDEPEND); `succ_hard` only
+        // the build-time edges, used to order within a cycle.
+        let mut succ_all: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut succ_hard: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for edge in &graph {
+            let hard = match edge.class {
+                DepClass::Depend | DepClass::Bdepend => true,
+                DepClass::Rdepend => false,
+                // PDEPEND (merged after parent) / IDEPEND: no ordering constraint.
+                _ => continue,
+            };
+            let to = format!("{}-{}", edge.to.0, edge.to.1);
+            let from = format!("{}-{}", edge.from.0, edge.from.1);
+            let (Some(&u), Some(&v)) = (idx.get(to.as_str()), idx.get(from.as_str())) else {
+                continue;
+            };
+            succ_all[u].push(v);
+            if hard {
+                succ_hard[u].push(v);
+            }
+        }
+        for adj in succ_all.iter_mut() {
+            adj.sort_unstable();
         }
 
-        for edge in &graph {
-            match edge.class {
-                DepClass::Depend | DepClass::Bdepend => {
-                    let dep_key = format!("{}-{}", edge.to.0, edge.to.1);
-                    let from_key = format!("{}-{}", edge.from.0, edge.from.1);
-                    adj.entry(dep_key).or_default().push(from_key.clone());
-                    *in_degree.entry(from_key).or_insert(0) += 1;
+        // Strongly-connected components via iterative Tarjan.  Nodes in different
+        // SCCs are linearised by the condensation (a DAG), so every cross-SCC
+        // edge — every edge that is not part of a genuine cycle — is respected.
+        let comp_of = tarjan_scc(&succ_all);
+        let num_comps = comp_of.iter().copied().max().map_or(0, |m| m + 1);
+        let mut members: Vec<Vec<usize>> = vec![Vec::new(); num_comps];
+        for (node, &c) in comp_of.iter().enumerate() {
+            members[c].push(node);
+        }
+
+        // Condensation edges + in-degrees (deduplicated).
+        let mut comp_succ: Vec<std::collections::BTreeSet<usize>> =
+            vec![std::collections::BTreeSet::new(); num_comps];
+        let mut comp_indeg = vec![0usize; num_comps];
+        for u in 0..n {
+            for &v in &succ_all[u] {
+                let (cu, cv) = (comp_of[u], comp_of[v]);
+                if cu != cv && comp_succ[cu].insert(cv) {
+                    comp_indeg[cv] += 1;
                 }
-                _ => {}
             }
         }
 
-        // BinaryHeap is a max-heap: pop() yields the lexicographically largest
-        // key first, giving deterministic output without O(n) Vec::insert.
-        let mut queue: BinaryHeap<String> = in_degree
-            .iter()
-            .filter(|&(_, &deg)| deg == 0)
-            .map(|(k, _)| k.clone())
+        // The component key (max member node key) drives a deterministic
+        // max-heap tie-break, preserving the "largest ready first" ordering and
+        // keeping the requested target — which has no dependents and so becomes
+        // ready last — near the end.
+        let comp_key = |c: usize| -> &str {
+            members[c].iter().map(|&i| node_pv[i].0.as_str()).max().unwrap_or("")
+        };
+
+        let mut comp_ready: BinaryHeap<(String, usize)> = (0..num_comps)
+            .filter(|&c| comp_indeg[c] == 0)
+            .map(|c| (comp_key(c).to_string(), c))
             .collect();
 
-        let mut result = Vec::new();
-        while let Some(key) = queue.pop() {
-            if let Some((pkg, ver)) = key_of.remove(&key) {
-                result.push((pkg, ver));
-            }
-            if let Some(neighbors) = adj.get(&key) {
-                for neighbor in neighbors {
-                    if let Some(deg) = in_degree.get_mut(neighbor) {
-                        *deg -= 1;
-                        if *deg == 0 {
-                            queue.push(neighbor.clone());
-                        }
-                    }
+        let mut result = Vec::with_capacity(n);
+        while let Some((_, c)) = comp_ready.pop() {
+            // Emit this component's members.  A singleton is just itself; a real
+            // cycle is ordered internally by breaking soft (RDEPEND) edges before
+            // hard ones (see `order_cycle`).
+            if members[c].len() == 1 {
+                let node = members[c][0];
+                result.push(node_pv[node].1.clone());
+            } else {
+                for node in order_cycle(&members[c], &succ_hard, &succ_all, &node_pv) {
+                    result.push(node_pv[node].1.clone());
                 }
             }
-        }
-
-        // Any packages remaining in key_of are part of dependency cycles (e.g.
-        // bootstrap cycles like xz-utils ↔ elt-patches).  Append them in a
-        // deterministic order rather than dropping them silently.
-        if !key_of.is_empty() {
-            let mut cyclic: Vec<_> = key_of.into_values().collect();
-            cyclic.sort_by(|(a, _), (b, _)| a.cmp(b));
-            result.extend(cyclic);
+            for &cv in &comp_succ[c] {
+                comp_indeg[cv] -= 1;
+                if comp_indeg[cv] == 0 {
+                    comp_ready.push((comp_key(cv).to_string(), cv));
+                }
+            }
         }
 
         result
     }
+}
+
+/// Iterative Tarjan SCC.  Returns the component id of each node; ids are dense
+/// `0..num_components`.  `succ[u]` lists nodes that must come *after* `u`.
+fn tarjan_scc(succ: &[Vec<usize>]) -> Vec<usize> {
+    let n = succ.len();
+    let mut index = vec![usize::MAX; n];
+    let mut lowlink = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut comp_of = vec![usize::MAX; n];
+    let mut next_index = 0usize;
+    let mut next_comp = 0usize;
+
+    for s in 0..n {
+        if index[s] != usize::MAX {
+            continue;
+        }
+        // DFS frame: (node, next child position).
+        let mut call: Vec<(usize, usize)> = vec![(s, 0)];
+        while let Some(&mut (v, ref mut ci)) = call.last_mut() {
+            if *ci == 0 {
+                index[v] = next_index;
+                lowlink[v] = next_index;
+                next_index += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            if *ci < succ[v].len() {
+                let w = succ[v][*ci];
+                *ci += 1;
+                if index[w] == usize::MAX {
+                    call.push((w, 0));
+                } else if on_stack[w] {
+                    lowlink[v] = lowlink[v].min(index[w]);
+                }
+            } else {
+                if lowlink[v] == index[v] {
+                    loop {
+                        let x = stack.pop().unwrap();
+                        on_stack[x] = false;
+                        comp_of[x] = next_comp;
+                        if x == v {
+                            break;
+                        }
+                    }
+                    next_comp += 1;
+                }
+                call.pop();
+                if let Some(&(parent, _)) = call.last() {
+                    lowlink[parent] = lowlink[parent].min(lowlink[v]);
+                }
+            }
+        }
+    }
+    comp_of
+}
+
+/// Order the members of a single cyclic component.  Every member has an
+/// incoming edge from within the cycle, so a plain topological sort is
+/// impossible; we break soft (RDEPEND) edges before hard (build-time) ones by
+/// repeatedly emitting the member closest to ready — fewest pending hard deps,
+/// then fewest pending soft deps, then largest key for determinism.
+fn order_cycle(
+    members: &[usize],
+    succ_hard: &[Vec<usize>],
+    succ_all: &[Vec<usize>],
+    node_pv: &[(String, (PortagePackage, Version))],
+) -> Vec<usize> {
+    use std::collections::HashSet;
+    let set: HashSet<usize> = members.iter().copied().collect();
+    let mut indeg_hard: HashMap<usize, usize> = members.iter().map(|&m| (m, 0)).collect();
+    let mut indeg_all: HashMap<usize, usize> = members.iter().map(|&m| (m, 0)).collect();
+    for &u in members {
+        for &v in &succ_all[u] {
+            if set.contains(&v) {
+                *indeg_all.get_mut(&v).unwrap() += 1;
+            }
+        }
+        for &v in &succ_hard[u] {
+            if set.contains(&v) {
+                *indeg_hard.get_mut(&v).unwrap() += 1;
+            }
+        }
+    }
+
+    let mut remaining: HashSet<usize> = set.clone();
+    let mut out = Vec::with_capacity(members.len());
+    while !remaining.is_empty() {
+        let pick = *remaining
+            .iter()
+            .min_by(|&&a, &&b| {
+                let ha = indeg_hard[&a];
+                let hb = indeg_hard[&b];
+                let aa = indeg_all[&a];
+                let ab = indeg_all[&b];
+                // Largest key wins ties: compare b before a on the key.
+                ha.cmp(&hb)
+                    .then(aa.cmp(&ab))
+                    .then_with(|| node_pv[b].0.cmp(&node_pv[a].0))
+            })
+            .unwrap();
+        remaining.remove(&pick);
+        out.push(pick);
+        for &v in &succ_all[pick] {
+            if let Some(e) = indeg_all.get_mut(&v) {
+                *e = e.saturating_sub(1);
+            }
+        }
+        for &v in &succ_hard[pick] {
+            if let Some(e) = indeg_hard.get_mut(&v) {
+                *e = e.saturating_sub(1);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -139,6 +139,15 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         .map(|(p, _)| *p.cpn())
         .collect();
 
+    // Packages that need a same-version rebuild (USE change) must stay in the
+    // merge list even though their installed CPV is unchanged — keep them in
+    // their topological position rather than appending them after the target.
+    let reinstall_cpns: std::collections::HashSet<Cpn> = provider
+        .reinstall_deps()
+        .iter()
+        .map(|r| *r.package.cpn())
+        .collect();
+
     let mut order: Vec<_> = provider
         .install_order(&solution)
         .into_iter()
@@ -147,10 +156,12 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
                 return false;
             }
             let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-            !installed_cpvs.contains(&cpv)
+            !installed_cpvs.contains(&cpv) || reinstall_cpns.contains(pkg.cpn())
         })
         .collect();
 
+    // Fallback: any reinstall the solver didn't route through install_order
+    // (rare) is appended so it is not silently dropped.
     {
         let in_order: std::collections::HashSet<Cpn> =
             order.iter().map(|(pkg, _)| *pkg.cpn()).collect();
