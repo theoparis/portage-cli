@@ -34,7 +34,7 @@ bon = "3"
 camino = "1"
 colorchoice-clap = "1"
 cfg-if = "1.0.4"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 criterion = "0.7"
 lasso = { version = "0.7", features = ["multi-threaded"] }
 mimalloc = "0.1.50"

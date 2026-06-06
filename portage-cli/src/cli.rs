@@ -118,7 +118,7 @@ pub struct Cli {
     #[arg(short = 'X', long, value_name = "ATOM")]
     pub exclude: Vec<String>,
 
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, env = "ROOT", value_name = "PATH")]
     pub root: Option<String>,
 
     #[arg(long, value_name = "PATH")]
