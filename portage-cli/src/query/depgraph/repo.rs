@@ -41,16 +41,23 @@ pub(super) fn keyword_accepts(keywords: &[Keyword], arch: &str, accept_keywords:
             kw.arch.as_str() == arch && kw.stability == Stability::Stable
         });
     }
+    // Portage semantics: accepting `~arch` (testing) implies accepting stable
+    // `arch` too — testing is a superset of stable.  `*` accepts any stable
+    // keyword for the arch, `~*` any testing keyword (which also implies stable).
+    let testing_tok = format!("~{arch}");
+    let accept_testing = accept_keywords.iter().any(|k| *k == testing_tok || k == "~*");
+    let accept_stable =
+        accept_testing || accept_keywords.iter().any(|k| k.as_str() == arch || k == "*");
+
     keywords.iter().any(|kw| {
         if kw.arch.as_str() != arch {
             return false;
         }
-        let token = match kw.stability {
-            Stability::Stable => kw.arch.as_str().to_string(),
-            Stability::Testing => format!("~{}", kw.arch.as_str()),
-            _ => return false,
-        };
-        accept_keywords.contains(&token)
+        match kw.stability {
+            Stability::Stable => accept_stable,
+            Stability::Testing => accept_testing,
+            _ => false,
+        }
     })
 }
 
