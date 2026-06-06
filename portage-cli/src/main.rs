@@ -45,7 +45,7 @@ async fn main() {
                 eprintln!("em: no atoms or applet specified. Use --help for usage.");
                 std::process::exit(1);
             }
-            run_emerge(&cli)
+            run_emerge(&cli).await
         }
     };
 
@@ -55,14 +55,37 @@ async fn main() {
     }
 }
 
-fn run_emerge(cli: &cli::Cli) -> Result<()> {
-    let atoms = parse_atoms(&cli.atoms);
-    if cli.pretend || cli.verbose {
-        for atom in &atoms {
-            println!("{atom}");
-        }
+async fn run_emerge(cli: &cli::Cli) -> Result<()> {
+    if !cli.pretend {
+        bail!("not implemented: emerge (use -p for pretend mode)");
     }
-    bail!("not implemented: emerge")
+    let parsed = parse_atoms(&cli.atoms);
+    let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
+    if atoms.is_empty() {
+        bail!("em: no valid atoms");
+    }
+    let resolved = cli.repo_path();
+    let repo_path = camino::Utf8Path::new(&resolved);
+    if !repo_path.is_dir() {
+        bail!("repo not found at {resolved}");
+    }
+    let root = cli.root.as_deref().map(camino::Utf8Path::new);
+    let format = if cli.tree {
+        cli::DepgraphFormat::Tree
+    } else {
+        cli::DepgraphFormat::Pretty
+    };
+    query::depgraph::depgraph(query::depgraph::DepgraphOpts {
+        repo_path,
+        atoms: &atoms,
+        arch: &cli.arch,
+        format,
+        verbose: cli.verbose,
+        empty: cli.emptytree,
+        autounmask: cli.autounmask,
+        autounmask_write: cli.autounmask_write,
+        root,
+    }).await
 }
 
 async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
