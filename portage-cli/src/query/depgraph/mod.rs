@@ -93,9 +93,11 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
     }
 
     let mut root_deps = Vec::new();
+    let mut root_cpns: std::collections::HashSet<Cpn> = std::collections::HashSet::new();
     for target in atoms {
         let dep = Dep::parse(target)
             .map_err(|e| anyhow::anyhow!("bad atom '{target}': {e}"))?;
+        root_cpns.insert(dep.cpn);
         let pkg = repo::target_package(
             &data, &dep, arch, &accept_keywords, &package_mask, &accept_license,
         );
@@ -156,7 +158,13 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
                 return false;
             }
             let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-            !installed_cpvs.contains(&cpv) || reinstall_cpns.contains(pkg.cpn())
+            // Drop packages already installed at this version, except:
+            //  - same-version USE rebuilds (reinstall_cpns), and
+            //  - explicitly-requested targets, which emerge reinstalls by
+            //    default ([ebuild R]) even when already at the best version.
+            !installed_cpvs.contains(&cpv)
+                || reinstall_cpns.contains(pkg.cpn())
+                || root_cpns.contains(pkg.cpn())
         })
         .collect();
 

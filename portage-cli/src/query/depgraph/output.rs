@@ -248,6 +248,30 @@ fn total_line(
     }
 }
 
+/// Build the 7-char status field that follows `[ebuild ` in the merge list,
+/// placing each action letter at the fixed column portage uses so columns line
+/// up across rows: `N`/`NS` (new / new slot), `R` (reinstall), `U`/`D`
+/// (upgrade / downgrade).
+fn status_field(tag: &str) -> String {
+    let mut f = [b' '; 7];
+    match tag {
+        "N" => f[1] = b'N',
+        "NS" => {
+            f[1] = b'N';
+            f[2] = b'S';
+        }
+        "R" => f[2] = b'R',
+        "U" => f[4] = b'U',
+        "D" => f[5] = b'D',
+        "UD" => {
+            f[4] = b'U';
+            f[5] = b'D';
+        }
+        _ => {}
+    }
+    String::from_utf8(f.to_vec()).unwrap()
+}
+
 pub(super) fn print_pretty(
     data: &RepoData,
     order: &[(PortagePackage, Version)],
@@ -287,11 +311,16 @@ pub(super) fn print_pretty(
             (String::new(), String::new())
         };
 
-        let old = old_ver.map(|v| format!(" [{}]", v)).unwrap_or_default();
-        let pad = " ".repeat(6usize.saturating_sub(tag.len()));
+        // emerge shows the previously-installed version only for upgrades and
+        // downgrades, not for same-version reinstalls or new installs.
+        let old = match tag {
+            "U" | "D" => old_ver.map(|v| format!(" [{}]", v)).unwrap_or_default(),
+            _ => String::new(),
+        };
+        let field = status_field(tag);
         writeln!(
             out,
-            "[{C_PKG}ebuild{C_PKG:#}  {C_PKG}{tag}{C_PKG:#}{pad}] {C_PKG}{cpn}-{ver}{slot_repo}{C_PKG:#}{old}{flag_str}",
+            "[{C_PKG}ebuild {field}{C_PKG:#}] {C_PKG}{cpn}-{ver}{slot_repo}{C_PKG:#}{old}{flag_str}",
         ).ok();
     }
 
