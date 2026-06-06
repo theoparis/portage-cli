@@ -1,10 +1,37 @@
 # Design: Autounmask-driven graph completeness
 
-Status: **Draft / proposed**
+Status: **OBSOLETE — premise disproved by Phase 0 (2026-06-06)**
 Author: depgraph work, 2026-06
 Scope: `portage-atom-pubgrub` resolver + `portage-cli` depgraph driver
 
-## 1. Problem
+> ## ⚠️ Phase 0 outcome: this design is not needed
+>
+> The 26-vs-78 completeness gap was **not** caused by legitimately masked
+> packages requiring autounmask relaxation. It was a single keyword-acceptance
+> bug: `keyword_accepts` matched the exact `ACCEPT_KEYWORDS` token, so a testing
+> system (`ACCEPT_KEYWORDS="~arm64"`) rejected every **stable**-keyworded
+> package. In portage, `~arch` implies `arch` (testing ⊇ stable).
+>
+> Fixing that one function (`~arch ⟹ arch`, plus `*`/`~*`) made
+> `em -p www-client/firefox` match `emerge -p` **exactly** (78/78, zero set
+> difference) in a single resolve, and also fixed the `NoSolution` failure on
+> single already-installed stable packages (the target itself had zero accepted
+> versions). Commit: `fix(depgraph): ~arch in ACCEPT_KEYWORDS implies stable arch`.
+>
+> Consequently the relaxation-set abstraction, the iterative-vs-single-shot
+> strategy benchmark, and USE-forcing-for-completeness (Phases 1–3 below) solve a
+> problem that no longer exists and were **not implemented**. The document is
+> kept for the architectural analysis (§2 pipeline, §3 drop mechanics) which
+> remains accurate, and as a record of the investigation.
+>
+> Residual, genuinely-useful follow-ups (tracked separately, not requiring this
+> machinery): autounmask USE-change output is slightly **over-eager** vs emerge
+> (extra flags e.g. cairo `glib svg`, freetype `png`, and `python_targets_*`
+> entries — needs triage: correct-but-emerge-stopped-early vs genuine over-report);
+> install-order parity (RDEPEND in topo sort; reinstalls appended after target);
+> default-reinstall semantics for an explicitly-requested already-installed target.
+
+## 1. Problem (as originally diagnosed — see Phase 0 note above for the real cause)
 
 `em -p www-client/firefox` produces a **26-package** graph; `emerge -p
 www-client/firefox` produces a **78-package** graph. We are missing ~2/3 of the
