@@ -3,7 +3,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Cpv, Dep, UseDefault, UseDepKind, Version};
+use portage_atom::{Cpn, Dep, UseDefault, UseDepKind, Version};
 use crate::repository::IUseDefault;
 use crate::use_config::UseFlagState;
 use pubgrub::{
@@ -47,6 +47,11 @@ pub(crate) struct VersionData {
     pub(crate) repo: Option<Interned<DefaultInterner>>,
     pub(crate) repo_constraints: Vec<convert::RepoConstraint>,
     pub(crate) slot_operator_deps: Vec<convert::SlotOperatorDep>,
+    /// The resolved **desired** USE state for this version: `package.use` and
+    /// global USE applied on top of the ebuild's IUSE defaults.  This is the
+    /// single source of truth for "is flag F on for this version" during both
+    /// branch conversion and the post-solve passes.
+    pub(crate) desired: UseConfig,
 }
 
 impl VersionData {
@@ -67,6 +72,7 @@ impl VersionData {
             repo: None,
             repo_constraints: Vec::new(),
             slot_operator_deps: Vec::new(),
+            desired: UseConfig::new(),
         }
     }
 }
@@ -186,12 +192,10 @@ pub struct PortageDependencyProvider {
     pub(crate) installed_use: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
     pub(crate) installed_iuse: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
     pub(crate) dropped_deps: Vec<DroppedDep>,
-    /// Global USE configuration, retained for post-solve validation of
-    /// non-installed packages (where VDB flags are not available).
+    /// Global USE configuration, still consulted by the OR-branch selection
+    /// heuristic (`use_dep_branch_satisfied`); the post-solve passes use the
+    /// per-version `VersionData::desired` instead.
     pub(crate) use_config: UseConfig,
-    /// Per-package USE overrides (`package.use`), retained so post-solve
-    /// validation can compute the same effective USE the build would see.
-    pub(crate) package_use: Vec<(Dep, Vec<String>)>,
     /// USE flag requirements collected by the post-solve validation pass.
     ///
     /// Covers both reinstall cases (`R`: installed packages with violated
@@ -268,7 +272,23 @@ impl PortageDependencyProvider {
                     &meta.deps.idepend,
                 ];
 
-                let cpv_use_cfg = apply_package_use(&use_config, &cpv, meta.slot, package_use);
+                // The desired USE set for this version: package.use + global USE
+                // overlaid on the ebuild's IUSE defaults.  Folding the defaults in
+                // here makes `cpv_use_cfg` authoritative, so every later reader
+                // (convert + post-solve) consults one resolved set.
+                let mut cpv_use_cfg =
+                    apply_package_use(&use_config, &cpv, meta.slot, package_use).into_owned();
+                for (flag, def) in &meta.iuse_defaults {
+                    if cpv_use_cfg.get_opt(flag).is_none() {
+                        cpv_use_cfg.set(
+                            *flag,
+                            match def {
+                                IUseDefault::Enabled => UseFlagState::Enabled,
+                                IUseDefault::Disabled => UseFlagState::Disabled,
+                            },
+                        );
+                    }
+                }
 
                 let class_results: [convert::ConversionResult; 5] = dep_classes.map(|entries| {
                     convert::convert_deps(
@@ -305,6 +325,7 @@ impl PortageDependencyProvider {
                 version_data.repo = meta.repo;
                 version_data.repo_constraints = all_repo_constraints;
                 version_data.slot_operator_deps = all_slot_operator_deps;
+                version_data.desired = cpv_use_cfg;
 
                 let entry = packages
                     .entry(pkg)
@@ -387,7 +408,6 @@ impl PortageDependencyProvider {
             installed_iuse: HashMap::new(),
             dropped_deps,
             use_config,
-            package_use: package_use.to_vec(),
             use_flag_requirements: Vec::new(),
         }
     }
@@ -871,17 +891,9 @@ impl PortageDependencyProvider {
         if !in_iuse {
             return matches!(dep_default, Some(UseDefault::Enabled));
         }
-        let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-        let cfg = apply_package_use(&self.use_config, &cpv, pkg.slot(), &self.package_use);
-        match cfg.get_opt(flag) {
-            Some(UseFlagState::Enabled) => true,
-            Some(UseFlagState::Disabled) => false,
-            // Not explicitly set (absent or solver-decided) → fall back to the
-            // ebuild's IUSE default (`+flag`).
-            Some(UseFlagState::SolverDecided) | None => vd
-                .and_then(|v| v.iuse_defaults.get(flag))
-                .is_some_and(|d| matches!(d, IUseDefault::Enabled)),
-        }
+        // `desired` already folds package.use, global USE, and IUSE defaults, so
+        // a single lookup gives the flag's effective state for this build.
+        vd.is_some_and(|v| v.desired.get(flag) == UseFlagState::Enabled)
     }
 
     fn use_dep_branch_satisfied(&self, udeps: &[convert::UseDepConstraint]) -> bool {
