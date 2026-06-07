@@ -218,6 +218,20 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         .filter(|e| !e.from.0.is_virtual() && !e.to.0.is_virtual())
         .collect();
 
+    // Emerge convention: list the explicitly-requested target(s) last.  Only
+    // move a target that nothing else depends on (not a `to` in any edge), so
+    // the order stays topologically valid for `em -p A B` where one target is a
+    // dependency of another.
+    {
+        let depended_upon: std::collections::HashSet<Cpn> =
+            edges.iter().map(|e| *e.to.0.cpn()).collect();
+        let (targets, rest): (Vec<_>, Vec<_>) = order.into_iter().partition(|(pkg, _)| {
+            root_cpns.contains(pkg.cpn()) && !depended_upon.contains(pkg.cpn())
+        });
+        order = rest;
+        order.extend(targets);
+    }
+
     let flag_reqs: HashMap<&PortagePackage, &UseFlagRequirement> = provider
         .use_flag_requirements()
         .iter()
