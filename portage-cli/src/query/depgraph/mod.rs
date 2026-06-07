@@ -152,6 +152,16 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         .map(|r| *r.package.cpn())
         .collect();
 
+    // When a rebuild is forced on an installed package and a newer version is
+    // available, favour the upgrade: build the newest version rather than
+    // rebuilding the installed one (matching emerge, and required when the
+    // installed version has been removed from the tree — it can't be rebuilt).
+    let upgrades: HashMap<Cpn, Version> = provider
+        .reinstall_deps()
+        .iter()
+        .filter_map(|r| r.upgrade_to.as_ref().map(|v| (*r.package.cpn(), v.clone())))
+        .collect();
+
     let mut order: Vec<_> = provider
         .install_order(&solution)
         .into_iter()
@@ -167,6 +177,11 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
             !installed_cpvs.contains(&cpv)
                 || reinstall_cpns.contains(pkg.cpn())
                 || root_cpns.contains(pkg.cpn())
+        })
+        .map(|(pkg, ver)| {
+            // Apply the favoured upgrade version if one was recorded.
+            let ver = upgrades.get(pkg.cpn()).cloned().unwrap_or(ver);
+            (pkg, ver)
         })
         .collect();
 
