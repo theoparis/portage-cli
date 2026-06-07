@@ -7,13 +7,33 @@
 //!
 //! # USE Flag Handling
 //!
-//! USE conditionals in dependency strings are handled via a hybrid strategy:
+//! The caller resolves the **desired** USE state per package version (profile,
+//! `make.conf`, `package.use`, and IUSE defaults are *its* concern) and hands it
+//! in; the solver never resolves policy itself. See
+//! `docs/use-and-solver-boundary.md` for the current/desired/needed model.
+//!
+//! USE conditionals in dependency strings are then handled via a hybrid strategy:
 //!
 //! - **User-decided** flags (`enabled` / `disabled`) are eagerly evaluated at
 //!   registration time — the solver never sees those branches.
 //! - **Solver-decided** flags are encoded as virtual packages with two versions
 //!   (0 = OFF, 1 = ON). PubGrub's one-version-per-package constraint provides
 //!   mutual exclusion for free.
+//!
+//! ## `SolverDecided` is experimental and currently dormant
+//!
+//! The solver-decided path lets PubGrub *choose* a flag's value to satisfy
+//! constraints — strictly more powerful than portage, which freezes USE before
+//! resolving. It is the intended lever for two things portage does poorly:
+//! automatic `REQUIRED_USE` satisfaction (not yet parsed anywhere) and
+//! minimal-USE-change conflict resolution.
+//!
+//! No current caller emits [`UseFlagState::SolverDecided`] — the cli hands the
+//! solver a fully fixed USE set — so this path is exercised only by tests. It is
+//! kept intentionally, but treat it as experimental: before it is useful it
+//! needs (a) the fixed-USE mode to match portage well as the baseline, and (b) a
+//! preference model so solver-chosen USE stays minimal and predictable. Do not
+//! rely on it being load-bearing.
 
 mod convert;
 mod error;
