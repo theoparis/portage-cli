@@ -1,7 +1,27 @@
 # Design: USE concerns and the solver boundary
 
-Status: **Agreed, pre-implementation** (2026-06-07)
+Status: **Partially implemented** (2026-06-07)
 Scope: `portage-atom-pubgrub` (+ the `portage-cli` Adapter that feeds it)
+
+## Implementation status
+
+- ✅ **Step 1** — `PackageData` → `BTreeMap<Version, VersionData>` (map-of-structs).
+- ✅ **Step 2** — characterization tests for the autounmask "needed" semantics.
+- ✅ **Step 3a** — single per-version `desired` set (`VersionData::desired`),
+  computed once in `new()`, the one reader for convert + post-solve; provider's
+  stored `package_use` removed; `effective_flag_new` reads `desired`.
+- ⏸ **Step 3b (deferred)** — moving the `desired` *computation* to the caller via
+  `PackageRepository::desired_use` (apply_package_use → cli Adapter). Deferred:
+  39 test call-sites + trait change + the `use_dep_branch_satisfied` heuristic,
+  for boundary purity, after 3a already captured the consolidation value. The
+  provider still runs `apply_package_use` in `new()` and keeps a global
+  `use_config` for the OR-branch heuristic.
+- ✅ **Step 4** — blockers + repo-constraints wired into `em -p`. `check_blockers`
+  now evaluates the blocker's USE condition against the matched package's
+  `desired` (no more false positives like `!glibc[crypt(-)]`) and dedups.
+- ✅ **Step 5** — `SolverDecided` documented as experimental/dormant in `lib.rs`.
+- ✅ **Bonus** — fixed pre-existing post-solve ordering nondeterminism
+  (`use_flag_requirements` and `package.use` entries were HashMap-ordered).
 
 This is the spec for consolidating USE handling and cleaning the crate's
 responsibilities. It supersedes the "canonical effective-USE resolver" idea
