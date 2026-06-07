@@ -198,6 +198,18 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         }
     }
 
+    // Post-solve: blockers (!cat/pkg / !!cat/pkg) and ::repo constraints. The
+    // solver does not model these, so they are reported here against the full
+    // solution (installed packages are favored into it, so installed-vs-new
+    // blockers are covered too).
+    {
+        let mut violations = provider.check_blockers(&solution);
+        violations.extend(provider.check_repo_constraints(&solution));
+        if !violations.is_empty() {
+            output::report_solver_violations(&violations);
+        }
+    }
+
     let edges: Vec<_> = provider
         .dependency_graph(&solution)
         .into_iter()

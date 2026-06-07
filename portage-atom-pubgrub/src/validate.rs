@@ -198,6 +198,7 @@ impl PortageDependencyProvider {
         solution: &pubgrub::SelectedDependencies<PortagePackage, Version>,
     ) -> Vec<Error> {
         let mut conflicts = Vec::new();
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
         for (pkg, version) in solution.iter() {
             let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
@@ -207,12 +208,34 @@ impl PortageDependencyProvider {
                     if !blocker_cpn_slot_matches(sol_pkg, blocker) {
                         return false;
                     }
-                    match &blocker.version {
+                    let version_ok = match &blocker.version {
                         None => true,
                         Some(v) => {
                             let op = blocker.op.unwrap_or(portage_atom::Operator::Equal);
                             version_matches_operator(sol_ver, op, blocker.glob, v)
                         }
+                    };
+                    if !version_ok {
+                        return false;
+                    }
+                    // A conditional blocker (`!foo[bar]`) only applies when the
+                    // matched package actually satisfies the USE condition.
+                    // Without this, packages whose blocked flag is off (e.g.
+                    // `!sys-libs/glibc[crypt(-)]` when glibc lacks `crypt`) are
+                    // reported as false conflicts.
+                    match &blocker.use_deps {
+                        None => true,
+                        Some(use_deps) => use_deps.iter().all(|ud| {
+                            let eff =
+                                self.effective_flag_new(sol_pkg, sol_ver, &ud.flag, ud.default);
+                            match ud.kind {
+                                UseDepKind::Enabled => eff,
+                                UseDepKind::Disabled => !eff,
+                                // Conditional/Equal forms don't occur on blockers in
+                                // practice; treat as applying so a real one isn't missed.
+                                _ => true,
+                            }
+                        }),
                     }
                 });
                 if matches {
@@ -220,11 +243,15 @@ impl PortageDependencyProvider {
                         Some(portage_atom::Blocker::Strong) => "strong(!!)",
                         _ => "weak(!)",
                     };
-                    conflicts.push(Error::BlockerConflict {
-                        pkg: format!("{}-{}", pkg, version),
-                        blocker: blocker.to_string(),
-                        strength,
-                    });
+                    let pkg_str = format!("{}-{}", pkg, version);
+                    let blocker_str = blocker.to_string();
+                    if seen.insert((pkg_str.clone(), blocker_str.clone())) {
+                        conflicts.push(Error::BlockerConflict {
+                            pkg: pkg_str,
+                            blocker: blocker_str,
+                            strength,
+                        });
+                    }
                 }
             }
         }
@@ -527,6 +554,54 @@ mod tests {
         assert!(
             !conflicts.is_empty(),
             "should detect blocker conflict between openssl and libressl"
+        );
+    }
+
+    #[test]
+    fn check_blockers_skips_unsatisfied_use_conditional() {
+        // openssl weakly blocks libressl only when libressl has `foo`; with foo
+        // off, the blocker must not fire (mirrors firefox's `!glibc[crypt(-)]`).
+        let mut repo = InMemoryRepository::new();
+        let empty = || PackageDeps {
+            depend: vec![],
+            rdepend: vec![],
+            bdepend: vec![],
+            pdepend: vec![],
+            idepend: vec![],
+        };
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-libs/openssl-3.0.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                depend: vec![DepEntry::Atom(Dep::parse("!dev-libs/libressl[foo]").unwrap())],
+                ..empty()
+            },
+        );
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-libs/libressl-3.9.0").unwrap(),
+            None,
+            None,
+            vec![Interned::intern("foo")], // foo in IUSE but off (empty config, no default)
+            empty(),
+        );
+
+        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let solution = provider
+            .resolve_targets(vec![
+                (
+                    PortagePackage::unslotted(Cpn::parse("dev-libs/openssl").unwrap()),
+                    PortageVersionSet::any(),
+                ),
+                (
+                    PortagePackage::unslotted(Cpn::parse("dev-libs/libressl").unwrap()),
+                    PortageVersionSet::any(),
+                ),
+            ])
+            .unwrap();
+        assert!(
+            provider.check_blockers(&solution).is_empty(),
+            "conditional blocker must not fire when libressl's `foo` is off"
         );
     }
 

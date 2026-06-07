@@ -889,7 +889,7 @@ impl PortageDependencyProvider {
     /// freshly built.  Mirrors what the build will actually see: `package.use`
     /// and global USE applied on top of the ebuild's IUSE defaults.  For a flag
     /// outside the package's IUSE, only the dep's own `(+)`/`(-)` default applies.
-    fn effective_flag_new(
+    pub(crate) fn effective_flag_new(
         &self,
         pkg: &PortagePackage,
         ver: &Version,

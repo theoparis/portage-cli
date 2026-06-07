@@ -54,6 +54,44 @@ pub(super) fn report_conflicts(conflicts: &[super::conflicts::Conflict]) {
     }
 }
 
+/// Report blocker (`!`/`!!`) and `::repo` violations detected post-solve.
+/// The solver does not model these, so they are surfaced here like slot
+/// conflicts rather than failing resolution.
+pub(super) fn report_solver_violations(violations: &[portage_atom_pubgrub::Error]) {
+    use portage_atom_pubgrub::Error;
+    let mut out = anstream::stderr();
+
+    let blockers: Vec<&Error> = violations
+        .iter()
+        .filter(|e| matches!(e, Error::BlockerConflict { .. }))
+        .collect();
+    if !blockers.is_empty() {
+        writeln!(out, "\n{C_OFF}!!!{C_OFF:#} Blocker conflict(s) detected:\n").ok();
+        for e in blockers {
+            if let Error::BlockerConflict { pkg, blocker, strength } = e {
+                writeln!(
+                    out,
+                    "  {C_PKG}{pkg}{C_PKG:#} blocks {C_OFF}{blocker}{C_OFF:#} ({strength})",
+                )
+                .ok();
+            }
+        }
+    }
+
+    let repos: Vec<&Error> = violations
+        .iter()
+        .filter(|e| matches!(e, Error::RepoConstraintConflict(..)))
+        .collect();
+    if !repos.is_empty() {
+        writeln!(out, "\n{C_OFF}!!!{C_OFF:#} Repository constraint conflict(s) detected:\n").ok();
+        for e in repos {
+            if let Error::RepoConstraintConflict(pkg, msg) = e {
+                writeln!(out, "  {C_PKG}{pkg}{C_PKG:#}: {msg}").ok();
+            }
+        }
+    }
+}
+
 pub(super) fn report_dropped_deps(dropped: &[DroppedDep], data: &RepoData, arch: &str) {
     // These are || alternatives bypassed by resolution — not failures.
     // Deduplicate by package and merge their alternatives across all occurrences.
