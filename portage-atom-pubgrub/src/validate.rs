@@ -51,13 +51,10 @@ impl PortageDependencyProvider {
     ) -> Vec<Error> {
         let mut errors = Vec::new();
         for (pkg, version) in solution.iter() {
-            let Some(data) = self.packages.get(pkg) else {
+            let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
             };
-            let Some(constraints) = data.use_deps.get(version) else {
-                continue;
-            };
-            for constraint in constraints {
+            for constraint in &vd.use_deps {
                 let (target_pkg, target_vs) = &constraint.target;
                 let target_entry = solution
                     .iter()
@@ -69,8 +66,8 @@ impl PortageDependencyProvider {
                 let target_iuse = self
                     .packages
                     .get(target_pkg)
-                    .and_then(|d| d.iuse.get(target_ver))
-                    .map(|v| v.as_slice())
+                    .and_then(|d| d.versions.get(target_ver))
+                    .map(|v| v.iuse.as_slice())
                     .unwrap_or(&[]);
 
                 for ud in &constraint.use_deps {
@@ -156,13 +153,10 @@ impl PortageDependencyProvider {
     ) -> Vec<Error> {
         let mut errors = Vec::new();
         for (pkg, version) in solution.iter() {
-            let Some(data) = self.packages.get(pkg) else {
+            let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
             };
-            let Some(constraints) = data.repo_constraints.get(version) else {
-                continue;
-            };
-            for constraint in constraints {
+            for constraint in &vd.repo_constraints {
                 let (target_pkg, target_vs) = &constraint.target;
                 let target_entry = solution
                     .iter()
@@ -173,7 +167,8 @@ impl PortageDependencyProvider {
                 let target_repo = self
                     .packages
                     .get(target_pkg_key)
-                    .and_then(|d| d.repo.get(target_ver));
+                    .and_then(|d| d.versions.get(target_ver))
+                    .and_then(|v| v.repo.as_ref());
                 match target_repo {
                     Some(r) if *r == constraint.repo => {}
                     _ => {
@@ -204,13 +199,10 @@ impl PortageDependencyProvider {
     ) -> Vec<Error> {
         let mut conflicts = Vec::new();
         for (pkg, version) in solution.iter() {
-            let Some(data) = self.packages.get(pkg) else {
+            let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
             };
-            let Some(blockers) = data.blockers.get(version) else {
-                continue;
-            };
-            for blocker in blockers {
+            for blocker in &vd.blockers {
                 let matches = solution.iter().any(|(sol_pkg, sol_ver)| {
                     if !blocker_cpn_slot_matches(sol_pkg, blocker) {
                         return false;
@@ -256,13 +248,10 @@ impl PortageDependencyProvider {
     ) -> Vec<SlotOperatorBinding> {
         let mut bindings = Vec::new();
         for (pkg, version) in solution.iter() {
-            let Some(data) = self.packages.get(pkg) else {
+            let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
             };
-            let Some(ops) = data.slot_operator_deps.get(version) else {
-                continue;
-            };
-            for op_dep in ops {
+            for op_dep in &vd.slot_operator_deps {
                 let bound_slot = solution.iter().find_map(|(sol_pkg, sol_ver)| {
                     if sol_pkg.cpn() == op_dep.target.0.cpn() && op_dep.target.1.contains(sol_ver) {
                         Some((sol_pkg.slot(), sol_ver.clone()))

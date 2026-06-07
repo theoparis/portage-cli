@@ -29,35 +29,50 @@ pub enum InstalledPolicy {
     Lock,
 }
 
-pub(crate) struct VersionDeps {
+/// All solver-relevant data for one package version.
+///
+/// Previously this was eight parallel `BTreeMap<Version, _>` fields on
+/// `PackageData`; collapsing them into one struct keeps a version's data
+/// cohesive and removes the hand-synced map inserts.
+pub(crate) struct VersionData {
     /// Merged deps for PubGrub's DependencyProvider trait.
     pub(crate) merged: Dependencies<PortagePackage, PortageVersionSet, String>,
     /// Per-class converted deps with optional gating USE flag.
     /// Index: 0=DEPEND, 1=RDEPEND, 2=BDEPEND, 3=PDEPEND, 4=IDEPEND
     pub(crate) by_class: Vec<Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>>,
+    pub(crate) blockers: Vec<Dep>,
+    pub(crate) use_deps: Vec<convert::UseDepConstraint>,
+    pub(crate) iuse: Vec<Interned<DefaultInterner>>,
+    pub(crate) iuse_defaults: HashMap<Interned<DefaultInterner>, IUseDefault>,
+    pub(crate) repo: Option<Interned<DefaultInterner>>,
+    pub(crate) repo_constraints: Vec<convert::RepoConstraint>,
+    pub(crate) slot_operator_deps: Vec<convert::SlotOperatorDep>,
 }
 
-impl VersionDeps {
-    /// Build from pre-extracted per-class requirements.  `by_class` is moved
-    /// in directly; `merged` is collected from a flattened view of it (flag stripped).
+impl VersionData {
+    /// Build a deps-only version (no blockers/use-deps/etc.), used for synthetic
+    /// solver nodes: the root target set and OR-group / USE-decision branches.
+    /// `merged` is collected from a flattened view of `by_class` (flag stripped).
     fn from_by_class(by_class: Vec<Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>>) -> Self {
         let merged = Dependencies::Available(
             by_class.iter().flatten().map(|(p, vs, _)| (p.clone(), vs.clone())).collect()
         );
-        Self { merged, by_class }
+        Self {
+            merged,
+            by_class,
+            blockers: Vec::new(),
+            use_deps: Vec::new(),
+            iuse: Vec::new(),
+            iuse_defaults: HashMap::new(),
+            repo: None,
+            repo_constraints: Vec::new(),
+            slot_operator_deps: Vec::new(),
+        }
     }
 }
 
 pub(crate) struct PackageData {
-    pub(crate) versions: BTreeMap<Version, VersionDeps>,
-    pub(crate) blockers: BTreeMap<Version, Vec<Dep>>,
-    pub(crate) use_deps: BTreeMap<Version, Vec<convert::UseDepConstraint>>,
-    pub(crate) iuse: BTreeMap<Version, Vec<Interned<DefaultInterner>>>,
-    pub(crate) iuse_defaults:
-        BTreeMap<Version, HashMap<Interned<DefaultInterner>, IUseDefault>>,
-    pub(crate) repo: BTreeMap<Version, Interned<DefaultInterner>>,
-    pub(crate) repo_constraints: BTreeMap<Version, Vec<convert::RepoConstraint>>,
-    pub(crate) slot_operator_deps: BTreeMap<Version, Vec<convert::SlotOperatorDep>>,
+    pub(crate) versions: BTreeMap<Version, VersionData>,
 }
 
 /// A package that is already installed, with its version and policy.
@@ -282,42 +297,19 @@ impl PortageDependencyProvider {
                     by_class.push(result.requirements);
                 }
 
-                let ver_deps = VersionDeps::from_by_class(by_class);
-                let entry = packages.entry(pkg).or_insert_with(|| PackageData {
-                    versions: BTreeMap::new(),
-                    blockers: BTreeMap::new(),
-                    use_deps: BTreeMap::new(),
-                    iuse: BTreeMap::new(),
-                    iuse_defaults: BTreeMap::new(),
-                    repo: BTreeMap::new(),
-                    repo_constraints: BTreeMap::new(),
-                    slot_operator_deps: BTreeMap::new(),
-                });
-                let ver = cpv.version.clone();
-                entry.versions.insert(ver.clone(), ver_deps);
-                if !all_blockers.is_empty() {
-                    entry.blockers.insert(ver.clone(), all_blockers);
-                }
-                if !all_use_deps.is_empty() {
-                    entry.use_deps.insert(ver.clone(), all_use_deps);
-                }
-                if !meta.iuse.is_empty() {
-                    entry.iuse.insert(ver.clone(), meta.iuse);
-                }
-                if !meta.iuse_defaults.is_empty() {
-                    entry.iuse_defaults.insert(ver.clone(), meta.iuse_defaults);
-                }
-                if let Some(r) = meta.repo {
-                    entry.repo.insert(ver.clone(), r);
-                }
-                if !all_repo_constraints.is_empty() {
-                    entry
-                        .repo_constraints
-                        .insert(ver.clone(), all_repo_constraints);
-                }
-                if !all_slot_operator_deps.is_empty() {
-                    entry.slot_operator_deps.insert(ver, all_slot_operator_deps);
-                }
+                let mut version_data = VersionData::from_by_class(by_class);
+                version_data.blockers = all_blockers;
+                version_data.use_deps = all_use_deps;
+                version_data.iuse = meta.iuse;
+                version_data.iuse_defaults = meta.iuse_defaults;
+                version_data.repo = meta.repo;
+                version_data.repo_constraints = all_repo_constraints;
+                version_data.slot_operator_deps = all_slot_operator_deps;
+
+                let entry = packages
+                    .entry(pkg)
+                    .or_insert_with(|| PackageData { versions: BTreeMap::new() });
+                entry.versions.insert(cpv.version.clone(), version_data);
 
                 register_virtual_choices(&mut packages, all_virtual_choices);
             }
@@ -419,7 +411,7 @@ impl PortageDependencyProvider {
         // use it even when it has been removed from the repository tree.
         if let Some(pkg_data) = self.packages.get_mut(&installed.package) {
             if !pkg_data.versions.contains_key(&installed.version) {
-                let vd = VersionDeps::from_by_class(vec![vec![], vec![], vec![], vec![], vec![]]);
+                let vd = VersionData::from_by_class(vec![vec![], vec![], vec![], vec![], vec![]]);
                 pkg_data.versions.insert(installed.version.clone(), vd);
             }
         }
@@ -506,28 +498,14 @@ impl PortageDependencyProvider {
         let root = PortagePackage::synthetic_root();
         let root_ver = Version::parse("0").unwrap();
 
-        let constraints: DependencyConstraints<PortagePackage, PortageVersionSet> =
-            targets.iter().map(|(p, vs)| (p.clone(), vs.clone())).collect();
-        // Root targets have no gating flag.
+        // Root targets have no gating flag; merged is derived from by_class.
         let targets_with_flag: Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)> =
             targets.into_iter().map(|(p, vs)| (p, vs, None)).collect();
-        let vd = VersionDeps {
-            merged: Dependencies::Available(constraints),
-            by_class: vec![targets_with_flag, vec![], vec![], vec![], vec![]],
-        };
+        let vd = VersionData::from_by_class(vec![targets_with_flag, vec![], vec![], vec![], vec![]]);
         let entry = self
             .packages
             .entry(root.clone())
-            .or_insert_with(|| PackageData {
-                versions: BTreeMap::new(),
-                blockers: BTreeMap::new(),
-                use_deps: BTreeMap::new(),
-                iuse: BTreeMap::new(),
-                iuse_defaults: BTreeMap::new(),
-                repo: BTreeMap::new(),
-                repo_constraints: BTreeMap::new(),
-                slot_operator_deps: BTreeMap::new(),
-            });
+            .or_insert_with(|| PackageData { versions: BTreeMap::new() });
         entry.versions.insert(root_ver.clone(), vd);
 
         let solution = pubgrub::resolve(self, root.clone(), root_ver)?;
@@ -546,7 +524,7 @@ impl PortageDependencyProvider {
 
     /// Returns true if the deps of `vd` transitively reach any installed CPN,
     /// descending up to `depth` levels through `__internal__/*` virtual packages.
-    fn deps_reach_installed(&self, vd: &VersionDeps, depth: u8) -> bool {
+    fn deps_reach_installed(&self, vd: &VersionData, depth: u8) -> bool {
         let Dependencies::Available(ref constraints) = vd.merged else {
             return false;
         };
@@ -653,12 +631,10 @@ impl PortageDependencyProvider {
 
             // -- main solution packages --
             for (pkg, ver) in solution.iter() {
-                let Some(data) = self.packages.get(pkg) else {
+                let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(ver)) else {
                     continue;
                 };
-                let Some(udeps) = data.use_deps.get(ver) else {
-                    continue;
-                };
+                let udeps = &vd.use_deps;
 
                 for constraint in udeps {
                     let (target_pkg, vs) = &constraint.target;
@@ -707,8 +683,12 @@ impl PortageDependencyProvider {
                             let iuse = self
                                 .packages
                                 .get(target_pkg)
-                                .and_then(|d| d.iuse.get(target_ver))
-                                .map(Vec::as_slice)
+                                .and_then(|d| d.versions.get(target_ver))
+                                .map(|vd| vd.iuse.as_slice())
+                                // Empty == absent: a synthetic installed entry (or a
+                                // repo version with no IUSE) must fall back to the
+                                // VDB-recorded IUSE, matching pre-refactor behaviour.
+                                .filter(|s| !s.is_empty())
                                 .or_else(|| {
                                     self.installed_iuse.get(target_pkg).map(Vec::as_slice)
                                 })
@@ -771,8 +751,8 @@ impl PortageDependencyProvider {
                 upgrade_to.insert(pkg.clone(), new_ver.clone());
 
                 // Expand the newer version's USE dep constraints.
-                let Some(data) = self.packages.get(&pkg) else { continue };
-                let Some(udeps) = data.use_deps.get(&new_ver) else { continue };
+                let Some(vd) = self.packages.get(&pkg).and_then(|d| d.versions.get(&new_ver)) else { continue };
+                let udeps = &vd.use_deps;
 
                 // The "parent" is the upgraded package itself.
                 let parent_is_installed = self.installed.contains_key(&pkg);
@@ -797,8 +777,8 @@ impl PortageDependencyProvider {
                         let dep_effective_enabled = if is_installed {
                             let active = self.installed_use.get(target_pkg).map(Vec::as_slice).unwrap_or(&[]);
                             let iuse = self.packages.get(target_pkg)
-                                .and_then(|d| d.iuse.get(target_ver))
-                                .map(Vec::as_slice)
+                                .and_then(|d| d.versions.get(target_ver))
+                                .map(|vd| vd.iuse.as_slice())
                                 .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
                                 .unwrap_or(&[]);
                             let in_iuse = iuse.contains(&ud.flag);
@@ -886,10 +866,8 @@ impl PortageDependencyProvider {
         flag: &Interned<DefaultInterner>,
         dep_default: Option<UseDefault>,
     ) -> bool {
-        let data = self.packages.get(pkg);
-        let in_iuse = data
-            .and_then(|d| d.iuse.get(ver))
-            .is_some_and(|i| i.contains(flag));
+        let vd = self.packages.get(pkg).and_then(|d| d.versions.get(ver));
+        let in_iuse = vd.is_some_and(|v| v.iuse.contains(flag));
         if !in_iuse {
             return matches!(dep_default, Some(UseDefault::Enabled));
         }
@@ -900,9 +878,8 @@ impl PortageDependencyProvider {
             Some(UseFlagState::Disabled) => false,
             // Not explicitly set (absent or solver-decided) → fall back to the
             // ebuild's IUSE default (`+flag`).
-            Some(UseFlagState::SolverDecided) | None => data
-                .and_then(|d| d.iuse_defaults.get(ver))
-                .and_then(|m| m.get(flag))
+            Some(UseFlagState::SolverDecided) | None => vd
+                .and_then(|v| v.iuse_defaults.get(flag))
                 .is_some_and(|d| matches!(d, IUseDefault::Enabled)),
         }
     }
@@ -924,8 +901,9 @@ impl PortageDependencyProvider {
             let iuse = self
                 .packages
                 .get(target_pkg)
-                .and_then(|d| d.iuse.get(inst_ver))
-                .map(Vec::as_slice)
+                .and_then(|d| d.versions.get(inst_ver))
+                .map(|vd| vd.iuse.as_slice())
+                .filter(|s| !s.is_empty()) // empty == absent (see compute_use_flag_requirements)
                 .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
                 .unwrap_or(&[]);
             for ud in &constraint.use_deps {
@@ -1063,9 +1041,9 @@ impl DependencyProvider for PortageDependencyProvider {
                         .zip(direct_installed.iter())
                         .map(|(&ver, &inst)| {
                             inst && data
-                                .use_deps
+                                .versions
                                 .get(ver)
-                                .map(|ud| self.use_dep_branch_satisfied(ud))
+                                .map(|vd| self.use_dep_branch_satisfied(&vd.use_deps))
                                 .unwrap_or(true)
                         })
                         .collect();
@@ -1170,29 +1148,20 @@ fn register_virtual_choices(
     choices: Vec<convert::VirtualChoice>,
 ) {
     for vc in choices {
-        let entry = packages.entry(vc.package).or_insert_with(|| PackageData {
-            versions: BTreeMap::new(),
-            blockers: BTreeMap::new(),
-            use_deps: BTreeMap::new(),
-            iuse: BTreeMap::new(),
-            iuse_defaults: BTreeMap::new(),
-            repo: BTreeMap::new(),
-            repo_constraints: BTreeMap::new(),
-            slot_operator_deps: BTreeMap::new(),
-        });
+        let entry = packages
+            .entry(vc.package)
+            .or_insert_with(|| PackageData { versions: BTreeMap::new() });
         for (ver, deps) in vc.versions {
-            let merged = Dependencies::Available(
-                deps.iter().map(|(p, vs, _)| (p.clone(), vs.clone())).collect()
-            );
-            let by_class = vec![deps, vec![], vec![], vec![], vec![]];
-            let vd = VersionDeps { merged, by_class };
+            let vd = VersionData::from_by_class(vec![deps, vec![], vec![], vec![], vec![]]);
             entry.versions.insert(ver, vd);
         }
-        // Store per-branch USE dep constraints so choose_version() can evaluate
+        // Attach per-branch USE dep constraints so choose_version() can evaluate
         // which OR-group branch is already satisfied without rebuilds.
         for (ver, udeps) in vc.branch_use_deps {
-            if !udeps.is_empty() {
-                entry.use_deps.insert(ver, udeps);
+            if !udeps.is_empty()
+                && let Some(vd) = entry.versions.get_mut(&ver)
+            {
+                vd.use_deps = udeps;
             }
         }
     }
