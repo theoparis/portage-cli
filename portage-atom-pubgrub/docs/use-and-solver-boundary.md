@@ -1,27 +1,43 @@
 # Design: USE concerns and the solver boundary
 
-Status: **Partially implemented** (2026-06-07)
+Status: **Implemented** (2026-06-07)
 Scope: `portage-atom-pubgrub` (+ the `portage-cli` Adapter that feeds it)
 
 ## Implementation status
 
 - ✅ **Step 1** — `PackageData` → `BTreeMap<Version, VersionData>` (map-of-structs).
 - ✅ **Step 2** — characterization tests for the autounmask "needed" semantics.
-- ✅ **Step 3a** — single per-version `desired` set (`VersionData::desired`),
-  computed once in `new()`, the one reader for convert + post-solve; provider's
-  stored `package_use` removed; `effective_flag_new` reads `desired`.
-- ⏸ **Step 3b (deferred)** — moving the `desired` *computation* to the caller via
-  `PackageRepository::desired_use` (apply_package_use → cli Adapter). Deferred:
-  39 test call-sites + trait change + the `use_dep_branch_satisfied` heuristic,
-  for boundary purity, after 3a already captured the consolidation value. The
-  provider still runs `apply_package_use` in `new()` and keeps a global
-  `use_config` for the OR-branch heuristic.
+- ✅ **Step 3a** — single per-version `desired` set (`VersionData::desired`);
+  `effective_flag_new` reads it; provider's stored `package_use` removed.
+- ✅ **Step 3b** — `desired` computation moved to the caller via
+  `PackageRepository::desired_use`. `new(repo)` drops its USE params; the
+  provider's global `use_config` field is gone (`use_dep_branch_satisfied` reads
+  per-version `desired`); `apply_package_use` resolution now lives in the cli
+  Adapter / `InMemoryRepository`. No profile/make.conf/package.use/ACCEPT_*
+  resolution remains in the crate (verified: only explanatory comments mention them).
 - ✅ **Step 4** — blockers + repo-constraints wired into `em -p`. `check_blockers`
   now evaluates the blocker's USE condition against the matched package's
   `desired` (no more false positives like `!glibc[crypt(-)]`) and dedups.
 - ✅ **Step 5** — `SolverDecided` documented as experimental/dormant in `lib.rs`.
 - ✅ **Bonus** — fixed pre-existing post-solve ordering nondeterminism
   (`use_flag_requirements` and `package.use` entries were HashMap-ordered).
+
+## Self-review notes (residual, non-blocking)
+
+- `apply_package_use` is now used only by the cli (3 call sites) yet still lives
+  in `provider.rs`. Natural future home: `use_config.rs`. Re-export path
+  (`portage_atom_pubgrub::apply_package_use`) can stay unchanged.
+- `convert_deps` still takes an `iuse_defaults` argument, now redundant since
+  `desired` arrives with defaults folded in (`get_with_iuse_default` returns the
+  pre-set value). Harmless; can be dropped for clarity.
+- The two post-solve loops in `compute_use_flag_requirements` were **not**
+  collapsed: they are not pure duplicates (the second is the
+  upgrade-instead-of-rebuild cascade over installed packages). The spec
+  overstated this; both now read the single `desired` source, which was the
+  real goal.
+- `desired_use`'s IUSE-default fold is shared via `UseConfig::fold_iuse_defaults`
+  for `InMemoryRepository`, but the cli/benchmark Adapters inline the loop (they
+  read `portage_metadata::Iuse`, a different shape). Minor duplication.
 
 This is the spec for consolidating USE handling and cleaning the crate's
 responsibilities. It supersedes the "canonical effective-USE resolver" idea

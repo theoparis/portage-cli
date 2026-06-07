@@ -93,7 +93,7 @@ impl UseConfig {
         defaults: &HashMap<Interned<DefaultInterner>, IUseDefault>,
     ) {
         for (flag, def) in defaults {
-            if self.flags.get(flag).is_none() {
+            if !self.flags.contains_key(flag) {
                 self.flags.insert(
                     *flag,
                     match def {
