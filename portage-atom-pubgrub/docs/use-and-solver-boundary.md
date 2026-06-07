@@ -22,22 +22,20 @@ Scope: `portage-atom-pubgrub` (+ the `portage-cli` Adapter that feeds it)
 - ✅ **Bonus** — fixed pre-existing post-solve ordering nondeterminism
   (`use_flag_requirements` and `package.use` entries were HashMap-ordered).
 
-## Self-review notes (residual, non-blocking)
+## Self-review notes
 
-- `apply_package_use` is now used only by the cli (3 call sites) yet still lives
-  in `provider.rs`. Natural future home: `use_config.rs`. Re-export path
-  (`portage_atom_pubgrub::apply_package_use`) can stay unchanged.
-- `convert_deps` still takes an `iuse_defaults` argument, now redundant since
-  `desired` arrives with defaults folded in (`get_with_iuse_default` returns the
-  pre-set value). Harmless; can be dropped for clarity.
-- The two post-solve loops in `compute_use_flag_requirements` were **not**
+- ✅ `apply_package_use` moved from `provider/mod.rs` to `use_config.rs` (its
+  natural home); re-export path unchanged.
+- ✅ `convert_deps`'s redundant `iuse_defaults` argument dropped — `desired`
+  arrives with defaults folded (`UseConfig::fold_iuse_defaults`), so convert
+  reads `use_config.get(flag)` directly.
+- (kept) The two post-solve loops in `compute_use_flag_requirements` were **not**
   collapsed: they are not pure duplicates (the second is the
   upgrade-instead-of-rebuild cascade over installed packages). The spec
-  overstated this; both now read the single `desired` source, which was the
-  real goal.
-- `desired_use`'s IUSE-default fold is shared via `UseConfig::fold_iuse_defaults`
-  for `InMemoryRepository`, but the cli/benchmark Adapters inline the loop (they
-  read `portage_metadata::Iuse`, a different shape). Minor duplication.
+  overstated this; both now read the single `desired` source, which was the goal.
+- (kept, minor) `desired_use`'s IUSE-default fold is shared via
+  `UseConfig::fold_iuse_defaults` for `InMemoryRepository`, but the cli/benchmark
+  Adapters inline the loop (they read `portage_metadata::Iuse`, a different shape).
 
 This is the spec for consolidating USE handling and cleaning the crate's
 responsibilities. It supersedes the "canonical effective-USE resolver" idea
