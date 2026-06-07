@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use portage_atom::interner::{DefaultInterner, Interned};
+use portage_atom::{Cpv, Dep};
 
 use crate::repository::IUseDefault;
 
@@ -113,6 +115,37 @@ impl UseConfig {
             .map(|(f, _)| *f)
             .collect()
     }
+}
+
+/// Apply per-package USE flag overrides on top of a base [`UseConfig`].
+///
+/// Scans `package_use` in order and applies any entries whose atom matches
+/// `cpv`.  Returns `Borrowed(base)` when no entries match to avoid a clone.
+/// This is policy resolution the *caller* performs to build the desired set;
+/// the solver itself never calls it.
+pub fn apply_package_use<'a>(
+    base: &'a UseConfig,
+    cpv: &Cpv,
+    slot: Option<Interned<DefaultInterner>>,
+    package_use: &[(Dep, Vec<String>)],
+) -> Cow<'a, UseConfig> {
+    if package_use.is_empty() {
+        return Cow::Borrowed(base);
+    }
+    let mut cfg = base.clone();
+    for (dep, flags) in package_use {
+        if crate::validate::dep_matches_cpv(dep, cpv, slot) {
+            for flag in flags {
+                let name = flag.strip_prefix('+').unwrap_or(flag);
+                if let Some(stripped) = name.strip_prefix('-') {
+                    cfg.disable(Interned::intern(stripped));
+                } else {
+                    cfg.enable(Interned::intern(name));
+                }
+            }
+        }
+    }
+    Cow::Owned(cfg)
 }
 
 #[cfg(test)]

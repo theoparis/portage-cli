@@ -5,7 +5,6 @@ use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Dep, DepEntry, Operator, SlotDep, SlotOperator, UseDep, Version};
 
 use crate::package::PortagePackage;
-use crate::repository::IUseDefault;
 use crate::use_config::{UseConfig, UseFlagState};
 use crate::version_set::PortageVersionSet;
 
@@ -112,13 +111,11 @@ pub fn convert_deps(
     cpn_str: &str,
     use_config: &UseConfig,
     slot_map: &SlotMap,
-    iuse_defaults: &HashMap<Interned<DefaultInterner>, IUseDefault>,
 ) -> ConversionResult {
     let mut ctx = ConvertCtx {
         cpn_str,
         use_config,
         slot_map,
-        iuse_defaults,
         requirements: Vec::new(),
         blockers: Vec::new(),
         virtual_choices: Vec::new(),
@@ -146,7 +143,6 @@ struct ConvertCtx<'a> {
     cpn_str: &'a str,
     use_config: &'a UseConfig,
     slot_map: &'a SlotMap,
-    iuse_defaults: &'a HashMap<Interned<DefaultInterner>, IUseDefault>,
     requirements: Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>,
     blockers: Vec<Dep>,
     virtual_choices: Vec<VirtualChoice>,
@@ -172,9 +168,9 @@ impl ConvertCtx<'_> {
                 negate,
                 children,
             } => {
-                let state = self
-                    .use_config
-                    .get_with_iuse_default(flag, self.iuse_defaults.get(flag).copied());
+                // `use_config` is the caller-resolved desired set, with IUSE
+                // defaults already folded in, so a plain lookup is authoritative.
+                let state = self.use_config.get(flag);
                 match state {
                     UseFlagState::Enabled => {
                         if !negate {
@@ -461,14 +457,12 @@ impl ConvertCtx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repository::IUseDefault;
 
     fn empty_slots() -> SlotMap {
         HashMap::new()
     }
 
-    fn empty_iuse_defaults() -> HashMap<Interned<DefaultInterner>, IUseDefault> {
-        HashMap::new()
-    }
 
     #[test]
     fn convert_simple_atom() {
@@ -479,7 +473,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.requirements[0].0.to_string(), "dev-libs/openssl");
@@ -495,7 +488,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
         assert!(
@@ -525,7 +517,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
     }
@@ -539,7 +530,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert!(result.requirements.is_empty());
     }
@@ -553,7 +543,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.blockers.len(), 1);
     }
@@ -567,7 +556,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
 
         // Should have 1 requirement: the virtual choice package
@@ -602,7 +590,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
 
         assert_eq!(result.virtual_choices.len(), 1);
@@ -622,7 +609,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
 
         // Should have 1 requirement: the virtual USE package
@@ -660,7 +646,6 @@ mod tests {
             "test/pkg",
             &config,
             &slots,
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.requirements[0].0.to_string(), "dev-libs/openssl:0");
@@ -691,7 +676,6 @@ mod tests {
             "test/pkg",
             &config,
             &slots,
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
         assert!(
@@ -722,7 +706,6 @@ mod tests {
             "test/pkg",
             &config,
             &slots,
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.requirements[0].0.to_string(), "dev-libs/openssl:0");
@@ -746,7 +729,6 @@ mod tests {
             "test/pkg",
             &config,
             &slots,
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.requirements[0].0.to_string(), "dev-libs/openssl:0");
@@ -761,7 +743,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.requirements[0].0.to_string(), "dev-libs/openssl:0");
@@ -776,7 +757,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.use_deps.len(), 1);
@@ -793,7 +773,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.use_deps.len(), 1);
         assert_eq!(
@@ -811,7 +790,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.use_deps.len(), 1);
         assert_eq!(result.use_deps[0].use_deps.len(), 2);
@@ -826,7 +804,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert!(result.use_deps.is_empty());
     }
@@ -840,7 +817,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(
             result.blockers.len(),
@@ -860,7 +836,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(
             result.blockers.len(),
@@ -870,13 +845,17 @@ mod tests {
         assert_eq!(result.blockers[0].cpn.package.as_str(), "openssl-compat");
     }
 
+    // IUSE defaults are folded into the desired config by the caller (via
+    // UseConfig::fold_iuse_defaults) before conversion; convert then reads the
+    // resolved state.  These tests fold first, then convert.
     #[test]
     fn convert_iuse_default_enabled() {
-        let config = UseConfig::new();
-        let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
+        let mut config = UseConfig::new();
         let mut defaults = HashMap::new();
         defaults.insert(Interned::intern("ssl"), IUseDefault::Enabled);
-        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots(), &defaults);
+        config.fold_iuse_defaults(&defaults);
+        let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(
             result.requirements.len(),
             1,
@@ -886,11 +865,12 @@ mod tests {
 
     #[test]
     fn convert_iuse_default_disabled() {
-        let config = UseConfig::new();
-        let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
+        let mut config = UseConfig::new();
         let mut defaults = HashMap::new();
         defaults.insert(Interned::intern("ssl"), IUseDefault::Disabled);
-        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots(), &defaults);
+        config.fold_iuse_defaults(&defaults);
+        let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert!(
             result.requirements.is_empty(),
             "ssl? should skip deps when IUSE default is -ssl and config is unset"
@@ -901,10 +881,11 @@ mod tests {
     fn convert_iuse_default_overridden_by_config() {
         let mut config = UseConfig::new();
         config.disable(Interned::intern("ssl"));
-        let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
         let mut defaults = HashMap::new();
         defaults.insert(Interned::intern("ssl"), IUseDefault::Enabled);
-        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots(), &defaults);
+        config.fold_iuse_defaults(&defaults); // explicit -ssl wins; fold leaves it
+        let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert!(
             result.requirements.is_empty(),
             "explicit config should override IUSE default"
@@ -921,7 +902,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(
             result.requirements.len(),
@@ -936,7 +916,6 @@ mod tests {
             "test/pkg",
             &config2,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert!(
             result2.requirements.is_empty(),
@@ -953,7 +932,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.virtual_choices.len(), 1);
         assert_eq!(result.virtual_choices[0].versions.len(), 2);
@@ -967,7 +945,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert!(result.requirements.is_empty());
         assert!(result.blockers.is_empty());
@@ -983,7 +960,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.repo_constraints.len(), 1);
         assert_eq!(result.repo_constraints[0].repo.as_str(), "gentoo");
@@ -998,7 +974,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
         assert!(
@@ -1022,7 +997,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.requirements.len(), 1);
         assert!(
@@ -1060,7 +1034,6 @@ mod tests {
             "test/pkg",
             &config,
             &slots,
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.slot_operator_deps.len(), 1);
         assert_eq!(result.slot_operator_deps[0].operator, SlotOperator::Equal);
@@ -1076,7 +1049,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert_eq!(result.slot_operator_deps.len(), 1);
         assert_eq!(result.slot_operator_deps[0].operator, SlotOperator::Equal);
@@ -1095,7 +1067,6 @@ mod tests {
             "test/pkg",
             &config,
             &empty_slots(),
-            &empty_iuse_defaults(),
         );
         assert!(
             result.slot_operator_deps.is_empty(),

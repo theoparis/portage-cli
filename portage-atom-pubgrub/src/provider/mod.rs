@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use portage_atom::interner::{DefaultInterner, Interned};
@@ -102,35 +101,6 @@ pub struct InstalledPackage {
     /// that case `PackageData.iuse` has no entry for the installed version, so we
     /// fall back to the VDB-recorded IUSE to avoid false-positive reinstall reports.
     pub iuse: Vec<Interned<DefaultInterner>>,
-}
-
-/// Apply per-package USE flag overrides on top of a base [`UseConfig`].
-///
-/// Scans `package_use` in order and applies any entries whose atom matches
-/// `cpv`.  Returns `Borrowed(base)` when no entries match to avoid a clone.
-pub fn apply_package_use<'a>(
-    base: &'a UseConfig,
-    cpv: &portage_atom::Cpv,
-    slot: Option<Interned<DefaultInterner>>,
-    package_use: &[(Dep, Vec<String>)],
-) -> Cow<'a, UseConfig> {
-    if package_use.is_empty() {
-        return Cow::Borrowed(base);
-    }
-    let mut cfg = base.clone();
-    for (dep, flags) in package_use {
-        if crate::validate::dep_matches_cpv(dep, cpv, slot) {
-            for flag in flags {
-                let name = flag.strip_prefix('+').unwrap_or(flag);
-                if let Some(stripped) = name.strip_prefix('-') {
-                    cfg.disable(portage_atom::interner::Interned::intern(stripped));
-                } else {
-                    cfg.enable(portage_atom::interner::Interned::intern(name));
-                }
-            }
-        }
-    }
-    Cow::Owned(cfg)
 }
 
 /// A dependency that was dropped because no versions were available.
@@ -269,13 +239,7 @@ impl PortageDependencyProvider {
                 let cpv_use_cfg = repo.desired_use(&cpv);
 
                 let class_results: [convert::ConversionResult; 5] = dep_classes.map(|entries| {
-                    convert::convert_deps(
-                        entries,
-                        &cpn_str,
-                        &cpv_use_cfg,
-                        &slot_map,
-                        &meta.iuse_defaults,
-                    )
+                    convert::convert_deps(entries, &cpn_str, &cpv_use_cfg, &slot_map)
                 });
 
                 let mut all_blockers = Vec::new();

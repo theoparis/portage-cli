@@ -49,10 +49,10 @@ pub use error::{Error, Result};
 pub use graph::{DepClass, DepEdge};
 pub use portage_atom::interner::{DefaultInterner, Interned};
 pub use package::PortagePackage;
-pub use provider::{DroppedDep, InstalledPackage, InstalledPolicy, PortageDependencyProvider, UseFlagRequirement, apply_package_use};
+pub use provider::{DroppedDep, InstalledPackage, InstalledPolicy, PortageDependencyProvider, UseFlagRequirement};
 pub use repository::{
     IUseDefault, InMemoryRepository, PackageDeps, PackageRepository, PackageVersions,
 };
-pub use use_config::{UseConfig, UseFlagState};
+pub use use_config::{UseConfig, UseFlagState, apply_package_use};
 pub use validate::SlotOperatorBinding;
 pub use version_set::PortageVersionSet;
