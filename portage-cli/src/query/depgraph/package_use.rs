@@ -88,10 +88,15 @@ pub(super) fn build_entries(
             .push(PackageUseLine { comments, atom, flags });
     }
 
-    by_file
+    // by_file is a HashMap; sort by filename so the report/written output is
+    // reproducible across runs.  Lines within a file follow flag_reqs order,
+    // which is already deterministic (use_flag_requirements is sorted).
+    let mut entries: Vec<PackageUseEntry> = by_file
         .into_iter()
         .map(|(filename, lines)| PackageUseEntry { filename, lines })
-        .collect()
+        .collect();
+    entries.sort_by(|a, b| a.filename.cmp(&b.filename));
+    entries
 }
 
 fn ver_str(v: &Version) -> String {

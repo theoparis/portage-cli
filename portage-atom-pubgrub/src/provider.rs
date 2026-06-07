@@ -828,7 +828,7 @@ impl PortageDependencyProvider {
             }
         }
 
-        by_target
+        let mut reqs: Vec<UseFlagRequirement> = by_target
             .into_iter()
             .map(|(pkg, (ver, enable, disable, requirers))| UseFlagRequirement {
                 package: pkg.clone(),
@@ -838,7 +838,17 @@ impl PortageDependencyProvider {
                 required_disabled: disable.into_iter().collect(),
                 required_by: requirers.into_iter().collect(),
             })
-            .collect()
+            .collect();
+        // `by_target` is a HashMap, so collect order is nondeterministic; sort by
+        // (package, version) so use_flag_requirements — and everything derived
+        // from it (reinstall_deps → the appended merge-order tail, and the
+        // autounmask report order) — is reproducible across runs.
+        reqs.sort_by(|a, b| {
+            a.package
+                .cmp(&b.package)
+                .then_with(|| a.version.cmp(&b.version))
+        });
+        reqs
     }
 
     /// Return all USE flag requirements collected by the post-solve validation pass.
