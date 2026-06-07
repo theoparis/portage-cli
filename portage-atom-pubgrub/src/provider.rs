@@ -1170,7 +1170,7 @@ fn register_virtual_choices(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::{InMemoryRepository, PackageDeps};
+    use crate::repository::{InMemoryRepository, PackageDeps, PackageVersions};
     use portage_atom::interner::Interned;
     use portage_atom::{Cpn, Dep, DepEntry};
 
@@ -1977,6 +1977,128 @@ mod tests {
         assert!(
             provider.reinstall_deps().is_empty(),
             "no reinstall needed when USE dep is already satisfied"
+        );
+    }
+
+    // ---- Characterization: autounmask "needed" USE detection ----
+    //
+    // These pin the observable behaviour that the `desired_use` concern
+    // extraction (step 3) must preserve: a flag is reported as needed only when
+    // it is NOT already provided — whether "provided" comes from the ebuild's
+    // IUSE default or from the global USE config.  When step 3 moves policy
+    // resolution behind `PackageRepository::desired_use`, the *setup* here will
+    // change (the caller will fold IUSE defaults / config into the desired set),
+    // but the assertions — needed vs not-needed — must stay identical.
+
+    /// `a` RDEPENDs `b[flag]`; `flag` is off everywhere → `b` needs it enabled.
+    #[test]
+    fn use_flag_needed_when_flag_off() {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-libs/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![Interned::intern("flag")],
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                rdepend: DepEntry::parse("dev-libs/b[flag]").unwrap(),
+                ..empty_deps()
+            },
+        );
+        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        let b = provider
+            .use_flag_requirements()
+            .iter()
+            .find(|r| r.package.cpn().package.as_str() == "b")
+            .expect("b should have a USE requirement");
+        assert!(b.required_enabled.contains(&Interned::intern("flag")));
+    }
+
+    /// Same, but `b` carries `+flag` as an IUSE default → already on, none needed.
+    #[test]
+    fn use_flag_not_needed_when_iuse_default_on() {
+        let mut repo = InMemoryRepository::new();
+        let mut defaults = HashMap::new();
+        defaults.insert(Interned::intern("flag"), IUseDefault::Enabled);
+        repo.add_package_versions(
+            portage_atom::Cpv::parse("dev-libs/b-1.0").unwrap(),
+            PackageVersions {
+                slot: Some(Interned::intern("0")),
+                subslot: None,
+                repo: None,
+                iuse: vec![Interned::intern("flag")],
+                iuse_defaults: defaults,
+                deps: empty_deps(),
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                rdepend: DepEntry::parse("dev-libs/b[flag]").unwrap(),
+                ..empty_deps()
+            },
+        );
+        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        assert!(
+            provider
+                .use_flag_requirements()
+                .iter()
+                .all(|r| r.required_enabled.is_empty()),
+            "IUSE +flag default already satisfies b[flag]; no autounmask needed"
+        );
+    }
+
+    /// Same, but the global config already enables `flag` → none needed.
+    #[test]
+    fn use_flag_not_needed_when_config_enables() {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-libs/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![Interned::intern("flag")],
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                rdepend: DepEntry::parse("dev-libs/b[flag]").unwrap(),
+                ..empty_deps()
+            },
+        );
+        let mut config = UseConfig::new();
+        config.enable(Interned::intern("flag"));
+        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        assert!(
+            provider
+                .use_flag_requirements()
+                .iter()
+                .all(|r| r.required_enabled.is_empty()),
+            "global config already enables flag; no autounmask needed"
         );
     }
 
