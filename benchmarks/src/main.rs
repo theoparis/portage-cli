@@ -96,22 +96,46 @@ mod pubgrub_solver {
     use super::*;
     use portage_atom_pubgrub::{
         IUseDefault, PackageDeps, PackageRepository, PackageVersions, PortageDependencyProvider,
-        PortagePackage, PortageVersionSet, UseConfig,
+        PortagePackage, PortageVersionSet, UseConfig, UseFlagState,
     };
 
     pub struct Adapter<'a> {
         data: &'a RepoData,
+        use_config: UseConfig,
     }
 
     impl<'a> Adapter<'a> {
-        pub fn new(data: &'a RepoData) -> Self {
-            Self { data }
+        pub fn new(data: &'a RepoData, use_config: UseConfig) -> Self {
+            Self { data, use_config }
         }
     }
 
     impl PackageRepository for Adapter<'_> {
         fn all_packages(&self) -> Vec<Cpn> {
             self.data.cpns.clone()
+        }
+
+        fn desired_use(&self, cpv: &Cpv) -> UseConfig {
+            let mut cfg = self.use_config.clone();
+            if let Some(entries) = self.data.versions.get(&cpv.cpn)
+                && let Some((_, cache)) = entries.iter().find(|(c, _)| c.version == cpv.version)
+            {
+                for iu in &cache.metadata.iuse {
+                    let flag = Interned::intern(iu.name());
+                    if cfg.get_opt(&flag).is_none()
+                        && let Some(def) = iu.default
+                    {
+                        cfg.set(
+                            flag,
+                            match def {
+                                portage_metadata::IUseDefault::Enabled => UseFlagState::Enabled,
+                                portage_metadata::IUseDefault::Disabled => UseFlagState::Disabled,
+                            },
+                        );
+                    }
+                }
+            }
+            cfg
         }
 
         fn versions_for(&self, cpn: &Cpn) -> Vec<(Cpv, PackageVersions)> {
@@ -182,7 +206,6 @@ mod pubgrub_solver {
     }
 
     pub fn resolve(data: &RepoData, targets: &[String]) -> Result<Vec<String>, String> {
-        let adapter = Adapter::new(data);
         let mut use_config = UseConfig::new();
         for flag in &[
             "acl",
@@ -231,7 +254,8 @@ mod pubgrub_solver {
             use_config.enable(Interned::intern(flag));
         }
         use_config.disable(Interned::intern("pthread"));
-        let mut provider = PortageDependencyProvider::new(adapter, use_config, &[]);
+        let adapter = Adapter::new(data, use_config);
+        let mut provider = PortageDependencyProvider::new(adapter);
 
         let mut root_deps = Vec::new();
         for target in targets {

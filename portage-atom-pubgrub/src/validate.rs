@@ -465,7 +465,7 @@ mod tests {
             empty_deps(),
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let app = PortagePackage::slotted(Cpn::parse("app-misc/app").unwrap(), slot_0);
         let solution = provider
             .resolve_targets(vec![(app, PortageVersionSet::any())])
@@ -501,7 +501,7 @@ mod tests {
             empty_deps(),
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let app = PortagePackage::slotted(Cpn::parse("app-misc/app").unwrap(), slot_0);
         let solution = provider
             .resolve_targets(vec![(app, PortageVersionSet::any())])
@@ -541,7 +541,7 @@ mod tests {
             empty(),
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let openssl = PortagePackage::unslotted(Cpn::parse("dev-libs/openssl").unwrap());
         let libressl = PortagePackage::unslotted(Cpn::parse("dev-libs/libressl").unwrap());
         let solution = provider
@@ -586,7 +586,7 @@ mod tests {
             empty(),
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let solution = provider
             .resolve_targets(vec![
                 (
@@ -635,7 +635,7 @@ mod tests {
             empty(),
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let openssl = PortagePackage::unslotted(Cpn::parse("dev-libs/openssl").unwrap());
         let foo = PortagePackage::unslotted(Cpn::parse("app-misc/foo").unwrap());
         let solution = provider
@@ -685,7 +685,7 @@ mod tests {
         let mut use_config = UseConfig::new();
         use_config.enable(Interned::intern("ssl"));
 
-        let mut provider = PortageDependencyProvider::new(repo, use_config.clone(), &[]);
+        let mut provider = { repo.set_use_config(use_config.clone()); PortageDependencyProvider::new(repo) };
         let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
         let solution = provider
             .resolve_targets(vec![(myapp, PortageVersionSet::any())])
@@ -726,7 +726,7 @@ mod tests {
 
         let use_config = UseConfig::new();
 
-        let mut provider = PortageDependencyProvider::new(repo, use_config.clone(), &[]);
+        let mut provider = { repo.set_use_config(use_config.clone()); PortageDependencyProvider::new(repo) };
         let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
         let solution = provider
             .resolve_targets(vec![(myapp, PortageVersionSet::any())])
@@ -771,7 +771,7 @@ mod tests {
         let mut use_config = UseConfig::new();
         use_config.enable(Interned::intern("ssl"));
 
-        let mut provider = PortageDependencyProvider::new(repo, use_config.clone(), &[]);
+        let mut provider = { repo.set_use_config(use_config.clone()); PortageDependencyProvider::new(repo) };
         let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
         let solution = provider
             .resolve_targets(vec![(myapp, PortageVersionSet::any())])
@@ -815,7 +815,7 @@ mod tests {
 
         let use_config = UseConfig::new();
 
-        let mut provider = PortageDependencyProvider::new(repo, use_config.clone(), &[]);
+        let mut provider = { repo.set_use_config(use_config.clone()); PortageDependencyProvider::new(repo) };
         let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
         let solution = provider
             .resolve_targets(vec![(myapp, PortageVersionSet::any())])
@@ -859,7 +859,7 @@ mod tests {
 
         let use_config = UseConfig::new();
 
-        let mut provider = PortageDependencyProvider::new(repo, use_config.clone(), &[]);
+        let mut provider = { repo.set_use_config(use_config.clone()); PortageDependencyProvider::new(repo) };
         let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
         let solution = provider
             .resolve_targets(vec![(myapp, PortageVersionSet::any())])
@@ -904,7 +904,7 @@ mod tests {
             },
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
         let solution = provider
             .resolve_targets(vec![(myapp, PortageVersionSet::any())])
@@ -948,7 +948,7 @@ mod tests {
             },
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
         let solution = provider
             .resolve_targets(vec![(myapp, PortageVersionSet::any())])
@@ -1004,7 +1004,7 @@ mod tests {
             PortagePackage::slotted(Cpn::parse("app-misc/blocker-pkg").unwrap(), slot_0);
         let target_slot0 = PortagePackage::slotted(Cpn::parse("app-misc/target").unwrap(), slot_0);
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let solution = provider
             .resolve_targets(vec![
                 (blocker_pkg.clone(), PortageVersionSet::any()),
@@ -1039,7 +1039,7 @@ mod tests {
         );
 
         let target_slot1 = PortagePackage::slotted(Cpn::parse("app-misc/target").unwrap(), slot_1);
-        let mut provider2 = PortageDependencyProvider::new(repo2, UseConfig::new(), &[]);
+        let mut provider2 = PortageDependencyProvider::new(repo2);
         let solution2 = provider2
             .resolve_targets(vec![
                 (blocker_pkg, PortageVersionSet::any()),
@@ -1094,7 +1094,7 @@ mod tests {
         let lib = PortagePackage::unslotted(Cpn::parse("dev-libs/lib").unwrap());
 
         // lib-1.0-r3 is a revision of 1.0 — should conflict with !~lib-1.0
-        let mut provider = PortageDependencyProvider::new(repo.clone(), UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo.clone());
         let solution = provider
             .resolve_targets(vec![
                 (app.clone(), PortageVersionSet::any()),
@@ -1115,7 +1115,7 @@ mod tests {
         );
 
         // lib-2.0 is a different base version — should NOT conflict with !~lib-1.0
-        let mut provider2 = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider2 = PortageDependencyProvider::new(repo);
         let solution2 = provider2
             .resolve_targets(vec![
                 (app, PortageVersionSet::any()),
@@ -1178,7 +1178,7 @@ mod tests {
             empty(),
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let app = PortagePackage::unslotted(Cpn::parse("app-misc/app").unwrap());
         let lib_pkg = PortagePackage::unslotted(Cpn::parse("dev-libs/lib").unwrap());
         let solution = provider

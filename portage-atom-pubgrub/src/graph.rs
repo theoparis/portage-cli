@@ -339,7 +339,6 @@ fn order_cycle(
 mod tests {
     use super::*;
     use crate::repository::{InMemoryRepository, PackageDeps};
-    use crate::use_config::UseConfig;
     use crate::version_set::PortageVersionSet;
     use portage_atom::interner::{DefaultInterner, Interned};
     use portage_atom::{Cpn, Cpv, Dep, DepEntry};
@@ -374,7 +373,7 @@ mod tests {
             empty(),
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let top = PortagePackage::unslotted(Cpn::parse("app-misc/top").unwrap());
 
         let solution = provider
@@ -437,7 +436,7 @@ mod tests {
             empty(),
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let app = PortagePackage::unslotted(Cpn::parse("app-misc/app").unwrap());
 
         let solution = provider
@@ -495,7 +494,7 @@ mod tests {
             rdepend(&[]),
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let target = PortagePackage::slotted(
             Cpn::parse("app-text/texlive-core").unwrap(),
             Interned::intern("0"),
@@ -542,7 +541,7 @@ mod tests {
             rdepend(&[]),
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let target = PortagePackage::slotted(
             Cpn::parse("app-text/texlive-core").unwrap(),
             Interned::intern("0"),

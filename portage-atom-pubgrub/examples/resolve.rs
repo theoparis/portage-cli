@@ -261,7 +261,9 @@ fn make_root_deps(atoms: &[&str]) -> Vec<(PortagePackage, PortageVersionSet)> {
 }
 
 fn solve_and_print(repo: &InMemoryRepository, use_config: UseConfig, root_atoms: &[&str]) {
-    let mut provider = PortageDependencyProvider::new(repo.clone(), use_config, &[]);
+    let mut repo = repo.clone();
+    repo.set_use_config(use_config);
+    let mut provider = PortageDependencyProvider::new(repo);
 
     match provider.resolve_targets(make_root_deps(root_atoms)) {
         Ok(solution) => {

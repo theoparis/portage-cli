@@ -73,8 +73,10 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         accept_keywords: &accept_keywords,
         package_mask: &package_mask,
         accept_license: &accept_license,
+        use_config: &use_config,
+        package_use: &package_use,
     };
-    let mut provider = PortageDependencyProvider::new(adapter, use_config.clone(), &package_use);
+    let mut provider = PortageDependencyProvider::new(adapter);
 
     if !empty {
         for e in &installed_entries {

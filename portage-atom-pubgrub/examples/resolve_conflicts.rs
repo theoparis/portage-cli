@@ -6,7 +6,6 @@
 use portage_atom::{Cpn, Cpv, Dep, DepEntry};
 use portage_atom_pubgrub::{
     InMemoryRepository, PackageDeps, PortageDependencyProvider, PortagePackage, PortageVersionSet,
-    UseConfig,
 };
 
 fn empty_deps() -> PackageDeps {
@@ -48,8 +47,7 @@ fn try_solve(title: &str, repo: &InMemoryRepository, root_atoms: &[&str]) {
     println!("{title}");
     println!("{}", "=".repeat(60));
 
-    let use_config = UseConfig::new();
-    let mut provider = PortageDependencyProvider::new(repo.clone(), use_config, &[]);
+    let mut provider = PortageDependencyProvider::new(repo.clone());
 
     match provider.resolve_targets(make_root_deps(root_atoms)) {
         Ok(_solution) => {
@@ -131,8 +129,7 @@ fn main() {
         );
         println!("{}", "=".repeat(60));
 
-        let use_config = UseConfig::new();
-        let mut provider = PortageDependencyProvider::new(repo.clone(), use_config, &[]);
+        let mut provider = PortageDependencyProvider::new(repo.clone());
 
         match provider.resolve_targets(make_root_deps(&["app-misc/myapp"])) {
             Ok(solution) => {

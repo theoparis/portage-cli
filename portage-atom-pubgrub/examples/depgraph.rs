@@ -12,7 +12,7 @@ use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Dep, DepEntry};
 use portage_atom_pubgrub::{
     DepClass, InMemoryRepository, PackageDeps, PortageDependencyProvider, PortagePackage,
-    PortageVersionSet, UseConfig,
+    PortageVersionSet,
 };
 
 fn empty_deps() -> PackageDeps {
@@ -88,8 +88,7 @@ fn main() {
         dep_entries(vec![DepEntry::Atom(Dep::parse("net-misc/curl").unwrap())]),
     );
 
-    let use_config = UseConfig::new();
-    let mut provider = PortageDependencyProvider::new(repo, use_config, &[]);
+    let mut provider = PortageDependencyProvider::new(repo);
 
     let myapp = PortagePackage::unslotted(Cpn::parse("app-misc/myapp").unwrap());
     let solution = provider

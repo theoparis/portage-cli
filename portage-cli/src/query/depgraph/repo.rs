@@ -156,11 +156,53 @@ pub(super) struct Adapter<'a> {
     pub(super) accept_keywords: &'a [String],
     pub(super) package_mask: &'a [Dep],
     pub(super) accept_license: &'a [String],
+    /// Global desired USE (profile + make.conf), folded with per-version
+    /// `package.use` + IUSE defaults by `desired_use`.
+    pub(super) use_config: &'a portage_atom_pubgrub::UseConfig,
+    pub(super) package_use: &'a [(Dep, Vec<String>)],
 }
 
 impl PackageRepository for Adapter<'_> {
     fn all_packages(&self) -> Vec<Cpn> {
         self.data.cpns.clone()
+    }
+
+    fn desired_use(&self, cpv: &Cpv) -> portage_atom_pubgrub::UseConfig {
+        use portage_atom_pubgrub::{UseConfig, UseFlagState, apply_package_use};
+
+        let meta = self
+            .data
+            .versions
+            .get(&cpv.cpn)
+            .and_then(|entries| entries.iter().find(|(c, _)| c.version == cpv.version))
+            .map(|(_, cache)| &cache.metadata);
+
+        let slot = meta.and_then(|m| {
+            let s = m.slot.slot;
+            if s.as_str().is_empty() { None } else { Some(s) }
+        });
+
+        // Caller-resolved policy: package.use over global USE, then the ebuild's
+        // IUSE defaults for anything still unset → the authoritative desired set.
+        let mut cfg: UseConfig =
+            apply_package_use(self.use_config, cpv, slot, self.package_use).into_owned();
+        if let Some(m) = meta {
+            for iu in &m.iuse {
+                let flag = Interned::intern(iu.name());
+                if cfg.get_opt(&flag).is_none()
+                    && let Some(def) = iu.default
+                {
+                    cfg.set(
+                        flag,
+                        match def {
+                            portage_metadata::IUseDefault::Enabled => UseFlagState::Enabled,
+                            portage_metadata::IUseDefault::Disabled => UseFlagState::Disabled,
+                        },
+                    );
+                }
+            }
+        }
+        cfg
     }
 
     fn versions_for(&self, cpn: &Cpn) -> Vec<(Cpv, PackageVersions)> {

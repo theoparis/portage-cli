@@ -192,10 +192,6 @@ pub struct PortageDependencyProvider {
     pub(crate) installed_use: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
     pub(crate) installed_iuse: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
     pub(crate) dropped_deps: Vec<DroppedDep>,
-    /// Global USE configuration, still consulted by the OR-branch selection
-    /// heuristic (`use_dep_branch_satisfied`); the post-solve passes use the
-    /// per-version `VersionData::desired` instead.
-    pub(crate) use_config: UseConfig,
     /// USE flag requirements collected by the post-solve validation pass.
     ///
     /// Covers both reinstall cases (`R`: installed packages with violated
@@ -205,17 +201,13 @@ pub struct PortageDependencyProvider {
 }
 
 impl PortageDependencyProvider {
-    /// Build the provider from a repository, a global USE flag configuration,
-    /// and per-package USE overrides (from `package.use` / `package.use.force`).
+    /// Build the provider from a repository.
     ///
-    /// `package_use` is a list of `(atom, flags)` pairs applied in order; a
-    /// flag prefixed with `-` disables it, a bare or `+`-prefixed flag enables
-    /// it.  Entries are matched against each CPV using the atom's version
-    /// constraint, so `>=dev-libs/foo-2.0 flag` only affects matching versions.
-    pub fn new<R: PackageRepository>(
-        repo: R,
-        use_config: UseConfig,        package_use: &[(Dep, Vec<String>)],
-    ) -> Self {
+    /// All USE policy is the repository's concern: each version's effective
+    /// desired USE is obtained via [`PackageRepository::desired_use`] (which
+    /// folds global USE, `package.use`, and IUSE defaults).  The solver never
+    /// resolves policy itself.  See `docs/use-and-solver-boundary.md`.
+    pub fn new<R: PackageRepository>(repo: R) -> Self {
         let mut packages = HashMap::new();
         let mut cpn_slots: HashMap<portage_atom::Cpn, Vec<Interned<DefaultInterner>>> =
             HashMap::new();
@@ -272,23 +264,10 @@ impl PortageDependencyProvider {
                     &meta.deps.idepend,
                 ];
 
-                // The desired USE set for this version: package.use + global USE
-                // overlaid on the ebuild's IUSE defaults.  Folding the defaults in
-                // here makes `cpv_use_cfg` authoritative, so every later reader
-                // (convert + post-solve) consults one resolved set.
-                let mut cpv_use_cfg =
-                    apply_package_use(&use_config, &cpv, meta.slot, package_use).into_owned();
-                for (flag, def) in &meta.iuse_defaults {
-                    if cpv_use_cfg.get_opt(flag).is_none() {
-                        cpv_use_cfg.set(
-                            *flag,
-                            match def {
-                                IUseDefault::Enabled => UseFlagState::Enabled,
-                                IUseDefault::Disabled => UseFlagState::Disabled,
-                            },
-                        );
-                    }
-                }
+                // The resolved desired USE for this version (caller's policy:
+                // package.use + global USE folded over IUSE defaults).  This is
+                // the single authoritative set every later reader consults.
+                let cpv_use_cfg = repo.desired_use(&cpv);
 
                 let class_results: [convert::ConversionResult; 5] = dep_classes.map(|entries| {
                     convert::convert_deps(
@@ -407,7 +386,6 @@ impl PortageDependencyProvider {
             installed_use: HashMap::new(),
             installed_iuse: HashMap::new(),
             dropped_deps,
-            use_config,
             use_flag_requirements: Vec::new(),
         }
     }
@@ -920,28 +898,15 @@ impl PortageDependencyProvider {
                 .get(target_pkg)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let iuse = self
-                .packages
-                .get(target_pkg)
-                .and_then(|d| d.versions.get(inst_ver))
-                .map(|vd| vd.iuse.as_slice())
-                .filter(|s| !s.is_empty()) // empty == absent (see compute_use_flag_requirements)
-                .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
-                .unwrap_or(&[]);
             for ud in &constraint.use_deps {
-                let in_iuse = iuse.contains(&ud.flag);
-                // Desired final state: flag is active now OR the global config
-                // wants it enabled AND the package supports it (flag is in IUSE).
-                let dep_effective_enabled = if in_iuse {
-                    active.contains(&ud.flag)
-                        || self.use_config.get(&ud.flag) == UseFlagState::Enabled
-                } else {
-                    matches!(ud.default, Some(UseDefault::Enabled))
-                };
-                // Parent's flag state: use global config as approximation
-                // (OR groups are almost always in newly-installed packages).
+                // Desired final state of the target's flag: active now, or the
+                // version's desired set will enable it on rebuild.
+                let dep_effective_enabled = active.contains(&ud.flag)
+                    || self.effective_flag_new(target_pkg, inst_ver, &ud.flag, ud.default);
+                // Parent flag (only used by Conditional/Equal kinds, rare in OR
+                // groups): approximate with the target's desired state.
                 let parent_flag_enabled =
-                    self.use_config.get(&ud.flag) == UseFlagState::Enabled;
+                    self.effective_flag_new(target_pkg, inst_ver, &ud.flag, ud.default);
                 // A violated constraint means this branch is not satisfiable.
                 if eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled)
                     .is_some()
@@ -1239,16 +1204,16 @@ mod tests {
 
     #[test]
     fn provider_constructs() {
-        let repo = make_simple_repo();
+        let mut repo = make_simple_repo();
         let config = UseConfig::new();
-        let _provider = PortageDependencyProvider::new(repo, config, &[]);
+        let _provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
     }
 
     #[test]
     fn choose_highest_version() {
-        let repo = make_simple_repo();
+        let mut repo = make_simple_repo();
         let config = UseConfig::new();
-        let provider = PortageDependencyProvider::new(repo, config, &[]);
+        let provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
         let openssl = PortagePackage::slotted(
             portage_atom::Cpn::parse("dev-libs/openssl").unwrap(),
             Interned::intern("0"),
@@ -1261,9 +1226,9 @@ mod tests {
 
     #[test]
     fn resolve_simple() {
-        let repo = make_simple_repo();
+        let mut repo = make_simple_repo();
         let config = UseConfig::new();
-        let provider = PortageDependencyProvider::new(repo, config, &[]);
+        let provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
         let root = PortagePackage::slotted(
             portage_atom::Cpn::parse("dev-lang/rust").unwrap(),
             Interned::intern("0"),
@@ -1313,7 +1278,7 @@ mod tests {
             },
         );
 
-        let provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let provider = PortageDependencyProvider::new(repo);
         let root =
             PortagePackage::slotted(Cpn::parse("app-misc/myapp").unwrap(), Interned::intern("0"));
         let result = pubgrub::resolve(&provider, root, Version::parse("1.0").unwrap());
@@ -1362,7 +1327,7 @@ mod tests {
             },
         );
 
-        let provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let provider = PortageDependencyProvider::new(repo);
         let root =
             PortagePackage::slotted(Cpn::parse("app-misc/myapp").unwrap(), Interned::intern("0"));
         let result = pubgrub::resolve(&provider, root, Version::parse("1.0").unwrap());
@@ -1401,7 +1366,7 @@ mod tests {
             },
         );
 
-        let provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let provider = PortageDependencyProvider::new(repo);
         let root =
             PortagePackage::slotted(Cpn::parse("app-misc/myapp").unwrap(), Interned::intern("0"));
         let result = pubgrub::resolve(&provider, root, Version::parse("1.0").unwrap());
@@ -1437,7 +1402,7 @@ mod tests {
             },
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let openssl = PortagePackage::unslotted(Cpn::parse("dev-libs/openssl").unwrap());
         provider.add_installed(InstalledPackage {
             package: openssl,
@@ -1489,7 +1454,7 @@ mod tests {
             },
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let openssl = PortagePackage::unslotted(Cpn::parse("dev-libs/openssl").unwrap());
         provider.add_installed(InstalledPackage {
             package: openssl,
@@ -1541,7 +1506,7 @@ mod tests {
             },
         );
 
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let openssl = PortagePackage::unslotted(Cpn::parse("dev-libs/openssl").unwrap());
         provider.add_installed(InstalledPackage {
             package: openssl,
@@ -1598,7 +1563,7 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
 
         provider.add_installed(InstalledPackage {
             package: PortagePackage::slotted(
@@ -1664,7 +1629,7 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
 
         for cpn in ["dev-libs/a", "dev-libs/b"] {
             provider.add_installed(InstalledPackage {
@@ -1741,7 +1706,7 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
 
         provider.add_installed(InstalledPackage {
             package: PortagePackage::slotted(
@@ -1836,7 +1801,7 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
 
         // Install python:3.14, python:3.13, and docutils with p3.13 active
         provider.add_installed(InstalledPackage {
@@ -1928,7 +1893,7 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
 
         // B is installed but flag is disabled
         provider.add_installed(InstalledPackage {
@@ -1978,7 +1943,7 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
 
         provider.add_installed(InstalledPackage {
             package: PortagePackage::slotted(
@@ -2032,7 +1997,7 @@ mod tests {
                 ..empty_deps()
             },
         );
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
         provider
             .resolve_targets(vec![(a, PortageVersionSet::any())])
@@ -2072,7 +2037,7 @@ mod tests {
                 ..empty_deps()
             },
         );
-        let mut provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let mut provider = PortageDependencyProvider::new(repo);
         let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
         provider
             .resolve_targets(vec![(a, PortageVersionSet::any())])
@@ -2109,7 +2074,7 @@ mod tests {
         );
         let mut config = UseConfig::new();
         config.enable(Interned::intern("flag"));
-        let mut provider = PortageDependencyProvider::new(repo, config, &[]);
+        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
         let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
         provider
             .resolve_targets(vec![(a, PortageVersionSet::any())])
@@ -2143,7 +2108,7 @@ mod tests {
             empty_deps(),
         );
 
-        let provider = PortageDependencyProvider::new(repo, UseConfig::new(), &[]);
+        let provider = PortageDependencyProvider::new(repo);
         let cpn = Cpn::parse("dev-lang/python").unwrap();
         let pkgs = provider.packages_for_cpn(&cpn);
 

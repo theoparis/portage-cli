@@ -84,6 +84,27 @@ impl UseConfig {
         }
     }
 
+    /// Fold a version's IUSE defaults into this config: for every flag not
+    /// already set explicitly, apply its `+`/`-` default.  After this, the
+    /// config is an authoritative "desired" set — a plain `get()` gives the
+    /// flag's effective state with no separate default lookup needed.
+    pub fn fold_iuse_defaults(
+        &mut self,
+        defaults: &HashMap<Interned<DefaultInterner>, IUseDefault>,
+    ) {
+        for (flag, def) in defaults {
+            if self.flags.get(flag).is_none() {
+                self.flags.insert(
+                    *flag,
+                    match def {
+                        IUseDefault::Enabled => UseFlagState::Enabled,
+                        IUseDefault::Disabled => UseFlagState::Disabled,
+                    },
+                );
+            }
+        }
+    }
+
     /// Returns all solver-decided flags.
     pub fn solver_decided_flags(&self) -> Vec<Interned<DefaultInterner>> {
         self.flags

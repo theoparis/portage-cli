@@ -344,11 +344,14 @@ fn load_repo(repo_path: &str, sys: &SystemConfig) -> InMemoryRepository {
 }
 
 fn build_provider(
-    repo: InMemoryRepository,
+    mut repo: InMemoryRepository,
     use_cfg: UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    _package_use: &[(Dep, Vec<String>)],
 ) -> PortageDependencyProvider {
-    PortageDependencyProvider::new(repo, use_cfg, package_use)
+    // USE policy now travels through the repository's desired_use; the in-memory
+    // repo applies global USE + IUSE defaults (package.use isn't modelled here).
+    repo.set_use_config(use_cfg);
+    PortageDependencyProvider::new(repo)
 }
 
 /// Load installed packages from the Gentoo VDB at `vdb_path` (default: /var/db/pkg).
