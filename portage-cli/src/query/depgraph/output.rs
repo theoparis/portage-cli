@@ -92,6 +92,23 @@ pub(super) fn report_solver_violations(violations: &[portage_atom_pubgrub::Error
     }
 }
 
+/// Report `REQUIRED_USE` constraints left unsatisfied by the planned USE.
+/// Mirrors emerge's "following REQUIRED_USE flag constraints are unsatisfied".
+pub(super) fn report_required_use(violations: &[super::required_use::RequiredUseViolation]) {
+    let mut out = anstream::stderr();
+    writeln!(
+        out,
+        "\n{C_OFF}!!!{C_OFF:#} The following REQUIRED_USE flag constraints are unsatisfied:\n"
+    )
+    .ok();
+    for v in violations {
+        writeln!(out, "  {C_PKG}{}-{}{C_PKG:#}", v.cpv.cpn, v.cpv.version).ok();
+        for clause in &v.unsatisfied {
+            writeln!(out, "    {C_OFF}{clause}{C_OFF:#}").ok();
+        }
+    }
+}
+
 pub(super) fn report_dropped_deps(dropped: &[DroppedDep], data: &RepoData, arch: &str) {
     // These are || alternatives bypassed by resolution — not failures.
     // Deduplicate by package and merge their alternatives across all occurrences.

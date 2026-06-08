@@ -25,8 +25,10 @@
 //! The solver-decided path lets PubGrub *choose* a flag's value to satisfy
 //! constraints — strictly more powerful than portage, which freezes USE before
 //! resolving. It is the intended lever for two things portage does poorly:
-//! automatic `REQUIRED_USE` satisfaction (not yet parsed anywhere) and
-//! minimal-USE-change conflict resolution.
+//! automatic `REQUIRED_USE` satisfaction (the constraint is parsed and
+//! evaluated by `portage-metadata`, and validated post-solve by the cli — the
+//! "Level A" path; solver auto-satisfaction is "Level C", see
+//! `docs/use-and-solver-boundary.md`) and minimal-USE-change conflict resolution.
 //!
 //! No current caller emits [`UseFlagState::SolverDecided`] — the cli hands the
 //! solver a fully fixed USE set — so this path is exercised only by tests. It is

@@ -4,6 +4,7 @@ mod installed;
 mod output;
 mod package_use;
 mod repo;
+mod required_use;
 mod use_env;
 
 use std::collections::HashMap;
@@ -228,6 +229,17 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         violations.extend(provider.check_repo_constraints(&solution));
         if !violations.is_empty() {
             output::report_solver_violations(&violations);
+        }
+    }
+
+    // Post-solve: REQUIRED_USE. Evaluated per-package against the USE each
+    // planned package would be built with (not modelled by the solver). Portage
+    // hard-errors here; em surfaces it as an advisory warning.
+    {
+        let ru_violations =
+            required_use::find_violations(&data, &order, &use_config, &package_use);
+        if !ru_violations.is_empty() {
+            output::report_required_use(&ru_violations);
         }
     }
 
