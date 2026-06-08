@@ -4,9 +4,9 @@ use gentoo_core::Arch;
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, Operator, Version};
 use portage_atom_pubgrub::{
-    DroppedDep, IUseDefault, PackageDeps, PackageRepository, PackageVersions,
+    DroppedDep, IUseDefault, PackageDeps, PackageRepository, PackageVersions, RequiredUse,
 };
-use portage_metadata::{CacheEntry, Keyword, LicenseExpr, Stability};
+use portage_metadata::{CacheEntry, Keyword, LicenseExpr, RequiredUseExpr, Stability};
 use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
 
 /// A reason a package version was excluded from the solver.
@@ -269,6 +269,13 @@ impl PackageRepository for Adapter<'_> {
                             pdepend: meta.pdepend.clone(),
                             idepend: meta.idepend.clone(),
                         };
+                        // Translate the parsed metadata grammar into the solver's
+                        // interned-flag fact vocabulary (the crate stays free of
+                        // portage-metadata). Dormant until Level-C consumes it.
+                        let required_use = meta
+                            .required_use
+                            .as_ref()
+                            .map(translate_required_use);
                         (
                             cpv.clone(),
                             PackageVersions {
@@ -278,12 +285,42 @@ impl PackageRepository for Adapter<'_> {
                                 iuse,
                                 iuse_defaults,
                                 deps,
+                                required_use,
                             },
                         )
                     })
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+/// Translate `portage_metadata::RequiredUseExpr` (string flags) into the
+/// solver's `RequiredUse` fact (interned flags).
+///
+/// This is the caller's adaptation step — it keeps `portage-atom-pubgrub`
+/// decoupled from the md5-cache parser, mirroring how dep strings become
+/// `DepEntry`. Pure structural translation; no policy.
+fn translate_required_use(expr: &RequiredUseExpr) -> RequiredUse {
+    let kids = |v: &[RequiredUseExpr]| v.iter().map(translate_required_use).collect();
+    match expr {
+        RequiredUseExpr::Flag { name, negated } => RequiredUse::Flag {
+            name: Interned::intern(name),
+            negated: *negated,
+        },
+        RequiredUseExpr::AnyOf(c) => RequiredUse::AnyOf(kids(c)),
+        RequiredUseExpr::ExactlyOne(c) => RequiredUse::ExactlyOne(kids(c)),
+        RequiredUseExpr::AtMostOne(c) => RequiredUse::AtMostOne(kids(c)),
+        RequiredUseExpr::UseConditional {
+            flag,
+            negated,
+            entries,
+        } => RequiredUse::UseConditional {
+            flag: Interned::intern(flag),
+            negated: *negated,
+            entries: kids(entries),
+        },
+        RequiredUseExpr::All(c) => RequiredUse::All(kids(c)),
     }
 }
 

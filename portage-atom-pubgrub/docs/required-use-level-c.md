@@ -138,9 +138,16 @@ for *un*satisfiable constraints (a hard pin that no legal assignment can meet).
 
 ## 7. Phasing
 
-- **Phase 0** — thread `RequiredUseExpr` into `VersionData` as a *dormant* fact
-  (no behaviour change, tests prove inertness); add the preference channel to
-  the ceded state.
+- **Phase 0** ✅ *(done 2026-06-08)* — thread the `REQUIRED_USE` fact through to
+  the provider as a *dormant* input. A crate-local `RequiredUse` enum (interned
+  flags) carries it; the cli Adapter translates `portage_metadata::RequiredUseExpr`
+  into it (`translate_required_use`), so the solver crate stays decoupled from the
+  md5-cache parser. Field on `PackageVersions` (fact in) and `VersionData`
+  (stored, unread). `required_use_is_dormant_phase0` proves inertness (an
+  unsatisfiable `REQUIRED_USE` neither breaks the solve nor changes the
+  solution); basket still matches `emerge -p` (0 diffs). *Not yet done:* the
+  preference channel on the ceded state — deferred to Phase 1 where it is first
+  needed.
 - **Phase 1** — encoder for `a?()/!a?()/||/^^/??` over `UseDecision` nodes +
   preference-biased `choose_version`; the `--autosolve-use` opt-in in the cli
   Adapter (cede eligible flags, supply preference); chosen flags reported via the

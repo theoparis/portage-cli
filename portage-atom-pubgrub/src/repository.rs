@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv};
 
+use crate::required_use::RequiredUse;
 use crate::use_config::UseConfig;
 
 /// Default state for an IUSE flag, from the `+`/`-` prefix in IUSE.
@@ -31,6 +32,14 @@ pub struct PackageVersions {
     pub iuse_defaults: HashMap<Interned<DefaultInterner>, IUseDefault>,
     /// Dependency trees by class.
     pub deps: PackageDeps,
+    /// `REQUIRED_USE` constraint, translated by the caller into the solver's
+    /// interned-flag vocabulary ([`RequiredUse`]).  `None` when the ebuild
+    /// declares no `REQUIRED_USE`.
+    ///
+    /// This is an intrinsic ebuild **fact**, not policy.  As of Phase 0 it is
+    /// stored but not yet consumed by the solver (Level-C auto-satisfaction is
+    /// the future consumer — see `docs/required-use-level-c.md`).
+    pub required_use: Option<RequiredUse>,
 }
 
 /// Structured dependency trees separated by PMS class.
@@ -147,6 +156,31 @@ impl InMemoryRepository {
                 iuse,
                 iuse_defaults: HashMap::new(),
                 deps,
+                required_use: None,
+            },
+        ));
+    }
+
+    /// Insert a version carrying a `REQUIRED_USE` fact (for Level-C tests).
+    pub fn add_version_with_required_use(
+        &mut self,
+        cpv: Cpv,
+        slot: Option<Interned<DefaultInterner>>,
+        iuse: Vec<Interned<DefaultInterner>>,
+        deps: PackageDeps,
+        required_use: RequiredUse,
+    ) {
+        let cpn = cpv.cpn;
+        self.packages.entry(cpn).or_default().push((
+            cpv,
+            PackageVersions {
+                slot,
+                subslot: None,
+                repo: None,
+                iuse,
+                iuse_defaults: HashMap::new(),
+                deps,
+                required_use: Some(required_use),
             },
         ));
     }
@@ -188,6 +222,7 @@ impl PackageRepository for InMemoryRepository {
                                     pdepend: meta.deps.pdepend.clone(),
                                     idepend: meta.deps.idepend.clone(),
                                 },
+                                required_use: meta.required_use.clone(),
                             },
                         )
                     })

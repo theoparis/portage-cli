@@ -45,6 +45,7 @@ mod graph;
 mod package;
 mod provider;
 mod repository;
+mod required_use;
 mod use_config;
 mod validate;
 mod version_set;
@@ -57,6 +58,7 @@ pub use provider::{DroppedDep, InstalledPackage, InstalledPolicy, PortageDepende
 pub use repository::{
     IUseDefault, InMemoryRepository, PackageDeps, PackageRepository, PackageVersions,
 };
+pub use required_use::RequiredUse;
 pub use use_config::{UseConfig, UseFlagState, apply_package_use};
 pub use validate::SlotOperatorBinding;
 pub use version_set::PortageVersionSet;

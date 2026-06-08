@@ -196,6 +196,9 @@ mod pubgrub_solver {
                                     iuse,
                                     iuse_defaults,
                                     deps,
+                                    // REQUIRED_USE is a dormant Level-C fact; the
+                                    // benchmark adapter does not feed it.
+                                    required_use: None,
                                 },
                             )
                         })
