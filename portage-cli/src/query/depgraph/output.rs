@@ -487,9 +487,12 @@ pub(super) fn print_tree(
         let ver = version_map.get(&e.to.0).copied().unwrap_or(&e.to.1);
         children.entry(&e.from.0).or_default().push((&e.to.0, ver));
     }
-    // deduplicate children (same package may appear via multiple dep classes)
+    // deduplicate children (same package may appear via multiple dep classes,
+    // and not necessarily adjacently — DEPEND/BDEPEND edges to the same package
+    // can be interleaved with others, so a positional dedup is insufficient).
     for kids in children.values_mut() {
-        kids.dedup_by_key(|(pkg, _)| *pkg);
+        let mut seen: std::collections::HashSet<&PortagePackage> = Default::default();
+        kids.retain(|(pkg, _)| seen.insert(*pkg));
     }
 
     let mut out = anstream::stdout();
