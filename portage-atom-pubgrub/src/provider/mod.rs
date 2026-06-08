@@ -8,7 +8,7 @@ use pubgrub::{Dependencies, SelectedDependencies};
 use crate::convert;
 use crate::package::PortagePackage;
 use crate::repository::PackageRepository;
-use crate::use_config::UseConfig;
+use crate::use_config::{UseConfig, UseFlagState};
 use crate::version_set::PortageVersionSet;
 
 /// The PubGrub `DependencyProvider` impl (prioritise / choose_version /
@@ -179,6 +179,11 @@ pub struct PortageDependencyProvider {
     /// instead of leaving the upgraded version's deps unaccounted for.  Cleared
     /// at the start of every [`resolve_targets`](Self::resolve_targets) call.
     pub(crate) upgrade_pins: HashMap<PortagePackage, Version>,
+    /// Preferred version (`0`/`1`) for each `UseDecision` node, i.e. the value
+    /// the caller's policy would have given the ceded flag.  `choose_version`
+    /// biases toward it so a `SolverDecided` flag only flips when a constraint
+    /// forces it (greedy keep-configured — see `docs/required-use-level-c.md`).
+    pub(crate) use_decision_prefer: HashMap<PortagePackage, Version>,
 }
 
 impl PortageDependencyProvider {
@@ -190,6 +195,7 @@ impl PortageDependencyProvider {
     /// resolves policy itself.  See `docs/use-and-solver-boundary.md`.
     pub fn new<R: PackageRepository>(repo: R) -> Self {
         let mut packages = HashMap::new();
+        let mut use_decision_prefer: HashMap<PortagePackage, Version> = HashMap::new();
         let mut cpn_slots: HashMap<portage_atom::Cpn, Vec<Interned<DefaultInterner>>> =
             HashMap::new();
 
@@ -249,6 +255,17 @@ impl PortageDependencyProvider {
                 // package.use + global USE folded over IUSE defaults).  This is
                 // the single authoritative set every later reader consults.
                 let cpv_use_cfg = repo.desired_use(&cpv);
+
+                // Record the preferred value of every ceded (`SolverDecided`)
+                // flag so `choose_version` can bias its `UseDecision` node toward
+                // the caller's configured value (greedy keep-configured).
+                for flag in cpv_use_cfg.solver_decided_flags() {
+                    if let UseFlagState::SolverDecided { prefer } = cpv_use_cfg.get(&flag) {
+                        let node = convert::use_decision_package(&cpn_str, &flag);
+                        let ver = Version::new(&[u64::from(prefer)]);
+                        use_decision_prefer.insert(node, ver);
+                    }
+                }
 
                 let class_results: [convert::ConversionResult; 5] = dep_classes.map(|entries| {
                     convert::convert_deps(entries, &cpn_str, &cpv_use_cfg, &slot_map)
@@ -364,6 +381,7 @@ impl PortageDependencyProvider {
             dropped_deps,
             use_flag_requirements: Vec::new(),
             upgrade_pins: HashMap::new(),
+            use_decision_prefer,
         }
     }
 
@@ -1561,6 +1579,44 @@ mod tests {
             with_ru, without_ru,
             "REQUIRED_USE must not change the solution in Phase 0 (dormant fact)"
         );
+    }
+
+    #[test]
+    fn ceded_flag_follows_preference() {
+        // A SolverDecided flag with no constraint forcing it should take the
+        // caller's preferred value: choose_version biases its UseDecision node.
+        // Observable via a conditional dep gated on the flag.
+        let build = |prefer: bool| {
+            let mut repo = InMemoryRepository::new();
+            repo.add_version(
+                portage_atom::Cpv::parse("dev-libs/b-1.0").unwrap(),
+                Some(Interned::intern("0")),
+                None,
+                empty_deps(),
+            );
+            repo.add_version_with_iuse(
+                portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+                Some(Interned::intern("0")),
+                None,
+                vec![Interned::intern("flag")],
+                PackageDeps {
+                    rdepend: DepEntry::parse("flag? ( dev-libs/b )").unwrap(),
+                    ..empty_deps()
+                },
+            );
+            let mut cfg = UseConfig::new();
+            cfg.solver_decide(Interned::intern("flag"), prefer);
+            let mut provider = { repo.set_use_config(cfg); PortageDependencyProvider::new(repo) };
+            let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+            provider
+                .resolve_targets(vec![(a, PortageVersionSet::any())])
+                .unwrap()
+        };
+        let has_b = |sol: &SelectedDependencies<PortagePackage, Version>| {
+            sol.iter().any(|(p, _)| p.cpn().package.as_str() == "b")
+        };
+        assert!(has_b(&build(true)), "prefer=on must enable flag → pull b");
+        assert!(!has_b(&build(false)), "prefer=off must leave flag off → no b");
     }
 
     // ---- Characterization: autounmask "needed" USE detection ----

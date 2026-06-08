@@ -96,6 +96,22 @@ pub(crate) struct UseDepConstraint {
 /// Slot info for a CPN: pre-computed `(slot_interned, slotted_package)` pairs.
 pub type SlotMap = HashMap<Cpn, Vec<(Interned<DefaultInterner>, PortagePackage)>>;
 
+/// The `UseDecision` virtual package for a given package's USE flag.
+///
+/// USE flags are package-scoped, so the node name embeds the CPN: the *same*
+/// node is shared by the conditional-dep encoding and the (future) `REQUIRED_USE`
+/// encoding, which is what makes "force flag on" also fire the deps gated on it.
+pub(crate) fn use_decision_package(
+    cpn_str: &str,
+    flag: &Interned<DefaultInterner>,
+) -> PortagePackage {
+    PortagePackage::use_decision(Interned::intern(&format!(
+        "USE_{}_{}",
+        cpn_str.replace('/', "_"),
+        flag.as_str()
+    )))
+}
+
 /// Convert a `DepEntry` tree into PubGrub dependency constraints.
 ///
 /// USE conditionals are handled according to the `UseConfig`:
@@ -191,13 +207,8 @@ impl ConvertCtx<'_> {
                             }
                         }
                     }
-                    UseFlagState::SolverDecided => {
-                        let flag_name = flag.as_str();
-                        let virtual_pkg = PortagePackage::use_decision(Interned::intern(&format!(
-                            "USE_{}_{}",
-                            self.cpn_str.replace('/', "_"),
-                            flag_name
-                        )));
+                    UseFlagState::SolverDecided { .. } => {
+                        let virtual_pkg = use_decision_package(self.cpn_str, flag);
 
                         let on_deps = if *negate {
                             vec![]
@@ -602,7 +613,7 @@ mod tests {
     #[test]
     fn convert_solver_decided_use_creates_virtual() {
         let mut config = UseConfig::new();
-        config.solver_decide(Interned::intern("ssl"));
+        config.solver_decide(Interned::intern("ssl"), false);
         let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
         let result = convert_deps(
             &entries,
@@ -829,7 +840,7 @@ mod tests {
     #[test]
     fn convert_blocker_in_solver_decided_use_preserved() {
         let mut config = UseConfig::new();
-        config.solver_decide(Interned::intern("ssl"));
+        config.solver_decide(Interned::intern("ssl"), false);
         let entries = DepEntry::parse("ssl? ( !dev-libs/openssl-compat )").unwrap();
         let result = convert_deps(
             &entries,

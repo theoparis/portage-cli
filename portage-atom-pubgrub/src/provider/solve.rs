@@ -64,6 +64,18 @@ impl DependencyProvider for PortageDependencyProvider {
             return Ok(Some(pin.clone()));
         }
 
+        // Ceded USE flags: bias a `UseDecision` node toward the caller's
+        // preferred value, so a `SolverDecided` flag keeps its configured value
+        // unless a `REQUIRED_USE` constraint narrows `range` away from it. When
+        // the preference is out of range the constraint has forced a flip; fall
+        // through to the normal pick (the other version).
+        if matches!(package, PortagePackage::UseDecision { .. })
+            && let Some(pref) = self.use_decision_prefer.get(package)
+            && range.contains(pref)
+        {
+            return Ok(Some(pref.clone()));
+        }
+
         if let Some((installed_ver, policy)) = self.installed.get(package) {
             match policy {
                 InstalledPolicy::Lock => {

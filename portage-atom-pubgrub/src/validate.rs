@@ -402,7 +402,7 @@ pub(crate) fn resolve_parent_flag(
     solution: &pubgrub::SelectedDependencies<PortagePackage, Version>,
 ) -> UseFlagState {
     let config_state = use_config.get(flag);
-    if config_state != UseFlagState::SolverDecided {
+    if !matches!(config_state, UseFlagState::SolverDecided { .. }) {
         return config_state;
     }
 

@@ -15,8 +15,12 @@ pub enum UseFlagState {
     Enabled,
     /// The flag is OFF — `flag? ( deps )` skips deps, `!flag? ( deps )` includes.
     Disabled,
-    /// The solver decides — create a virtual package with versions 0/1.
-    SolverDecided,
+    /// The caller cedes this flag to the solver — a `UseDecision` virtual package
+    /// (versions `0`/`1`) is created and the solver picks its value subject to
+    /// constraints (Level-C `REQUIRED_USE`).  `prefer` is the value the caller's
+    /// policy would have produced; `choose_version` biases toward it so a ceded
+    /// flag only flips when a constraint forces it (greedy keep-configured).
+    SolverDecided { prefer: bool },
 }
 
 /// Configuration for USE flag evaluation during dependency conversion.
@@ -48,9 +52,9 @@ impl UseConfig {
         self.flags.insert(flag, UseFlagState::Disabled);
     }
 
-    /// Mark a flag as solver-decided.
-    pub fn solver_decide(&mut self, flag: Interned<DefaultInterner>) {
-        self.flags.insert(flag, UseFlagState::SolverDecided);
+    /// Mark a flag as solver-decided, with the caller's preferred value.
+    pub fn solver_decide(&mut self, flag: Interned<DefaultInterner>, prefer: bool) {
+        self.flags.insert(flag, UseFlagState::SolverDecided { prefer });
     }
 
     /// Get the state of a flag. Unset flags default to `Disabled`.
@@ -111,7 +115,7 @@ impl UseConfig {
     pub fn solver_decided_flags(&self) -> Vec<Interned<DefaultInterner>> {
         self.flags
             .iter()
-            .filter(|(_, s)| **s == UseFlagState::SolverDecided)
+            .filter(|(_, s)| matches!(s, UseFlagState::SolverDecided { .. }))
             .map(|(f, _)| *f)
             .collect()
     }
@@ -176,8 +180,8 @@ mod tests {
         let debug = Interned::intern("debug");
         let test = Interned::intern("test");
         config.enable(ssl);
-        config.solver_decide(debug);
-        config.solver_decide(test);
+        config.solver_decide(debug, false);
+        config.solver_decide(test, true);
         let decided = config.solver_decided_flags();
         assert_eq!(decided.len(), 2);
     }
@@ -188,8 +192,8 @@ mod tests {
         let flag = Interned::intern("ssl");
         config.set(flag, UseFlagState::Enabled);
         assert_eq!(config.get(&flag), UseFlagState::Enabled);
-        config.set(flag, UseFlagState::SolverDecided);
-        assert_eq!(config.get(&flag), UseFlagState::SolverDecided);
+        config.set(flag, UseFlagState::SolverDecided { prefer: false });
+        assert_eq!(config.get(&flag), UseFlagState::SolverDecided { prefer: false });
     }
 
     #[test]
