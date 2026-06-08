@@ -288,6 +288,17 @@ impl PortageDependencyProvider {
                     by_class.push(result.requirements);
                 }
 
+                // Level-C: encode REQUIRED_USE over the package's UseDecision
+                // nodes (only ceded flags produce constraints; with everything
+                // fixed this is inert). The pull/force/choice requirements ride
+                // in the DEPEND class (index 0); they reference virtual nodes,
+                // which are stripped from the install order.
+                if let Some(ru) = &meta.required_use {
+                    let enc = convert::encode_required_use(&cpn_str, ru, &cpv_use_cfg);
+                    by_class[0].extend(enc.requirements);
+                    all_virtual_choices.extend(enc.virtual_choices);
+                }
+
                 let mut version_data = VersionData::from_by_class(by_class);
                 version_data.blockers = all_blockers;
                 version_data.use_deps = all_use_deps;
@@ -597,8 +608,27 @@ fn register_virtual_choices(
             .entry(vc.package)
             .or_insert_with(|| PackageData { versions: BTreeMap::new() });
         for (ver, deps) in vc.versions {
-            let vd = VersionData::from_by_class(vec![deps, vec![], vec![], vec![], vec![]]);
-            entry.versions.insert(ver, vd);
+            // Merge, don't overwrite: a UseDecision node can be produced by both
+            // the conditional-dep path and the REQUIRED_USE encoder for the same
+            // (cpn, flag). Selecting a version must enforce *all* of its deps.
+            match entry.versions.get_mut(&ver) {
+                Some(existing) => {
+                    existing.by_class[0].extend(deps);
+                    existing.merged = Dependencies::Available(
+                        existing
+                            .by_class
+                            .iter()
+                            .flatten()
+                            .map(|(p, vs, _)| (p.clone(), vs.clone()))
+                            .collect(),
+                    );
+                }
+                None => {
+                    let vd =
+                        VersionData::from_by_class(vec![deps, vec![], vec![], vec![], vec![]]);
+                    entry.versions.insert(ver, vd);
+                }
+            }
         }
         // Attach per-branch USE dep constraints so choose_version() can evaluate
         // which OR-group branch is already satisfied without rebuilds.
@@ -1617,6 +1647,141 @@ mod tests {
         };
         assert!(has_b(&build(true)), "prefer=on must enable flag → pull b");
         assert!(!has_b(&build(false)), "prefer=off must leave flag off → no b");
+    }
+
+    // ---- Level-C REQUIRED_USE encoding (Phase 1b) ----
+
+    /// Build `app-misc/a` with the given REQUIRED_USE, ceding x/y/z (preferences
+    /// from `prefer`), where each flag pulls a marker dep `dev-libs/p{flag}` when
+    /// on. Returns the set of marker package names present in the solution.
+    fn solve_required_use(
+        ru: crate::required_use::RequiredUse,
+        prefer: &[(&str, bool)],
+        fixed: &[(&str, bool)],
+    ) -> std::collections::BTreeSet<String> {
+        let mut repo = InMemoryRepository::new();
+        for f in ["x", "y", "z"] {
+            repo.add_version(
+                portage_atom::Cpv::parse(&format!("dev-libs/p{f}-1.0")).unwrap(),
+                Some(Interned::intern("0")),
+                None,
+                empty_deps(),
+            );
+        }
+        repo.add_version_with_required_use(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            vec![Interned::intern("x"), Interned::intern("y"), Interned::intern("z")],
+            PackageDeps {
+                rdepend: DepEntry::parse(
+                    "x? ( dev-libs/px ) y? ( dev-libs/py ) z? ( dev-libs/pz )",
+                )
+                .unwrap(),
+                ..empty_deps()
+            },
+            ru,
+        );
+        let mut cfg = UseConfig::new();
+        for (f, p) in prefer {
+            cfg.solver_decide(Interned::intern(f), *p);
+        }
+        for (f, on) in fixed {
+            if *on { cfg.enable(Interned::intern(f)) } else { cfg.disable(Interned::intern(f)) }
+        }
+        let mut provider = { repo.set_use_config(cfg); PortageDependencyProvider::new(repo) };
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let sol = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+        sol.iter()
+            .filter(|(p, _)| !p.is_virtual() && p.cpn().category.as_str() == "dev-libs")
+            .map(|(p, _)| p.cpn().package.as_str().to_string())
+            .filter(|n| n.starts_with('p'))
+            .collect()
+    }
+
+    fn flag(name: &str, negated: bool) -> crate::required_use::RequiredUse {
+        crate::required_use::RequiredUse::Flag { name: Interned::intern(name), negated }
+    }
+
+    #[test]
+    fn required_use_exactly_one_picks_one() {
+        use crate::required_use::RequiredUse::ExactlyOne;
+        // ^^ ( x y ), both ceded off → solver must enable exactly one.
+        let got = solve_required_use(
+            ExactlyOne(vec![flag("x", false), flag("y", false)]),
+            &[("x", false), ("y", false)],
+            &[],
+        );
+        assert_eq!(got.len(), 1, "exactly one marker expected, got {got:?}");
+    }
+
+    #[test]
+    fn required_use_any_of_enables_at_least_one() {
+        use crate::required_use::RequiredUse::AnyOf;
+        // || ( x y ), both ceded off → at least one on.
+        let got = solve_required_use(
+            AnyOf(vec![flag("x", false), flag("y", false)]),
+            &[("x", false), ("y", false)],
+            &[],
+        );
+        assert!(!got.is_empty(), "at least one marker expected");
+    }
+
+    #[test]
+    fn required_use_at_most_one_caps_preferences() {
+        use crate::required_use::RequiredUse::AtMostOne;
+        // ?? ( x y ), both ceded ON → at most one may stay on.
+        let got = solve_required_use(
+            AtMostOne(vec![flag("x", false), flag("y", false)]),
+            &[("x", true), ("y", true)],
+            &[],
+        );
+        assert!(got.len() <= 1, "at most one marker allowed, got {got:?}");
+    }
+
+    #[test]
+    fn required_use_conditional_forces_consequent() {
+        use crate::required_use::RequiredUse::UseConditional;
+        // x? ( y ): x ceded ON (pref) ⇒ y must be on; y prefers OFF but is forced.
+        let got = solve_required_use(
+            UseConditional {
+                flag: Interned::intern("x"),
+                negated: false,
+                entries: vec![flag("y", false)],
+            },
+            &[("x", true), ("y", false)],
+            &[],
+        );
+        assert!(got.contains("px"), "x on");
+        assert!(got.contains("py"), "y forced on by x? ( y )");
+    }
+
+    #[test]
+    fn required_use_exactly_one_with_fixed_on_disables_rest() {
+        use crate::required_use::RequiredUse::ExactlyOne;
+        // ^^ ( x y ): x fixed ON, y ceded (prefers on) → y must be off.
+        let got = solve_required_use(
+            ExactlyOne(vec![flag("x", false), flag("y", false)]),
+            &[("y", true)],
+            &[("x", true)],
+        );
+        assert!(got.contains("px"), "x is the fixed-on choice");
+        assert!(!got.contains("py"), "y must be disabled by ^^ with x fixed on");
+    }
+
+    #[test]
+    fn required_use_preference_kept_when_unconstrained() {
+        use crate::required_use::RequiredUse::AnyOf;
+        // || ( x y ) with x preferring ON: the at-least-one is already met by x,
+        // y stays at its preferred OFF (no gratuitous flip).
+        let got = solve_required_use(
+            AnyOf(vec![flag("x", false), flag("y", false)]),
+            &[("x", true), ("y", false)],
+            &[],
+        );
+        assert!(got.contains("px"));
+        assert!(!got.contains("py"), "y should keep its preferred off");
     }
 
     // ---- Characterization: autounmask "needed" USE detection ----

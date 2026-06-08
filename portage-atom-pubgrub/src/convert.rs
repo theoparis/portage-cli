@@ -5,6 +5,7 @@ use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Dep, DepEntry, Operator, SlotDep, SlotOperator, UseDep, Version};
 
 use crate::package::PortagePackage;
+use crate::required_use::RequiredUse;
 use crate::use_config::{UseConfig, UseFlagState};
 use crate::version_set::PortageVersionSet;
 
@@ -463,6 +464,317 @@ impl ConvertCtx<'_> {
         // The choice virtual itself carries the current gating flag.
         self.requirements.push((pkg, PortageVersionSet::any(), self.gating_flag));
     }
+}
+
+// ===========================================================================
+// Level-C REQUIRED_USE encoding  (docs/required-use-level-c.md)
+// ===========================================================================
+
+type Req = (PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>);
+
+/// Result of encoding a package's `REQUIRED_USE` into solver constraints.
+pub(crate) struct RequiredUseEncoding {
+    /// Requirements to add to the package version: pulls/forces the relevant
+    /// `UseDecision` nodes and references the at-least-one `Choice` nodes.
+    pub requirements: Vec<Req>,
+    /// `UseDecision` nodes (with implication / pairwise-exclusion deps) and
+    /// `Choice` nodes (at-least-one).  Merged with the conditional-dep nodes by
+    /// `register_virtual_choices`.
+    pub virtual_choices: Vec<VirtualChoice>,
+}
+
+/// One operand of a `REQUIRED_USE` group/clause, after classifying its flag
+/// against the desired config.
+enum Operand {
+    /// A flag whose value is fixed by policy; `satisfied` is whether the operand
+    /// (respecting its `!`) already holds.
+    Fixed { satisfied: bool },
+    /// A ceded flag: `node` is its `UseDecision`, `sat_ver` the version (`0`/`1`)
+    /// at which the operand (respecting its `!`) is satisfied.
+    Free { node: PortagePackage, sat_ver: u64 },
+}
+
+/// Encode a package's `REQUIRED_USE` into `UseDecision`/`Choice` constraints.
+///
+/// Fixed flags are partially evaluated; ceded (`SolverDecided`) flags are
+/// constrained. Constructs the encoder does not handle (nested groups under a
+/// *ceded* guard, group operands that are not bare flags) are left unencoded —
+/// the cli's Level-A check still reports them. See `docs/required-use-level-c.md`.
+pub(crate) fn encode_required_use(
+    cpn_str: &str,
+    ru: &RequiredUse,
+    desired: &UseConfig,
+) -> RequiredUseEncoding {
+    let mut b = RuBuilder {
+        cpn_str,
+        desired,
+        node_on: HashMap::new(),
+        node_off: HashMap::new(),
+        touched: std::collections::BTreeSet::new(),
+        requirements: Vec::new(),
+        virtual_choices: Vec::new(),
+    };
+    b.clause(ru);
+    b.finish()
+}
+
+struct RuBuilder<'a> {
+    cpn_str: &'a str,
+    desired: &'a UseConfig,
+    /// Extra deps for each node's version-1 (flag ON).
+    node_on: HashMap<PortagePackage, Vec<Req>>,
+    /// Extra deps for each node's version-0 (flag OFF).
+    node_off: HashMap<PortagePackage, Vec<Req>>,
+    /// Nodes that must exist (both versions registered) and be pulled in.
+    touched: std::collections::BTreeSet<PortagePackage>,
+    requirements: Vec<Req>,
+    virtual_choices: Vec<VirtualChoice>,
+}
+
+impl RuBuilder<'_> {
+    const OFF: u64 = 0;
+    const ON: u64 = 1;
+
+    fn ver(v: u64) -> Version {
+        Version::new(&[v])
+    }
+
+    fn singleton(node: &PortagePackage, v: u64) -> Req {
+        (
+            node.clone(),
+            PortageVersionSet::from_operator(Operator::Equal, false, Self::ver(v)),
+            None,
+        )
+    }
+
+    /// Classify a `Flag { name, negated }` operand against the desired config.
+    fn operand(&self, name: &Interned<DefaultInterner>, negated: bool) -> Operand {
+        match self.desired.get(name) {
+            UseFlagState::SolverDecided { .. } => Operand::Free {
+                node: use_decision_package(self.cpn_str, name),
+                sat_ver: if negated { Self::OFF } else { Self::ON },
+            },
+            state => {
+                let on = matches!(state, UseFlagState::Enabled);
+                Operand::Fixed {
+                    satisfied: on != negated,
+                }
+            }
+        }
+    }
+
+    /// Force a ceded node to a specific version on the package itself.
+    fn force(&mut self, node: &PortagePackage, v: u64) {
+        self.touched.insert(node.clone());
+        self.requirements.push(Self::singleton(node, v));
+    }
+
+    /// When `src` is at `src_ver`, require `dst` at `dst_ver`.
+    fn imply(&mut self, src: &PortagePackage, src_ver: u64, dst: &PortagePackage, dst_ver: u64) {
+        self.touched.insert(src.clone());
+        self.touched.insert(dst.clone());
+        let bucket = if src_ver == Self::ON {
+            self.node_on.entry(src.clone()).or_default()
+        } else {
+            self.node_off.entry(src.clone()).or_default()
+        };
+        bucket.push(Self::singleton(dst, dst_ver));
+    }
+
+    /// At least one of the ceded operands must be satisfied (a `Choice` node).
+    fn at_least_one(&mut self, free: &[(PortagePackage, u64)]) {
+        let id = next_choice_id();
+        let pkg = PortagePackage::choice(Interned::intern(&format!("ru_choice_{id}")));
+        let n = free.len();
+        let mut versions = Vec::with_capacity(n);
+        for (i, (node, sat_ver)) in free.iter().enumerate() {
+            // n..1 numbering (parallel to convert_choice_group), one branch per flag.
+            versions.push((Self::ver((n - i) as u64), vec![Self::singleton(node, *sat_ver)]));
+            self.touched.insert(node.clone());
+        }
+        self.virtual_choices.push(VirtualChoice {
+            package: pkg.clone(),
+            versions,
+            branch_use_deps: Vec::new(),
+        });
+        self.requirements.push((pkg, PortageVersionSet::any(), None));
+    }
+
+    /// At most one of the ceded operands may be satisfied (pairwise exclusion).
+    fn at_most_one(&mut self, free: &[(PortagePackage, u64)]) {
+        for (i, (ni, svi)) in free.iter().enumerate() {
+            for (j, (nj, svj)) in free.iter().enumerate() {
+                if i != j {
+                    // ni satisfied ⇒ nj not satisfied.
+                    self.imply(ni, *svi, nj, Self::ON + Self::OFF - *svj);
+                }
+            }
+        }
+    }
+
+    /// Encode one clause (recursing through top-level `All`).
+    fn clause(&mut self, c: &RequiredUse) {
+        match c {
+            RequiredUse::All(children) => {
+                for child in children {
+                    self.clause(child);
+                }
+            }
+            RequiredUse::Flag { name, negated } => match self.operand(name, *negated) {
+                Operand::Free { node, sat_ver } => self.force(&node, sat_ver),
+                // Fixed-satisfied: nothing to do. Fixed-unsatisfiable: a fixed
+                // flag we cannot change — leave it to the Level-A reporter.
+                Operand::Fixed { .. } => {}
+            },
+            RequiredUse::AnyOf(ch) => self.group(ch, Group::Any),
+            RequiredUse::ExactlyOne(ch) => self.group(ch, Group::Exactly),
+            RequiredUse::AtMostOne(ch) => self.group(ch, Group::AtMost),
+            RequiredUse::UseConditional {
+                flag,
+                negated,
+                entries,
+            } => self.conditional(flag, *negated, entries),
+        }
+    }
+
+    fn group(&mut self, children: &[RequiredUse], kind: Group) {
+        // Only flat groups of bare flags are encoded; anything else is deferred.
+        let Some(ops) = self.flag_operands(children) else {
+            return;
+        };
+        let fixed_sat = ops
+            .iter()
+            .filter(|o| matches!(o, Operand::Fixed { satisfied: true }))
+            .count();
+        let free: Vec<(PortagePackage, u64)> = ops
+            .iter()
+            .filter_map(|o| match o {
+                Operand::Free { node, sat_ver } => Some((node.clone(), *sat_ver)),
+                _ => None,
+            })
+            .collect();
+
+        match kind {
+            Group::Any => {
+                if fixed_sat >= 1 {
+                    return; // already satisfied
+                }
+                match free.len() {
+                    0 => {} // unsatisfiable → Level A
+                    1 => self.force(&free[0].0, free[0].1),
+                    _ => self.at_least_one(&free),
+                }
+            }
+            Group::AtMost => {
+                if fixed_sat >= 2 {
+                    return; // unsatisfiable → Level A
+                }
+                if fixed_sat == 1 {
+                    // the fixed one is "the" one → all free must be off.
+                    for (node, sv) in &free {
+                        self.force(node, Self::ON + Self::OFF - *sv);
+                    }
+                } else if free.len() >= 2 {
+                    self.at_most_one(&free);
+                }
+            }
+            Group::Exactly => {
+                if fixed_sat >= 2 {
+                    return; // unsatisfiable → Level A
+                }
+                if fixed_sat == 1 {
+                    for (node, sv) in &free {
+                        self.force(node, Self::ON + Self::OFF - *sv);
+                    }
+                } else {
+                    match free.len() {
+                        0 => {} // unsatisfiable → Level A
+                        1 => self.force(&free[0].0, free[0].1),
+                        _ => {
+                            self.at_least_one(&free);
+                            self.at_most_one(&free);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn conditional(&mut self, flag: &Interned<DefaultInterner>, negated: bool, entries: &[RequiredUse]) {
+        match self.desired.get(flag) {
+            UseFlagState::SolverDecided { .. } => {
+                let guard = use_decision_package(self.cpn_str, flag);
+                let active_ver = if negated { Self::OFF } else { Self::ON };
+                // Only bare-flag consequents are encoded under a ceded guard.
+                let Some(ops) = self.flag_operands(entries) else {
+                    return;
+                };
+                for op in ops {
+                    match op {
+                        Operand::Free { node, sat_ver } => {
+                            // guard active ⇒ entry must be satisfied.
+                            self.imply(&guard, active_ver, &node, sat_ver);
+                        }
+                        Operand::Fixed { satisfied: true } => {}
+                        Operand::Fixed { satisfied: false } => {
+                            // guard active ⇒ a fixed flag would be violated, so
+                            // the guard must take its inactive value instead.
+                            self.force(&guard, Self::ON + Self::OFF - active_ver);
+                        }
+                    }
+                }
+            }
+            state => {
+                // Fixed guard: if active, the entries are mandatory clauses.
+                let on = matches!(state, UseFlagState::Enabled);
+                let active = on != negated;
+                if active {
+                    for e in entries {
+                        self.clause(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Classify a list of children as bare-flag operands, or `None` if any child
+    /// is not a bare `Flag` (a nested group — deferred to Phase 2).
+    fn flag_operands(&self, children: &[RequiredUse]) -> Option<Vec<Operand>> {
+        children
+            .iter()
+            .map(|c| match c {
+                RequiredUse::Flag { name, negated } => Some(self.operand(name, *negated)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn finish(mut self) -> RequiredUseEncoding {
+        // Materialise every touched node as a two-version UseDecision virtual,
+        // carrying any implication/exclusion deps, and pull it into the package.
+        let nodes: Vec<PortagePackage> = self.touched.iter().cloned().collect();
+        for node in nodes {
+            let on = self.node_on.remove(&node).unwrap_or_default();
+            let off = self.node_off.remove(&node).unwrap_or_default();
+            self.virtual_choices.push(VirtualChoice {
+                package: node.clone(),
+                versions: vec![(Self::ver(Self::OFF), off), (Self::ver(Self::ON), on)],
+                branch_use_deps: Vec::new(),
+            });
+            self.requirements
+                .push((node, PortageVersionSet::any(), None));
+        }
+        RequiredUseEncoding {
+            requirements: self.requirements,
+            virtual_choices: self.virtual_choices,
+        }
+    }
+}
+
+enum Group {
+    Any,
+    Exactly,
+    AtMost,
 }
 
 #[cfg(test)]
