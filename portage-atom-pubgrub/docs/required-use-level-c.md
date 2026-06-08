@@ -172,7 +172,43 @@ for *un*satisfiable constraints (a hard pin that no legal assignment can meet).
   ceded (usually harmless — forced flags rarely sit in fixable `REQUIRED_USE`);
   the `UseDecision` node is per-`(cpn, flag)`, so a multi-slot package's slots
   share one decision.
-- **Phase 2** — nested conditionals; richer reporting.
+- **Phase 2** ⚙️ *(in progress, 2026-06-09)*:
+  - **Latent `Ord` bug fixed (load-bearing).** `PortagePackage::Ord` collapsed
+    all `UseDecision` (and `Choice`/`SlotChoice`) nodes to `Ordering::Equal`,
+    inconsistent with its `Eq`/`Hash`. The encoder's `touched` `BTreeSet` keyed
+    on these silently kept only *one* node, so for any package with a multi-flag
+    `REQUIRED_USE` the encoder dropped most of its constraints — Phase 1 was only
+    ever exercised on the rare single-flag case. `Ord` now breaks ties by the
+    interned name; `internal_nodes_order_consistent_with_eq` guards it.
+  - **Nested groups under a *ceded* guard** (`a? ( ^^ ( b c ) )`, `a? ( || … )`,
+    `a? ( ?? … )`, `a? ( b(fixed)? ( c ) )`). `convert::guarded`/`guarded_any`/
+    `guarded_at_most`/`imply_choice` *gate* the body's constraints behind
+    `guard@active` (a `Choice` pulled only from the guard's version bucket), so an
+    inactive guard removes the constraint structurally — no escape-literal heuristics.
+    A nested conditional whose *inner* guard is also ceded is deferred to Level A
+    (a two-antecedent implication PubGrub Horn clauses can't model).
+  - **Preference-ordered choice branches.** `Operand::Free` now carries
+    `prefer_ver`; `at_least_one`/`imply_choice` order branches preference-satisfied
+    first (`order_by_preference`) so the solver meets a clause without a flip when
+    it already can. Fixes gratuitous flips (`||`/`^^` previously enabled the
+    first-listed flag regardless of preference, e.g. swapping `PYTHON_SINGLE_TARGET`
+    or adding an extra `PYTHON_TARGETS`).
+  - **Cede gated on actual violation (cli).** The Adapter cedes a package's flags
+    *only* when its `REQUIRED_USE` is currently unsatisfied by the resolved config
+    (`RequiredUseExpr::unsatisfied`). An already-satisfied package is left fixed —
+    nothing to autosolve — so the solver no longer re-decides settled USE_EXPAND
+    flags (LLVM_SLOT/PYTHON_TARGETS) and drags in their conditional deps. This cut
+    the `dev-qt/qtbase --autosolve-use` closure from 75 back to 42 (baseline 41),
+    matching emerge's "act only on violations" behaviour.
+
+  Verified on the live tree: no-autosolve basket package set matches `emerge -p`
+  (firefox/texlive-core/qtbase); `USE="journald syslog" … --autosolve-use
+  dev-qt/qtbase` still disables `syslog` and reports the one flip.
+
+  *Still pending in Phase 2:* `use.force`/`use.mask`-aware cede (forced flags not
+  yet distinguished from profile defaults); per-slot `UseDecision` nodes (a
+  multi-slot package's slots share one decision); nested *ceded-guard chains*
+  (deferred to Level A); richer reporting.
 - **Phase 3** (maybe) — cross-package USE-dep co-solve (§6).
 
 ## 8. Invariants to hold (acceptance)

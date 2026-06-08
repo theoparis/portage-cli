@@ -139,9 +139,15 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   Portage's "fix your USE flags" behaviour (**Level A**). With the consumer's
   `--autosolve-use` the constraint is encoded over `UseDecision` nodes and the
   solver *chooses* satisfying flag values, biased toward the configured value
-  (**Level C**, intra-package); see `docs/required-use-level-c.md`. Not yet
-  built: nested groups under a ceded guard, and cross-package `[flag]` USE-dep
-  co-solving (still post-solve).
+  (**Level C**, intra-package); see `docs/required-use-level-c.md`. Level C now
+  also encodes **nested groups under a ceded guard** (`a? ( ^^ ( b c ) )`) by
+  gating their constraints behind the guard, orders choice branches toward the
+  configured value to avoid gratuitous flips, and (in the consumer) cedes a
+  package's flags only when its `REQUIRED_USE` is actually violated — so
+  autosolve no longer re-decides settled USE_EXPAND flags. Not yet built:
+  `use.force`/`use.mask`-aware and per-slot cede, nested *ceded-guard chains*
+  (deferred to Level A), and cross-package `[flag]` USE-dep co-solving (still
+  post-solve).
 - **Upgraded versions are re-solved.** When a forced rebuild is favoured up to a
   newer version (`upgrade_to`), `resolve_targets` pins that version and re-solves
   to a fixpoint (bounded), so the upgraded version's full dependency closure

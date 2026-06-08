@@ -214,6 +214,16 @@ impl PackageRepository for Adapter<'_> {
         if self.autosolve_use
             && let Some(m) = meta
             && let Some(ru) = &m.required_use
+            // Only cede when the constraint is *not* already satisfied by the
+            // resolved config. If it is satisfied, there is nothing to autosolve;
+            // ceding anyway would let the solver re-decide settled flags (e.g.
+            // USE_EXPAND like LLVM_SLOT/PYTHON_TARGETS) and gratuitously pull
+            // their conditional deps. Matches emerge: it acts only on violations.
+            && {
+                let enabled =
+                    |flag: &str| matches!(cfg.get(&Interned::intern(flag)), UseFlagState::Enabled);
+                !ru.unsatisfied(&enabled).is_empty()
+            }
         {
             // Flags the user pinned via package.use: applying it to an empty
             // base leaves exactly those flags set.

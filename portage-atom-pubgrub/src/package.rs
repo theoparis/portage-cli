@@ -141,6 +141,12 @@ impl Ord for PortagePackage {
             }),
             (Self::Real { .. }, _) => Ordering::Less,
             (_, Self::Real { .. }) => Ordering::Greater,
+            // Internal variants: order by discriminant, then by the interned
+            // name within a variant so `Ord` stays consistent with `Eq`/`Hash`
+            // (otherwise distinct nodes collapse in a `BTreeSet`/`BTreeMap`).
+            (Self::UseDecision { name: a }, Self::UseDecision { name: b })
+            | (Self::Choice { name: a }, Self::Choice { name: b })
+            | (Self::SlotChoice { name: a }, Self::SlotChoice { name: b }) => a.as_str().cmp(b.as_str()),
             _ => self.discriminant_ord().cmp(&other.discriminant_ord()),
         }
     }
@@ -235,5 +241,33 @@ mod tests {
         assert!(!PortagePackage::unslotted(cpn).is_virtual());
         assert!(PortagePackage::synthetic_root().is_virtual());
         assert!(PortagePackage::use_decision(Interned::intern("test")).is_virtual());
+    }
+
+    // `Ord` must be consistent with `Eq`/`Hash`: distinct internal nodes that
+    // are unequal must not compare `Equal`, or a `BTreeSet`/`BTreeMap` keyed on
+    // them silently collapses them into one (the bug behind ceded nested groups).
+    #[test]
+    fn internal_nodes_order_consistent_with_eq() {
+        use std::cmp::Ordering;
+        let a = PortagePackage::use_decision(Interned::intern("USE_a"));
+        let b = PortagePackage::use_decision(Interned::intern("USE_b"));
+        assert_ne!(a, b);
+        assert_ne!(a.cmp(&b), Ordering::Equal, "distinct nodes must not tie");
+        assert_eq!(a.cmp(&a), Ordering::Equal);
+
+        // The set must retain every distinct node.
+        let mut set = std::collections::BTreeSet::new();
+        for n in ["x", "y", "z"] {
+            set.insert(PortagePackage::use_decision(Interned::intern(n)));
+        }
+        assert_eq!(set.len(), 3, "BTreeSet dropped distinct UseDecision nodes");
+
+        // Same for the other interned-name variants.
+        let c1 = PortagePackage::choice(Interned::intern("c1"));
+        let c2 = PortagePackage::choice(Interned::intern("c2"));
+        assert_ne!(c1.cmp(&c2), Ordering::Equal);
+        let s1 = PortagePackage::slot_choice(Interned::intern("s1"));
+        let s2 = PortagePackage::slot_choice(Interned::intern("s2"));
+        assert_ne!(s1.cmp(&s2), Ordering::Equal);
     }
 }

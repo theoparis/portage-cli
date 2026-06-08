@@ -134,8 +134,12 @@ package's own facts):
   flag, `REQUIRED_USE` is encoded as relations between `UseDecision` packages so
   the solver *picks* satisfying flags (biased toward the configured value); the
   choices fold back into the displayed USE via synthetic `package.use` and any
-  flips are reported. Intra-package only so far. It is **off by default** so
-  default `em -p` keeps matching `emerge -p` (which does not auto-satisfy
+  flips are reported. Nested groups under a ceded guard (`a? ( ^^ ( b c ) )`) are
+  encoded by gating, and choice branches are ordered toward the configured value
+  so already-valid packages are left untouched. The cli cedes a package's flags
+  **only when its `REQUIRED_USE` is actually violated** (so settled USE_EXPAND
+  flags are not re-decided). Intra-package only so far. It is **off by default**
+  so default `em -p` keeps matching `emerge -p` (which does not auto-satisfy
   `REQUIRED_USE`). Concern split, the PubGrub encoding, and remaining phases are
   in [required-use-level-c.md](../portage-atom-pubgrub/docs/required-use-level-c.md).
 

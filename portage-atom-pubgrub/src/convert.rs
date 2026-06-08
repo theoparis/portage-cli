@@ -484,14 +484,38 @@ pub(crate) struct RequiredUseEncoding {
 }
 
 /// One operand of a `REQUIRED_USE` group/clause, after classifying its flag
-/// against the desired config.
+/// against the desired config. Doubles as a clause *literal* for the guarded
+/// (nested) encoding (`emit_guarded`).
+#[derive(Clone)]
 enum Operand {
     /// A flag whose value is fixed by policy; `satisfied` is whether the operand
     /// (respecting its `!`) already holds.
     Fixed { satisfied: bool },
     /// A ceded flag: `node` is its `UseDecision`, `sat_ver` the version (`0`/`1`)
-    /// at which the operand (respecting its `!`) is satisfied.
-    Free { node: PortagePackage, sat_ver: u64 },
+    /// at which the operand (respecting its `!`) is satisfied, and `prefer_ver`
+    /// the version the keep-config preference would pick (used to order choice
+    /// branches toward a no-flip solution).
+    Free {
+        node: PortagePackage,
+        sat_ver: u64,
+        prefer_ver: u64,
+    },
+}
+
+/// A ceded clause literal: `(node, required_ver, prefer_ver)`.
+type FreeLit = (PortagePackage, u64, u64);
+
+/// The ceded literals among a list of classified operands; `Fixed` operands
+/// have no node and are dropped.
+fn free_operands(ops: &[Operand]) -> Vec<FreeLit> {
+    ops.iter()
+        .filter_map(|o| match o {
+            Operand::Free { node, sat_ver, prefer_ver } => {
+                Some((node.clone(), *sat_ver, *prefer_ver))
+            }
+            Operand::Fixed { .. } => None,
+        })
+        .collect()
 }
 
 /// Encode a package's `REQUIRED_USE` into `UseDecision`/`Choice` constraints.
@@ -550,9 +574,10 @@ impl RuBuilder<'_> {
     /// Classify a `Flag { name, negated }` operand against the desired config.
     fn operand(&self, name: &Interned<DefaultInterner>, negated: bool) -> Operand {
         match self.desired.get(name) {
-            UseFlagState::SolverDecided { .. } => Operand::Free {
+            UseFlagState::SolverDecided { prefer } => Operand::Free {
                 node: use_decision_package(self.cpn_str, name),
                 sat_ver: if negated { Self::OFF } else { Self::ON },
+                prefer_ver: u64::from(prefer),
             },
             state => {
                 let on = matches!(state, UseFlagState::Enabled);
@@ -561,6 +586,17 @@ impl RuBuilder<'_> {
                 }
             }
         }
+    }
+
+    /// Order ceded literals so those the keep-config preference already satisfies
+    /// come first (highest choice versions), so the solver can satisfy a clause
+    /// without flipping a flag when it already can. Returns `(node, required_ver)`.
+    fn order_by_preference(lits: &[FreeLit]) -> Vec<(PortagePackage, u64)> {
+        let mut v: Vec<&FreeLit> = lits.iter().collect();
+        // `false` (preference already satisfies the literal) sorts before `true`;
+        // sort is stable, so original order is kept within each group.
+        v.sort_by_key(|(_, req, prefer)| req != prefer);
+        v.into_iter().map(|(n, req, _)| (n.clone(), *req)).collect()
     }
 
     /// Force a ceded node to a specific version on the package itself.
@@ -582,12 +618,15 @@ impl RuBuilder<'_> {
     }
 
     /// At least one of the ceded operands must be satisfied (a `Choice` node).
-    fn at_least_one(&mut self, free: &[(PortagePackage, u64)]) {
+    /// Branches are ordered preference-satisfied-first so the solver picks an
+    /// already-met operand (no flip) when one exists.
+    fn at_least_one(&mut self, free: &[FreeLit]) {
+        let ordered = Self::order_by_preference(free);
         let id = next_choice_id();
         let pkg = PortagePackage::choice(Interned::intern(&format!("ru_choice_{id}")));
-        let n = free.len();
+        let n = ordered.len();
         let mut versions = Vec::with_capacity(n);
-        for (i, (node, sat_ver)) in free.iter().enumerate() {
+        for (i, (node, sat_ver)) in ordered.iter().enumerate() {
             // n..1 numbering (parallel to convert_choice_group), one branch per flag.
             versions.push((Self::ver((n - i) as u64), vec![Self::singleton(node, *sat_ver)]));
             self.touched.insert(node.clone());
@@ -601,9 +640,9 @@ impl RuBuilder<'_> {
     }
 
     /// At most one of the ceded operands may be satisfied (pairwise exclusion).
-    fn at_most_one(&mut self, free: &[(PortagePackage, u64)]) {
-        for (i, (ni, svi)) in free.iter().enumerate() {
-            for (j, (nj, svj)) in free.iter().enumerate() {
+    fn at_most_one(&mut self, free: &[FreeLit]) {
+        for (i, (ni, svi, _)) in free.iter().enumerate() {
+            for (j, (nj, svj, _)) in free.iter().enumerate() {
                 if i != j {
                     // ni satisfied ⇒ nj not satisfied.
                     self.imply(ni, *svi, nj, Self::ON + Self::OFF - *svj);
@@ -621,7 +660,7 @@ impl RuBuilder<'_> {
                 }
             }
             RequiredUse::Flag { name, negated } => match self.operand(name, *negated) {
-                Operand::Free { node, sat_ver } => self.force(&node, sat_ver),
+                Operand::Free { node, sat_ver, .. } => self.force(&node, sat_ver),
                 // Fixed-satisfied: nothing to do. Fixed-unsatisfiable: a fixed
                 // flag we cannot change — leave it to the Level-A reporter.
                 Operand::Fixed { .. } => {}
@@ -646,13 +685,7 @@ impl RuBuilder<'_> {
             .iter()
             .filter(|o| matches!(o, Operand::Fixed { satisfied: true }))
             .count();
-        let free: Vec<(PortagePackage, u64)> = ops
-            .iter()
-            .filter_map(|o| match o {
-                Operand::Free { node, sat_ver } => Some((node.clone(), *sat_ver)),
-                _ => None,
-            })
-            .collect();
+        let free: Vec<FreeLit> = free_operands(&ops);
 
         match kind {
             Group::Any => {
@@ -671,7 +704,7 @@ impl RuBuilder<'_> {
                 }
                 if fixed_sat == 1 {
                     // the fixed one is "the" one → all free must be off.
-                    for (node, sv) in &free {
+                    for (node, sv, _) in &free {
                         self.force(node, Self::ON + Self::OFF - *sv);
                     }
                 } else if free.len() >= 2 {
@@ -683,7 +716,7 @@ impl RuBuilder<'_> {
                     return; // unsatisfiable → Level A
                 }
                 if fixed_sat == 1 {
-                    for (node, sv) in &free {
+                    for (node, sv, _) in &free {
                         self.force(node, Self::ON + Self::OFF - *sv);
                     }
                 } else {
@@ -705,23 +738,11 @@ impl RuBuilder<'_> {
             UseFlagState::SolverDecided { .. } => {
                 let guard = use_decision_package(self.cpn_str, flag);
                 let active_ver = if negated { Self::OFF } else { Self::ON };
-                // Only bare-flag consequents are encoded under a ceded guard.
-                let Some(ops) = self.flag_operands(entries) else {
-                    return;
-                };
-                for op in ops {
-                    match op {
-                        Operand::Free { node, sat_ver } => {
-                            // guard active ⇒ entry must be satisfied.
-                            self.imply(&guard, active_ver, &node, sat_ver);
-                        }
-                        Operand::Fixed { satisfied: true } => {}
-                        Operand::Fixed { satisfied: false } => {
-                            // guard active ⇒ a fixed flag would be violated, so
-                            // the guard must take its inactive value instead.
-                            self.force(&guard, Self::ON + Self::OFF - active_ver);
-                        }
-                    }
+                // Gate every consequent behind `guard@active_ver`: the body's
+                // constraints are pulled into the solve only when the guard is
+                // active, so an inactive guard leaves the body free.
+                for e in entries {
+                    self.guarded(e, &guard, active_ver);
                 }
             }
             state => {
@@ -738,7 +759,7 @@ impl RuBuilder<'_> {
     }
 
     /// Classify a list of children as bare-flag operands, or `None` if any child
-    /// is not a bare `Flag` (a nested group — deferred to Phase 2).
+    /// is not a bare `Flag` (a deeper nested group — still deferred).
     fn flag_operands(&self, children: &[RequiredUse]) -> Option<Vec<Operand>> {
         children
             .iter()
@@ -747,6 +768,145 @@ impl RuBuilder<'_> {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Gate `expr`'s constraints behind `guard@gv` (a ceded conditional's guard).
+    /// Constraints are only pulled into the solve when the guard takes value
+    /// `gv`, so an inactive guard leaves the body's flags free — no gratuitous
+    /// flips. This is the nested-group case the flat encoder defers.
+    ///
+    /// A nested conditional whose *inner* guard is also ceded is left to the
+    /// Level-A reporter: gating it would need a two-antecedent implication
+    /// (`outer ∧ inner ⇒ …`), which PubGrub's Horn-style clauses can't express
+    /// without a fragile choice that ignores the keep-config preference.
+    fn guarded(&mut self, expr: &RequiredUse, guard: &PortagePackage, gv: u64) {
+        match expr {
+            RequiredUse::All(children) => {
+                for c in children {
+                    self.guarded(c, guard, gv);
+                }
+            }
+            RequiredUse::Flag { name, negated } => match self.operand(name, *negated) {
+                Operand::Free { node, sat_ver, .. } => self.imply(guard, gv, &node, sat_ver),
+                Operand::Fixed { satisfied: true } => {}
+                Operand::Fixed { satisfied: false } => {
+                    // guard active ⇒ a fixed flag would be violated, so the guard
+                    // must take its inactive value.
+                    self.force(guard, Self::ON + Self::OFF - gv);
+                }
+            },
+            RequiredUse::AnyOf(ch) => self.guarded_any(ch, guard, gv),
+            RequiredUse::ExactlyOne(ch) => {
+                self.guarded_any(ch, guard, gv);
+                self.guarded_at_most(ch, guard, gv);
+            }
+            RequiredUse::AtMostOne(ch) => self.guarded_at_most(ch, guard, gv),
+            RequiredUse::UseConditional {
+                flag,
+                negated,
+                entries,
+            } => match self.desired.get(flag) {
+                // Inner guard also ceded → defer (see method doc).
+                UseFlagState::SolverDecided { .. } => {}
+                state => {
+                    let on = matches!(state, UseFlagState::Enabled);
+                    if on != *negated {
+                        for e in entries {
+                            self.guarded(e, guard, gv);
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    /// `guard@gv ⇒ at least one of the bare-flag operands satisfied`.
+    fn guarded_any(&mut self, children: &[RequiredUse], guard: &PortagePackage, gv: u64) {
+        let Some(ops) = self.flag_operands(children) else {
+            return; // deeper-nested operands deferred
+        };
+        if ops.iter().any(|o| matches!(o, Operand::Fixed { satisfied: true })) {
+            return; // already satisfied regardless of the guard
+        }
+        let free: Vec<FreeLit> = free_operands(&ops);
+        match free.len() {
+            // No way to satisfy when active ⇒ the guard must stay inactive.
+            0 => self.force(guard, Self::ON + Self::OFF - gv),
+            1 => self.imply(guard, gv, &free[0].0, free[0].1),
+            _ => self.imply_choice(guard, gv, &free),
+        }
+    }
+
+    /// `guard@gv ⇒ at most one of the bare-flag operands satisfied`.
+    fn guarded_at_most(&mut self, children: &[RequiredUse], guard: &PortagePackage, gv: u64) {
+        let Some(ops) = self.flag_operands(children) else {
+            return;
+        };
+        let fixed_sat = ops
+            .iter()
+            .filter(|o| matches!(o, Operand::Fixed { satisfied: true }))
+            .count();
+        if fixed_sat >= 2 {
+            // Two fixed-on operands ⇒ unsatisfiable when active ⇒ guard inactive.
+            self.force(guard, Self::ON + Self::OFF - gv);
+            return;
+        }
+        let free: Vec<FreeLit> = free_operands(&ops);
+        if fixed_sat == 1 {
+            // The fixed-on operand is "the" one; all free must be off when active.
+            for (node, sv, _) in &free {
+                self.imply(guard, gv, node, Self::ON + Self::OFF - sv);
+            }
+        } else {
+            for i in 0..free.len() {
+                for j in (i + 1)..free.len() {
+                    // guard@gv ⇒ (¬free[i] ∨ ¬free[j]); each negated literal keeps
+                    // its own preference so the choice can avoid a flip.
+                    let pair = [
+                        (
+                            free[i].0.clone(),
+                            Self::ON + Self::OFF - free[i].1,
+                            free[i].2,
+                        ),
+                        (
+                            free[j].0.clone(),
+                            Self::ON + Self::OFF - free[j].1,
+                            free[j].2,
+                        ),
+                    ];
+                    self.imply_choice(guard, gv, &pair);
+                }
+            }
+        }
+    }
+
+    /// Register a `Choice` node (one branch per operand) that is pulled into the
+    /// solve *only* when `guard@gv` is selected, by attaching it to the guard's
+    /// version bucket rather than the package's always-on requirements. Branches
+    /// are ordered preference-satisfied-first (as in `at_least_one`).
+    fn imply_choice(&mut self, guard: &PortagePackage, gv: u64, ops: &[FreeLit]) {
+        let ordered = Self::order_by_preference(ops);
+        let id = next_choice_id();
+        let pkg = PortagePackage::choice(Interned::intern(&format!("ru_gchoice_{id}")));
+        let n = ordered.len();
+        let mut versions = Vec::with_capacity(n);
+        for (i, (node, sat_ver)) in ordered.iter().enumerate() {
+            versions.push((Self::ver((n - i) as u64), vec![Self::singleton(node, *sat_ver)]));
+            self.touched.insert(node.clone());
+        }
+        self.virtual_choices.push(VirtualChoice {
+            package: pkg.clone(),
+            versions,
+            branch_use_deps: Vec::new(),
+        });
+        // Pull the choice when the guard is active (and only then).
+        self.touched.insert(guard.clone());
+        let bucket = if gv == Self::ON {
+            self.node_on.entry(guard.clone()).or_default()
+        } else {
+            self.node_off.entry(guard.clone()).or_default()
+        };
+        bucket.push((pkg, PortageVersionSet::any(), None));
     }
 
     fn finish(mut self) -> RequiredUseEncoding {

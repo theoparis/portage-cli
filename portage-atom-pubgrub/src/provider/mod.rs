@@ -1848,6 +1848,137 @@ mod tests {
         assert!(!got.contains("py"), "y should keep its preferred off");
     }
 
+    #[test]
+    fn required_use_exactly_one_keeps_preferred_not_first() {
+        use crate::required_use::RequiredUse::ExactlyOne;
+        // ^^ ( x y ) with the *second*-listed flag (y) preferred on and already
+        // satisfying the group: the solver must keep y, not gratuitously flip to
+        // the first-listed x. Guards against choice branches ignoring preference.
+        let got = solve_required_use(
+            ExactlyOne(vec![flag("x", false), flag("y", false)]),
+            &[("x", false), ("y", true)],
+            &[],
+        );
+        assert!(got.contains("py"), "preferred y kept, got {got:?}");
+        assert!(!got.contains("px"), "x not gratuitously enabled, got {got:?}");
+    }
+
+    #[test]
+    fn required_use_any_of_keeps_preferred_no_extra() {
+        use crate::required_use::RequiredUse::AnyOf;
+        // || ( x y z ) with only z (last) preferred on: the at-least-one is met,
+        // no other flag should be flipped on (the python_targets blowup case).
+        let got = solve_required_use(
+            AnyOf(vec![flag("x", false), flag("y", false), flag("z", false)]),
+            &[("x", false), ("y", false), ("z", true)],
+            &[],
+        );
+        assert!(got.contains("pz"), "preferred z kept");
+        assert!(!got.contains("px") && !got.contains("py"), "no extra flips, got {got:?}");
+    }
+
+    #[test]
+    fn required_use_nested_exactly_one_under_guard() {
+        use crate::required_use::RequiredUse::{ExactlyOne, UseConditional};
+        // x? ( ^^ ( y z ) ): x ceded ON, y/z ceded OFF → x stays on and exactly
+        // one of y/z is enabled by the nested group.
+        let got = solve_required_use(
+            UseConditional {
+                flag: Interned::intern("x"),
+                negated: false,
+                entries: vec![ExactlyOne(vec![flag("y", false), flag("z", false)])],
+            },
+            &[("x", true), ("y", false), ("z", false)],
+            &[],
+        );
+        assert!(got.contains("px"), "x kept on");
+        let yz = got.iter().filter(|n| *n == "py" || *n == "pz").count();
+        assert_eq!(yz, 1, "exactly one of y/z under the guard, got {got:?}");
+    }
+
+    #[test]
+    fn required_use_nested_group_inert_when_guard_off() {
+        use crate::required_use::RequiredUse::{ExactlyOne, UseConditional};
+        // x? ( ^^ ( y z ) ): x ceded OFF (preferred) → the nested ^^ never fires,
+        // so y/z keep their preferred off (no gratuitous enable).
+        let got = solve_required_use(
+            UseConditional {
+                flag: Interned::intern("x"),
+                negated: false,
+                entries: vec![ExactlyOne(vec![flag("y", false), flag("z", false)])],
+            },
+            &[("x", false), ("y", false), ("z", false)],
+            &[],
+        );
+        assert!(got.is_empty(), "guard off ⇒ nothing forced, got {got:?}");
+    }
+
+    #[test]
+    fn required_use_nested_conditional_fixed_inner_guard() {
+        use crate::required_use::RequiredUse::UseConditional;
+        // x? ( y? ( z ) ): x ceded ON, y *fixed* ON (not ceded), z prefers OFF →
+        // the inner guard collapses to a constant and z is forced on.
+        let got = solve_required_use(
+            UseConditional {
+                flag: Interned::intern("x"),
+                negated: false,
+                entries: vec![UseConditional {
+                    flag: Interned::intern("y"),
+                    negated: false,
+                    entries: vec![flag("z", false)],
+                }],
+            },
+            &[("x", true), ("z", false)],
+            &[("y", true)],
+        );
+        assert!(got.contains("px") && got.contains("py"), "x,y on");
+        assert!(got.contains("pz"), "z forced on by x? ( y(fixed)? ( z ) )");
+    }
+
+    #[test]
+    fn required_use_doubly_ceded_chain_defers_safely() {
+        use crate::required_use::RequiredUse::UseConditional;
+        // x? ( y? ( z ) ) with BOTH x and y ceded: a two-antecedent implication
+        // PubGrub can't model, so it is deferred to the Level-A reporter — the
+        // solve must still succeed and leave the flags at their preferences (no
+        // gratuitous flip, no panic).
+        let got = solve_required_use(
+            UseConditional {
+                flag: Interned::intern("x"),
+                negated: false,
+                entries: vec![UseConditional {
+                    flag: Interned::intern("y"),
+                    negated: false,
+                    entries: vec![flag("z", false)],
+                }],
+            },
+            &[("x", true), ("y", true), ("z", false)],
+            &[],
+        );
+        // x,y kept at preferred on; z is NOT auto-forced (left to Level A).
+        assert!(got.contains("px") && got.contains("py"), "guards kept on");
+        assert!(!got.contains("pz"), "deferred: z not auto-forced");
+    }
+
+    #[test]
+    fn required_use_nested_at_most_one_under_guard() {
+        use crate::required_use::RequiredUse::{AtMostOne, UseConditional};
+        // x? ( ?? ( y z ) ): x ceded ON, y/z both ceded ON → at most one of y/z
+        // may stay on while the guard is active.
+        let got = solve_required_use(
+            UseConditional {
+                flag: Interned::intern("x"),
+                negated: false,
+                entries: vec![AtMostOne(vec![flag("y", false), flag("z", false)])],
+            },
+            &[("x", true), ("y", true), ("z", true)],
+            &[],
+        );
+        assert!(got.contains("px"), "x kept on");
+        let yz = got.iter().filter(|n| *n == "py" || *n == "pz").count();
+        assert!(yz <= 1, "at most one of y/z under the guard, got {got:?}");
+    }
+
     // ---- Characterization: autounmask "needed" USE detection ----
     //
     // These pin the observable behaviour that the `desired_use` concern
