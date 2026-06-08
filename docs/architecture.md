@@ -1,0 +1,145 @@
+# Architecture
+
+The main architecture reference for this workspace. It describes **how the
+pieces fit together and how `em` resolves a dependency plan**. For the
+per-crate public-API catalog and crates.io/publishing status, see the
+root [`ARCHITECTURE.md`](../ARCHITECTURE.md). For the deeper USE/solver
+contract, see [`portage-atom-pubgrub/docs/use-and-solver-boundary.md`](../portage-atom-pubgrub/docs/use-and-solver-boundary.md);
+for performance numbers and the running gap list, see the
+[`portage-atom-pubgrub` README](../portage-atom-pubgrub/README.md).
+
+> **Slop warning.** This codebase is largely AI-generated. Verify a claim
+> against the code before relying on it; update this file when it drifts.
+
+## Crate layering
+
+Lower crates know nothing of higher ones. The edges below are the real
+`Cargo.toml` dependencies.
+
+```
+gentoo-interner ─┐
+                 ├─ gentoo-core ─────────────┐
+portage-atom ────┤                           │
+   │             ├─ portage-metadata ─┐       │
+   │             │                    ├─ portage-repo ─┐
+   ├─ portage-atom-pubgrub ───────────┼───────────────┼─ portage-cli (em)
+   └─ portage-atom-resolvo ───────────┘  portage-distfiles, portage-vdb ┘
+```
+
+- **portage-atom** — PMS atom parsing (`Cpn`, `Cpv`, `Dep`, `Version`,
+  `DepEntry`, USE-deps, slot operators). The vocabulary every other crate speaks.
+- **portage-metadata** — ebuild metadata: md5-cache `CacheEntry`/`EbuildMetadata`,
+  EAPI, keywords, `IUse`, and the `LicenseExpr` / `RequiredUseExpr` / `RestrictExpr`
+  sub-grammars. Pure parsing + evaluation; no I/O.
+- **portage-repo** — reads a repository from disk: ebuild discovery, profile
+  stack resolution, manifests, and an embedded `bash` (`EbuildShell`, via brush)
+  for sourcing `make.defaults`/`make.conf` and ebuilds.
+- **portage-atom-pubgrub** / **portage-atom-resolvo** — two interchangeable
+  solver bridges over the same facts. `em` uses the PubGrub bridge; resolvo is
+  kept for cross-checking. Both consume a `PackageRepository` of *facts* and
+  *resolved policy* and never resolve profile/`make.conf`/`package.use` themselves.
+- **portage-cli** — the `em` binary: wires repo + profile + VDB into a solver,
+  runs post-solve checks, and renders emerge-compatible output.
+
+## The `em -p` / `em query depgraph` pipeline
+
+`em -p` and `em query depgraph` share one path (`query/depgraph/mod.rs`).
+Stages, in order:
+
+1. **Load facts** (`repo.rs`) — parse the repo's md5-cache into `RepoData`
+   (CPN → versions → `CacheEntry`), filtered by keywords/mask/license.
+2. **Build the USE environment** (`use_env.rs` → `portage-repo`) — see
+   [USE stacking](#use-stacking-precedence) below. Produces the global
+   `UseConfig`, `package.use`, `USE_EXPAND` groups, masks, `ACCEPT_KEYWORDS`,
+   `ACCEPT_LICENSE`.
+3. **Load installed set** (`installed.rs`) — the VDB, used for `InstalledPolicy`
+   (`Favor`/`Lock`), action tags (`N`/`R`/`U`/`D`), and reverse-dep checks.
+4. **Build the provider** (`PortageDependencyProvider::new(adapter)`) — the cli
+   `Adapter` implements `PackageRepository`, handing the solver each version's
+   facts (`versions_for`) and its resolved **desired** USE (`desired_use`).
+5. **Resolve** (`resolve_targets`) — PubGrub selects one version per package,
+   modelling OR/`^^`/`??` groups, slots/subslots, USE-conditional deps, and
+   USE-dep constraints (the latter via virtual `UseDecision` packages).
+6. **Post-solve checks** — see [Post-solve validation](#post-solve-validation).
+7. **Install order** (`install_order`) — SCC condensation (iterative Tarjan) +
+   lexicographic Kahn; hard (DEPEND/BDEPEND) edges before soft (RDEPEND); cycles
+   broken on soft edges. Explicitly-requested targets are listed last when
+   nothing depends on them (emerge convention).
+8. **Render** (`output.rs`) — `pretty` (emerge `-p`/`-pv`), `json`, or `tree`.
+
+## USE stacking precedence
+
+This is the part most easily gotten wrong, so it is pinned here. `em` resolves a
+package's effective USE in the same incremental order Portage does
+(low → high precedence; later layers override earlier, `-flag` removes):
+
+1. `make.globals`
+2. profile `make.defaults` (stacked through the profile parents)
+3. `make.conf`
+4. **the `USE` environment variable** (and each `USE_EXPAND` key read from the
+   process env, e.g. `PYTHON_TARGETS=...`)
+5. `package.use` (profile + `/etc/portage/package.use`)
+6. `use.force` / `use.mask`
+
+Layers 1–4 are computed in `portage-repo`'s `resolve_use_flags`
+(`build/profile.rs`): the profile chain and `make.conf` are sourced through the
+embedded shell, then `apply_env_layer` merges the `USE`/`USE_EXPAND` env vars as
+the final incremental layer. So `USE="-X" em -p www-client/firefox` *does* enter
+the stack — but `package.use`/`use.force` (layers 5–6) sit above it and can pin a
+flag back on. Layer 5 (`package.use`) is applied **per package** at solve/display
+time via `apply_package_use`, which is also what `desired_use` returns to the
+solver. The solver itself never recomputes any of this; it consumes the resolved
+`desired` set (see the [USE/solver boundary doc](../portage-atom-pubgrub/docs/use-and-solver-boundary.md)).
+
+## Post-solve validation
+
+The solver decides *versions*; several constraints are intentionally **not**
+modelled inside it and are checked after a solution exists. Some live in the
+solver crate (they read its `VersionData`), some in the cli (they need only a
+package's own facts):
+
+| Check | Where | Notes |
+|---|---|---|
+| USE-dep constraints (`[flag]`, `[flag?]`, `[flag=]`) | crate `validate.rs` | `check_use_deps` |
+| Blockers (`!foo` / `!!foo`) | crate `validate.rs` | `check_blockers`; evaluates the blocker's own USE condition to avoid false positives |
+| `::repo` constraints | crate `validate.rs` | `check_repo_constraints` |
+| Reverse-dependency conflicts | cli `conflicts.rs` | complete-graph check (every installed pkg's deps vs the plan) that a default `emerge -p` skips; advisory, reported as "Dependency constraint conflict" |
+| `REQUIRED_USE` | cli `required_use.rs` | **Level A** — see below |
+
+### REQUIRED_USE: Level A vs Level C
+
+`REQUIRED_USE` (`^^`/`??`/`||`/`flag? ( … )`) is handled at two possible levels:
+
+- **Level A — validate & report (current).** `RequiredUseExpr::is_satisfied` /
+  `unsatisfied` (in `portage-metadata`) evaluate each planned package's
+  constraint against its effective USE; violations are reported as an advisory
+  warning, matching Portage's default "fix your USE flags" behaviour. This is a
+  purely local, post-solve check, so it lives in the cli (`required_use.rs`)
+  beside `conflicts.rs` — it needs no solver state, and therefore the solver
+  crate does **not** depend on `portage-metadata`.
+- **Level C — solver auto-satisfaction (not built).** Encoding `REQUIRED_USE` as
+  relations between `UseDecision` packages so the solver *picks* satisfying
+  flags. This is the strategic lever in
+  [use-and-solver-boundary.md §4](../portage-atom-pubgrub/docs/use-and-solver-boundary.md);
+  it is what would justify threading `RequiredUseExpr` into the solver crate's
+  `VersionData`. It requires a USE-preference model and the Level-A oracle first.
+
+Keeping Level A in the cli is deliberate: the `portage-metadata → portage-atom-pubgrub`
+dependency is a Level-C cost, not a Level-A one.
+
+## Solvers are interchangeable
+
+Both solver bridges expose a `PackageRepository` trait and a provider over the
+same facts; `em` defaults to PubGrub. This lets a plan be cross-checked between
+two independent algorithms. The boundary rule for both: **facts in (deps, slots,
+versions, IUSE names) and resolved policy in (desired USE via `desired_use`);
+the solver computes the *needed* set and never resolves policy.**
+
+## Known divergences from emerge
+
+The plan (package set + versions) matches `emerge -p` on the test basket;
+remaining differences are documented in the
+[`portage-atom-pubgrub` README](../portage-atom-pubgrub/README.md) "Known
+limitations" section — chiefly install-*order* positions (different scheduler),
+the advisory reverse-dep/REQUIRED_USE reporting that emerge's default hides, and
+the unbuilt Level-C `REQUIRED_USE` solving.

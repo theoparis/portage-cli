@@ -11,23 +11,27 @@ cargo fmt --check                  # Format check — must pass
 
 ## Architecture
 
-- Binary crate producing the `em` command
-- CLI built with [clap](https://crates.io/crates/clap) derive macros
-- Commands are subcommands of the top-level `Cli` struct
-- Business logic delegated to library crates (`portage-atom`; `portage-repo` and `portage-atom-resolvo` to be added later)
-- Keep `main.rs` thin; extract modules as complexity grows
-- The [architecture](./ARCHITECTURE.md) contains more details when needed and can be updated as changes are made.
+- Binary crate producing the `em` command; CLI built with
+  [clap](https://crates.io/crates/clap) derive macros, subcommands of the
+  top-level `Cli` struct. Keep `main.rs` thin; extract modules as complexity grows.
+- Business logic is delegated to the library crates (`portage-atom`,
+  `portage-metadata`, `portage-repo`, `portage-atom-pubgrub`, …).
+- **Read [`docs/architecture.md`](./docs/architecture.md) first** — it is the
+  main architecture reference (the `em -p` resolution pipeline, USE stacking
+  precedence, the USE/solver boundary, post-solve validation, and known
+  divergences from emerge). Keep it updated as the design changes.
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) is the per-crate public-API catalog and
+  publishing status.
 
 ## Dependencies
 
 - `portage-atom` — PMS atom parsing (Cpn, Cpv, Dep, etc.)
+- `portage-metadata` — md5-cache metadata, `RequiredUseExpr`, keywords, IUSE
+- `portage-repo` — repository layout, profile stack, embedded ebuild shell
+- `portage-atom-pubgrub` — the PubGrub solver bridge `em` resolves through
 - `clap` — CLI argument parsing
-- `tokio` — async runtime (prepared for future portage-repo integration)
+- `tokio` — async runtime
 - `thiserror` — error derive macros
-
-> **Note**: `portage-atom-resolvo` and `portage-repo` are planned but not yet
-> depended on (portage-repo is not yet published to crates.io). Add them back
-> when implementing real emerge/resolve logic.
 
 ## Coding Style
 
