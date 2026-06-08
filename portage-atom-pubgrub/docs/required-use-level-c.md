@@ -205,10 +205,18 @@ for *un*satisfiable constraints (a hard pin that no legal assignment can meet).
   (firefox/texlive-core/qtbase); `USE="journald syslog" … --autosolve-use
   dev-qt/qtbase` still disables `syslog` and reports the one flip.
 
-  *Still pending in Phase 2:* `use.force`/`use.mask`-aware cede (forced flags not
-  yet distinguished from profile defaults); per-slot `UseDecision` nodes (a
-  multi-slot package's slots share one decision); nested *ceded-guard chains*
-  (deferred to Level A); richer reporting.
+  - **`use.force`/`use.mask`-aware cede (cli).** The cli now threads the profile
+    stack's `use.force`/`use.mask` (global) and matching `package.use.force`/
+    `package.use.mask` into the Adapter and never cedes a flag they pin — a forced
+    flag stays a fixed `Enabled`/`Disabled` operand the encoder partially
+    evaluates, so the solver can't produce a plan that flips a profile-forced
+    flag. Verified by `forced_flag_is_not_ceded` (+ `unforced_flags_are_ceded`,
+    `satisfied_constraint_cedes_nothing`).
+
+  *Still pending in Phase 2:* per-slot `UseDecision` nodes (a multi-slot package's
+  slots share one decision); nested *ceded-guard chains* (deferred to Level A);
+  richer reporting. `/etc/portage/profile/{use,package.use}.{force,mask}` are not
+  yet read (only the profile stack), a minor gap.
 - **Phase 3** (maybe) — cross-package USE-dep co-solve (§6).
 
 ## 8. Invariants to hold (acceptance)

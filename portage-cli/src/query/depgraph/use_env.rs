@@ -16,6 +16,13 @@ pub(super) struct UseEnv {
     pub package_use: Vec<(Dep, Vec<String>)>,
     /// Masked packages from the profile stack and `/etc/portage/package.mask`.
     pub package_mask: Vec<Dep>,
+    /// Global `use.force` ∪ `use.mask` flag names (profile stack). These are hard
+    /// profile decisions a flag's value must not deviate from, so Level-C never
+    /// cedes them.
+    pub force_mask_global: Vec<String>,
+    /// Per-package `package.use.force` ∪ `package.use.mask` (profile stack), flag
+    /// names per atom (negated `-flag` unforce/unmask tokens dropped).
+    pub force_mask_pkg: Vec<(Dep, Vec<String>)>,
     /// Effective ACCEPT_KEYWORDS tokens (e.g. `["arm64", "~arm64"]`).
     pub accept_keywords: Vec<String>,
     /// Effective ACCEPT_LICENSE tokens (e.g. `["*"]` or `["MIT", "GPL-2"]`).
@@ -85,7 +92,41 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
     let mut package_mask = stack.package_mask().unwrap_or_default();
     package_mask.extend(load_dep_list(portage_dir.join("package.mask").as_str()));
 
-    Ok(UseEnv { config, expand, expand_hidden, package_use, package_mask, accept_keywords, accept_license, distdir })
+    // Forced/masked flags are hard profile decisions; collect their names so
+    // Level-C cede leaves them fixed. A `use.mask` flag is masked *off* and a
+    // `use.force` flag forced *on*; for ceding we only care that the value is
+    // pinned, so both go in one set. Negated tokens (`-flag` = unmask/unforce)
+    // are dropped — they release a pin rather than create one.
+    let strip = |toks: Vec<String>| -> Vec<String> {
+        toks.into_iter().filter(|t| !t.starts_with('-')).collect()
+    };
+    let mut force_mask_global = strip(stack.use_force().unwrap_or_default());
+    force_mask_global.extend(strip(stack.use_mask().unwrap_or_default()));
+
+    let mut force_mask_pkg: Vec<(Dep, Vec<String>)> = stack
+        .package_use_force()
+        .unwrap_or_default()
+        .into_iter()
+        .chain(stack.package_use_mask().unwrap_or_default())
+        .filter_map(|(dep, flags)| {
+            let kept = strip(flags);
+            (!kept.is_empty()).then_some((dep, kept))
+        })
+        .collect();
+    force_mask_pkg.shrink_to_fit();
+
+    Ok(UseEnv {
+        config,
+        expand,
+        expand_hidden,
+        package_use,
+        package_mask,
+        force_mask_global,
+        force_mask_pkg,
+        accept_keywords,
+        accept_license,
+        distdir,
+    })
 }
 
 fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {

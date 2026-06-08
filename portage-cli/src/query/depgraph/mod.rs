@@ -52,6 +52,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         expand_hidden: use_expand_hidden,
         package_use,
         package_mask,
+        force_mask_global,
+        force_mask_pkg,
         accept_keywords,
         accept_license,
         distdir,
@@ -102,6 +104,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
             accept_license: &accept_license,
             use_config: &use_config,
             package_use: &package_use,
+            force_mask_global: &force_mask_global,
+            force_mask_pkg: &force_mask_pkg,
             autosolve_use,
         };
         let mut provider = PortageDependencyProvider::new(adapter);

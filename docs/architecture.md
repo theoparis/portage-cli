@@ -137,8 +137,10 @@ package's own facts):
   flips are reported. Nested groups under a ceded guard (`a? ( ^^ ( b c ) )`) are
   encoded by gating, and choice branches are ordered toward the configured value
   so already-valid packages are left untouched. The cli cedes a package's flags
-  **only when its `REQUIRED_USE` is actually violated** (so settled USE_EXPAND
-  flags are not re-decided). Intra-package only so far. It is **off by default**
+  **only when its `REQUIRED_USE` is actually violated**, and never cedes a flag
+  pinned by `package.use`/`use.force`/`use.mask` (so settled USE_EXPAND flags are
+  not re-decided and profile-forced flags are never flipped). Intra-package only
+  so far. It is **off by default**
   so default `em -p` keeps matching `emerge -p` (which does not auto-satisfy
   `REQUIRED_USE`). Concern split, the PubGrub encoding, and remaining phases are
   in [required-use-level-c.md](../portage-atom-pubgrub/docs/required-use-level-c.md).

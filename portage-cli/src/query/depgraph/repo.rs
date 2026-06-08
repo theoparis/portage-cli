@@ -160,6 +160,10 @@ pub(super) struct Adapter<'a> {
     /// `package.use` + IUSE defaults by `desired_use`.
     pub(super) use_config: &'a portage_atom_pubgrub::UseConfig,
     pub(super) package_use: &'a [(Dep, Vec<String>)],
+    /// Global `use.force`/`use.mask` flag names — never ceded (hard profile pins).
+    pub(super) force_mask_global: &'a [String],
+    /// Per-package `package.use.force`/`package.use.mask` — never ceded.
+    pub(super) force_mask_pkg: &'a [(Dep, Vec<String>)],
     /// Level-C: when set, cede each package's non-pinned `REQUIRED_USE` flags to
     /// the solver (`SolverDecided`) instead of fixing them. See
     /// `portage-atom-pubgrub/docs/required-use-level-c.md`.
@@ -231,12 +235,25 @@ impl PackageRepository for Adapter<'_> {
             let pins = apply_package_use(&empty, cpv, slot, self.package_use);
             let iuse: std::collections::HashSet<&str> =
                 m.iuse.iter().map(|iu| iu.name()).collect();
+            // Flags pinned by use.force / use.mask (global + matching
+            // package.use.force/mask): hard profile decisions, never ceded.
+            let mut forced_masked: std::collections::HashSet<&str> =
+                self.force_mask_global.iter().map(String::as_str).collect();
+            for (dep, flags) in self.force_mask_pkg {
+                if mask_matches(dep, cpv) {
+                    forced_masked.extend(flags.iter().map(String::as_str));
+                }
+            }
             let mut names = std::collections::BTreeSet::new();
             collect_required_use_flags(ru, &mut names);
             for name in names {
                 let flag = Interned::intern(&name);
-                // Only cede real flags the user has not pinned.
-                if !iuse.contains(name.as_str()) || pins.get_opt(&flag).is_some() {
+                // Only cede real flags the user has not pinned or the profile has
+                // not forced/masked.
+                if !iuse.contains(name.as_str())
+                    || pins.get_opt(&flag).is_some()
+                    || forced_masked.contains(name.as_str())
+                {
                     continue;
                 }
                 let prefer = matches!(cfg.get(&flag), UseFlagState::Enabled);
@@ -588,4 +605,127 @@ pub(super) fn find_autounmask_candidates(
     candidates.retain(|c| seen.insert(c.cpv.to_string()));
 
     candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use portage_atom_pubgrub::{PackageRepository, UseConfig, UseFlagState};
+
+    /// Build a one-package `RepoData` from md5-cache text.
+    fn repo_with(cpv: &str, cache_text: &str) -> (RepoData, Cpv) {
+        let cpv = Cpv::parse(cpv).unwrap();
+        let entry = CacheEntry::parse(cache_text).unwrap();
+        let mut versions = HashMap::new();
+        versions.insert(cpv.cpn, vec![(cpv.clone(), entry)]);
+        (
+            RepoData { cpns: vec![cpv.cpn], versions, repo_name: "test".into() },
+            cpv,
+        )
+    }
+
+    // A flag forced by use.force must not be ceded to the solver even when it is
+    // named in a violated REQUIRED_USE — only the non-forced flag is ceded, so
+    // the solver can never produce a plan that flips a forced flag.
+    #[test]
+    fn forced_flag_is_not_ceded() {
+        let (data, cpv) = repo_with(
+            "cat/pkg-1.0",
+            "EAPI=7\nSLOT=0\nIUSE=a b\nREQUIRED_USE=?? ( a b )\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+        );
+        let arch = Arch::intern("amd64");
+        let mut use_config = UseConfig::new();
+        use_config.enable(Interned::intern("a"));
+        use_config.enable(Interned::intern("b")); // both on ⇒ ?? ( a b ) violated
+
+        let adapter = Adapter {
+            data: &data,
+            arch: &arch,
+            accept_keywords: &["amd64".to_string()],
+            package_mask: &[],
+            accept_license: &["*".to_string()],
+            use_config: &use_config,
+            package_use: &[],
+            force_mask_global: &["a".to_string()], // a is use.force'd
+            force_mask_pkg: &[],
+            autosolve_use: true,
+        };
+
+        let desired = adapter.desired_use(&cpv);
+        assert!(
+            matches!(desired.get(&Interned::intern("a")), UseFlagState::Enabled),
+            "forced flag a must stay fixed-enabled, not ceded"
+        );
+        assert!(
+            matches!(desired.get(&Interned::intern("b")), UseFlagState::SolverDecided { .. }),
+            "non-forced flag b should be ceded to satisfy the violated ?? ( a b )"
+        );
+    }
+
+    // Without the force pin, both flags in the violated constraint are ceded.
+    #[test]
+    fn unforced_flags_are_ceded() {
+        let (data, cpv) = repo_with(
+            "cat/pkg-1.0",
+            "EAPI=7\nSLOT=0\nIUSE=a b\nREQUIRED_USE=?? ( a b )\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+        );
+        let arch = Arch::intern("amd64");
+        let mut use_config = UseConfig::new();
+        use_config.enable(Interned::intern("a"));
+        use_config.enable(Interned::intern("b"));
+
+        let adapter = Adapter {
+            data: &data,
+            arch: &arch,
+            accept_keywords: &["amd64".to_string()],
+            package_mask: &[],
+            accept_license: &["*".to_string()],
+            use_config: &use_config,
+            package_use: &[],
+            force_mask_global: &[],
+            force_mask_pkg: &[],
+            autosolve_use: true,
+        };
+
+        let desired = adapter.desired_use(&cpv);
+        for f in ["a", "b"] {
+            assert!(
+                matches!(desired.get(&Interned::intern(f)), UseFlagState::SolverDecided { .. }),
+                "flag {f} should be ceded when nothing pins it"
+            );
+        }
+    }
+
+    // A satisfied REQUIRED_USE cedes nothing (cede gating).
+    #[test]
+    fn satisfied_constraint_cedes_nothing() {
+        let (data, cpv) = repo_with(
+            "cat/pkg-1.0",
+            "EAPI=7\nSLOT=0\nIUSE=a b\nREQUIRED_USE=?? ( a b )\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+        );
+        let arch = Arch::intern("amd64");
+        let mut use_config = UseConfig::new();
+        use_config.enable(Interned::intern("a")); // only a on ⇒ ?? satisfied
+
+        let adapter = Adapter {
+            data: &data,
+            arch: &arch,
+            accept_keywords: &["amd64".to_string()],
+            package_mask: &[],
+            accept_license: &["*".to_string()],
+            use_config: &use_config,
+            package_use: &[],
+            force_mask_global: &[],
+            force_mask_pkg: &[],
+            autosolve_use: true,
+        };
+
+        let desired = adapter.desired_use(&cpv);
+        for f in ["a", "b"] {
+            assert!(
+                !matches!(desired.get(&Interned::intern(f)), UseFlagState::SolverDecided { .. }),
+                "flag {f} must not be ceded when REQUIRED_USE already holds"
+            );
+        }
+    }
 }
