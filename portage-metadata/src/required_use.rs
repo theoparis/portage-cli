@@ -68,6 +68,73 @@ impl RequiredUseExpr {
         })
     }
 
+    /// Evaluate this constraint against a USE-flag predicate.
+    ///
+    /// `enabled(flag)` must return whether `flag` is enabled in the package's
+    /// effective USE.  Returns `true` when the constraint is satisfied, per
+    /// [PMS 7.3.4](https://projects.gentoo.org/pms/9/pms.html#use-state-constraints):
+    ///
+    /// - a bare flag is satisfied when enabled (a negated flag when disabled);
+    /// - `|| ( ... )` — at least one child satisfied (empty group is satisfied);
+    /// - `^^ ( ... )` — exactly one child satisfied;
+    /// - `?? ( ... )` — at most one child satisfied;
+    /// - `flag? ( ... )` / `!flag? ( ... )` — when the guard is active, all
+    ///   children must be satisfied; otherwise vacuously satisfied.
+    pub fn is_satisfied(&self, enabled: &dyn Fn(&str) -> bool) -> bool {
+        match self {
+            RequiredUseExpr::Flag { name, negated } => enabled(name) != *negated,
+            RequiredUseExpr::All(children) => children.iter().all(|c| c.is_satisfied(enabled)),
+            RequiredUseExpr::AnyOf(children) => {
+                children.is_empty() || children.iter().any(|c| c.is_satisfied(enabled))
+            }
+            RequiredUseExpr::ExactlyOne(children) => {
+                children.iter().filter(|c| c.is_satisfied(enabled)).count() == 1
+            }
+            RequiredUseExpr::AtMostOne(children) => {
+                children.iter().filter(|c| c.is_satisfied(enabled)).count() <= 1
+            }
+            RequiredUseExpr::UseConditional {
+                flag,
+                negated,
+                entries,
+            } => {
+                let guard_active = enabled(flag) != *negated;
+                !guard_active || entries.iter().all(|c| c.is_satisfied(enabled))
+            }
+        }
+    }
+
+    /// Collect the unsatisfied sub-constraints for reporting, at a useful
+    /// granularity: a top-level `All` is descended into so each failing clause
+    /// is reported on its own (e.g. `|| ( X wayland )` separately from
+    /// `^^ ( llvm_slot_20 llvm_slot_21 )`); any other failing node — including a
+    /// `flag? ( ... )` group whose guard is active — is reported whole, matching
+    /// how emerge lists unsatisfied REQUIRED_USE.
+    pub fn unsatisfied<'a>(&'a self, enabled: &dyn Fn(&str) -> bool) -> Vec<&'a RequiredUseExpr> {
+        let mut out = Vec::new();
+        self.collect_unsatisfied(enabled, &mut out);
+        out
+    }
+
+    fn collect_unsatisfied<'a>(
+        &'a self,
+        enabled: &dyn Fn(&str) -> bool,
+        out: &mut Vec<&'a RequiredUseExpr>,
+    ) {
+        match self {
+            RequiredUseExpr::All(children) => {
+                for child in children {
+                    child.collect_unsatisfied(enabled, out);
+                }
+            }
+            other => {
+                if !other.is_satisfied(enabled) {
+                    out.push(other);
+                }
+            }
+        }
+    }
+
     /// Return a copy with duplicate entries removed at every level (first occurrence wins).
     pub fn dedup(&self) -> Self {
         match self {
@@ -463,5 +530,72 @@ mod tests {
     #[test]
     fn invalid_use_conditional_flag_starting_with_hyphen() {
         assert!(RequiredUseExpr::parse("-flag? ( ssl )").is_err());
+    }
+
+    /// Build a predicate from a set of enabled flag names.
+    fn enabled_set(flags: &[&str]) -> impl Fn(&str) -> bool {
+        let set: std::collections::HashSet<String> =
+            flags.iter().map(|s| s.to_string()).collect();
+        move |f: &str| set.contains(f)
+    }
+
+    #[test]
+    fn eval_flag_and_negation() {
+        let on = enabled_set(&["ssl"]);
+        assert!(RequiredUseExpr::parse("ssl").unwrap().is_satisfied(&on));
+        assert!(!RequiredUseExpr::parse("!ssl").unwrap().is_satisfied(&on));
+        assert!(!RequiredUseExpr::parse("debug").unwrap().is_satisfied(&on));
+        assert!(RequiredUseExpr::parse("!debug").unwrap().is_satisfied(&on));
+    }
+
+    #[test]
+    fn eval_any_of() {
+        let expr = RequiredUseExpr::parse("|| ( X wayland )").unwrap();
+        assert!(expr.is_satisfied(&enabled_set(&["X"])));
+        assert!(expr.is_satisfied(&enabled_set(&["wayland"])));
+        assert!(!expr.is_satisfied(&enabled_set(&[])));
+    }
+
+    #[test]
+    fn eval_exactly_one() {
+        let expr = RequiredUseExpr::parse("^^ ( llvm_slot_20 llvm_slot_21 )").unwrap();
+        assert!(expr.is_satisfied(&enabled_set(&["llvm_slot_21"])));
+        assert!(!expr.is_satisfied(&enabled_set(&[])));
+        assert!(!expr.is_satisfied(&enabled_set(&["llvm_slot_20", "llvm_slot_21"])));
+    }
+
+    #[test]
+    fn eval_at_most_one() {
+        let expr = RequiredUseExpr::parse("?? ( journald syslog )").unwrap();
+        assert!(expr.is_satisfied(&enabled_set(&[])));
+        assert!(expr.is_satisfied(&enabled_set(&["journald"])));
+        assert!(!expr.is_satisfied(&enabled_set(&["journald", "syslog"])));
+    }
+
+    #[test]
+    fn eval_use_conditional() {
+        let expr = RequiredUseExpr::parse("wayland? ( dbus )").unwrap();
+        // guard off → vacuously satisfied
+        assert!(expr.is_satisfied(&enabled_set(&[])));
+        // guard on, requirement met
+        assert!(expr.is_satisfied(&enabled_set(&["wayland", "dbus"])));
+        // guard on, requirement unmet
+        assert!(!expr.is_satisfied(&enabled_set(&["wayland"])));
+    }
+
+    #[test]
+    fn unsatisfied_reports_failing_clauses_granularly() {
+        // firefox-like: a top-level All of several constraints.
+        let expr =
+            RequiredUseExpr::parse("|| ( X wayland ) wayland? ( dbus ) ^^ ( a b )").unwrap();
+        // wayland on without dbus → conditional fails; X on satisfies ||; pick a so ^^ ok.
+        let bad = expr.unsatisfied(&enabled_set(&["X", "wayland", "a"]));
+        assert_eq!(bad.len(), 1);
+        assert_eq!(bad[0].to_string(), "wayland? ( dbus )");
+        // everything satisfied → empty
+        assert!(
+            expr.unsatisfied(&enabled_set(&["X", "wayland", "dbus", "a"]))
+                .is_empty()
+        );
     }
 }
