@@ -205,46 +205,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         order.extend(to_reinstall);
     }
 
-    // Post-solve: check installed packages' (reverse-)dependency constraints
-    // against the proposed changes. This is a complete-graph-style check that
-    // emerge's default targeted `-p` skips, so it can surface real breakage
-    // (e.g. upgrading docutils past an installed package's `<` bound) that a
-    // plain `emerge -p` leaves silent.
-    {
-        let proposed: HashMap<Cpn, Version> = order
-            .iter()
-            .filter(|(pkg, _)| !pkg.is_virtual())
-            .map(|(pkg, ver)| (*pkg.cpn(), ver.clone()))
-            .collect();
-        let dep_conflicts = conflicts::find_conflicts(&installed_entries, &proposed);
-        if !dep_conflicts.is_empty() {
-            output::report_conflicts(&dep_conflicts);
-        }
-    }
-
-    // Post-solve: blockers (!cat/pkg / !!cat/pkg) and ::repo constraints. The
-    // solver does not model these, so they are reported here against the full
-    // solution (installed packages are favored into it, so installed-vs-new
-    // blockers are covered too).
-    {
-        let mut violations = provider.check_blockers(&solution);
-        violations.extend(provider.check_repo_constraints(&solution));
-        if !violations.is_empty() {
-            output::report_solver_violations(&violations);
-        }
-    }
-
-    // Post-solve: REQUIRED_USE. Evaluated per-package against the USE each
-    // planned package would be built with (not modelled by the solver). Portage
-    // hard-errors here; em surfaces it as an advisory warning.
-    {
-        let ru_violations =
-            required_use::find_violations(&data, &order, &use_config, &package_use);
-        if !ru_violations.is_empty() {
-            output::report_required_use(&ru_violations);
-        }
-    }
-
     let edges: Vec<_> = provider
         .dependency_graph(&solution)
         .into_iter()
@@ -340,6 +300,40 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
                 })
                 .collect();
             output::print_tree(&roots, &edges, &installed_cpvs)
+        }
+    }
+
+    // Advisory warnings are emitted after the plan so the merge list reads
+    // first and the caveats follow it (emerge lists issues at the bottom too).
+    // These are non-fatal: the plan is still produced.
+    //
+    //  - reverse-dependency constraints: a complete-graph check that emerge's
+    //    default targeted `-p` skips (e.g. upgrading docutils past an installed
+    //    package's `<` bound);
+    //  - blockers (`!foo` / `!!foo`) and `::repo` constraints, which the solver
+    //    does not model;
+    //  - REQUIRED_USE, evaluated per-package against its effective USE.
+    {
+        let proposed: HashMap<Cpn, Version> = order
+            .iter()
+            .filter(|(pkg, _)| !pkg.is_virtual())
+            .map(|(pkg, ver)| (*pkg.cpn(), ver.clone()))
+            .collect();
+        let dep_conflicts = conflicts::find_conflicts(&installed_entries, &proposed);
+        if !dep_conflicts.is_empty() {
+            output::report_conflicts(&dep_conflicts);
+        }
+
+        let mut violations = provider.check_blockers(&solution);
+        violations.extend(provider.check_repo_constraints(&solution));
+        if !violations.is_empty() {
+            output::report_solver_violations(&violations);
+        }
+
+        let ru_violations =
+            required_use::find_violations(&data, &order, &use_config, &package_use);
+        if !ru_violations.is_empty() {
+            output::report_required_use(&ru_violations);
         }
     }
 
