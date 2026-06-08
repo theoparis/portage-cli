@@ -196,3 +196,25 @@ own tests. It is kept and made canonical:
 - Exactly one function computes "is flag F on for package P": the `desired`
   reader (for fixed flags) feeding `eval_violated_use_dep`.
 - The `UseDecision` path still compiles and its unit tests still pass.
+
+## 9. Downstream status (2026-06-08)
+
+Post-implementation follow-ups in the consumer (`portage-cli`), completing the
+"`validate.rs` becomes load-bearing" goal (§6) and verifying parity:
+
+- **Blockers + reverse-dep constraints are live in `em -p`.** `check_blockers`
+  and `check_repo_constraints` run post-solve; the consumer additionally runs a
+  complete-graph reverse-dependency check (every installed package's constraints
+  vs the plan). It is **non-fatal/advisory** — the plan is still produced.
+- **Conflict report relabelled.** That reverse-dep check was previously printed
+  under a "Slot conflict" header; it is not slot-specific, so it now reads
+  "Dependency constraint conflict". (e.g. it surfaces upgrading `docutils` past
+  an installed package's `<` bound — real breakage that a plain `emerge -p`
+  leaves silent because emerge doesn't pull reverse deps into a targeted graph.)
+- **Tree-view dedup fix.** `em query depgraph --format tree` now dedups children
+  by package value (a package reached via two dep classes produces non-adjacent
+  duplicate edges; the old positional `dedup_by_key` missed them).
+- **Verified parity.** `em -p` matches `emerge -p` on the full *versioned*
+  package set for the firefox / texlive-core / qtbase basket. Remaining
+  divergence is install-*order* positions only. The current running gap list and
+  the performance comparison live in the crate `README.md`.
