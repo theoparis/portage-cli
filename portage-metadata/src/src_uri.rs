@@ -68,6 +68,36 @@ impl SrcUriEntry {
             .parse(input)
             .map_err(|e| Error::InvalidSrcUri(format!("{e}")))
     }
+
+    /// Append the distfile names this entry contributes for a given USE state.
+    ///
+    /// `enabled(flag)` reports whether `flag` is enabled in the package's
+    /// effective USE; `flag? ( … )` / `!flag? ( … )` groups are descended only
+    /// when their guard is active. A plain URI contributes its derived
+    /// filename, a renamed URI its target. Callers typically dedup the result
+    /// (the same distfile may be referenced more than once).
+    pub fn collect_filenames(&self, enabled: &dyn Fn(&str) -> bool, out: &mut Vec<String>) {
+        match self {
+            SrcUriEntry::Uri { filename, .. } => out.push(filename.clone()),
+            SrcUriEntry::Renamed { target, .. } => out.push(target.clone()),
+            SrcUriEntry::UseConditional {
+                flag,
+                negated,
+                entries,
+            } => {
+                if enabled(flag) != *negated {
+                    for e in entries {
+                        e.collect_filenames(enabled, out);
+                    }
+                }
+            }
+            SrcUriEntry::Group(entries) => {
+                for e in entries {
+                    e.collect_filenames(enabled, out);
+                }
+            }
+        }
+    }
 }
 
 /// Extract filename from a URL (last path component).
@@ -281,6 +311,43 @@ pub(crate) fn parse_src_uri_string(input: &mut &str) -> ModalResult<Vec<SrcUriEn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn enabled_set(flags: &[&str]) -> impl Fn(&str) -> bool {
+        let set: std::collections::HashSet<String> =
+            flags.iter().map(|s| s.to_string()).collect();
+        move |f: &str| set.contains(f)
+    }
+
+    fn filenames(input: &str, on: &[&str]) -> Vec<String> {
+        let entries = SrcUriEntry::parse(input).unwrap();
+        let pred = enabled_set(on);
+        let mut out = Vec::new();
+        for e in &entries {
+            e.collect_filenames(&pred, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn collect_filenames_plain_and_renamed() {
+        assert_eq!(
+            filenames(
+                "https://e.com/foo-1.0.tar.gz https://e.com/x.tar.xz -> bar-1.0.tar.xz",
+                &[]
+            ),
+            vec!["foo-1.0.tar.gz".to_string(), "bar-1.0.tar.xz".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_filenames_use_conditional() {
+        let src = "base.tar.gz ssl? ( https://e.com/ssl-patch.tar.xz )";
+        assert_eq!(filenames(src, &[]), vec!["base.tar.gz".to_string()]);
+        assert_eq!(
+            filenames(src, &["ssl"]),
+            vec!["base.tar.gz".to_string(), "ssl-patch.tar.xz".to_string()]
+        );
+    }
 
     #[test]
     fn parse_single_uri() {
