@@ -20,6 +20,8 @@ pub(super) struct UseEnv {
     pub accept_keywords: Vec<String>,
     /// Effective ACCEPT_LICENSE tokens (e.g. `["*"]` or `["MIT", "GPL-2"]`).
     pub accept_license: Vec<String>,
+    /// Resolved `DISTDIR` (where fetched distfiles live), for download-size accounting.
+    pub distdir: String,
 }
 
 pub(super) async fn build_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<UseEnv> {
@@ -67,6 +69,10 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
         let v = split_var("ACCEPT_LICENSE");
         if v.is_empty() { vec!["*".to_string()] } else { v }
     };
+    let distdir = shell
+        .get_var("DISTDIR")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/cache/distfiles".to_string());
 
     let mut config = UseConfig::new();
     for flag in flags {
@@ -79,7 +85,7 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
     let mut package_mask = stack.package_mask().unwrap_or_default();
     package_mask.extend(load_dep_list(portage_dir.join("package.mask").as_str()));
 
-    Ok(UseEnv { config, expand, expand_hidden, package_use, package_mask, accept_keywords, accept_license })
+    Ok(UseEnv { config, expand, expand_hidden, package_use, package_mask, accept_keywords, accept_license, distdir })
 }
 
 fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {

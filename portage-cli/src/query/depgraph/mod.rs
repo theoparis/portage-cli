@@ -1,5 +1,6 @@
 mod autounmask;
 mod conflicts;
+mod download_size;
 mod installed;
 mod output;
 mod package_use;
@@ -52,6 +53,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         package_mask,
         accept_keywords,
         accept_license,
+        distdir,
     } = use_env;
 
     let installed_cpvs: std::collections::HashSet<Cpv> = installed_entries
@@ -310,7 +312,14 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
 
     match format {
         DepgraphFormat::Pretty => {
-            output::print_pretty(&data, &order, &installed, &use_config, &package_use, &use_expand, &use_expand_hidden, &flag_reqs, verbose)
+            // Verbose mode shows per-package download size and a total; skip the
+            // Manifest/DISTDIR work entirely in plain mode.
+            let sizes = if verbose {
+                download_size::compute(repo_path, &distdir, &data, &order, &use_config, &package_use)
+            } else {
+                HashMap::new()
+            };
+            output::print_pretty(&data, &order, &installed, &use_config, &package_use, &use_expand, &use_expand_hidden, &flag_reqs, &sizes, verbose)
         }
         DepgraphFormat::Json => {
             output::print_json(&data, &order, &edges, &installed, &flag_reqs)

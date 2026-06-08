@@ -274,6 +274,7 @@ fn slot_repo_suffix(cache: &CacheEntry, repo_name: &str) -> String {
 fn total_line(
     order: &[(PortagePackage, Version)],
     installed: &HashMap<Cpn, HashMap<String, Version>>,
+    sizes: &HashMap<Cpv, u64>,
 ) -> String {
     let (mut new, mut new_slot, mut up, mut down, mut re) = (0, 0, 0, 0, 0);
     for (pkg, ver) in order {
@@ -287,19 +288,26 @@ fn total_line(
         }
     }
     let plural = |n: usize, s: &str| format!("{n} {s}{}", if n == 1 { "" } else { "s" });
+    // Order mirrors portage's PackageCounters.__str__: upgrades, downgrades,
+    // new, in new slot, reinstall.
     let mut parts = Vec::new();
-    if new > 0 { parts.push(format!("{new} new")); }
-    if new_slot > 0 { parts.push(plural(new_slot, "in new slot")); }
     if up > 0 { parts.push(plural(up, "upgrade")); }
     if down > 0 { parts.push(plural(down, "downgrade")); }
+    if new > 0 { parts.push(format!("{new} new")); }
+    if new_slot > 0 { parts.push(plural(new_slot, "in new slot")); }
     if re > 0 { parts.push(plural(re, "reinstall")); }
 
     let n = order.len();
     let pkgs = if n == 1 { "package" } else { "packages" };
+    let total_bytes: u64 = order
+        .iter()
+        .map(|(pkg, ver)| sizes.get(&Cpv::new(*pkg.cpn(), ver.clone())).copied().unwrap_or(0))
+        .sum();
+    let downloads = format!(", Size of downloads: {}", format_kib(total_bytes));
     if parts.is_empty() {
-        format!("\nTotal: {n} {pkgs}")
+        format!("\nTotal: {n} {pkgs}{downloads}")
     } else {
-        format!("\nTotal: {n} {pkgs} ({})", parts.join(", "))
+        format!("\nTotal: {n} {pkgs} ({}){downloads}", parts.join(", "))
     }
 }
 
@@ -327,6 +335,14 @@ fn status_field(tag: &str) -> String {
     String::from_utf8(f.to_vec()).unwrap()
 }
 
+/// Format a byte count as emerge does: ceil-divided to KiB (e.g. `569527` →
+/// `557 KiB`, `0` → `0 KiB`). emerge's thousands grouping is locale-dependent
+/// and absent under the C locale, so none is applied here.
+fn format_kib(bytes: u64) -> String {
+    format!("{} KiB", bytes.div_ceil(1024))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn print_pretty(
     data: &RepoData,
     order: &[(PortagePackage, Version)],
@@ -336,6 +352,7 @@ pub(super) fn print_pretty(
     use_expand: &[String],
     use_expand_hidden: &[String],
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
+    sizes: &HashMap<Cpv, u64>,
     verbose: bool,
 ) {
     let mut out = anstream::stdout();
@@ -372,16 +389,23 @@ pub(super) fn print_pretty(
             "U" | "D" => old_ver.map(|v| format!(" [{}]", v)).unwrap_or_default(),
             _ => String::new(),
         };
+        // Verbose mode appends the download size (distfiles not in DISTDIR).
+        let size_str = if verbose {
+            let cpv = Cpv::new(*cpn, ver.clone());
+            format!(" {}", format_kib(sizes.get(&cpv).copied().unwrap_or(0)))
+        } else {
+            String::new()
+        };
         let field = status_field(tag);
         writeln!(
             out,
-            "[{C_PKG}ebuild {field}{C_PKG:#}] {C_PKG}{cpn}-{ver}{slot_repo}{C_PKG:#}{old}{flag_str}",
+            "[{C_PKG}ebuild {field}{C_PKG:#}] {C_PKG}{cpn}-{ver}{slot_repo}{C_PKG:#}{old}{flag_str}{size_str}",
         ).ok();
     }
 
     // emerge only prints the Total line in verbose mode.
     if verbose {
-        writeln!(out, "{}", total_line(order, installed)).ok();
+        writeln!(out, "{}", total_line(order, installed, sizes)).ok();
     }
 }
 
