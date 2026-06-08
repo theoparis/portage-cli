@@ -35,7 +35,9 @@
 //! kept intentionally, but treat it as experimental: before it is useful it
 //! needs (a) the fixed-USE mode to match portage well as the baseline, and (b) a
 //! preference model so solver-chosen USE stays minimal and predictable. Do not
-//! rely on it being load-bearing.
+//! rely on it being load-bearing. The Level-C plan (the `REQUIRED_USE` →
+//! `UseDecision` encoding, concern split, opt-in/parity, phasing) is in
+//! `docs/required-use-level-c.md`.
 
 mod convert;
 mod error;

@@ -138,6 +138,11 @@ stays minimal and predictable (bias `choose_version`/`prioritize` and the v0/v1
 ordering toward the configured value). Until then, keep the path intact and
 documented as experimental; do not activate it.
 
+The full Level-C plan (concern split, the `REQUIRED_USE`→`UseDecision`
+encoding, opt-in/parity, phasing) now lives in
+[`required-use-level-c.md`](required-use-level-c.md). Baseline (a) is met as of
+2026-06-08 (basket matches `emerge -p`); preference model (b) is Phase 1 there.
+
 ## 5. What moves, what stays
 
 **Moves out of the crate (into the cli Adapter):**
