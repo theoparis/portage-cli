@@ -84,6 +84,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         empty: cli.emptytree,
         autounmask: cli.autounmask,
         autounmask_write: cli.autounmask_write,
+        autosolve_use: cli.autosolve_use,
         root,
     }).await
 }
@@ -216,7 +217,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
         QueryCommand::Depends { atom } => {
             query::depends::run(&std::path::PathBuf::from(globals.repo_path()), atom)
         }
-        QueryCommand::Depgraph { atom, format } => {
+        QueryCommand::Depgraph { atom, format, autosolve_use } => {
             let parsed = parse_atoms(atom);
             let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
             if atoms.is_empty() {
@@ -237,6 +238,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 empty: globals.emptytree,
                 autounmask: globals.autounmask,
                 autounmask_write: globals.autounmask_write,
+                autosolve_use: *autosolve_use || globals.autosolve_use,
                 root,
             }).await
         }

@@ -31,11 +31,12 @@ pub struct DepgraphOpts<'a> {
     pub empty: bool,
     pub autounmask: bool,
     pub autounmask_write: bool,
+    pub autosolve_use: bool,
     pub root: Option<&'a Utf8Path>,
 }
 
 pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
-    let DepgraphOpts { repo_path, atoms, arch, format, verbose, empty, autounmask, autounmask_write, root } = opts;
+    let DepgraphOpts { repo_path, atoms, arch, format, verbose, empty, autounmask, autounmask_write, autosolve_use, root } = opts;
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
 
@@ -70,33 +71,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
             .insert(slot_key, e.version.clone());
     }
 
-    let adapter = repo::Adapter {
-        data: &data,
-        arch,
-        accept_keywords: &accept_keywords,
-        package_mask: &package_mask,
-        accept_license: &accept_license,
-        use_config: &use_config,
-        package_use: &package_use,
-    };
-    let mut provider = PortageDependencyProvider::new(adapter);
-
-    if !empty {
-        for e in &installed_entries {
-            let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
-                Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
-                None => PortagePackage::unslotted(e.cpn),
-            };
-            provider.add_installed(SolverInstalledPackage {
-                package: pkg,
-                version: e.version.clone(),
-                policy: InstalledPolicy::Favor,
-                active_use: e.active_use.clone(),
-                iuse: e.iuse.clone(),
-            });
-        }
-    }
-
     let mut root_deps = Vec::new();
     let mut root_cpns: std::collections::HashSet<Cpn> = std::collections::HashSet::new();
     for target in atoms {
@@ -116,11 +90,102 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         root_deps.push((pkg, vs));
     }
 
+    // Build a provider (with the given cede policy) and run the solve. Factored
+    // so a failed --autosolve-use attempt can fall back to a fixed-USE (Level A)
+    // solve instead of erroring — matching the doc invariant.
+    let build_and_solve = |autosolve_use: bool| {
+        let adapter = repo::Adapter {
+            data: &data,
+            arch,
+            accept_keywords: &accept_keywords,
+            package_mask: &package_mask,
+            accept_license: &accept_license,
+            use_config: &use_config,
+            package_use: &package_use,
+            autosolve_use,
+        };
+        let mut provider = PortageDependencyProvider::new(adapter);
+        if !empty {
+            for e in &installed_entries {
+                let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
+                    Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
+                    None => PortagePackage::unslotted(e.cpn),
+                };
+                provider.add_installed(SolverInstalledPackage {
+                    package: pkg,
+                    version: e.version.clone(),
+                    policy: InstalledPolicy::Favor,
+                    active_use: e.active_use.clone(),
+                    iuse: e.iuse.clone(),
+                });
+            }
+        }
+        let result = provider.resolve_targets(root_deps.clone());
+        (provider, result)
+    };
+
+    let (provider, solution) = {
+        let (provider, result) = build_and_solve(autosolve_use);
+        match result {
+            Ok(sol) => (provider, sol),
+            Err(_) if autosolve_use => {
+                // REQUIRED_USE could not be auto-satisfied; fall back to a
+                // fixed-USE solve so the plan + Level-A advisory still appear.
+                eprintln!(
+                    "!!! --autosolve-use could not satisfy REQUIRED_USE; \
+                     falling back to a fixed-USE plan."
+                );
+                let (provider, result) = build_and_solve(false);
+                let sol = result
+                    .map_err(|e2| anyhow::anyhow!("resolution failed: {:?}", e2))?;
+                (provider, sol)
+            }
+            Err(e) => return Err(anyhow::anyhow!("resolution failed: {:?}", e)),
+        }
+    };
+
+    // Level-C: fold the solver's chosen ceded-flag values back into the
+    // effective USE used for display, the REQUIRED_USE check, and autounmask, by
+    // appending synthetic `=cpv flag` package.use entries. With --autosolve-use
+    // off this is empty and `package_use` is unchanged (parity preserved).
+    let ceded = provider.solved_use_decisions();
+    let package_use: Vec<(Dep, Vec<String>)> = if ceded.is_empty() {
+        package_use
+    } else {
+        let mut by_cpn: HashMap<Cpn, Vec<&portage_atom_pubgrub::CededFlag>> = HashMap::new();
+        for c in &ceded {
+            by_cpn.entry(c.cpn).or_default().push(c);
+        }
+        let mut combined = package_use.clone();
+        for (pkg, ver) in solution.iter() {
+            if pkg.is_virtual() {
+                continue;
+            }
+            if let Some(flags) = by_cpn.get(pkg.cpn()) {
+                let atom = format!("={}/{}-{}", pkg.cpn().category, pkg.cpn().package, ver);
+                if let Ok(dep) = Dep::parse(&atom) {
+                    let tokens = flags
+                        .iter()
+                        .map(|c| {
+                            if c.value {
+                                c.flag.as_str().to_string()
+                            } else {
+                                format!("-{}", c.flag.as_str())
+                            }
+                        })
+                        .collect();
+                    combined.push((dep, tokens));
+                }
+            }
+        }
+        combined
+    };
+
     if verbose {
         output::report_dropped_deps(provider.dropped_deps(), &data, arch.as_str());
     }
 
-    // Autounmask: detect filtered candidates from dropped deps before solving.
+    // Autounmask: detect filtered candidates from dropped deps.
     let autounmask_candidates = repo::find_autounmask_candidates(
         &data,
         provider.dropped_deps(),
@@ -131,9 +196,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
     );
 
     let root_pkgs: Vec<PortagePackage> = root_deps.iter().map(|(p, _)| p.clone()).collect();
-    let solution = provider
-        .resolve_targets(root_deps)
-        .map_err(|e| anyhow::anyhow!("resolution failed: {:?}", e))?;
 
     // A candidate is only actionable if:
     // 1. Its CPN is not already in the solution (an available version satisfies the dep).
@@ -334,6 +396,15 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
             required_use::find_violations(&data, &order, &use_config, &package_use);
         if !ru_violations.is_empty() {
             output::report_required_use(&ru_violations);
+        }
+
+        // Level-C: report the flags the solver flipped from their configured
+        // value to satisfy REQUIRED_USE (they appear set in the plan via the
+        // synthetic package.use above; this tells the user what changed).
+        let flips: Vec<&portage_atom_pubgrub::CededFlag> =
+            ceded.iter().filter(|c| c.flipped).collect();
+        if !flips.is_empty() {
+            output::report_autosolved_use(&flips);
         }
     }
 

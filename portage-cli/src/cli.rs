@@ -109,6 +109,11 @@ pub struct Cli {
     #[arg(long)]
     pub autounmask: bool,
 
+    /// Let the solver choose USE flags to satisfy REQUIRED_USE (Level C) rather
+    /// than only reporting violations. Off by default; flips are reported.
+    #[arg(long)]
+    pub autosolve_use: bool,
+
     #[arg(long)]
     pub complete_graph: bool,
 
@@ -464,6 +469,9 @@ pub enum QueryCommand {
         /// Output format
         #[arg(long, short, value_enum, default_value = "pretty")]
         format: DepgraphFormat,
+        /// Let the solver choose USE flags to satisfy REQUIRED_USE (Level C).
+        #[arg(long)]
+        autosolve_use: bool,
     },
     #[command(about = "List files installed by a package", alias = "f")]
     Files {

@@ -133,12 +133,15 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   would violate one (e.g. upgrading `docutils` past an installed package's `<`
   bound). This is a non-fatal warning — the plan is still produced and is
   identical to emerge's; the breakage is simply surfaced rather than hidden.
-- **`REQUIRED_USE` is validated but not solver-satisfied.** `^^`/`??`/`a? ( b )`
-  are parsed and evaluated (`portage-metadata`), and the consumer reports any
-  unsatisfied constraint post-solve as an advisory warning — matching Portage's
-  default "fix your USE flags" behaviour (**Level A**). What is *not* built is
-  **Level C**: having the solver *choose* satisfying flags via the dormant
-  `SolverDecided` / `UseDecision` machinery (see `docs/use-and-solver-boundary.md` §4).
+- **`REQUIRED_USE`: Level A by default, Level C opt-in.** `^^`/`??`/`a? ( b )`
+  are parsed and evaluated (`portage-metadata`); by default the consumer reports
+  any unsatisfied constraint post-solve as an advisory warning, matching
+  Portage's "fix your USE flags" behaviour (**Level A**). With the consumer's
+  `--autosolve-use` the constraint is encoded over `UseDecision` nodes and the
+  solver *chooses* satisfying flag values, biased toward the configured value
+  (**Level C**, intra-package); see `docs/required-use-level-c.md`. Not yet
+  built: nested groups under a ceded guard, and cross-package `[flag]` USE-dep
+  co-solving (still post-solve).
 - **Upgraded versions are re-solved.** When a forced rebuild is favoured up to a
   newer version (`upgrade_to`), `resolve_targets` pins that version and re-solves
   to a fixpoint (bounded), so the upgraded version's full dependency closure

@@ -184,6 +184,26 @@ pub struct PortageDependencyProvider {
     /// biases toward it so a `SolverDecided` flag only flips when a constraint
     /// forces it (greedy keep-configured — see `docs/required-use-level-c.md`).
     pub(crate) use_decision_prefer: HashMap<PortagePackage, Version>,
+    /// Reverse map from a `UseDecision` node to the `(cpn, flag)` it decides,
+    /// so the chosen values can be reported back to the caller by name.
+    pub(crate) use_decision_meta: HashMap<PortagePackage, (Cpn, Interned<DefaultInterner>)>,
+    /// The value the solver chose for each `UseDecision` node in the last solve
+    /// (`true` = on). Captured before virtual nodes are stripped from the result.
+    pub(crate) solved_use_decisions: HashMap<PortagePackage, bool>,
+}
+
+/// A USE flag the caller ceded to the solver, with the value the solver chose.
+#[derive(Debug, Clone)]
+pub struct CededFlag {
+    /// The package the flag belongs to.
+    pub cpn: Cpn,
+    /// The ceded flag.
+    pub flag: Interned<DefaultInterner>,
+    /// The value the solver chose (`true` = enabled).
+    pub value: bool,
+    /// `true` when the chosen value differs from the caller's preference, i.e.
+    /// the solver flipped it to satisfy a constraint.
+    pub flipped: bool,
 }
 
 impl PortageDependencyProvider {
@@ -196,6 +216,8 @@ impl PortageDependencyProvider {
     pub fn new<R: PackageRepository>(repo: R) -> Self {
         let mut packages = HashMap::new();
         let mut use_decision_prefer: HashMap<PortagePackage, Version> = HashMap::new();
+        let mut use_decision_meta: HashMap<PortagePackage, (Cpn, Interned<DefaultInterner>)> =
+            HashMap::new();
         let mut cpn_slots: HashMap<portage_atom::Cpn, Vec<Interned<DefaultInterner>>> =
             HashMap::new();
 
@@ -263,7 +285,8 @@ impl PortageDependencyProvider {
                     if let UseFlagState::SolverDecided { prefer } = cpv_use_cfg.get(&flag) {
                         let node = convert::use_decision_package(&cpn_str, &flag);
                         let ver = Version::new(&[u64::from(prefer)]);
-                        use_decision_prefer.insert(node, ver);
+                        use_decision_prefer.insert(node.clone(), ver);
+                        use_decision_meta.insert(node, (cpn, flag));
                     }
                 }
 
@@ -393,6 +416,8 @@ impl PortageDependencyProvider {
             use_flag_requirements: Vec::new(),
             upgrade_pins: HashMap::new(),
             use_decision_prefer,
+            use_decision_meta,
+            solved_use_decisions: HashMap::new(),
         }
     }
 
@@ -562,10 +587,49 @@ impl PortageDependencyProvider {
 
         self.packages.remove(&root);
 
+        // Capture the solver's choice for every ceded flag before the virtual
+        // UseDecision nodes are stripped from the returned solution.
+        self.solved_use_decisions = solution
+            .iter()
+            .filter(|(p, _)| matches!(p, PortagePackage::UseDecision { .. }))
+            .map(|(p, v)| (p.clone(), *v == Version::new(&[1])))
+            .collect();
+
         Ok(solution
             .into_iter()
             .filter(|(p, _)| !p.is_virtual())
             .collect())
+    }
+
+    /// The flags the caller ceded to the solver, with the values it chose.
+    ///
+    /// Empty unless the caller emitted `SolverDecided` flags (Level-C). Lets the
+    /// caller fold the chosen values back into its effective-USE display and
+    /// report any the solver flipped. See `docs/required-use-level-c.md`.
+    pub fn solved_use_decisions(&self) -> Vec<CededFlag> {
+        let mut out: Vec<CededFlag> = self
+            .solved_use_decisions
+            .iter()
+            .filter_map(|(node, &value)| {
+                let (cpn, flag) = self.use_decision_meta.get(node)?;
+                let preferred = self
+                    .use_decision_prefer
+                    .get(node)
+                    .map(|v| *v == Version::new(&[1]));
+                Some(CededFlag {
+                    cpn: *cpn,
+                    flag: *flag,
+                    value,
+                    flipped: preferred != Some(value),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            a.cpn
+                .cmp(&b.cpn)
+                .then_with(|| a.flag.as_str().cmp(b.flag.as_str()))
+        });
+        out
     }
 
     /// Returns true if the deps of `vd` transitively reach any installed CPN,

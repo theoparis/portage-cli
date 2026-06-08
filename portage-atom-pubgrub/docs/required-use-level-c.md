@@ -148,10 +148,30 @@ for *un*satisfiable constraints (a hard pin that no legal assignment can meet).
   solution); basket still matches `emerge -p` (0 diffs). *Not yet done:* the
   preference channel on the ceded state — deferred to Phase 1 where it is first
   needed.
-- **Phase 1** — encoder for `a?()/!a?()/||/^^/??` over `UseDecision` nodes +
-  preference-biased `choose_version`; the `--autosolve-use` opt-in in the cli
-  Adapter (cede eligible flags, supply preference); chosen flags reported via the
-  autounmask path. Default path unchanged.
+- **Phase 1** ✅ *(done 2026-06-08)* — three sub-steps:
+  - **1a** — preference channel: `SolverDecided { prefer }`; `choose_version`
+    biases each `UseDecision` node toward the preferred value
+    (`use_decision_prefer`).
+  - **1b** — `convert::encode_required_use`: `a?()/!a?()/||/^^/??`/bare-flag over
+    the package's `UseDecision` nodes (implications + `Choice` + pairwise
+    exclusion), fixed flags partially evaluated; `register_virtual_choices`
+    merges nodes so one node per `(cpn, flag)` is shared with conditional deps.
+  - **1c** — cli `--autosolve-use` (off by default): the Adapter cedes each
+    package's non-pinned `REQUIRED_USE` flags (preference = resolved value); the
+    solver's choices are captured (`CededFlag` / `solved_use_decisions`), folded
+    back into the effective USE for display + the Level-A check + autounmask via
+    synthetic `=cpv flag` `package.use` entries, and flipped flags are reported.
+    A failed autosolve solve falls back to a fixed-USE (Level-A) plan.
+
+  Verified: basket parity unchanged with the flag off (0 diffs);
+  `USE="journald syslog" em -p --autosolve-use dev-qt/qtbase` disables `syslog`
+  to satisfy `?? ( journald syslog )` and reports the flip (no Level-A warning).
+
+  **Cede-policy caveats (Phase 2 refinements):** flags pinned by `use.force` /
+  `use.mask` are not yet distinguished from profile defaults, so they may be
+  ceded (usually harmless — forced flags rarely sit in fixable `REQUIRED_USE`);
+  the `UseDecision` node is per-`(cpn, flag)`, so a multi-slot package's slots
+  share one decision.
 - **Phase 2** — nested conditionals; richer reporting.
 - **Phase 3** (maybe) — cross-package USE-dep co-solve (§6).
 

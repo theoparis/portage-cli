@@ -54,7 +54,7 @@ pub use error::{Error, Result};
 pub use graph::{DepClass, DepEdge};
 pub use portage_atom::interner::{DefaultInterner, Interned};
 pub use package::PortagePackage;
-pub use provider::{DroppedDep, InstalledPackage, InstalledPolicy, PortageDependencyProvider, UseFlagRequirement};
+pub use provider::{CededFlag, DroppedDep, InstalledPackage, InstalledPolicy, PortageDependencyProvider, UseFlagRequirement};
 pub use repository::{
     IUseDefault, InMemoryRepository, PackageDeps, PackageRepository, PackageVersions,
 };

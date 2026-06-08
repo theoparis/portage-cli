@@ -130,16 +130,14 @@ package's own facts):
   purely local, post-solve check, so it lives in the cli (`required_use.rs`)
   beside `conflicts.rs` — it needs no solver state, and therefore the solver
   crate does **not** depend on `portage-metadata`.
-- **Level C — solver auto-satisfaction (designed, not built).** Encoding
-  `REQUIRED_USE` as relations between `UseDecision` packages so the solver
-  *picks* satisfying flags. This is the strategic lever in
-  [use-and-solver-boundary.md §4](../portage-atom-pubgrub/docs/use-and-solver-boundary.md);
-  it is what would justify threading `RequiredUseExpr` into the solver crate's
-  `VersionData`. The full plan — concern split, the PubGrub encoding,
-  opt-in/parity, and phasing — is in
-  [required-use-level-c.md](../portage-atom-pubgrub/docs/required-use-level-c.md).
-  It is **opt-in, default off** so default `em -p` keeps matching `emerge -p`
-  (which does not auto-satisfy `REQUIRED_USE`).
+- **Level C — solver auto-satisfaction (`--autosolve-use`, opt-in).** With the
+  flag, `REQUIRED_USE` is encoded as relations between `UseDecision` packages so
+  the solver *picks* satisfying flags (biased toward the configured value); the
+  choices fold back into the displayed USE via synthetic `package.use` and any
+  flips are reported. Intra-package only so far. It is **off by default** so
+  default `em -p` keeps matching `emerge -p` (which does not auto-satisfy
+  `REQUIRED_USE`). Concern split, the PubGrub encoding, and remaining phases are
+  in [required-use-level-c.md](../portage-atom-pubgrub/docs/required-use-level-c.md).
 
 Keeping Level A in the cli is deliberate: the `portage-metadata → portage-atom-pubgrub`
 dependency is a Level-C cost, not a Level-A one.

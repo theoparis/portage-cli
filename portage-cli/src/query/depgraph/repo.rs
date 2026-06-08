@@ -160,6 +160,10 @@ pub(super) struct Adapter<'a> {
     /// `package.use` + IUSE defaults by `desired_use`.
     pub(super) use_config: &'a portage_atom_pubgrub::UseConfig,
     pub(super) package_use: &'a [(Dep, Vec<String>)],
+    /// Level-C: when set, cede each package's non-pinned `REQUIRED_USE` flags to
+    /// the solver (`SolverDecided`) instead of fixing them. See
+    /// `portage-atom-pubgrub/docs/required-use-level-c.md`.
+    pub(super) autosolve_use: bool,
 }
 
 impl PackageRepository for Adapter<'_> {
@@ -200,6 +204,33 @@ impl PackageRepository for Adapter<'_> {
                         },
                     );
                 }
+            }
+        }
+
+        // Level-C: cede this package's REQUIRED_USE flags to the solver. A ceded
+        // flag keeps its resolved value as the *preference* (greedy keep-config);
+        // the solver only flips it to satisfy REQUIRED_USE. Flags the user pinned
+        // via package.use are left fixed (a hard choice we must not override).
+        if self.autosolve_use
+            && let Some(m) = meta
+            && let Some(ru) = &m.required_use
+        {
+            // Flags the user pinned via package.use: applying it to an empty
+            // base leaves exactly those flags set.
+            let empty = UseConfig::new();
+            let pins = apply_package_use(&empty, cpv, slot, self.package_use);
+            let iuse: std::collections::HashSet<&str> =
+                m.iuse.iter().map(|iu| iu.name()).collect();
+            let mut names = std::collections::BTreeSet::new();
+            collect_required_use_flags(ru, &mut names);
+            for name in names {
+                let flag = Interned::intern(&name);
+                // Only cede real flags the user has not pinned.
+                if !iuse.contains(name.as_str()) || pins.get_opt(&flag).is_some() {
+                    continue;
+                }
+                let prefer = matches!(cfg.get(&flag), UseFlagState::Enabled);
+                cfg.solver_decide(flag, prefer);
             }
         }
         cfg
@@ -321,6 +352,30 @@ fn translate_required_use(expr: &RequiredUseExpr) -> RequiredUse {
             entries: kids(entries),
         },
         RequiredUseExpr::All(c) => RequiredUse::All(kids(c)),
+    }
+}
+
+/// Collect every flag name mentioned in a `REQUIRED_USE` expression (guards and
+/// operands, ignoring `!`), for deciding which flags to cede.
+fn collect_required_use_flags(expr: &RequiredUseExpr, out: &mut std::collections::BTreeSet<String>) {
+    match expr {
+        RequiredUseExpr::Flag { name, .. } => {
+            out.insert(name.clone());
+        }
+        RequiredUseExpr::AnyOf(c)
+        | RequiredUseExpr::ExactlyOne(c)
+        | RequiredUseExpr::AtMostOne(c)
+        | RequiredUseExpr::All(c) => {
+            for e in c {
+                collect_required_use_flags(e, out);
+            }
+        }
+        RequiredUseExpr::UseConditional { flag, entries, .. } => {
+            out.insert(flag.clone());
+            for e in entries {
+                collect_required_use_flags(e, out);
+            }
+        }
     }
 }
 

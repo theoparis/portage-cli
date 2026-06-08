@@ -5,7 +5,7 @@ use anstyle::{AnsiColor, Effects, Style};
 use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
-    DepClass, DroppedDep, PortagePackage, UseConfig, UseFlagRequirement, UseFlagState,
+    CededFlag, DepClass, DroppedDep, PortagePackage, UseConfig, UseFlagRequirement, UseFlagState,
     apply_package_use,
 };
 use portage_metadata::CacheEntry;
@@ -106,6 +106,26 @@ pub(super) fn report_required_use(violations: &[super::required_use::RequiredUse
         for clause in &v.unsatisfied {
             writeln!(out, "    {C_OFF}{clause}{C_OFF:#}").ok();
         }
+    }
+}
+
+pub(super) fn report_autosolved_use(flips: &[&CededFlag]) {
+    let mut out = anstream::stderr();
+    writeln!(
+        out,
+        "\n{C_PKG}***{C_PKG:#} --autosolve-use changed these USE flags to satisfy REQUIRED_USE:\n"
+    )
+    .ok();
+    for c in flips {
+        let (sign, style) = if c.value { ("+", C_ON) } else { ("-", C_OFF) };
+        writeln!(
+            out,
+            "  {C_PKG}{}/{}{C_PKG:#}  {style}{sign}{}{style:#}",
+            c.cpn.category,
+            c.cpn.package,
+            c.flag.as_str()
+        )
+        .ok();
     }
 }
 
