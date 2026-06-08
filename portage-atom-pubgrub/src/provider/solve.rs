@@ -52,6 +52,18 @@ impl DependencyProvider for PortageDependencyProvider {
             return Ok(None);
         }
 
+        // A prior solve iteration decided to upgrade this installed package to a
+        // newer version (`upgrade_to`).  Pin it so the solver actually selects
+        // that version — and therefore re-solves its dependency closure — rather
+        // than favouring the installed version again.  If the pinned version is
+        // out of range for this particular constraint, fall through to the
+        // normal logic.
+        if let Some(pin) = self.upgrade_pins.get(package)
+            && range.contains(pin)
+        {
+            return Ok(Some(pin.clone()));
+        }
+
         if let Some((installed_ver, policy)) = self.installed.get(package) {
             match policy {
                 InstalledPolicy::Lock => {

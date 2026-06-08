@@ -139,10 +139,12 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   default "fix your USE flags" behaviour (**Level A**). What is *not* built is
   **Level C**: having the solver *choose* satisfying flags via the dormant
   `SolverDecided` / `UseDecision` machinery (see `docs/use-and-solver-boundary.md` §4).
-- **Post-solve version remap does not re-solve.** When a forced rebuild is
-  upgraded to a newer version (`upgrade_to`), the new version's dependencies are
-  not re-solved. This is sound for the leaf-ish packages it currently affects but
-  is an approximation, not a general guarantee.
+- **Upgraded versions are re-solved.** When a forced rebuild is favoured up to a
+  newer version (`upgrade_to`), `resolve_targets` pins that version and re-solves
+  to a fixpoint (bounded), so the upgraded version's full dependency closure
+  (including any deps the installed version lacked) is part of the plan rather
+  than an unaccounted approximation. If a re-solve cannot be satisfied it falls
+  back to the last good solution instead of erroring.
 
 ## Related Projects
 

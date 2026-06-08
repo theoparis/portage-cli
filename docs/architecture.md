@@ -59,7 +59,12 @@ Stages, in order:
    facts (`versions_for`) and its resolved **desired** USE (`desired_use`).
 5. **Resolve** (`resolve_targets`) — PubGrub selects one version per package,
    modelling OR/`^^`/`??` groups, slots/subslots, USE-conditional deps, and
-   USE-dep constraints (the latter via virtual `UseDecision` packages).
+   USE-dep constraints (the latter via virtual `UseDecision` packages). When the
+   post-solve pass decides to upgrade an installed package to a newer version
+   (`upgrade_to`), `resolve_targets` pins that version and re-solves to a
+   (bounded) fixpoint, so the upgraded version's full dependency closure is part
+   of the plan — not an unsolved approximation; a re-solve that cannot be
+   satisfied falls back to the last good solution.
 6. **Post-solve checks** — see [Post-solve validation](#post-solve-validation).
 7. **Install order** (`install_order`) — SCC condensation (iterative Tarjan) +
    lexicographic Kahn; hard (DEPEND/BDEPEND) edges before soft (RDEPEND); cycles

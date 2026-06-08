@@ -167,6 +167,12 @@ pub struct PortageDependencyProvider {
     /// constraints) and informational cases (`N`/`U`: new packages whose
     /// required flags may not be set by the current global config).
     pub(crate) use_flag_requirements: Vec<UseFlagRequirement>,
+    /// Installed packages that a previous solve iteration decided to upgrade to a
+    /// newer repo version (`upgrade_to`).  On the next iteration the solver pins
+    /// these to the new version so its full dependency closure is re-solved,
+    /// instead of leaving the upgraded version's deps unaccounted for.  Cleared
+    /// at the start of every [`resolve_targets`](Self::resolve_targets) call.
+    pub(crate) upgrade_pins: HashMap<PortagePackage, Version>,
 }
 
 impl PortageDependencyProvider {
@@ -350,6 +356,7 @@ impl PortageDependencyProvider {
             installed_iuse: HashMap::new(),
             dropped_deps,
             use_flag_requirements: Vec::new(),
+            upgrade_pins: HashMap::new(),
         }
     }
 
@@ -469,13 +476,55 @@ impl PortageDependencyProvider {
             .or_insert_with(|| PackageData { versions: BTreeMap::new() });
         entry.versions.insert(root_ver.clone(), vd);
 
-        let solution = pubgrub::resolve(self, root.clone(), root_ver)?;
-        self.packages.remove(&root);
-
+        // Re-solve to a fixpoint so that any installed package the post-solve
+        // pass decides to upgrade (`upgrade_to`) has its *new* version's full
+        // dependency closure solved, not just the installed version's runtime
+        // deps.  Each iteration pins the upgrades discovered so far (see
+        // `upgrade_pins` / `choose_version`) and solves again; new upgrades
+        // surfaced by the richer graph feed the next round.  Bounded so a
+        // pathological oscillation can't loop forever — on the rare re-solve
+        // failure or the bound, we keep the last good solution (the previous
+        // sound approximation).
+        self.upgrade_pins.clear();
+        const MAX_RESOLVE_ITERS: usize = 4;
+        let mut solution = pubgrub::resolve(self, root.clone(), root_ver.clone())?;
         // Post-solve: collect USE flag requirements for all packages.  Must run
         // before filtering virtuals because per-branch constraints live in
         // Choice/SlotChoice nodes.
         self.use_flag_requirements = self.compute_use_flag_requirements(&solution);
+
+        for _ in 1..MAX_RESOLVE_ITERS {
+            // Pin every upgrade discovered so far; stop once nothing new appears.
+            let mut added_pin = false;
+            let pins: Vec<(PortagePackage, Version)> = self
+                .use_flag_requirements
+                .iter()
+                .filter_map(|r| r.upgrade_to.clone().map(|v| (r.package.clone(), v)))
+                .collect();
+            for (pkg, ver) in pins {
+                if self.upgrade_pins.get(&pkg) != Some(&ver) {
+                    self.upgrade_pins.insert(pkg, ver);
+                    added_pin = true;
+                }
+            }
+            if !added_pin {
+                break;
+            }
+
+            // Re-solve with the new pins.  If it fails (e.g. the upgraded
+            // version's deps can't be satisfied), keep the last good solution
+            // rather than turning an advisory situation into a hard error.
+            match pubgrub::resolve(self, root.clone(), root_ver.clone()) {
+                Ok(next) => {
+                    solution = next;
+                    self.use_flag_requirements =
+                        self.compute_use_flag_requirements(&solution);
+                }
+                Err(_) => break,
+            }
+        }
+
+        self.packages.remove(&root);
 
         Ok(solution
             .into_iter()
@@ -1349,6 +1398,96 @@ mod tests {
         assert!(
             provider.reinstall_deps().is_empty(),
             "no reinstall needed when USE dep is already satisfied"
+        );
+    }
+
+    #[test]
+    fn upgrade_to_resolves_new_versions_deps() {
+        // Regression for the "post-solve remap does not re-solve" gap (#4):
+        // when a forced rebuild of an installed package is favoured up to a
+        // newer repo version, that newer version's dependency closure must be
+        // part of the plan.
+        //
+        // Setup:
+        //   - b-1.0 installed (flag off) — the installed version has NO deps.
+        //   - b-2.0 in the tree RDEPENDs a brand-new package c (which b-1.0
+        //     lacks).
+        //   - a-1.0 RDEPENDs b[flag] → b must rebuild → upgrade to b-2.0.
+        // Before the fix, the solve used b-1.0's (empty) deps and c never
+        // appeared; after the fix the re-solve pins b-2.0 and pulls in c.
+        let mut repo = InMemoryRepository::new();
+
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-libs/c-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+        // Installed version: no deps.
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-python/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![Interned::intern("flag")],
+            empty_deps(),
+        );
+        // Newer version: gains an RDEPEND on c.
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-python/b-2.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![Interned::intern("flag")],
+            PackageDeps {
+                rdepend: DepEntry::parse("dev-libs/c").unwrap(),
+                ..empty_deps()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                rdepend: DepEntry::parse("dev-python/b[flag]").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+
+        // b is installed at 1.0 with flag disabled → rebuild forced by a.
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::slotted(
+                Cpn::parse("dev-python/b").unwrap(),
+                Interned::intern("0"),
+            ),
+            version: Version::parse("1.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![], // flag NOT active
+            iuse: vec![Interned::intern("flag")],
+        });
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        // b must be upgraded to 2.0 ...
+        let b_ver = solution
+            .iter()
+            .find(|(p, _)| p.cpn().package.as_str() == "b")
+            .map(|(_, v)| v.clone());
+        assert_eq!(
+            b_ver,
+            Some(Version::parse("2.0").unwrap()),
+            "b should be upgraded to 2.0"
+        );
+        // ... and 2.0's new dependency c must be in the plan.
+        assert!(
+            solution
+                .iter()
+                .any(|(p, _)| p.cpn().package.as_str() == "c"),
+            "c (a new dependency of b-2.0) must be pulled into the re-solved plan"
         );
     }
 
