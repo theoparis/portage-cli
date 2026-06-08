@@ -35,7 +35,7 @@ pub(super) fn report_conflicts(conflicts: &[super::conflicts::Conflict]) {
             .push(c);
     }
     let mut out = anstream::stderr();
-    writeln!(out, "\n{C_OFF}!!!{C_OFF:#} Slot conflict(s) detected:\n").ok();
+    writeln!(out, "\n{C_OFF}!!!{C_OFF:#} Dependency constraint conflict(s) detected:\n").ok();
     for (target, cs) in &by_target {
         writeln!(out, "  {C_PKG}{target}{C_PKG:#}").ok();
         for c in cs {

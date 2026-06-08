@@ -202,16 +202,20 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         order.extend(to_reinstall);
     }
 
-    // Post-solve: check installed packages' constraints against proposed changes.
+    // Post-solve: check installed packages' (reverse-)dependency constraints
+    // against the proposed changes. This is a complete-graph-style check that
+    // emerge's default targeted `-p` skips, so it can surface real breakage
+    // (e.g. upgrading docutils past an installed package's `<` bound) that a
+    // plain `emerge -p` leaves silent.
     {
         let proposed: HashMap<Cpn, Version> = order
             .iter()
             .filter(|(pkg, _)| !pkg.is_virtual())
             .map(|(pkg, ver)| (*pkg.cpn(), ver.clone()))
             .collect();
-        let slot_conflicts = conflicts::find_conflicts(&installed_entries, &proposed);
-        if !slot_conflicts.is_empty() {
-            output::report_conflicts(&slot_conflicts);
+        let dep_conflicts = conflicts::find_conflicts(&installed_entries, &proposed);
+        if !dep_conflicts.is_empty() {
+            output::report_conflicts(&dep_conflicts);
         }
     }
 
