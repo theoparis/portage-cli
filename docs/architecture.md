@@ -66,6 +66,12 @@ Stages, in order:
    broken on soft edges. Explicitly-requested targets are listed last when
    nothing depends on them (emerge convention).
 8. **Render** (`output.rs`) — `pretty` (emerge `-p`/`-pv`), `json`, or `tree`.
+   Verbose `-pv` also shows per-package download size and a "Size of downloads"
+   total (`download_size.rs`): distfiles from each package's `Manifest`,
+   restricted to what `SRC_URI` needs for the effective USE, minus those already
+   in `DISTDIR`, deduplicated across the plan — matching `emerge -pv` exactly.
+9. **Advisory warnings** — emitted *after* the plan (emerge lists issues at the
+   bottom), see [Post-solve validation](#post-solve-validation).
 
 ## USE stacking precedence
 
@@ -94,7 +100,9 @@ solver. The solver itself never recomputes any of this; it consumes the resolved
 ## Post-solve validation
 
 The solver decides *versions*; several constraints are intentionally **not**
-modelled inside it and are checked after a solution exists. Some live in the
+modelled inside it and are checked after a solution exists. All of these are
+**advisory** (the plan is still produced) and are printed *after* the merge list,
+so the plan reads first and the caveats follow — as emerge does. Some live in the
 solver crate (they read its `VersionData`), some in the cli (they need only a
 package's own facts):
 

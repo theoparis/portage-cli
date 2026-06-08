@@ -133,16 +133,16 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   would violate one (e.g. upgrading `docutils` past an installed package's `<`
   bound). This is a non-fatal warning — the plan is still produced and is
   identical to emerge's; the breakage is simply surfaced rather than hidden.
-- **`REQUIRED_USE` is not modelled.** `^^ () / ?? () / a? ( b )` are not parsed
-  yet, so the solver cannot auto-satisfy them. The `SolverDecided` / `UseDecision`
-  machinery that would enable this is present but dormant (see
-  `docs/use-and-solver-boundary.md` §4).
+- **`REQUIRED_USE` is validated but not solver-satisfied.** `^^`/`??`/`a? ( b )`
+  are parsed and evaluated (`portage-metadata`), and the consumer reports any
+  unsatisfied constraint post-solve as an advisory warning — matching Portage's
+  default "fix your USE flags" behaviour (**Level A**). What is *not* built is
+  **Level C**: having the solver *choose* satisfying flags via the dormant
+  `SolverDecided` / `UseDecision` machinery (see `docs/use-and-solver-boundary.md` §4).
 - **Post-solve version remap does not re-solve.** When a forced rebuild is
   upgraded to a newer version (`upgrade_to`), the new version's dependencies are
   not re-solved. This is sound for the leaf-ish packages it currently affects but
   is an approximation, not a general guarantee.
-- **No download-size accounting** in verbose output (needs Manifest parsing), and
-  old/installed versions are not enriched with `:slot::repo` (needs the VDB repo).
 
 ## Related Projects
 
