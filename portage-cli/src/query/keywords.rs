@@ -1,20 +1,22 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context, Result};
-use portage_atom::Dep;
+use anyhow::Result;
 use portage_metadata::Stability;
 use portage_repo::Repository;
+use portage_vdb::Vdb;
 
+use super::ResolveMode;
+use super::resolve_atom;
 use super::which::dep_matches_cpv;
 
-pub fn run(repo_path: &Path, atoms: &[String]) -> Result<()> {
+pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[String]) -> Result<()> {
     let repo = Repository::open(repo_path)?;
 
     let ebuilds: Vec<_> = repo.ebuilds()?.into_iter().collect();
 
     for raw in atoms {
-        let dep = Dep::parse(raw).with_context(|| format!("bad atom '{raw}'"))?;
+        let dep = resolve_atom(&repo, vdb, mode, raw)?;
 
         let mut matches: Vec<_> = ebuilds
             .iter()

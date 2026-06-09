@@ -1,17 +1,23 @@
 use std::cmp::Ordering;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use portage_atom::{Cpv, Dep, Operator};
 use portage_repo::Repository;
+use portage_vdb::Vdb;
 
-pub fn run(repo_path: &Path, atoms: &[String]) -> Result<()> {
+pub fn run(
+    repo_path: &Path,
+    vdb: Option<&Vdb>,
+    mode: super::ResolveMode,
+    atoms: &[String],
+) -> Result<()> {
     let repo = Repository::open(repo_path)?;
 
     let ebuilds: Vec<_> = repo.ebuilds()?.into_iter().collect();
 
     for raw in atoms {
-        let dep = Dep::parse(raw).with_context(|| format!("bad atom '{raw}'"))?;
+        let dep = super::resolve_atom(&repo, vdb, mode, raw)?;
 
         let best = ebuilds
             .iter()

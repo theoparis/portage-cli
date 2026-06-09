@@ -59,15 +59,22 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     if !cli.pretend {
         bail!("not implemented: emerge (use -p for pretend mode)");
     }
-    let parsed = parse_atoms(&cli.atoms);
-    let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
-    if atoms.is_empty() {
-        bail!("em: no valid atoms");
-    }
     let resolved = cli.repo_path();
     let repo_path = camino::Utf8Path::new(&resolved);
     if !repo_path.is_dir() {
         bail!("repo not found at {resolved}");
+    }
+    let repo = portage_repo::Repository::open(repo_path.as_std_path())?;
+    let vdb = open_vdb(cli).ok();
+    let mode = if cli.update {
+        query::ResolveMode::PreferInstalled
+    } else {
+        query::ResolveMode::Error
+    };
+    let parsed = query::resolve_atoms(&cli.atoms, &repo, vdb.as_ref(), mode);
+    let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
+    if atoms.is_empty() {
+        bail!("em: no valid atoms");
     }
     let root = cli.root.as_deref().map(camino::Utf8Path::new);
     let format = if cli.tree {
@@ -250,22 +257,30 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             query::check::run(&vdb, atom)
         }
         QueryCommand::Depends { atom } => {
-            query::depends::run(&std::path::PathBuf::from(globals.repo_path()), atom)
+            let vdb = open_vdb(globals).ok();
+            query::depends::run(
+                &std::path::PathBuf::from(globals.repo_path()),
+                vdb.as_ref(),
+                query::ResolveMode::Error,
+                atom,
+            )
         }
         QueryCommand::Depgraph {
             atom,
             format,
             autosolve_use,
         } => {
-            let parsed = parse_atoms(atom);
-            let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
-            if atoms.is_empty() {
-                bail!("equery depgraph: no valid atoms");
-            }
             let resolved = globals.repo_path();
             let repo_path = camino::Utf8Path::new(&resolved);
             if !repo_path.is_dir() {
                 bail!("repo not found at {resolved}");
+            }
+            let repo = portage_repo::Repository::open(repo_path.as_std_path())?;
+            let vdb = open_vdb(globals).ok();
+            let parsed = query::resolve_atoms(atom, &repo, vdb.as_ref(), query::ResolveMode::Error);
+            let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
+            if atoms.is_empty() {
+                bail!("equery depgraph: no valid atoms");
             }
             let root = globals.root.as_deref().map(camino::Utf8Path::new);
             query::depgraph::depgraph(query::depgraph::DepgraphOpts {
@@ -294,7 +309,13 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             query::hasuse::run(&std::path::PathBuf::from(globals.repo_path()), flag)
         }
         QueryCommand::Keywords { atom } => {
-            query::keywords::run(&std::path::PathBuf::from(globals.repo_path()), atom)
+            let vdb = open_vdb(globals).ok();
+            query::keywords::run(
+                &std::path::PathBuf::from(globals.repo_path()),
+                vdb.as_ref(),
+                query::ResolveMode::Error,
+                atom,
+            )
         }
         QueryCommand::List { installed, pattern } => {
             if *installed {
@@ -309,6 +330,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             query::meta::run(
                 &std::path::PathBuf::from(globals.repo_path()),
                 vdb.as_ref(),
+                query::ResolveMode::Error,
                 atom,
             )
         }
@@ -321,11 +343,18 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             query::uses::run(
                 &std::path::PathBuf::from(globals.repo_path()),
                 vdb.as_ref(),
+                query::ResolveMode::Error,
                 atom,
             )
         }
         QueryCommand::Which { atom } => {
-            query::which::run(&std::path::PathBuf::from(globals.repo_path()), atom)
+            let vdb = open_vdb(globals).ok();
+            query::which::run(
+                &std::path::PathBuf::from(globals.repo_path()),
+                vdb.as_ref(),
+                query::ResolveMode::Error,
+                atom,
+            )
         }
     }
 }

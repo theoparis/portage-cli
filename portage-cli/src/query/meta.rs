@@ -3,22 +3,23 @@
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use humansize::{BINARY, format_size};
-use portage_atom::Dep;
 use portage_repo::Repository;
 use portage_vdb::Vdb;
 
+use super::ResolveMode;
+use super::resolve_atom;
 use super::which::dep_matches_cpv;
 use crate::vdb::find_packages;
 
-pub fn run(repo_path: &Path, vdb: Option<&Vdb>, atoms: &[String]) -> Result<()> {
+pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[String]) -> Result<()> {
     let repo = Repository::open(repo_path)?;
 
     let ebuilds: Vec<_> = repo.ebuilds()?.into_iter().collect();
 
     for raw in atoms {
-        let dep = Dep::parse(raw).with_context(|| format!("bad atom '{raw}'"))?;
+        let dep = resolve_atom(&repo, vdb, mode, raw)?;
 
         let mut matches: Vec<_> = ebuilds
             .iter()
