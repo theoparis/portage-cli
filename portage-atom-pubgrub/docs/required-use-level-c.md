@@ -137,16 +137,81 @@ qtbase's shows only the relevant `?? ( journald syslog )`, not the whole tree):
 The Level-A reporter remains for *un*satisfiable constraints (a hard pin that no
 legal assignment can meet).
 
-## 6. Out of scope (later phases)
+## 6. Cross-package `[flag]` USE-dep co-solve (C7) — design
 
-- **Cross-package USE-dep co-solve.** If `P` deps `Q[a]` and `Q.a` is ceded, the
-  `[a]` should *force* `D_{Q}_a@1` during the solve. Today USE-deps are checked
-  post-solve. Routing them through `UseDecision` co-solves flag choice with
-  USE-dep satisfaction — strictly bigger, touches the whole post-solve model.
-  Phase 1 keeps USE-deps post-solve; a ceded flag that a `[a]` later wants on
-  but the solver left off is reported by the existing USE-dep validation, same
-  as a fixed flag would be.
-- **Nested conditional groups** (`a? ( ^^ ( … ) )`) — Phase 2.
+This is the next phase. It promotes a cross-package `[flag]` USE-dep from an
+**advisory** (the cli reports "add `Q a` to `package.use`") to an **applied**
+flag under `--autosolve-use`, mirroring Level-C `REQUIRED_USE`.
+
+### Handling tiers (the frame)
+
+Every constraint sits in one of three tiers by the guarantee it gets:
+
+- **Tier 1 — solved/enforced:** version ranges, slots/subslots, `||`/`^^`/`??`,
+  USE-*conditional* deps (`a? ( dep )`), and Level-C `REQUIRED_USE` (opt-in).
+- **Tier 2 — advisory:** checked post-solve, plan still emitted even if violated
+  — blockers, `::repo`, `REQUIRED_USE` Level-A, reverse-dep conflicts, and
+  **cross-package `[flag]`** (today: surfaced as autounmask `package.use`).
+- **Tier 3 — invisible:** not detected, plan silently differs from emerge — `:=`
+  subslot rebuilds, old-slot wrapper/shim packages.
+
+C7 moves cross-package `[flag]` from Tier 2 toward Tier 1 (opt-in).
+
+### Foundation that already exists
+
+`PortageDependencyProvider::compute_use_flag_requirements` already computes, per
+package, the `required_enabled` / `required_disabled` flags that the in-plan
+`[flag]` deps demand (this is what the cli turns into autounmask suggestions via
+`use_flag_requirements()`). So the *detection* is done; C7 only adds the
+*application*.
+
+### Approach: cede-the-target + re-solve (no new solver encoding)
+
+Under `--autosolve-use`, after a solve:
+
+1. Read `use_flag_requirements()`.
+2. For each target package + required flag that is **a real IUSE flag** and **not
+   pinned** (`package.use` / `ForceMask::pins`) and **not contradictory**, cede
+   that flag on the target toward the required value.
+3. Re-solve to a bounded fixpoint (the same pattern `resolve_targets` already uses
+   for `upgrade_to`), so newly-ceded flags' conditional deps and `REQUIRED_USE`
+   are folded in. Fall back to the last good plan if a re-solve fails.
+
+This reuses the Level-C cede mechanism and the existing re-solve loop, keeps the
+solver crate free of a new cross-package encoding, and stays gated so default
+`em -p` keeps matching `emerge -p` (which also only *advises* USE changes).
+
+### Corner cases (spec: `portage-cli/src/query/depgraph/c7.rs`)
+
+Minimal package sets, written before the implementation as the executable spec /
+future regression tests. They currently assert Tier-2 behaviour and document the
+C7 target inline:
+
+| Case | Scenario | C7 target |
+|---|---|---|
+| CC1 | `foo[bar]`, bar off | cede bar on |
+| CC2 | `foo[-bar]`, bar on | cede bar off |
+| CC3 | `foo[bar?]`, parent bar on | cede to match the active conditional |
+| CC4 | `foo[bar=]` | cede foo's bar to equal the parent's |
+| CC5 | `foo[bar]` vs `?? ( bar baz )` | C7 + Level-C must agree in one re-solve |
+| CC6 | `[bar]` vs `[-bar]` (two parents) | detect both, stay advisory, never loop |
+| CC7 | `[bar]`, bar ∉ foo's IUSE | never cede (cannot apply) |
+
+**Findings from the spec:**
+- **CC5** — C7 and Level-C interact: ceding `bar` on may break the target's
+  `REQUIRED_USE`, so both must be resolved in the same re-solve.
+- **CC6** — current contradiction reporting is **lossy**: only one side of a
+  `[bar]`/`[-bar]` conflict is recorded in `use_flag_requirements`. C7's
+  conflict-detection (don't cede when both directions are demanded) needs both
+  sides, so this is fixed as part of C7 (or the follow-up cleanup pass).
+
+### Later / out of scope
+
+- **Nested ceded-guard chains** (`a? ( b? ( c ) )`, both ceded) — needs a
+  2-antecedent implication PubGrub Horn clauses can't express (C6).
+- **Per-slot `UseDecision` nodes** — kept as a Tier-2 advisory edge rather than a
+  node rename, because per-slot naming conflicts with cross-package references
+  from unslotted deps (C5).
 - **Global minimal-flip optimisation** — not planned.
 
 ## 7. Phasing

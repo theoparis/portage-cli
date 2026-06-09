@@ -185,9 +185,34 @@ the solver computes the *needed* set and never resolves policy.**
 
 ## Known divergences from emerge
 
-The plan (package set + versions) matches `emerge -p` on the test basket;
-remaining differences are documented in the
+The plan (package set + versions) matches `emerge -p` on the test basket. The
+useful way to read the remaining gaps is by **handling tier** — the guarantee a
+constraint gets — not by feature, since almost everything is "handled outside the
+PubGrub core" in *some* way:
+
+- **Tier 1 — solved (enforced).** The solution provably satisfies it: version
+  ranges, slots/subslots, `||`/`^^`/`??` groups, USE-*conditional* deps
+  (`flag? ( dep )`), and Level-C `REQUIRED_USE` (opt-in, `--autosolve-use`).
+- **Tier 2 — advisory.** Checked post-solve; the plan is still emitted even when
+  violated, and the caveat is printed after it (as emerge does):
+  - blockers (`!foo`/`!!foo`) — reported, not used to exclude/replace;
+  - `::repo` constraints;
+  - `REQUIRED_USE` Level-A (the default);
+  - reverse-dependency conflicts — an *enrichment* a default targeted `emerge -p`
+    hides (every installed package's constraints checked against the plan);
+  - cross-package `[flag]` USE-deps — surfaced as autounmask `package.use`
+    suggestions (C7 will promote these toward Tier 1 under `--autosolve-use`).
+- **Tier 3 — invisible.** Not detected; the plan can silently differ from emerge
+  with no warning:
+  - slot-operator `:=` subslot-change rebuilds of installed dependents;
+  - old-slot wrapper/shim packages (`autoconf-wrapper`, `gcc-config`).
+
+Plus two **intentional** cosmetic divergences: install-*order* positions (valid
+topological order, different scheduler — emerge: target-driven DFS; here: SCC
+condensation + lexicographic Kahn) and the `:slot` suffix on autounmask
+`package.use` atoms. Severity tracks the tier: Tier 3 (silent) is the priority to
+fix, Tier 2 is a deliberate "report don't block" stance (some intentional like
+reverse-deps, some pending promotion like blockers and cross-package `[flag]`).
+The running per-item list lives in the
 [`portage-atom-pubgrub` README](../portage-atom-pubgrub/README.md) "Known
-limitations" section — chiefly install-*order* positions (different scheduler),
-the advisory reverse-dep/REQUIRED_USE reporting that emerge's default hides, and
-the unbuilt Level-C `REQUIRED_USE` solving.
+limitations" section and `docs/required-use-level-c.md` (§6, C7).
