@@ -108,32 +108,41 @@ fn ver_str(v: &Version) -> String {
 
 /// C7: auto-apply cross-package `[flag]` USE-deps to a fixpoint.
 ///
-/// Starting from `package_use`, repeatedly: solve (`solve` returns the in-plan
-/// USE-flag requirements, or `None` if the solve failed), force every demanded
-/// flag that is real IUSE of its target via a synthetic `cpn flags` entry, and
-/// re-solve — until no new flag is added. Returns the augmented `package_use`.
+/// Starting from `package_use`, repeatedly: solve (`solve` returns an opaque
+/// solve outcome `T`, or `None` if the solve failed), read the in-plan USE-flag
+/// requirements from it via `reqs_of`, force every demanded flag that is real
+/// IUSE of its target via a synthetic `cpn flags` entry, and re-solve — until no
+/// new flag is added.
+///
+/// Returns the augmented `package_use` and, **when the fixpoint converged on a
+/// solve of that exact `package_use`**, that final outcome — so the caller can
+/// reuse it instead of solving once more. The outcome is `None` if a solve
+/// failed or the iteration bound was hit (the returned `package_use` then has
+/// additions that were not re-solved, so the caller must solve again).
 ///
 /// `applied` (a flag forced once) is never re-forced, so a `[bar]` vs `[-bar]`
 /// contradiction resolves to first-wins + advisory for the loser rather than
 /// oscillating; the bound is a backstop. Caller gates this on `--autosolve-use`.
-pub(super) fn cosolve_use_deps<F>(
+pub(super) fn cosolve_use_deps<T, S, R>(
     mut package_use: Vec<(Dep, Vec<String>)>,
     data: &super::repo::RepoData,
-    solve: F,
-) -> Vec<(Dep, Vec<String>)>
+    solve: S,
+    reqs_of: R,
+) -> (Vec<(Dep, Vec<String>)>, Option<T>)
 where
-    F: Fn(&[(Dep, Vec<String>)]) -> Option<Vec<UseFlagRequirement>>,
+    S: Fn(&[(Dep, Vec<String>)]) -> Option<T>,
+    R: Fn(&T) -> Vec<UseFlagRequirement>,
 {
     use portage_atom::Cpn;
     use portage_atom::interner::{DefaultInterner, Interned};
 
     let mut applied: HashMap<(Cpn, Interned<DefaultInterner>), bool> = HashMap::new();
     for _ in 0..8 {
-        let Some(reqs) = solve(&package_use) else {
-            break;
+        let Some(solved) = solve(&package_use) else {
+            return (package_use, None); // solve failed — caller must re-solve / fall back
         };
         let mut new_by_cpn: HashMap<Cpn, Vec<String>> = HashMap::new();
-        for (cpn, flag, enable) in solver_use_dep_targets(&reqs, data) {
+        for (cpn, flag, enable) in solver_use_dep_targets(&reqs_of(&solved), data) {
             if applied.contains_key(&(cpn, flag)) {
                 continue; // already forced (same or opposite) — don't oscillate
             }
@@ -146,7 +155,8 @@ where
             new_by_cpn.entry(cpn).or_default().push(tok);
         }
         if new_by_cpn.is_empty() {
-            break;
+            // Fixpoint: `solved` is a solve of the current `package_use`.
+            return (package_use, Some(solved));
         }
         for (cpn, flags) in new_by_cpn {
             if let Ok(dep) = Dep::parse(&cpn.to_string()) {
@@ -154,7 +164,7 @@ where
             }
         }
     }
-    package_use
+    (package_use, None) // bound hit — `package_use` has additions not yet solved
 }
 
 /// The `(target cpn, flag, enable)` triples that in-plan cross-package `[flag]`

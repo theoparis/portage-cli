@@ -149,33 +149,43 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
     // and re-solving to a fixpoint (so they are satisfied in the plan, not just
     // suggested). Gated on autosolve, so default `em -p` keeps emerge's advisory
     // behaviour. See `package_use::cosolve_use_deps`.
-    let package_use = if autosolve_use {
-        package_use::cosolve_use_deps(package_use, &data, |pu| {
-            let (provider, result) = build_and_solve(true, pu);
-            result
-                .ok()
-                .map(|_| provider.use_flag_requirements().to_vec())
-        })
+    // Under autosolve the fixpoint hands back the final solve it converged on, so
+    // we reuse it instead of solving again; `solved` is `None` for the default
+    // path (no fixpoint) or when the fixpoint failed/bailed and we must re-solve.
+    let (package_use, solved) = if autosolve_use {
+        package_use::cosolve_use_deps(
+            package_use,
+            &data,
+            |pu| {
+                let (provider, result) = build_and_solve(true, pu);
+                result.ok().map(|sol| (provider, sol))
+            },
+            |(provider, _)| provider.use_flag_requirements().to_vec(),
+        )
     } else {
-        package_use
+        (package_use, None)
     };
 
-    let (provider, solution) = {
-        let (provider, result) = build_and_solve(autosolve_use, &package_use);
-        match result {
-            Ok(sol) => (provider, sol),
-            Err(_) if autosolve_use => {
-                // REQUIRED_USE could not be auto-satisfied; fall back to a
-                // fixed-USE solve so the plan + Level-A advisory still appear.
-                eprintln!(
-                    "!!! --autosolve-use could not satisfy REQUIRED_USE; \
-                     falling back to a fixed-USE plan."
-                );
-                let (provider, result) = build_and_solve(false, &package_use);
-                let sol = result.map_err(|e2| anyhow::anyhow!("resolution failed: {:?}", e2))?;
-                (provider, sol)
+    let (provider, solution) = match solved {
+        Some(solved) => solved,
+        None => {
+            let (provider, result) = build_and_solve(autosolve_use, &package_use);
+            match result {
+                Ok(sol) => (provider, sol),
+                Err(_) if autosolve_use => {
+                    // REQUIRED_USE could not be auto-satisfied; fall back to a
+                    // fixed-USE solve so the plan + Level-A advisory still appear.
+                    eprintln!(
+                        "!!! --autosolve-use could not satisfy REQUIRED_USE; \
+                         falling back to a fixed-USE plan."
+                    );
+                    let (provider, result) = build_and_solve(false, &package_use);
+                    let sol =
+                        result.map_err(|e2| anyhow::anyhow!("resolution failed: {:?}", e2))?;
+                    (provider, sol)
+                }
+                Err(e) => return Err(anyhow::anyhow!("resolution failed: {:?}", e)),
             }
-            Err(e) => return Err(anyhow::anyhow!("resolution failed: {:?}", e)),
         }
     };
 
