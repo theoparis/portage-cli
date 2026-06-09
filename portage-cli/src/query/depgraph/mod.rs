@@ -1,6 +1,7 @@
 mod autounmask;
 mod conflicts;
 mod download_size;
+mod force_mask;
 mod installed;
 mod output;
 mod package_use;
@@ -52,8 +53,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         expand_hidden: use_expand_hidden,
         package_use,
         package_mask,
-        force_mask_global,
-        force_mask_pkg,
+        force_mask,
         accept_keywords,
         accept_license,
         distdir,
@@ -104,8 +104,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
             accept_license: &accept_license,
             use_config: &use_config,
             package_use: &package_use,
-            force_mask_global: &force_mask_global,
-            force_mask_pkg: &force_mask_pkg,
+            force_mask: &force_mask,
             autosolve_use,
         };
         let mut provider = PortageDependencyProvider::new(adapter);
@@ -148,38 +147,60 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         }
     };
 
-    // Level-C: fold the solver's chosen ceded-flag values back into the
-    // effective USE used for display, the REQUIRED_USE check, and autounmask, by
-    // appending synthetic `=cpv flag` package.use entries. With --autosolve-use
-    // off this is empty and `package_use` is unchanged (parity preserved).
+    // Fold per-package profile force/mask and the Level-C ceded flag values back
+    // into the effective USE used for display, the REQUIRED_USE check, and
+    // autounmask, by appending synthetic `=cpv flag`/`-flag` package.use entries.
+    // The force/mask entries surface package.use.force/mask (+ stable variants)
+    // in the plan — e.g. crossdev's multilib/cet on cross-* packages — mirroring
+    // what `desired_use` already applied for the solver. With no force/mask policy
+    // and --autosolve-use off this is a no-op and `package_use` is unchanged
+    // (parity preserved).
     let ceded = provider.solved_use_decisions();
-    let package_use: Vec<(Dep, Vec<String>)> = if ceded.is_empty() {
+    let package_use: Vec<(Dep, Vec<String>)> = if ceded.is_empty() && force_mask.is_empty() {
         package_use
     } else {
         let mut by_cpn: HashMap<Cpn, Vec<&portage_atom_pubgrub::CededFlag>> = HashMap::new();
         for c in &ceded {
             by_cpn.entry(c.cpn).or_default().push(c);
         }
-        let mut combined = package_use.clone();
+        let mut combined = package_use;
         for (pkg, ver) in solution.iter() {
             if pkg.is_virtual() {
                 continue;
             }
-            if let Some(flags) = by_cpn.get(pkg.cpn()) {
-                let atom = format!("={}/{}-{}", pkg.cpn().category, pkg.cpn().package, ver);
-                if let Ok(dep) = Dep::parse(&atom) {
-                    let tokens = flags
-                        .iter()
-                        .map(|c| {
-                            if c.value {
-                                c.flag.as_str().to_string()
-                            } else {
-                                format!("-{}", c.flag.as_str())
-                            }
-                        })
-                        .collect();
-                    combined.push((dep, tokens));
+            let atom = format!("={}/{}-{}", pkg.cpn().category, pkg.cpn().package, ver);
+            let Ok(dep) = Dep::parse(&atom) else { continue };
+
+            // Profile force/mask for this resolved version (mask rendered as
+            // `-flag`; force as `flag`). Stable variants apply only when the
+            // version is merged due to a stable keyword.
+            if !force_mask.is_empty() {
+                let cpv = Cpv::new(*pkg.cpn(), ver.clone());
+                let keywords = repo::find_cache(&data, pkg, ver)
+                    .map(|c| c.metadata.keywords.as_slice())
+                    .unwrap_or(&[]);
+                let stable = force_mask::is_stable(keywords, arch.as_str(), &accept_keywords);
+                let (forced, masked) = force_mask.effective(&cpv, stable);
+                if !forced.is_empty() || !masked.is_empty() {
+                    let mut tokens: Vec<String> = forced.into_iter().collect();
+                    tokens.extend(masked.into_iter().map(|m| format!("-{m}")));
+                    combined.push((dep.clone(), tokens));
                 }
+            }
+
+            // Level-C: the solver's chosen ceded-flag values.
+            if let Some(flags) = by_cpn.get(pkg.cpn()) {
+                let tokens = flags
+                    .iter()
+                    .map(|c| {
+                        if c.value {
+                            c.flag.as_str().to_string()
+                        } else {
+                            format!("-{}", c.flag.as_str())
+                        }
+                    })
+                    .collect();
+                combined.push((dep, tokens));
             }
         }
         combined

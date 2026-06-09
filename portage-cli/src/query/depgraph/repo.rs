@@ -118,7 +118,7 @@ fn licenses_needed(expr: &LicenseExpr, accept: &[String]) -> Vec<String> {
 }
 
 /// Check whether `mask_dep` matches the given `cpv` (version + CPN, no slot check).
-fn mask_matches(mask_dep: &Dep, cpv: &Cpv) -> bool {
+pub(super) fn mask_matches(mask_dep: &Dep, cpv: &Cpv) -> bool {
     if mask_dep.cpn != cpv.cpn {
         return false;
     }
@@ -160,10 +160,9 @@ pub(super) struct Adapter<'a> {
     /// `package.use` + IUSE defaults by `desired_use`.
     pub(super) use_config: &'a portage_atom_pubgrub::UseConfig,
     pub(super) package_use: &'a [(Dep, Vec<String>)],
-    /// Global `use.force`/`use.mask` flag names — never ceded (hard profile pins).
-    pub(super) force_mask_global: &'a [String],
-    /// Per-package `package.use.force`/`package.use.mask` — never ceded.
-    pub(super) force_mask_pkg: &'a [(Dep, Vec<String>)],
+    /// Profile USE force/mask policy: applied to each version's effective USE and
+    /// consulted by the Level-C cede gate (pinned flags are never ceded).
+    pub(super) force_mask: &'a super::force_mask::ForceMask,
     /// Level-C: when set, cede each package's non-pinned `REQUIRED_USE` flags to
     /// the solver (`SolverDecided`) instead of fixing them. See
     /// `portage-atom-pubgrub/docs/required-use-level-c.md`.
@@ -211,6 +210,19 @@ impl PackageRepository for Adapter<'_> {
             }
         }
 
+        // Profile USE force/mask override package.use and the configured value
+        // (Portage semantics). Global use.force/use.mask are already in the base
+        // config; this layers the package-level sets plus the *.stable.* sets,
+        // the latter only when this version is merged due to a stable keyword.
+        // This is what makes crossdev's package.use.force/mask (multilib/cet/…)
+        // take effect on cross-* packages.
+        let stable = meta.is_some_and(|m| {
+            super::force_mask::is_stable(&m.keywords, self.arch.as_str(), self.accept_keywords)
+        });
+        if !self.force_mask.is_empty() {
+            self.force_mask.apply(&mut cfg, cpv, stable);
+        }
+
         // Level-C: cede this package's REQUIRED_USE flags to the solver. A ceded
         // flag keeps its resolved value as the *preference* (greedy keep-config);
         // the solver only flips it to satisfy REQUIRED_USE. Flags the user pinned
@@ -235,15 +247,9 @@ impl PackageRepository for Adapter<'_> {
             let pins = apply_package_use(&empty, cpv, slot, self.package_use);
             let iuse: std::collections::HashSet<&str> =
                 m.iuse.iter().map(|iu| iu.name()).collect();
-            // Flags pinned by use.force / use.mask (global + matching
-            // package.use.force/mask): hard profile decisions, never ceded.
-            let mut forced_masked: std::collections::HashSet<&str> =
-                self.force_mask_global.iter().map(String::as_str).collect();
-            for (dep, flags) in self.force_mask_pkg {
-                if mask_matches(dep, cpv) {
-                    forced_masked.extend(flags.iter().map(String::as_str));
-                }
-            }
+            // Flags pinned by use.force/use.mask (global, package-level and the
+            // stable variants): hard profile decisions, never ceded.
+            let forced_masked = self.force_mask.pins(cpv, stable);
             let mut names = std::collections::BTreeSet::new();
             collect_required_use_flags(ru, &mut names);
             for name in names {
@@ -610,6 +616,7 @@ pub(super) fn find_autounmask_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::force_mask::ForceMask;
     use portage_atom_pubgrub::{PackageRepository, UseConfig, UseFlagState};
 
     /// Build a one-package `RepoData` from md5-cache text.
@@ -638,6 +645,7 @@ mod tests {
         use_config.enable(Interned::intern("a"));
         use_config.enable(Interned::intern("b")); // both on ⇒ ?? ( a b ) violated
 
+        let fm = ForceMask { use_force: vec!["a".to_string()], ..Default::default() };
         let adapter = Adapter {
             data: &data,
             arch: &arch,
@@ -646,8 +654,7 @@ mod tests {
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],
-            force_mask_global: &["a".to_string()], // a is use.force'd
-            force_mask_pkg: &[],
+            force_mask: &fm, // a is use.force'd
             autosolve_use: true,
         };
 
@@ -674,6 +681,7 @@ mod tests {
         use_config.enable(Interned::intern("a"));
         use_config.enable(Interned::intern("b"));
 
+        let fm = ForceMask::default();
         let adapter = Adapter {
             data: &data,
             arch: &arch,
@@ -682,8 +690,7 @@ mod tests {
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],
-            force_mask_global: &[],
-            force_mask_pkg: &[],
+            force_mask: &fm,
             autosolve_use: true,
         };
 
@@ -707,6 +714,7 @@ mod tests {
         let mut use_config = UseConfig::new();
         use_config.enable(Interned::intern("a")); // only a on ⇒ ?? satisfied
 
+        let fm = ForceMask::default();
         let adapter = Adapter {
             data: &data,
             arch: &arch,
@@ -715,8 +723,7 @@ mod tests {
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],
-            force_mask_global: &[],
-            force_mask_pkg: &[],
+            force_mask: &fm,
             autosolve_use: true,
         };
 
@@ -727,5 +734,47 @@ mod tests {
                 "flag {f} must not be ceded when REQUIRED_USE already holds"
             );
         }
+    }
+
+    // package.use.force/mask now change a package's effective USE (not just the
+    // cede gate). This is the crossdev case: force multilib on, mask cet off.
+    #[test]
+    fn package_force_mask_change_effective_use() {
+        let (data, cpv) = repo_with(
+            "cross-foo/gcc-13.2",
+            "EAPI=8\nSLOT=0\nIUSE=multilib cet\nKEYWORDS=~amd64\nDESCRIPTION=t\n",
+        );
+        let arch = Arch::intern("amd64");
+        let mut use_config = UseConfig::new();
+        use_config.enable(Interned::intern("cet")); // user enabled a flag the profile masks
+
+        let fm = ForceMask {
+            pkg_force: vec![(Dep::parse("cross-foo/gcc").unwrap(), vec!["multilib".to_string()])],
+            pkg_mask: vec![(Dep::parse("cross-foo/gcc").unwrap(), vec!["cet".to_string()])],
+            ..Default::default()
+        };
+        let adapter = Adapter {
+            data: &data,
+            arch: &arch,
+            accept_keywords: &["~amd64".to_string()],
+            package_mask: &[],
+            accept_license: &["*".to_string()],
+            use_config: &use_config,
+            package_use: &[],
+            force_mask: &fm,
+            autosolve_use: false,
+        };
+
+        let desired = adapter.desired_use(&cpv);
+        assert_eq!(
+            desired.get(&Interned::intern("multilib")),
+            UseFlagState::Enabled,
+            "package.use.force must enable multilib"
+        );
+        assert_eq!(
+            desired.get(&Interned::intern("cet")),
+            UseFlagState::Disabled,
+            "package.use.mask must beat the user's enable of cet"
+        );
     }
 }
