@@ -97,7 +97,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
     // Build a provider (with the given cede policy) and run the solve. Factored
     // so a failed --autosolve-use attempt can fall back to a fixed-USE (Level A)
     // solve instead of erroring — matching the doc invariant.
-    let build_and_solve = |autosolve_use: bool| {
+    let build_and_solve = |autosolve_use: bool, pkg_use: &[(Dep, Vec<String>)]| {
         let adapter = repo::Adapter {
             data: &data,
             arch,
@@ -105,7 +105,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
             package_mask: &package_mask,
             accept_license: &accept_license,
             use_config: &use_config,
-            package_use: &package_use,
+            package_use: pkg_use,
             force_mask: &force_mask,
             autosolve_use,
         };
@@ -129,8 +129,22 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         (provider, result)
     };
 
+    // C7: under --autosolve-use, auto-apply cross-package `[flag]` USE-deps by
+    // forcing the demanded flags on real-IUSE targets via synthetic `package.use`
+    // and re-solving to a fixpoint (so they are satisfied in the plan, not just
+    // suggested). Gated on autosolve, so default `em -p` keeps emerge's advisory
+    // behaviour. See `package_use::cosolve_use_deps`.
+    let package_use = if autosolve_use {
+        package_use::cosolve_use_deps(package_use, &data, |pu| {
+            let (provider, result) = build_and_solve(true, pu);
+            result.ok().map(|_| provider.use_flag_requirements().to_vec())
+        })
+    } else {
+        package_use
+    };
+
     let (provider, solution) = {
-        let (provider, result) = build_and_solve(autosolve_use);
+        let (provider, result) = build_and_solve(autosolve_use, &package_use);
         match result {
             Ok(sol) => (provider, sol),
             Err(_) if autosolve_use => {
@@ -140,7 +154,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
                     "!!! --autosolve-use could not satisfy REQUIRED_USE; \
                      falling back to a fixed-USE plan."
                 );
-                let (provider, result) = build_and_solve(false);
+                let (provider, result) = build_and_solve(false, &package_use);
                 let sol = result
                     .map_err(|e2| anyhow::anyhow!("resolution failed: {:?}", e2))?;
                 (provider, sol)

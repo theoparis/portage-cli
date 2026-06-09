@@ -103,6 +103,94 @@ fn ver_str(v: &Version) -> String {
     v.to_string()
 }
 
+/// C7: auto-apply cross-package `[flag]` USE-deps to a fixpoint.
+///
+/// Starting from `package_use`, repeatedly: solve (`solve` returns the in-plan
+/// USE-flag requirements, or `None` if the solve failed), force every demanded
+/// flag that is real IUSE of its target via a synthetic `cpn flags` entry, and
+/// re-solve — until no new flag is added. Returns the augmented `package_use`.
+///
+/// `applied` (a flag forced once) is never re-forced, so a `[bar]` vs `[-bar]`
+/// contradiction resolves to first-wins + advisory for the loser rather than
+/// oscillating; the bound is a backstop. Caller gates this on `--autosolve-use`.
+pub(super) fn cosolve_use_deps<F>(
+    mut package_use: Vec<(Dep, Vec<String>)>,
+    data: &super::repo::RepoData,
+    solve: F,
+) -> Vec<(Dep, Vec<String>)>
+where
+    F: Fn(&[(Dep, Vec<String>)]) -> Option<Vec<UseFlagRequirement>>,
+{
+    use portage_atom::Cpn;
+    use portage_atom::interner::{DefaultInterner, Interned};
+
+    let mut applied: HashMap<(Cpn, Interned<DefaultInterner>), bool> = HashMap::new();
+    for _ in 0..8 {
+        let Some(reqs) = solve(&package_use) else { break };
+        let mut new_by_cpn: HashMap<Cpn, Vec<String>> = HashMap::new();
+        for (cpn, flag, enable) in solver_use_dep_targets(&reqs, data) {
+            if applied.contains_key(&(cpn, flag)) {
+                continue; // already forced (same or opposite) — don't oscillate
+            }
+            applied.insert((cpn, flag), enable);
+            let tok = if enable {
+                flag.as_str().to_string()
+            } else {
+                format!("-{}", flag.as_str())
+            };
+            new_by_cpn.entry(cpn).or_default().push(tok);
+        }
+        if new_by_cpn.is_empty() {
+            break;
+        }
+        for (cpn, flags) in new_by_cpn {
+            if let Ok(dep) = Dep::parse(&cpn.to_string()) {
+                package_use.push((dep, flags));
+            }
+        }
+    }
+    package_use
+}
+
+/// The `(target cpn, flag, enable)` triples that in-plan cross-package `[flag]`
+/// deps demand, filtered to flags that are **real IUSE** of the target's
+/// selected/upgrade version (a `[bar]` on a target without `bar` cannot be
+/// applied — CC7). Used by C7 (`--autosolve-use`) to auto-apply USE-deps via
+/// synthetic `package.use` and re-solve, instead of only suggesting them.
+pub(super) fn solver_use_dep_targets(
+    flag_reqs: &[UseFlagRequirement],
+    data: &super::repo::RepoData,
+) -> Vec<(
+    portage_atom::Cpn,
+    portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>,
+    bool,
+)> {
+    let mut out = Vec::new();
+    for req in flag_reqs {
+        if req.package.is_virtual()
+            || (req.required_enabled.is_empty() && req.required_disabled.is_empty())
+        {
+            continue;
+        }
+        let cpn = *req.package.cpn();
+        let ver = req.upgrade_to.as_ref().unwrap_or(&req.version);
+        let iuse: HashSet<String> = super::repo::find_cache(data, &req.package, ver)
+            .map(|c| c.metadata.iuse.iter().map(|i| i.name().to_string()).collect())
+            .unwrap_or_default();
+        for f in &req.required_enabled {
+            if iuse.contains(f.as_str()) {
+                out.push((cpn, *f, true));
+            }
+        }
+        for f in &req.required_disabled {
+            if iuse.contains(f.as_str()) {
+                out.push((cpn, *f, false));
+            }
+        }
+    }
+    out
+}
+
 /// Adjacency map: CPN → Vec<(to_CPN, annotation)>.
 /// annotation = "from-cpv[flag]" when gated, "from-cpv" otherwise.
 type Adjacency = HashMap<String, Vec<(String, String)>>;

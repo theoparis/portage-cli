@@ -67,9 +67,9 @@ impl Outcome {
     }
 }
 
-/// Solve `targets` against `data`. Returns `Err` (as a string) for an
-/// unsatisfiable problem.
-fn solve(data: &RepoData, targets: &[&str], autosolve: bool) -> Result<Outcome, String> {
+/// Solve `targets` against `data` with the given `package_use`. Returns `None`
+/// for an unsatisfiable problem.
+fn solve_with(data: &RepoData, targets: &[&str], pu: &[(Dep, Vec<String>)]) -> Option<Outcome> {
     let arch = Arch::intern("amd64");
     let accept = ["amd64".to_string()];
     let lic = ["*".to_string()];
@@ -82,9 +82,9 @@ fn solve(data: &RepoData, targets: &[&str], autosolve: bool) -> Result<Outcome, 
         package_mask: &[],
         accept_license: &lic,
         use_config: &use_config,
-        package_use: &[],
+        package_use: pu,
         force_mask: &fm,
-        autosolve_use: autosolve,
+        autosolve_use: true,
     };
     let mut provider = PortageDependencyProvider::new(adapter);
     let roots: Vec<_> = targets
@@ -95,13 +95,34 @@ fn solve(data: &RepoData, targets: &[&str], autosolve: bool) -> Result<Outcome, 
             (pkg, PortageVersionSet::any())
         })
         .collect();
-    let sol = provider.resolve_targets(roots).map_err(|e| format!("{e:?}"))?;
+    let sol = provider.resolve_targets(roots).ok()?;
     let plan = sol
         .iter()
         .filter(|(p, _)| !p.is_virtual())
         .map(|(p, v)| format!("{}-{}", p.cpn(), v))
         .collect();
-    Ok(Outcome { reqs: provider.use_flag_requirements().to_vec(), plan })
+    Some(Outcome { reqs: provider.use_flag_requirements().to_vec(), plan })
+}
+
+/// A single (default, no-autosolve) solve — shows the Tier-2 behaviour.
+fn solve(data: &RepoData, targets: &[&str]) -> Outcome {
+    solve_with(data, targets, &[]).expect("solve")
+}
+
+/// Run the C7 co-solve fixpoint (as `depgraph` does under `--autosolve-use`):
+/// returns the augmented `package_use` and the final outcome.
+fn cosolve(data: &RepoData, targets: &[&str]) -> (Vec<(Dep, Vec<String>)>, Outcome) {
+    let pu = super::package_use::cosolve_use_deps(Vec::new(), data, |pu| {
+        solve_with(data, targets, pu).map(|o| o.reqs)
+    });
+    let out = solve_with(data, targets, &pu).expect("final solve");
+    (pu, out)
+}
+
+/// Whether `pu` forces `token` (e.g. `bar` / `-bar`) on `cpn`.
+fn pu_forces(pu: &[(Dep, Vec<String>)], cpn: &str, token: &str) -> bool {
+    pu.iter()
+        .any(|(d, flags)| d.to_string() == cpn && flags.iter().any(|f| f == token))
 }
 
 // md5-cache helpers ---------------------------------------------------------
@@ -125,65 +146,70 @@ fn parent(iuse: &str, rdepend: &str) -> String {
 // CC1 — plain `[bar]`, target's bar is off: satisfiable by enabling bar.
 // ---------------------------------------------------------------------------
 #[test]
-fn cc1_plain_enabled_dep_detected() {
+fn cc1_plain_enabled() {
     let data = repo_from(&[
         ("app/parent-1", &parent("", "dev/foo[bar]")),
         ("dev/foo-1", &leaf("bar", "")), // bar default off
     ]);
-    let out = solve(&data, &["app/parent"], false).unwrap();
+    // Default (Tier 2): detected, bar stays off (suggested only).
+    let out = solve(&data, &["app/parent"]);
     assert!(out.has("dev/foo-1"), "foo is pulled into the plan");
-    // Tier 2 today: the requirement is detected, bar stays off (suggested only).
-    assert!(out.needs_enabled("dev/foo", "bar"), "solver detects foo needs bar");
-    // C7 target (autosolve): cede bar on foo, re-solve → no leftover requirement,
-    //   the plan carries foo with bar enabled.
+    assert!(out.needs_enabled("dev/foo", "bar"), "default: detected only");
+    // C7 (autosolve): bar is forced on foo and the requirement is satisfied.
+    let (pu, co) = cosolve(&data, &["app/parent"]);
+    assert!(pu_forces(&pu, "dev/foo", "bar"), "C7 forces bar on foo");
+    assert!(!co.needs_enabled("dev/foo", "bar"), "C7: requirement satisfied");
+    assert!(co.has("dev/foo-1"));
 }
 
 // ---------------------------------------------------------------------------
 // CC2 — plain `[-bar]`, target's bar is on by default: needs disabling.
 // ---------------------------------------------------------------------------
 #[test]
-fn cc2_plain_disabled_dep_detected() {
+fn cc2_plain_disabled() {
     let data = repo_from(&[
         ("app/parent-1", &parent("", "dev/foo[-bar]")),
         ("dev/foo-1", &leaf("+bar", "")), // bar default ON
     ]);
-    let out = solve(&data, &["app/parent"], false).unwrap();
-    assert!(out.needs_disabled("dev/foo", "bar"), "solver detects foo must drop bar");
-    // C7 target: cede bar OFF on foo.
+    assert!(solve(&data, &["app/parent"]).needs_disabled("dev/foo", "bar"), "default: detected");
+    let (pu, co) = cosolve(&data, &["app/parent"]);
+    assert!(pu_forces(&pu, "dev/foo", "-bar"), "C7 forces bar off foo");
+    assert!(!co.needs_disabled("dev/foo", "bar"), "C7: requirement satisfied");
 }
 
 // ---------------------------------------------------------------------------
 // CC3 — conditional `[bar?]`: target needs bar only if the parent has bar.
 // ---------------------------------------------------------------------------
 #[test]
-fn cc3_conditional_dep_detected_when_parent_flag_on() {
+fn cc3_conditional_parent_flag_on() {
     let data = repo_from(&[
-        // parent has bar ON, so foo[bar?] requires foo to have bar.
-        ("app/parent-1", &parent("+bar", "dev/foo[bar?]")),
+        ("app/parent-1", &parent("+bar", "dev/foo[bar?]")), // parent bar on
         ("dev/foo-1", &leaf("bar", "")),
     ]);
-    let out = solve(&data, &["app/parent"], false).unwrap();
-    assert!(out.needs_enabled("dev/foo", "bar"), "parent bar on ⇒ foo needs bar");
-    // C7 target: cede bar on foo to match the active conditional.
+    assert!(solve(&data, &["app/parent"]).needs_enabled("dev/foo", "bar"), "default: detected");
+    let (pu, co) = cosolve(&data, &["app/parent"]);
+    assert!(pu_forces(&pu, "dev/foo", "bar"), "C7 matches the active conditional");
+    assert!(!co.needs_enabled("dev/foo", "bar"));
 }
 
 // ---------------------------------------------------------------------------
 // CC4 — equality `[bar=]`: target's bar must equal the parent's bar.
 // ---------------------------------------------------------------------------
 #[test]
-fn cc4_equal_dep_detected() {
+fn cc4_equal() {
     let data = repo_from(&[
         ("app/parent-1", &parent("+bar", "dev/foo[bar=]")), // parent bar on
         ("dev/foo-1", &leaf("bar", "")),                    // foo bar off ⇒ mismatch
     ]);
-    let out = solve(&data, &["app/parent"], false).unwrap();
-    assert!(out.needs_enabled("dev/foo", "bar"), "bar= with parent on ⇒ foo needs bar");
-    // C7 target: cede foo bar to equal the parent's resolved bar.
+    assert!(solve(&data, &["app/parent"]).needs_enabled("dev/foo", "bar"), "default: detected");
+    let (pu, co) = cosolve(&data, &["app/parent"]);
+    assert!(pu_forces(&pu, "dev/foo", "bar"), "C7 makes foo bar equal parent bar");
+    assert!(!co.needs_enabled("dev/foo", "bar"));
 }
 
 // ---------------------------------------------------------------------------
 // CC5 — `[bar]` collides with the target's REQUIRED_USE (`?? ( bar baz )`,
-// baz default-on): satisfying the dep forces a second flag to move.
+// baz default-on): C7 forces bar on, Level-C must drop baz in the same re-solve.
 // ---------------------------------------------------------------------------
 #[test]
 fn cc5_dep_interacts_with_target_required_use() {
@@ -191,37 +217,35 @@ fn cc5_dep_interacts_with_target_required_use() {
         ("app/parent-1", &parent("", "dev/foo[bar]")),
         ("dev/foo-1", &leaf("bar +baz", "?? ( bar baz )")), // baz on; bar+baz illegal
     ]);
-    let out = solve(&data, &["app/parent"], false).unwrap();
-    assert!(out.needs_enabled("dev/foo", "bar"), "foo still needs bar");
-    // C7 target: ceding bar on must, via Level-C, also drop baz so `?? ( bar baz )`
-    //   holds — i.e. C7 and Level-C must co-operate in one re-solve.
+    assert!(solve(&data, &["app/parent"]).needs_enabled("dev/foo", "bar"), "default: detected");
+    // C7 forces bar; the solve still succeeds because Level-C cedes baz off so
+    // `?? ( bar baz )` holds — C7 and Level-C co-operate in one re-solve.
+    let (pu, co) = cosolve(&data, &["app/parent"]);
+    assert!(pu_forces(&pu, "dev/foo", "bar"));
+    assert!(co.has("dev/foo-1"), "plan is still produced (RU satisfied via baz)");
+    assert!(!co.needs_enabled("dev/foo", "bar"), "C7: requirement satisfied");
 }
 
 // ---------------------------------------------------------------------------
-// CC6 — unsatisfiable: two parents demand opposite values of the same flag.
-// Must stay advisory (no legal cede), never crash.
+// CC6 — two parents demand opposite values of the same flag. C7 must terminate
+// (no oscillation): first-seen wins, the loser stays a Tier-2 advisory.
 // ---------------------------------------------------------------------------
 #[test]
-fn cc6_conflicting_parents_stay_advisory() {
+fn cc6_conflicting_parents_terminate() {
     let data = repo_from(&[
         ("app/p1-1", &parent("", "dev/foo[bar]")),
         ("app/p2-1", &parent("", "dev/foo[-bar]")),
         ("dev/foo-1", &leaf("bar", "")),
     ]);
-    let out = solve(&data, &["app/p1", "app/p2"], false).unwrap();
-    // Current behaviour is *lossy*: only one side of the contradiction is
-    // recorded (the enable, from p1); the `-bar` from p2 is silently dropped.
-    assert!(out.needs_enabled("dev/foo", "bar"));
-    assert!(
-        !out.needs_disabled("dev/foo", "bar"),
-        "today the opposite requirement is not surfaced (a pre-existing gap)"
-    );
-    // C7 target: a co-solve attempt must *detect* the contradiction (both sides)
-    //   and leave foo's bar un-ceded — Tier-2 advisory — never loop or crash.
+    // Co-solve must terminate and apply exactly one direction (it does not loop).
+    let (pu, _co) = cosolve(&data, &["app/p1", "app/p2"]);
+    let forces_on = pu_forces(&pu, "dev/foo", "bar");
+    let forces_off = pu_forces(&pu, "dev/foo", "-bar");
+    assert!(forces_on ^ forces_off, "exactly one side is applied, never both, never looping");
 }
 
 // ---------------------------------------------------------------------------
-// CC7 — `[bar]` where bar is not in the target's IUSE: cannot be ceded.
+// CC7 — `[bar]` where bar is not in the target's IUSE: cannot be applied.
 // ---------------------------------------------------------------------------
 #[test]
 fn cc7_flag_absent_from_target_iuse() {
@@ -229,9 +253,7 @@ fn cc7_flag_absent_from_target_iuse() {
         ("app/parent-1", &parent("", "dev/foo[bar]")),
         ("dev/foo-1", &leaf("other", "")), // no bar IUSE
     ]);
-    let out = solve(&data, &["app/parent"], false).unwrap();
-    assert!(out.has("dev/foo-1"), "foo still resolves");
-    // C7 target: bar is not a real flag on foo → never cede; stays advisory
-    //   (an autounmask suggestion the user cannot actually apply).
-    let _ = out.needs_enabled("dev/foo", "bar");
+    let (pu, co) = cosolve(&data, &["app/parent"]);
+    assert!(co.has("dev/foo-1"), "foo still resolves");
+    assert!(!pu_forces(&pu, "dev/foo", "bar"), "C7 never forces a non-IUSE flag");
 }

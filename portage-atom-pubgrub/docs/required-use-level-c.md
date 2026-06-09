@@ -137,11 +137,13 @@ qtbase's shows only the relevant `?? ( journald syslog )`, not the whole tree):
 The Level-A reporter remains for *un*satisfiable constraints (a hard pin that no
 legal assignment can meet).
 
-## 6. Cross-package `[flag]` USE-dep co-solve (C7) — design
+## 6. Cross-package `[flag]` USE-dep co-solve (C7) — **implemented**
 
-This is the next phase. It promotes a cross-package `[flag]` USE-dep from an
-**advisory** (the cli reports "add `Q a` to `package.use`") to an **applied**
-flag under `--autosolve-use`, mirroring Level-C `REQUIRED_USE`.
+Promotes a cross-package `[flag]` USE-dep from an **advisory** (the cli reports
+"add `Q a` to `package.use`") to an **applied** flag under `--autosolve-use`,
+mirroring Level-C `REQUIRED_USE`. Implemented in
+`package_use::cosolve_use_deps`, driven from `depgraph` (gated on autosolve);
+spec/regression tests in `c7.rs` (CC1–CC7, all asserting the co-solve outcome).
 
 ### Handling tiers (the frame)
 
@@ -165,45 +167,50 @@ package, the `required_enabled` / `required_disabled` flags that the in-plan
 `use_flag_requirements()`). So the *detection* is done; C7 only adds the
 *application*.
 
-### Approach: cede-the-target + re-solve (no new solver encoding)
+### Approach: force-the-target + re-solve (no new solver encoding)
 
-Under `--autosolve-use`, after a solve:
+Under `--autosolve-use`, `cosolve_use_deps` iterates to a fixpoint:
 
-1. Read `use_flag_requirements()`.
-2. For each target package + required flag that is **a real IUSE flag** and **not
-   pinned** (`package.use` / `ForceMask::pins`) and **not contradictory**, cede
-   that flag on the target toward the required value.
-3. Re-solve to a bounded fixpoint (the same pattern `resolve_targets` already uses
-   for `upgrade_to`), so newly-ceded flags' conditional deps and `REQUIRED_USE`
-   are folded in. Fall back to the last good plan if a re-solve fails.
+1. Solve; read `use_flag_requirements()`.
+2. For each target + required flag that is **a real IUSE flag** of the target
+   (`solver_use_dep_targets`; non-IUSE flags can't be applied — CC7), append a
+   synthetic `cpn flag`/`cpn -flag` `package.use` entry **forcing** it.
+3. Re-solve. Forcing the flag via `package.use` makes it pinned, so Level-C's
+   cede gate leaves it fixed and instead cedes the *collateral* flags needed to
+   keep the target's `REQUIRED_USE` (CC5). Repeat until no new flag is added
+   (bounded backstop). An `applied` set records each forced flag so an opposite
+   later demand (`[bar]` vs `[-bar]`) is first-wins, not an oscillation (CC6).
 
-This reuses the Level-C cede mechanism and the existing re-solve loop, keeps the
-solver crate free of a new cross-package encoding, and stays gated so default
-`em -p` keeps matching `emerge -p` (which also only *advises* USE changes).
+Forcing via `package.use` (rather than ceding) is deliberate: a `[bar]` is a hard
+requirement, and the synthetic entry flows through every effective-USE consumer
+(solver, display, the Level-A check) for free. It reuses the existing re-solve
+loop and the synthetic-`package.use` fold, keeps the solver crate free of a new
+cross-package encoding, and stays gated so default `em -p` keeps matching
+`emerge -p` (which also only *advises* USE changes).
 
 ### Corner cases (spec: `portage-cli/src/query/depgraph/c7.rs`)
 
-Minimal package sets, written before the implementation as the executable spec /
-future regression tests. They currently assert Tier-2 behaviour and document the
-C7 target inline:
+Minimal package sets, each asserting both the default Tier-2 behaviour and the
+co-solve outcome under autosolve:
 
-| Case | Scenario | C7 target |
+| Case | Scenario | Behaviour (autosolve) |
 |---|---|---|
-| CC1 | `foo[bar]`, bar off | cede bar on |
-| CC2 | `foo[-bar]`, bar on | cede bar off |
-| CC3 | `foo[bar?]`, parent bar on | cede to match the active conditional |
-| CC4 | `foo[bar=]` | cede foo's bar to equal the parent's |
-| CC5 | `foo[bar]` vs `?? ( bar baz )` | C7 + Level-C must agree in one re-solve |
-| CC6 | `[bar]` vs `[-bar]` (two parents) | detect both, stay advisory, never loop |
-| CC7 | `[bar]`, bar ∉ foo's IUSE | never cede (cannot apply) |
+| CC1 | `foo[bar]`, bar off | forces `foo bar`, requirement satisfied |
+| CC2 | `foo[-bar]`, bar on | forces `foo -bar` |
+| CC3 | `foo[bar?]`, parent bar on | forces `foo bar` to match the conditional |
+| CC4 | `foo[bar=]` | forces foo's bar to equal the parent's |
+| CC5 | `foo[bar]` vs `?? ( bar baz )` | forces bar; Level-C drops baz; plan stands |
+| CC6 | `[bar]` vs `[-bar]` (two parents) | first-wins, terminates, loser advisory |
+| CC7 | `[bar]`, bar ∉ foo's IUSE | never forced (cannot apply) |
 
 **Findings from the spec:**
-- **CC5** — C7 and Level-C interact: ceding `bar` on may break the target's
-  `REQUIRED_USE`, so both must be resolved in the same re-solve.
-- **CC6** — current contradiction reporting is **lossy**: only one side of a
-  `[bar]`/`[-bar]` conflict is recorded in `use_flag_requirements`. C7's
-  conflict-detection (don't cede when both directions are demanded) needs both
-  sides, so this is fixed as part of C7 (or the follow-up cleanup pass).
+- **CC5** — C7 and Level-C interact: forcing `bar` on may break the target's
+  `REQUIRED_USE`, which Level-C then fixes by ceding the collateral flag in the
+  *same* re-solve. Verified: the plan is still produced.
+- **CC6** — contradiction reporting in `use_flag_requirements` is **lossy** (only
+  one side of a `[bar]`/`[-bar]` conflict is recorded). C7 sidesteps the
+  oscillation risk with the `applied`/first-wins guard, but surfacing *both*
+  sides of the conflict to the user is left for the cleanup pass.
 
 ### Later / out of scope
 

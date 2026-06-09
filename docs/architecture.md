@@ -201,7 +201,8 @@ PubGrub core" in *some* way:
   - reverse-dependency conflicts — an *enrichment* a default targeted `emerge -p`
     hides (every installed package's constraints checked against the plan);
   - cross-package `[flag]` USE-deps — surfaced as autounmask `package.use`
-    suggestions (C7 will promote these toward Tier 1 under `--autosolve-use`).
+    suggestions by default, but **co-solved** (promoted to Tier 1) under
+    `--autosolve-use` by `package_use::cosolve_use_deps` (C7).
 - **Tier 3 — invisible.** Not detected; the plan can silently differ from emerge
   with no warning:
   - slot-operator `:=` subslot-change rebuilds of installed dependents;
