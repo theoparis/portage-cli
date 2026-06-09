@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 
 use anstyle::{AnsiColor, Effects, Style};
-use portage_atom::interner::Interned;
+use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
     CededFlag, DepClass, DroppedDep, PortagePackage, UseConfig, UseFlagRequirement, UseFlagState,
@@ -237,6 +237,10 @@ pub(super) fn report_dropped_deps(dropped: &[DroppedDep], data: &RepoData, arch:
     }
 }
 
+/// Format USE flags for display.
+///
+/// For upgrades/downgrades, if `installed_active_use` is Some, only show flags that differ
+/// from the installed version's active USE (emerge -p behavior).
 fn format_flags(
     cache: &CacheEntry,
     use_config: &UseConfig,
@@ -244,6 +248,7 @@ fn format_flags(
     use_expand_hidden: &[String],
     is_reinstall: bool,
     req: Option<&UseFlagRequirement>,
+    installed_active_use: Option<&[Interned<DefaultInterner>]>,
 ) -> String {
     // Each entry: (enabled_tokens, disabled_tokens).  BTreeMap keeps groups sorted.
     let mut base_flags: (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
@@ -264,6 +269,15 @@ fn format_flags(
             Some(_) => false,
             None => iuse_default_enabled,
         };
+
+        // In diff mode (upgrade/downgrade), skip flags that haven't changed
+        if let Some(installed_use) = installed_active_use {
+            let installed_enabled = installed_use.contains(&interned);
+            // Skip if the enabled state is the same
+            if enabled == installed_enabled {
+                continue;
+            }
+        }
 
         // For reinstall packages: show current state with a change marker.
         // For new/upgrade packages: apply required state directly (it will be
@@ -295,34 +309,34 @@ fn format_flags(
             name.starts_with(prefix.as_str())
         });
 
-        let paint = |s: String, on: bool| -> String {
-            if on {
-                format!("{C_ON}{s}{C_ON:#}")
-            } else {
-                format!("{C_OFF}{s}{C_OFF:#}")
-            }
-        };
-
         if let Some(key) = expand_match {
             let prefix = format!("{}_", key.to_lowercase());
             let short = &name[prefix.len()..];
             let bucket = expand_groups.entry(key.as_str()).or_default();
             if enabled {
-                bucket.0.push(paint(format!("{short}{suffix}"), true));
+                bucket.0.push(format!("{C_ON}{short}{suffix}{C_ON:#}"));
             } else {
-                bucket.1.push(paint(format!("-{short}{suffix}"), false));
+                // Wrap disabled USE_EXPAND flags in parentheses
+                bucket.1.push(format!("{C_OFF}(-{short}{suffix}){C_OFF:#}"));
             }
         } else if enabled {
-            base_flags.0.push(paint(format!("{name}{suffix}"), true));
+            base_flags.0.push(format!("{C_ON}{name}{suffix}{C_ON:#}"));
         } else {
-            base_flags.1.push(paint(format!("-{name}{suffix}"), false));
+            base_flags
+                .1
+                .push(format!("{C_OFF}-{name}{suffix}{C_OFF:#}"));
         }
     }
 
     let join_bucket = |(on, off): &(Vec<String>, Vec<String>)| -> String {
-        on.iter()
-            .chain(off.iter())
-            .cloned()
+        // Sort enabled and disabled flags separately for portage-compatible ordering
+        let mut on_sorted = on.clone();
+        let mut off_sorted = off.clone();
+        on_sorted.sort();
+        off_sorted.sort();
+        on_sorted
+            .into_iter()
+            .chain(off_sorted)
             .collect::<Vec<_>>()
             .join(" ")
     };
@@ -456,6 +470,7 @@ pub(super) fn print_pretty(
     data: &RepoData,
     order: &[(PortagePackage, Version)],
     installed: &HashMap<Cpn, HashMap<String, Version>>,
+    installed_entries: &[super::installed::VdbEntry],
     use_config: &UseConfig,
     package_use: &[(Dep, Vec<String>)],
     use_expand: &[String],
@@ -485,6 +500,21 @@ pub(super) fn print_pretty(
         let (flag_str, slot_repo) = if verbose {
             let cpv = Cpv::new(*cpn, ver.clone());
             let effective_use = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
+
+            // For upgrades/downgrades, find the installed entry to compare USE flags
+            let installed_active_use = if tag == "U" || tag == "D" {
+                let slot_key = pkg
+                    .slot()
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_default();
+                installed_entries
+                    .iter()
+                    .find(|e| e.cpn == *cpn && e.slot.as_deref() == Some(slot_key.as_str()))
+                    .map(|e| e.active_use.as_slice())
+            } else {
+                None
+            };
+
             let flags = cache
                 .map(|c| {
                     format_flags(
@@ -494,6 +524,7 @@ pub(super) fn print_pretty(
                         use_expand_hidden,
                         is_reinstall,
                         req,
+                        installed_active_use,
                     )
                 })
                 .unwrap_or_default();

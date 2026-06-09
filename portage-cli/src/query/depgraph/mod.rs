@@ -407,6 +407,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
                 &data,
                 &order,
                 &installed,
+                &installed_entries,
                 &use_config,
                 &package_use,
                 &use_expand,
