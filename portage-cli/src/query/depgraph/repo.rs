@@ -190,13 +190,93 @@ pub(super) struct Adapter<'a> {
     pub(super) autosolve_use: bool,
 }
 
+/// Apply the ebuild's IUSE defaults: every IUSE flag not already set by the
+/// resolved config takes its `+`/`-` default.
+fn apply_iuse_defaults(
+    cfg: &mut portage_atom_pubgrub::UseConfig,
+    m: &portage_metadata::EbuildMetadata,
+) {
+    use portage_atom_pubgrub::UseFlagState;
+    for iu in &m.iuse {
+        let flag = Interned::intern(iu.name());
+        if cfg.get_opt(&flag).is_none()
+            && let Some(def) = iu.default
+        {
+            cfg.set(
+                flag,
+                match def {
+                    portage_metadata::IUseDefault::Enabled => UseFlagState::Enabled,
+                    portage_metadata::IUseDefault::Disabled => UseFlagState::Disabled,
+                },
+            );
+        }
+    }
+}
+
+impl Adapter<'_> {
+    /// Level-C cede: when `--autosolve-use` is on and the package's REQUIRED_USE
+    /// is *violated* by the resolved config, hand its REQUIRED_USE flags to the
+    /// solver as preferences (`solver_decide`) — a ceded flag keeps its resolved
+    /// value as the preference (greedy keep-config) and the solver only flips it
+    /// to satisfy REQUIRED_USE. Flags the user pinned via package.use, or the
+    /// profile forced/masked, are left fixed (hard choices we must not override).
+    ///
+    /// Skips ceding entirely when the constraint already holds, so settled flags
+    /// (e.g. a USE_EXPAND like LLVM_SLOT/PYTHON_TARGETS) are not re-decided and
+    /// their conditional deps not gratuitously pulled — matching emerge, which
+    /// acts only on violations.
+    fn cede_required_use(
+        &self,
+        cfg: &mut portage_atom_pubgrub::UseConfig,
+        m: &portage_metadata::EbuildMetadata,
+        cpv: &Cpv,
+        slot: Option<Interned<DefaultInterner>>,
+        stable: bool,
+    ) {
+        use portage_atom_pubgrub::{UseConfig, UseFlagState, apply_package_use};
+
+        let Some(ru) = &m.required_use else {
+            return;
+        };
+        let enabled =
+            |flag: &str| matches!(cfg.get(&Interned::intern(flag)), UseFlagState::Enabled);
+        if ru.unsatisfied(&enabled).is_empty() {
+            return;
+        }
+
+        // Flags the user pinned via package.use: applying it to an empty base
+        // leaves exactly those flags set.
+        let empty = UseConfig::new();
+        let pins = apply_package_use(&empty, cpv, slot, self.package_use);
+        let iuse: std::collections::HashSet<&str> = m.iuse.iter().map(|iu| iu.name()).collect();
+        // Flags pinned by use.force/use.mask (global, package-level and the stable
+        // variants): hard profile decisions, never ceded.
+        let forced_masked = self.force_mask.pins(cpv, stable);
+        let mut names = std::collections::BTreeSet::new();
+        collect_required_use_flags(ru, &mut names);
+        for name in names {
+            let flag = Interned::intern(&name);
+            // Only cede real flags the user has not pinned or the profile has not
+            // forced/masked.
+            if !iuse.contains(name.as_str())
+                || pins.get_opt(&flag).is_some()
+                || forced_masked.contains(name.as_str())
+            {
+                continue;
+            }
+            let prefer = matches!(cfg.get(&flag), UseFlagState::Enabled);
+            cfg.solver_decide(flag, prefer);
+        }
+    }
+}
+
 impl PackageRepository for Adapter<'_> {
     fn all_packages(&self) -> Vec<Cpn> {
         self.data.cpns.clone()
     }
 
     fn desired_use(&self, cpv: &Cpv) -> portage_atom_pubgrub::UseConfig {
-        use portage_atom_pubgrub::{UseConfig, UseFlagState, apply_package_use};
+        use portage_atom_pubgrub::{UseConfig, apply_package_use};
 
         let meta = self
             .data
@@ -215,20 +295,7 @@ impl PackageRepository for Adapter<'_> {
         let mut cfg: UseConfig =
             apply_package_use(self.use_config, cpv, slot, self.package_use).into_owned();
         if let Some(m) = meta {
-            for iu in &m.iuse {
-                let flag = Interned::intern(iu.name());
-                if cfg.get_opt(&flag).is_none()
-                    && let Some(def) = iu.default
-                {
-                    cfg.set(
-                        flag,
-                        match def {
-                            portage_metadata::IUseDefault::Enabled => UseFlagState::Enabled,
-                            portage_metadata::IUseDefault::Disabled => UseFlagState::Disabled,
-                        },
-                    );
-                }
-            }
+            apply_iuse_defaults(&mut cfg, m);
         }
 
         // Profile USE force/mask override package.use and the configured value
@@ -244,47 +311,11 @@ impl PackageRepository for Adapter<'_> {
             self.force_mask.apply(&mut cfg, cpv, stable);
         }
 
-        // Level-C: cede this package's REQUIRED_USE flags to the solver. A ceded
-        // flag keeps its resolved value as the *preference* (greedy keep-config);
-        // the solver only flips it to satisfy REQUIRED_USE. Flags the user pinned
-        // via package.use are left fixed (a hard choice we must not override).
+        // Level-C: cede this package's REQUIRED_USE flags to the solver.
         if self.autosolve_use
             && let Some(m) = meta
-            && let Some(ru) = &m.required_use
-            // Only cede when the constraint is *not* already satisfied by the
-            // resolved config. If it is satisfied, there is nothing to autosolve;
-            // ceding anyway would let the solver re-decide settled flags (e.g.
-            // USE_EXPAND like LLVM_SLOT/PYTHON_TARGETS) and gratuitously pull
-            // their conditional deps. Matches emerge: it acts only on violations.
-            && {
-                let enabled =
-                    |flag: &str| matches!(cfg.get(&Interned::intern(flag)), UseFlagState::Enabled);
-                !ru.unsatisfied(&enabled).is_empty()
-            }
         {
-            // Flags the user pinned via package.use: applying it to an empty
-            // base leaves exactly those flags set.
-            let empty = UseConfig::new();
-            let pins = apply_package_use(&empty, cpv, slot, self.package_use);
-            let iuse: std::collections::HashSet<&str> = m.iuse.iter().map(|iu| iu.name()).collect();
-            // Flags pinned by use.force/use.mask (global, package-level and the
-            // stable variants): hard profile decisions, never ceded.
-            let forced_masked = self.force_mask.pins(cpv, stable);
-            let mut names = std::collections::BTreeSet::new();
-            collect_required_use_flags(ru, &mut names);
-            for name in names {
-                let flag = Interned::intern(&name);
-                // Only cede real flags the user has not pinned or the profile has
-                // not forced/masked.
-                if !iuse.contains(name.as_str())
-                    || pins.get_opt(&flag).is_some()
-                    || forced_masked.contains(name.as_str())
-                {
-                    continue;
-                }
-                let prefer = matches!(cfg.get(&flag), UseFlagState::Enabled);
-                cfg.solver_decide(flag, prefer);
-            }
+            self.cede_required_use(&mut cfg, m, cpv, slot, stable);
         }
         cfg
     }
