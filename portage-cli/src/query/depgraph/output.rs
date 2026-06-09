@@ -20,6 +20,29 @@ pub(super) const C_ON: Style = Style::new()
 pub(super) const C_OFF: Style = Style::new()
     .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Blue)))
     .effects(Effects::BOLD);
+// Portage-style colors for emerge -p output:
+// - BRACKET: blue for [ and ] in [ebuild STATUS]
+// - STATUS_N/S: green for new/new-slot
+// - STATUS_U: cyan for upgrade
+// - STATUS_D: blue for downgrade
+// - STATUS_R: yellow for reinstall
+pub(super) const C_BRACKET: Style =
+    Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Blue)));
+pub(super) const C_STATUS_N: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)))
+    .effects(Effects::BOLD);
+pub(super) const C_STATUS_S: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)))
+    .effects(Effects::BOLD);
+pub(super) const C_STATUS_U: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Cyan)))
+    .effects(Effects::BOLD);
+pub(super) const C_STATUS_D: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Blue)))
+    .effects(Effects::BOLD);
+pub(super) const C_STATUS_R: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Yellow)))
+    .effects(Effects::BOLD);
 
 use super::installed::action_tag;
 use super::repo::{RepoData, find_cache};
@@ -458,6 +481,28 @@ fn status_field(tag: &str) -> String {
     String::from_utf8(f.to_vec()).unwrap()
 }
 
+/// Colorize the status field characters according to portage conventions:
+/// - N: green
+/// - S: green  
+/// - U: cyan
+/// - D: blue
+/// - R: yellow
+fn colorize_status_field(field: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in field.chars().enumerate() {
+        let style = match (i, c) {
+            (1, 'N') => C_STATUS_N,
+            (2, 'S') => C_STATUS_S,
+            (2, 'R') => C_STATUS_R,
+            (4, 'U') => C_STATUS_U,
+            (5, 'D') => C_STATUS_D,
+            _ => Style::new(), // No color for spaces or other positions
+        };
+        result.push_str(&format!("{style}{c}{style:#}"));
+    }
+    result
+}
+
 /// Format a byte count as emerge does: ceil-divided to KiB (e.g. `569527` →
 /// `557 KiB`, `0` → `0 KiB`). emerge's thousands grouping is locale-dependent
 /// and absent under the C locale, so none is applied here.
@@ -550,9 +595,10 @@ pub(super) fn print_pretty(
             String::new()
         };
         let field = status_field(tag);
+        let colored_field = colorize_status_field(&field);
         writeln!(
             out,
-            "[{C_PKG}ebuild {field}{C_PKG:#}] {C_PKG}{cpn}-{ver}{slot_repo}{C_PKG:#}{old}{flag_str}{size_str}",
+            "[{C_BRACKET}ebuild {colored_field}{C_BRACKET:#}] {C_PKG}{cpn}-{ver}{slot_repo}{C_PKG:#}{old}{flag_str}{size_str}",
         ).ok();
     }
 
