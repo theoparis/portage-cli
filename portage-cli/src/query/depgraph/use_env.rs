@@ -42,8 +42,14 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
     let profile_link = portage_dir.join("make.profile");
     let profile_path = std::fs::canonicalize(profile_link.as_std_path())
         .map_err(|e| anyhow::anyhow!("cannot resolve {profile_link}: {e}"))?;
+    // Portage appends `/etc/portage/profile` as the top (highest-priority)
+    // profile layer, so its use.force/use.mask/package.use*/package.mask override
+    // the resolved make.profile chain. Fold it in so Level-C never cedes a flag a
+    // site override pins and the plan honours site masks (portage(5)).
     let stack = ProfileStack::build(profile_path)
-        .map_err(|e| anyhow::anyhow!("failed to build profile stack: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to build profile stack: {e}"))?
+        .with_user_profile(portage_dir.join("profile").into_std_path_buf())
+        .map_err(|e| anyhow::anyhow!("failed to load /etc/portage/profile: {e}"))?;
     let mut shell = repo.shell().await
         .map_err(|e| anyhow::anyhow!("failed to start ebuild shell: {e}"))?;
 

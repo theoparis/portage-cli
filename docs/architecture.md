@@ -92,6 +92,16 @@ package's effective USE in the same incremental order Portage does
 5. `package.use` (profile + `/etc/portage/package.use`)
 6. `use.force` / `use.mask`
 
+Portage also appends **`/etc/portage/profile/`** as a *site-local profile layer*
+on top of the resolved `make.profile` chain (portage(5),
+`LocationsManager`'s `CUSTOM_PROFILE_PATH`) — a flat node whose own `parent` file
+is not followed. `ProfileStack::with_user_profile` folds it in, so its
+`make.defaults` (layer 2), `package.use` (layer 5) and `use.force`/`use.mask`
+(layer 6) all take effect at the *highest* priority. Per PMS 5.2.4 any of these
+profile files may be a *directory* whose regular files are concatenated in
+filename order (`/etc/portage/profile/package.use.mask/<name>` is the common
+case); `read_lines` handles both forms.
+
 Layers 1–4 are computed in `portage-repo`'s `resolve_use_flags`
 (`build/profile.rs`): the profile chain and `make.conf` are sourced through the
 embedded shell, then `apply_env_layer` merges the `USE`/`USE_EXPAND` env vars as

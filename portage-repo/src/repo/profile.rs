@@ -265,6 +265,22 @@ impl ProfileStack {
         Ok(ProfileStack { profiles })
     }
 
+    /// Append a site-local user-configuration profile (Portage's
+    /// `/etc/portage/profile`) as the final, highest-priority layer.
+    ///
+    /// Portage treats this directory as a profile appended *after* the resolved
+    /// `make.profile` chain, so its `use.force`/`use.mask`/`package.use*`/
+    /// `package.mask`/`packages`/`make.defaults` override everything below it
+    /// (see portage(5), `LocationsManager`'s `CUSTOM_PROFILE_PATH`). Unlike a
+    /// normal profile it is a **flat** node: its own `parent` file is *not*
+    /// followed. A no-op when `dir` does not exist or is not a directory.
+    pub fn with_user_profile(mut self, dir: PathBuf) -> Result<Self> {
+        if dir.is_dir() {
+            self.profiles.push(Profile::open(dir)?);
+        }
+        Ok(self)
+    }
+
     /// All profiles in resolution order: root ancestors first, leaf last.
     pub fn profiles(&self) -> &[Profile] {
         &self.profiles
@@ -776,6 +792,66 @@ mod tests {
         let forced = stack.use_force().unwrap();
         assert!(!forced.contains(&"ipv6".to_string()));
         assert!(forced.contains(&"nls".to_string()));
+    }
+
+    #[test]
+    fn user_profile_is_top_layer_and_overrides() {
+        // Portage appends /etc/portage/profile as the highest-priority layer.
+        let dir = tempfile::tempdir().unwrap();
+        let leaf = make_profile(&dir, "leaf", &[]);
+        std::fs::write(leaf.join("use.force"), "ipv6\n").unwrap();
+
+        let user = dir.path().join("user-profile");
+        std::fs::create_dir(&user).unwrap();
+        // Unforce ipv6 (incremental removal from the top) and force nls.
+        std::fs::write(user.join("use.force"), "-ipv6\nnls\n").unwrap();
+
+        let stack = ProfileStack::build(leaf)
+            .unwrap()
+            .with_user_profile(user)
+            .unwrap();
+        let forced = stack.use_force().unwrap();
+        assert!(!forced.contains(&"ipv6".to_string()), "user layer unforced ipv6");
+        assert!(forced.contains(&"nls".to_string()), "user layer forced nls");
+    }
+
+    #[test]
+    fn user_profile_reads_directory_form_package_use_mask() {
+        // /etc/portage/profile/package.use.mask is commonly a directory.
+        let dir = tempfile::tempdir().unwrap();
+        let leaf = make_profile(&dir, "leaf", &[]);
+
+        let user = dir.path().join("user-profile");
+        std::fs::create_dir(&user).unwrap();
+        let pum = user.join("package.use.mask");
+        std::fs::create_dir(&pum).unwrap();
+        std::fs::write(pum.join("cross"), "cross-foo/gcc multilib cet\n").unwrap();
+
+        let stack = ProfileStack::build(leaf)
+            .unwrap()
+            .with_user_profile(user)
+            .unwrap();
+        let masked = stack.package_use_mask().unwrap();
+        let entry = masked
+            .iter()
+            .find(|(d, _)| d.to_string().contains("cross-foo/gcc"))
+            .expect("directory-form package.use.mask read");
+        assert!(entry.1.contains(&"multilib".to_string()));
+        assert!(entry.1.contains(&"cet".to_string()));
+    }
+
+    #[test]
+    fn with_user_profile_absent_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaf = make_profile(&dir, "leaf", &[]);
+        let before = ProfileStack::build(leaf.clone()).unwrap().profiles().len();
+        let after = ProfileStack::build(leaf)
+            .unwrap()
+            .with_user_profile(dir.path().join("does-not-exist"))
+            .unwrap()
+            .profiles()
+            .len();
+        assert_eq!(before, after, "absent user profile must not add a layer");
     }
 
     #[test]

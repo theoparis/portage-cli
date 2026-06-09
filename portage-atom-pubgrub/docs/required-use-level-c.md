@@ -232,10 +232,19 @@ legal assignment can meet).
     (`RequiredUseExpr::clauses`/`mentions`) rather than the whole constraint. See
     §5 for the format.
 
+  - **`/etc/portage/profile` site layer (portage-repo).** `ProfileStack` now
+    appends Portage's `/etc/portage/profile` as the top profile layer
+    (`with_user_profile`), and `read_lines` reads PMS 5.2.4 directory-form profile
+    files (`package.use.mask/<name>`). So site-local `use.force`/`use.mask`/
+    `package.use.{force,mask}` pins flow through the existing accessors and the
+    cede gate honours them — closing the gap where a site-forced flag could be
+    ceded/flipped. Basket parity unchanged (the site layer here only pins
+    `crossdev` packages). *Note:* the `.stable.{force,mask}` variants are still
+    ignored (they need per-package stable/unstable determination).
+
   *Still pending in Phase 2:* per-slot `UseDecision` nodes (a multi-slot package's
-  slots share one decision); nested *ceded-guard chains* (deferred to Level A).
-  `/etc/portage/profile/{use,package.use}.{force,mask}` are not yet read (only the
-  profile stack), a minor gap.
+  slots share one decision); nested *ceded-guard chains* (deferred to Level A);
+  `use.stable.*`/`package.use.stable.*` (apply only to stable-keyworded merges).
 - **Phase 3** (maybe) — cross-package USE-dep co-solve (§6).
 
 ## 8. Invariants to hold (acceptance)

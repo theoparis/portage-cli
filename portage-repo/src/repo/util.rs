@@ -22,6 +22,39 @@ pub(crate) fn read_to_string(path: impl AsRef<Path>) -> Result<String> {
 /// Returns an empty `Vec` if the file does not exist.
 pub(crate) fn read_lines(path: impl AsRef<Path>) -> Result<Vec<String>> {
     let path = path.as_ref();
+    // PMS 5.2.4: a profile configuration file may instead be a *directory*, in
+    // which case the regular files directly within it are concatenated, sorted
+    // by filename, with dotfiles skipped. Portage's `/etc/portage/profile`
+    // commonly uses this form (e.g. `package.use.mask/<name>`).
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => {
+            let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(path)
+                .map_err(|e| io_err(path, e))?
+                .filter_map(std::result::Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_file()
+                        && !p
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with('.'))
+                })
+                .collect();
+            entries.sort();
+            let mut out = Vec::new();
+            for entry in entries {
+                out.extend(read_file_lines(&entry)?);
+            }
+            Ok(out)
+        }
+        Ok(_) => read_file_lines(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(io_err(path, e)),
+    }
+}
+
+/// Read a single regular file as trimmed, comment-stripped, non-blank lines.
+fn read_file_lines(path: &Path) -> Result<Vec<String>> {
     match std::fs::read_to_string(path) {
         Ok(contents) => Ok(contents
             .lines()
@@ -74,6 +107,22 @@ mod tests {
     fn read_lines_missing_file_returns_empty() {
         let lines = read_lines(Path::new("/nonexistent/path/file.txt")).unwrap();
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn read_lines_directory_concatenates_sorted_skipping_dotfiles() {
+        // PMS 5.2.4: a profile file may be a directory whose regular files are
+        // concatenated in filename order; dotfiles are ignored.
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("use.mask");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("20-b"), "bravo\n# c\ncharlie\n").unwrap();
+        std::fs::write(sub.join("10-a"), "alpha\n").unwrap();
+        std::fs::write(sub.join(".hidden"), "ignored\n").unwrap();
+        std::fs::create_dir(sub.join("nested")).unwrap();
+
+        let lines = read_lines(&sub).unwrap();
+        assert_eq!(lines, vec!["alpha", "bravo", "charlie"]);
     }
 
     #[test]
