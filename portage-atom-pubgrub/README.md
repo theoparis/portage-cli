@@ -144,9 +144,11 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   gating their constraints behind the guard, orders choice branches toward the
   configured value to avoid gratuitous flips, and (in the consumer) cedes a
   package's flags only when its `REQUIRED_USE` is actually violated and the flag
-  is not pinned by `package.use`/`use.force`/`use.mask` — so autosolve never
-  re-decides settled USE_EXPAND flags or flips a profile-forced flag. Not yet
-  built: per-slot cede, nested *ceded-guard chains* (deferred to Level A), and
+  is not pinned by `package.use` or any force/mask (`use.force`/`use.mask`,
+  `package.use.force`/`mask`, and the `*.stable.*` variants) — so autosolve never
+  re-decides settled USE_EXPAND flags or flips a profile-forced flag. Flips are
+  surfaced in a per-package report citing the driving clause. Not yet built:
+  per-slot cede, nested *ceded-guard chains* (deferred to Level A), and
   cross-package `[flag]` USE-dep co-solving (still post-solve).
 - **Upgraded versions are re-solved.** When a forced rebuild is favoured up to a
   newer version (`upgrade_to`), `resolve_targets` pins that version and re-solves

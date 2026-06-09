@@ -239,12 +239,21 @@ legal assignment can meet).
     `package.use.{force,mask}` pins flow through the existing accessors and the
     cede gate honours them — closing the gap where a site-forced flag could be
     ceded/flipped. Basket parity unchanged (the site layer here only pins
-    `crossdev` packages). *Note:* the `.stable.{force,mask}` variants are still
-    ignored (they need per-package stable/unstable determination).
+    `crossdev` packages).
+
+  - **Per-package force/mask applied to effective USE (cli `force_mask.rs`).**
+    Previously only *global* `use.force`/`use.mask` reached effective USE, and the
+    per-package sets only gated ceding. Now `ForceMask` resolves the full policy
+    per package — `package.use.force`/`mask` always, the `*.stable.*` variants when
+    the version is merged due to a stable keyword (`is_stable`, mirroring Portage's
+    `KeywordsManager.isStable`; inert on `~arch`) — and applies it (force enables,
+    mask disables, mask wins) in **both** `desired_use` (the solver view) and the
+    `mod.rs` display fold. This is what makes crossdev's `cross-*`
+    `multilib`/`cet`/`nopie` pins take effect. The cede gate's never-cede set is
+    now `ForceMask::pins`.
 
   *Still pending in Phase 2:* per-slot `UseDecision` nodes (a multi-slot package's
-  slots share one decision); nested *ceded-guard chains* (deferred to Level A);
-  `use.stable.*`/`package.use.stable.*` (apply only to stable-keyworded merges).
+  slots share one decision); nested *ceded-guard chains* (deferred to Level A).
 - **Phase 3** (maybe) — cross-package USE-dep co-solve (§6).
 
 ## 8. Invariants to hold (acceptance)

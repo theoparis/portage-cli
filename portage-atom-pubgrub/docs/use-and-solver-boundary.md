@@ -53,9 +53,10 @@ cross its boundary, and it computes neither of them:
   VDB to compute.
 
 "Effective USE" — `profile ∘ make.conf ∘ package.use ∘ IUSE-defaults ∘
-use.force/mask` — is **policy resolution** and belongs entirely to the caller
-(`build_use_env` + the `PackageRepository` Adapter). The solver must never
-recompute it.
+use.force/mask` (including the per-package `package.use.force`/`mask` and the
+`*.stable.*` variants, resolved in the cli's `force_mask.rs`) — is **policy
+resolution** and belongs entirely to the caller (`build_use_env` + the
+`PackageRepository` Adapter). The solver must never recompute it.
 
 > The over-eagerness bug fixed on 2026-06-06 (`effective_flag_new`, stored
 > `package_use`, `apply_package_use` in the provider) was a symptom of policy

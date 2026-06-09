@@ -90,7 +90,8 @@ package's effective USE in the same incremental order Portage does
 4. **the `USE` environment variable** (and each `USE_EXPAND` key read from the
    process env, e.g. `PYTHON_TARGETS=...`)
 5. `package.use` (profile + `/etc/portage/package.use`)
-6. `use.force` / `use.mask`
+6. `use.force` / `use.mask`, and the per-package `package.use.force` /
+   `package.use.mask` (plus the `*.stable.*` variants for stable-keyword merges)
 
 Portage also appends **`/etc/portage/profile/`** as a *site-local profile layer*
 on top of the resolved `make.profile` chain (portage(5),
@@ -102,15 +103,28 @@ profile files may be a *directory* whose regular files are concatenated in
 filename order (`/etc/portage/profile/package.use.mask/<name>` is the common
 case); `read_lines` handles both forms.
 
-Layers 1–4 are computed in `portage-repo`'s `resolve_use_flags`
-(`build/profile.rs`): the profile chain and `make.conf` are sourced through the
-embedded shell, then `apply_env_layer` merges the `USE`/`USE_EXPAND` env vars as
-the final incremental layer. So `USE="-X" em -p www-client/firefox` *does* enter
-the stack — but `package.use`/`use.force` (layers 5–6) sit above it and can pin a
-flag back on. Layer 5 (`package.use`) is applied **per package** at solve/display
-time via `apply_package_use`, which is also what `desired_use` returns to the
-solver. The solver itself never recomputes any of this; it consumes the resolved
-`desired` set (see the [USE/solver boundary doc](../portage-atom-pubgrub/docs/use-and-solver-boundary.md)).
+Layers 1–4, plus the **global** `use.force`/`use.mask`, are computed in
+`portage-repo`'s `resolve_use_flags` (`build/profile.rs`): the profile chain and
+`make.conf` are sourced through the embedded shell, then `apply_env_layer` merges
+the `USE`/`USE_EXPAND` env vars, and finally global `use.force`/`use.mask` add/remove
+flags. So `USE="-X" em -p www-client/firefox` *does* enter the stack — but
+`package.use`/`use.force` (layers 5–6) sit above it and can pin a flag back on.
+
+Layer 5 (`package.use`) is applied **per package** at solve/display time via
+`apply_package_use`. The **per-package** parts of layer 6 — `package.use.force`/
+`package.use.mask` and all `*.stable.*` variants — are applied on top of that by
+`force_mask.rs` (`ForceMask`): force enables a flag, mask disables it (mask wins),
+overriding `package.use` and the configured value, exactly as Portage does. The
+`*.stable.*` sets apply only when the version is "merged due to a stable keyword"
+(`force_mask::is_stable`, mirroring Portage's `KeywordsManager.isStable`: accepted
+*and* `ACCEPT_KEYWORDS` does not accept `~arch`), so they are inert on a `~arch`
+system. This is what makes crossdev's `cross-*` `multilib`/`cet`/`nopie` pins take
+effect. Force/mask are applied in **both** consumers: `desired_use` (the solver's
+view, so conditional deps fire correctly) and the display fold in `mod.rs` (which
+appends synthetic `package.use` entries so output, the `REQUIRED_USE` check,
+download-size and autounmask all agree). The solver itself never recomputes any of
+this; it consumes the resolved `desired` set (see the
+[USE/solver boundary doc](../portage-atom-pubgrub/docs/use-and-solver-boundary.md)).
 
 ## Post-solve validation
 
@@ -143,14 +157,17 @@ package's own facts):
 - **Level C — solver auto-satisfaction (`--autosolve-use`, opt-in).** With the
   flag, `REQUIRED_USE` is encoded as relations between `UseDecision` packages so
   the solver *picks* satisfying flags (biased toward the configured value); the
-  choices fold back into the displayed USE via synthetic `package.use` and any
-  flips are reported. Nested groups under a ceded guard (`a? ( ^^ ( b c ) )`) are
-  encoded by gating, and choice branches are ordered toward the configured value
-  so already-valid packages are left untouched. The cli cedes a package's flags
-  **only when its `REQUIRED_USE` is actually violated**, and never cedes a flag
-  pinned by `package.use`/`use.force`/`use.mask` (so settled USE_EXPAND flags are
-  not re-decided and profile-forced flags are never flipped). Intra-package only
-  so far. It is **off by default**
+  choices fold back into the displayed USE via synthetic `package.use`, and any
+  flips are reported in a dedicated per-package report that cites the driving
+  `REQUIRED_USE` clause (`output::report_autosolved_use`). Nested groups under a
+  ceded guard (`a? ( ^^ ( b c ) )`) are encoded by gating, and choice branches are
+  ordered toward the configured value so already-valid packages are left
+  untouched. The cli cedes a package's flags **only when its `REQUIRED_USE` is
+  actually violated**, and never cedes a flag pinned by `package.use` or by any
+  force/mask (`ForceMask::pins`: `use.force`/`use.mask`, `package.use.force`/`mask`,
+  and the `*.stable.*` variants) — so settled USE_EXPAND flags are not re-decided
+  and profile-forced flags are never flipped. Intra-package only so far. It is
+  **off by default**
   so default `em -p` keeps matching `emerge -p` (which does not auto-satisfy
   `REQUIRED_USE`). Concern split, the PubGrub encoding, and remaining phases are
   in [required-use-level-c.md](../portage-atom-pubgrub/docs/required-use-level-c.md).
