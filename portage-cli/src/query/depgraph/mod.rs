@@ -30,7 +30,7 @@ pub struct DepgraphOpts<'a> {
     pub atoms: &'a [String],
     pub arch: &'a Arch,
     pub format: DepgraphFormat,
-    pub verbose: bool,
+    pub verbose: u8,
     pub empty: bool,
     pub autounmask: bool,
     pub autounmask_write: bool,
@@ -248,7 +248,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         combined
     };
 
-    if verbose {
+    if verbose >= 3 {
         output::report_dropped_deps(provider.dropped_deps(), &data, arch.as_str());
     }
 
@@ -401,7 +401,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         DepgraphFormat::Pretty => {
             // Verbose mode shows per-package download size and a total; skip the
             // Manifest/DISTDIR work entirely in plain mode.
-            let sizes = if verbose {
+            let sizes = if verbose >= 1 {
                 download_size::compute(
                     repo_path,
                     &distdir,

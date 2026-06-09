@@ -33,8 +33,8 @@ pub struct Cli {
     #[arg(short = 'a', long)]
     pub ask: bool,
 
-    #[arg(short = 'v', long, global = true)]
-    pub verbose: bool,
+    #[arg(short = 'v', long, action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
 
     #[arg(short = 'q', long, global = true)]
     pub quiet: bool,

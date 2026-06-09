@@ -521,7 +521,7 @@ pub(super) fn print_pretty(
     use_expand_hidden: &[String],
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
     sizes: &HashMap<Cpv, u64>,
-    verbose: bool,
+    verbose: u8,
 ) {
     let mut out = anstream::stdout();
 
@@ -539,45 +539,45 @@ pub(super) fn print_pretty(
         let is_reinstall = tag == "R";
         let cache = find_cache(data, pkg, ver);
 
-        // Verbose mode shows USE/expand flags and the slot/subslot::repo suffix;
-        // plain mode mirrors `emerge -p` and lists just the versioned atom.
-        let (flag_str, slot_repo) = if verbose {
-            let cpv = Cpv::new(*cpn, ver.clone());
-            let effective_use = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
+        // emerge -p always shows USE flags; -v additionally shows the
+        // :slot/subslot::repo suffix and download size.
+        let cpv = Cpv::new(*cpn, ver.clone());
+        let effective_use = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
 
-            // For upgrades/downgrades, find the installed entry to compare USE flags
-            let installed_active_use = if tag == "U" || tag == "D" {
-                let slot_key = pkg
-                    .slot()
-                    .map(|s| s.as_str().to_string())
-                    .unwrap_or_default();
-                installed_entries
-                    .iter()
-                    .find(|e| e.cpn == *cpn && e.slot.as_deref() == Some(slot_key.as_str()))
-                    .map(|e| e.active_use.as_slice())
-            } else {
-                None
-            };
-
-            let flags = cache
-                .map(|c| {
-                    format_flags(
-                        c,
-                        &effective_use,
-                        use_expand,
-                        use_expand_hidden,
-                        is_reinstall,
-                        req,
-                        installed_active_use,
-                    )
-                })
+        // For upgrades/downgrades, find the installed entry to compare USE flags
+        let installed_active_use = if tag == "U" || tag == "D" {
+            let slot_key = pkg
+                .slot()
+                .map(|s| s.as_str().to_string())
                 .unwrap_or_default();
-            let suffix = cache
-                .map(|c| slot_repo_suffix(c, &data.repo_name))
-                .unwrap_or_default();
-            (flags, suffix)
+            installed_entries
+                .iter()
+                .find(|e| e.cpn == *cpn && e.slot.as_deref() == Some(slot_key.as_str()))
+                .map(|e| e.active_use.as_slice())
         } else {
-            (String::new(), String::new())
+            None
+        };
+
+        let flag_str = cache
+            .map(|c| {
+                format_flags(
+                    c,
+                    &effective_use,
+                    use_expand,
+                    use_expand_hidden,
+                    is_reinstall,
+                    req,
+                    installed_active_use,
+                )
+            })
+            .unwrap_or_default();
+
+        let slot_repo = if verbose >= 1 {
+            cache
+                .map(|c| slot_repo_suffix(c, &data.repo_name))
+                .unwrap_or_default()
+        } else {
+            String::new()
         };
 
         // emerge shows the previously-installed version only for upgrades and
@@ -587,8 +587,7 @@ pub(super) fn print_pretty(
             _ => String::new(),
         };
         // Verbose mode appends the download size (distfiles not in DISTDIR).
-        let size_str = if verbose {
-            let cpv = Cpv::new(*cpn, ver.clone());
+        let size_str = if verbose >= 1 {
             format!(" {}", format_kib(sizes.get(&cpv).copied().unwrap_or(0)))
         } else {
             String::new()
@@ -602,7 +601,7 @@ pub(super) fn print_pretty(
     }
 
     // emerge only prints the Total line in verbose mode.
-    if verbose {
+    if verbose >= 1 {
         writeln!(out, "{}", total_line(order, installed, sizes)).ok();
     }
 }
