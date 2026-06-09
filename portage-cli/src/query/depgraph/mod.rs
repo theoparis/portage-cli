@@ -1,4 +1,6 @@
 mod autounmask;
+#[cfg(test)]
+mod c7;
 mod conflicts;
 mod download_size;
 mod force_mask;
