@@ -18,15 +18,21 @@
 //! `multilib`/`cet`/`nopie`, which only take effect once package-level force/mask
 //! are applied to effective USE.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
-use portage_atom::Cpv;
-use portage_atom::Dep;
 use portage_atom::interner::Interned;
+use portage_atom::{Cpn, Cpv, Dep};
 use portage_atom_pubgrub::UseConfig;
 use portage_metadata::Keyword;
 
 use super::repo::{keyword_accepts, mask_matches};
+
+/// Per-atom force/mask entries grouped by `Cpn`. The profile chain contributes
+/// hundreds of `package.use.{force,mask}` atoms; grouping by `Cpn` turns a
+/// package's lookup into O(1) (a miss costs nothing) instead of a scan over the
+/// whole list for every package the solver evaluates. Per-`Cpn` insertion order
+/// is preserved so the incremental `-flag` (unforce/unmask) resolution is exact.
+pub(super) type PkgRules = HashMap<Cpn, Vec<(Dep, Vec<String>)>>;
 
 /// Resolved profile force/mask policy. The `Vec<String>` globals are already
 /// `-`-resolved (`merge_use_flags`); the per-atom sets keep raw tokens so a
@@ -37,15 +43,27 @@ pub(super) struct ForceMask {
     pub use_mask: Vec<String>,
     pub use_stable_force: Vec<String>,
     pub use_stable_mask: Vec<String>,
-    pub pkg_force: Vec<(Dep, Vec<String>)>,
-    pub pkg_mask: Vec<(Dep, Vec<String>)>,
-    pub pkg_stable_force: Vec<(Dep, Vec<String>)>,
-    pub pkg_stable_mask: Vec<(Dep, Vec<String>)>,
+    pub pkg_force: PkgRules,
+    pub pkg_mask: PkgRules,
+    pub pkg_stable_force: PkgRules,
+    pub pkg_stable_mask: PkgRules,
+}
+
+/// Group flat per-atom entries by `Cpn` (see [`PkgRules`]).
+pub(super) fn index_by_cpn(entries: Vec<(Dep, Vec<String>)>) -> PkgRules {
+    let mut map = PkgRules::new();
+    for (dep, flags) in entries {
+        map.entry(dep.cpn).or_default().push((dep, flags));
+    }
+    map
 }
 
 /// Accumulate per-atom flag entries matching `cpv` into `set`, honouring `-flag`
 /// removal (incremental, in list order).
-fn accumulate(entries: &[(Dep, Vec<String>)], cpv: &Cpv, set: &mut BTreeSet<String>) {
+fn accumulate(rules: &PkgRules, cpv: &Cpv, set: &mut BTreeSet<String>) {
+    let Some(entries) = rules.get(&cpv.cpn) else {
+        return;
+    };
     for (dep, flags) in entries {
         if !mask_matches(dep, cpv) {
             continue;
@@ -169,11 +187,14 @@ mod tests {
     #[test]
     fn package_force_and_mask_apply_with_mask_winning() {
         let fm = ForceMask {
-            pkg_force: vec![(
+            pkg_force: index_by_cpn(vec![(
                 dep("cross-foo/gcc"),
                 vec!["multilib".into(), "shared".into()],
-            )],
-            pkg_mask: vec![(dep("cross-foo/gcc"), vec!["cet".into(), "shared".into()])],
+            )]),
+            pkg_mask: index_by_cpn(vec![(
+                dep("cross-foo/gcc"),
+                vec!["cet".into(), "shared".into()],
+            )]),
             ..Default::default()
         };
         let c = cpv("cross-foo/gcc-13.2");
@@ -201,10 +222,10 @@ mod tests {
     fn unforce_token_removes_from_set() {
         let fm = ForceMask {
             // parent forces multilib, leaf unforces it for this atom
-            pkg_force: vec![
+            pkg_force: index_by_cpn(vec![
                 (dep("cross-foo/gcc"), vec!["multilib".into()]),
                 (dep("cross-foo/gcc"), vec!["-multilib".into()]),
-            ],
+            ]),
             ..Default::default()
         };
         let (forced, _) = fm.effective(&cpv("cross-foo/gcc-13.2"), false);

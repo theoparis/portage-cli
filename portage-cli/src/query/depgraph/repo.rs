@@ -657,9 +657,13 @@ pub(super) fn find_autounmask_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::super::force_mask::ForceMask;
+    use super::super::force_mask::{ForceMask, index_by_cpn};
     use super::*;
     use portage_atom_pubgrub::{PackageRepository, UseConfig, UseFlagState};
+
+    fn dep(s: &str) -> Dep {
+        Dep::parse(s).unwrap()
+    }
 
     /// Build a one-package `RepoData` from md5-cache text.
     fn repo_with(cpv: &str, cache_text: &str) -> (RepoData, Cpv) {
@@ -807,14 +811,8 @@ mod tests {
         use_config.enable(Interned::intern("cet")); // user enabled a flag the profile masks
 
         let fm = ForceMask {
-            pkg_force: vec![(
-                Dep::parse("cross-foo/gcc").unwrap(),
-                vec!["multilib".to_string()],
-            )],
-            pkg_mask: vec![(
-                Dep::parse("cross-foo/gcc").unwrap(),
-                vec!["cet".to_string()],
-            )],
+            pkg_force: index_by_cpn(vec![(dep("cross-foo/gcc"), vec!["multilib".to_string()])]),
+            pkg_mask: index_by_cpn(vec![(dep("cross-foo/gcc"), vec!["cet".to_string()])]),
             ..Default::default()
         };
         let adapter = Adapter {

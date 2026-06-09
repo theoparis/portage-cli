@@ -3,7 +3,7 @@ use portage_atom::Dep;
 use portage_atom_pubgrub::{UseConfig, UseFlagState};
 use portage_repo::{ProfileStack, Repository};
 
-use super::force_mask::ForceMask;
+use super::force_mask::{ForceMask, index_by_cpn};
 
 type Result<T> = anyhow::Result<T>;
 
@@ -113,10 +113,10 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
         use_mask: stack.use_mask().unwrap_or_default(),
         use_stable_force: stack.use_stable_force().unwrap_or_default(),
         use_stable_mask: stack.use_stable_mask().unwrap_or_default(),
-        pkg_force: stack.package_use_force().unwrap_or_default(),
-        pkg_mask: stack.package_use_mask().unwrap_or_default(),
-        pkg_stable_force: stack.package_use_stable_force().unwrap_or_default(),
-        pkg_stable_mask: stack.package_use_stable_mask().unwrap_or_default(),
+        pkg_force: index_by_cpn(stack.package_use_force().unwrap_or_default()),
+        pkg_mask: index_by_cpn(stack.package_use_mask().unwrap_or_default()),
+        pkg_stable_force: index_by_cpn(stack.package_use_stable_force().unwrap_or_default()),
+        pkg_stable_mask: index_by_cpn(stack.package_use_stable_mask().unwrap_or_default()),
     };
 
     Ok(UseEnv {
