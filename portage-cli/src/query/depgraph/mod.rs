@@ -408,7 +408,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         let flips: Vec<&portage_atom_pubgrub::CededFlag> =
             ceded.iter().filter(|c| c.flipped).collect();
         if !flips.is_empty() {
-            output::report_autosolved_use(&flips);
+            output::report_autosolved_use(&flips, solution.iter(), &data);
         }
     }
 

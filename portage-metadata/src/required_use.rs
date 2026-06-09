@@ -135,6 +135,31 @@ impl RequiredUseExpr {
         }
     }
 
+    /// The top-level clauses: the children of a top-level `All`, or the whole
+    /// expression as a single clause otherwise. Useful for isolating the
+    /// relevant part of a large `REQUIRED_USE` when reporting one flag.
+    pub fn clauses(&self) -> &[RequiredUseExpr] {
+        match self {
+            RequiredUseExpr::All(children) => children,
+            other => std::slice::from_ref(other),
+        }
+    }
+
+    /// Whether this expression references `flag` anywhere — as a bare flag
+    /// (negated or not) or as a `flag? ( ... )` conditional guard.
+    pub fn mentions(&self, flag: &str) -> bool {
+        match self {
+            RequiredUseExpr::Flag { name, .. } => name == flag,
+            RequiredUseExpr::AnyOf(children)
+            | RequiredUseExpr::ExactlyOne(children)
+            | RequiredUseExpr::AtMostOne(children)
+            | RequiredUseExpr::All(children) => children.iter().any(|c| c.mentions(flag)),
+            RequiredUseExpr::UseConditional { flag: guard, entries, .. } => {
+                guard == flag || entries.iter().any(|c| c.mentions(flag))
+            }
+        }
+    }
+
     /// Return a copy with duplicate entries removed at every level (first occurrence wins).
     pub fn dedup(&self) -> Self {
         match self {
@@ -597,5 +622,28 @@ mod tests {
             expr.unsatisfied(&enabled_set(&["X", "wayland", "dbus", "a"]))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn clauses_splits_top_level_all() {
+        let expr = RequiredUseExpr::parse("?? ( journald syslog ) X? ( gui )").unwrap();
+        let clauses: Vec<String> = expr.clauses().iter().map(ToString::to_string).collect();
+        assert_eq!(clauses, ["?? ( journald syslog )", "X? ( gui )"]);
+        // A non-All expression is a single clause (itself).
+        let one = RequiredUseExpr::parse("^^ ( a b )").unwrap();
+        assert_eq!(one.clauses().len(), 1);
+        assert_eq!(one.clauses()[0].to_string(), "^^ ( a b )");
+    }
+
+    #[test]
+    fn mentions_finds_flag_as_member_and_guard() {
+        let expr = RequiredUseExpr::parse("?? ( journald syslog ) gui? ( X )").unwrap();
+        assert!(expr.mentions("syslog"), "bare member");
+        assert!(expr.mentions("gui"), "conditional guard");
+        assert!(expr.mentions("X"), "member under a conditional");
+        assert!(!expr.mentions("wayland"), "absent flag");
+        // Negated bare flag is still a mention.
+        let neg = RequiredUseExpr::parse("|| ( !foo bar )").unwrap();
+        assert!(neg.mentions("foo"));
     }
 }

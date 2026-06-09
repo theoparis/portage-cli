@@ -109,23 +109,75 @@ pub(super) fn report_required_use(violations: &[super::required_use::RequiredUse
     }
 }
 
-pub(super) fn report_autosolved_use(flips: &[&CededFlag]) {
+/// Report the USE flags `--autosolve-use` flipped to satisfy `REQUIRED_USE`.
+///
+/// Flips are grouped onto each in-plan `cpv` (the version the synthetic
+/// `package.use` entry keys on), and each block shows the package's
+/// `REQUIRED_USE` so the user can see *why* the flag had to move, plus the
+/// value their configuration had asked for.
+pub(super) fn report_autosolved_use<'a>(
+    flips: &[&CededFlag],
+    solution: impl IntoIterator<Item = (&'a PortagePackage, &'a Version)>,
+    data: &RepoData,
+) {
+    use std::collections::BTreeMap;
+
+    let mut by_cpn: HashMap<Cpn, Vec<&CededFlag>> = HashMap::new();
+    for c in flips {
+        by_cpn.entry(c.cpn).or_default().push(c);
+    }
+
+    // A flip on a CPN applies to every in-plan version of it (the synthetic
+    // package.use above keys per cpv); list each cpv so the report is actionable.
+    // BTreeMap keeps the output stable across runs.
+    type Block<'a> = (Option<&'a portage_metadata::RequiredUseExpr>, Vec<&'a CededFlag>);
+    let mut blocks: BTreeMap<String, Block> = BTreeMap::new();
+    for (pkg, ver) in solution {
+        if pkg.is_virtual() {
+            continue;
+        }
+        let Some(pkg_flips) = by_cpn.get(pkg.cpn()) else {
+            continue;
+        };
+        let cpv = format!("{}/{}-{}", pkg.cpn().category, pkg.cpn().package, ver);
+        let ru = find_cache(data, pkg, ver).and_then(|c| c.metadata.required_use.as_ref());
+        blocks.insert(cpv, (ru, pkg_flips.clone()));
+    }
+    if blocks.is_empty() {
+        return;
+    }
+
     let mut out = anstream::stderr();
     writeln!(
         out,
-        "\n{C_PKG}***{C_PKG:#} --autosolve-use changed these USE flags to satisfy REQUIRED_USE:\n"
+        "\n{C_PKG}***{C_PKG:#} --autosolve-use adjusted USE flags to satisfy REQUIRED_USE:\n"
     )
     .ok();
-    for c in flips {
-        let (sign, style) = if c.value { ("+", C_ON) } else { ("-", C_OFF) };
-        writeln!(
-            out,
-            "  {C_PKG}{}/{}{C_PKG:#}  {style}{sign}{}{style:#}",
-            c.cpn.category,
-            c.cpn.package,
-            c.flag.as_str()
-        )
-        .ok();
+    for (cpv, (ru, pkg_flips)) in &blocks {
+        writeln!(out, "  {C_PKG}{cpv}{C_PKG:#}").ok();
+        for c in pkg_flips {
+            let (sign, style) = if c.value { ("+", C_ON) } else { ("-", C_OFF) };
+            let configured = if c.value { "off" } else { "on" };
+            writeln!(
+                out,
+                "    {style}{sign}{}{style:#}  {C_OFF}(configured {configured}){C_OFF:#}",
+                c.flag.as_str()
+            )
+            .ok();
+        }
+        // Show only the REQUIRED_USE clauses that mention a flipped flag — the
+        // full constraint can be enormous (e.g. qtbase) and bury the relevant
+        // part; deduplicate so two flips sharing a clause print it once.
+        if let Some(ru) = ru {
+            let mut shown = std::collections::BTreeSet::new();
+            for clause in ru.clauses() {
+                if pkg_flips.iter().any(|c| clause.mentions(c.flag.as_str()))
+                    && shown.insert(clause.to_string())
+                {
+                    writeln!(out, "    {C_OFF}because:{C_OFF:#} {clause}").ok();
+                }
+            }
+        }
     }
 }
 

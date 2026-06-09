@@ -118,11 +118,24 @@ ceded state to carry it, e.g. `SolverDecided { prefer: bool }` (or a parallel
 ## 5. Reporting
 
 Solver-chosen values that differ from what the user configured are exactly
-`needed \ desired` — the **existing autounmask `package.use` path**. No new
-report surface: a Level-C flip shows up as a `package.use` suggestion (and a `*`
-rebuild marker when it changes an installed package), which is the honest "I had
-to change these to satisfy `REQUIRED_USE`" message. The Level-A reporter remains
-for *un*satisfiable constraints (a hard pin that no legal assignment can meet).
+`needed \ desired`: they fold back into the displayed USE via synthetic
+`package.use` entries (and a `*` rebuild marker when they change an installed
+package). On top of that, `em` prints a dedicated **autosolve report**
+(`report_autosolved_use`) grouped per resolved `cpv`, showing each flip with the
+value the user had configured and the *specific* `REQUIRED_USE` clause that drove
+it (`RequiredUseExpr::clauses` filtered by `mentions`, so a large constraint like
+qtbase's shows only the relevant `?? ( journald syslog )`, not the whole tree):
+
+```
+*** --autosolve-use adjusted USE flags to satisfy REQUIRED_USE:
+
+  dev-qt/qtbase-6.11.1
+    -syslog  (configured on)
+    because: ?? ( journald syslog )
+```
+
+The Level-A reporter remains for *un*satisfiable constraints (a hard pin that no
+legal assignment can meet).
 
 ## 6. Out of scope (later phases)
 
@@ -213,10 +226,16 @@ for *un*satisfiable constraints (a hard pin that no legal assignment can meet).
     flag. Verified by `forced_flag_is_not_ceded` (+ `unforced_flags_are_ceded`,
     `satisfied_constraint_cedes_nothing`).
 
+  - **Richer reporting (cli).** `report_autosolved_use` now groups flips per
+    resolved `cpv`, prints the configured value each flag was moved away from, and
+    cites only the `REQUIRED_USE` clause(s) that mention a flipped flag
+    (`RequiredUseExpr::clauses`/`mentions`) rather than the whole constraint. See
+    §5 for the format.
+
   *Still pending in Phase 2:* per-slot `UseDecision` nodes (a multi-slot package's
-  slots share one decision); nested *ceded-guard chains* (deferred to Level A);
-  richer reporting. `/etc/portage/profile/{use,package.use}.{force,mask}` are not
-  yet read (only the profile stack), a minor gap.
+  slots share one decision); nested *ceded-guard chains* (deferred to Level A).
+  `/etc/portage/profile/{use,package.use}.{force,mask}` are not yet read (only the
+  profile stack), a minor gap.
 - **Phase 3** (maybe) — cross-package USE-dep co-solve (§6).
 
 ## 8. Invariants to hold (acceptance)
