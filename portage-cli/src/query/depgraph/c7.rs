@@ -279,6 +279,17 @@ fn cc6_conflicting_parents_terminate() {
         ("app/p2-1", &parent("", "dev/foo[-bar]")),
         ("dev/foo-1", &leaf("bar", "")),
     ]);
+    // Tier-2 default: the conflict is surfaced rather than hidden. foo's bar is
+    // off, so p2's `[-bar]` is already satisfied; without folding p1's pending
+    // `enable` into the target state, only `enable` would be recorded and the
+    // contradiction would stay invisible. Now both sides are reported.
+    let out = solve(&data, &["app/p1", "app/p2"]);
+    assert!(out.needs_enabled("dev/foo", "bar"), "p1's [bar] recorded");
+    assert!(
+        out.needs_disabled("dev/foo", "bar"),
+        "p2's [-bar] recorded too — conflict surfaced, not lost"
+    );
+
     // Co-solve must terminate and apply exactly one direction (it does not loop).
     let (pu, _co) = cosolve(&data, &["app/p1", "app/p2"]);
     let forces_on = pu_forces(&pu, "dev/foo", "bar");

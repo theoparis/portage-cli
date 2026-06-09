@@ -158,6 +158,18 @@ impl PortageDependencyProvider {
                             self.effective_flag_new(target_pkg, target_ver, &ud.flag, ud.default)
                         };
 
+                        // Account for a decision already made for this target in
+                        // this pass: a pending enable/disable overrides the static
+                        // state so a second requirer demanding the opposite value
+                        // sees the conflict and records its (opposite) requirement
+                        // too, instead of being silently satisfied. This surfaces
+                        // `dev/foo[bar]` vs `dev/foo[-bar]` as both sides recorded.
+                        let dep_effective_enabled = match by_target.get(target_pkg) {
+                            Some((_, en, _, _)) if en.contains(&ud.flag) => true,
+                            Some((_, _, di, _)) if di.contains(&ud.flag) => false,
+                            _ => dep_effective_enabled,
+                        };
+
                         if let Some(requires_enabled) = eval_violated_use_dep(
                             ud.kind,
                             dep_effective_enabled,
@@ -270,6 +282,14 @@ impl PortageDependencyProvider {
                             }
                         } else {
                             self.effective_flag_new(target_pkg, target_ver, &ud.flag, ud.default)
+                        };
+
+                        // See the main loop: fold in this pass's pending decision
+                        // so a conflicting second requirer records the opposite side.
+                        let dep_effective_enabled = match by_target.get(target_pkg) {
+                            Some((_, en, _, _)) if en.contains(&ud.flag) => true,
+                            Some((_, _, di, _)) if di.contains(&ud.flag) => false,
+                            _ => dep_effective_enabled,
                         };
 
                         if let Some(req_en) = eval_violated_use_dep(
