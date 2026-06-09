@@ -324,6 +324,33 @@ impl Repository {
         }
     }
 
+    /// Resolve a package pattern to one or more [`Cpn`] values.
+    ///
+    /// * `cat/pkg` — exact lookup within the named category.
+    /// * bare `name` — scans all categories for packages matching the name.
+    ///
+    /// Returns an empty `Vec` when no match is found.
+    pub fn find_cpns(&self, pattern: &str) -> Vec<Cpn> {
+        if let Some(slash) = pattern.find('/') {
+            let cat_name = &pattern[..slash];
+            let pkg_name = &pattern[slash + 1..];
+            let Some(cat) = self.category(cat_name) else {
+                return vec![];
+            };
+            if let Some(pkg) = cat.package(pkg_name) {
+                return vec![*pkg.cpn()];
+            }
+            // Package name might be a glob/version pattern — just return empty
+            vec![]
+        } else {
+            let name = pattern;
+            self.categories()
+                .into_iter()
+                .filter_map(|cat| cat.package(name).map(|p| *p.cpn()))
+                .collect()
+        }
+    }
+
     /// Read a metadata cache entry for the given `Cpv`.
     ///
     /// Reads from `metadata/md5-cache/{category}/{package-version}`.
@@ -1096,5 +1123,68 @@ mod tests {
         assert_eq!(descs.len(), 2);
         assert_eq!(descs[0].0, "ssl");
         assert_eq!(descs[0].1, "Enable SSL support");
+    }
+
+    #[test]
+    fn find_cpns_exact_cat_pkg() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::create_dir_all(dir.path().join("sys-apps").join("foo")).unwrap();
+        std::fs::write(dir.path().join("profiles").join("categories"), "sys-apps\n").unwrap();
+
+        let cpns = repo.find_cpns("sys-apps/foo");
+        assert_eq!(cpns.len(), 1);
+        assert_eq!(cpns[0].category.as_ref(), "sys-apps");
+        assert_eq!(cpns[0].package.as_ref(), "foo");
+    }
+
+    #[test]
+    fn find_cpns_bare_name_single_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::create_dir_all(dir.path().join("sys-apps").join("foo")).unwrap();
+        std::fs::write(dir.path().join("profiles").join("categories"), "sys-apps\n").unwrap();
+
+        let cpns = repo.find_cpns("foo");
+        assert_eq!(cpns.len(), 1);
+        assert_eq!(cpns[0].category.as_ref(), "sys-apps");
+        assert_eq!(cpns[0].package.as_ref(), "foo");
+    }
+
+    #[test]
+    fn find_cpns_bare_name_multiple_categories() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::create_dir_all(dir.path().join("sys-apps").join("bar")).unwrap();
+        std::fs::create_dir_all(dir.path().join("app-misc").join("bar")).unwrap();
+        std::fs::write(
+            dir.path().join("profiles").join("categories"),
+            "sys-apps\napp-misc\n",
+        )
+        .unwrap();
+
+        let cpns = repo.find_cpns("bar");
+        assert_eq!(cpns.len(), 2);
+    }
+
+    #[test]
+    fn find_cpns_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::write(dir.path().join("profiles").join("categories"), "sys-apps\n").unwrap();
+
+        let cpns = repo.find_cpns("nonexistent");
+        assert!(cpns.is_empty());
+    }
+
+    #[test]
+    fn find_cpns_cat_pkg_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        std::fs::create_dir_all(dir.path().join("sys-apps").join("foo")).unwrap();
+        std::fs::write(dir.path().join("profiles").join("categories"), "sys-apps\n").unwrap();
+
+        let cpns = repo.find_cpns("sys-apps/nonexistent");
+        assert!(cpns.is_empty());
     }
 }
