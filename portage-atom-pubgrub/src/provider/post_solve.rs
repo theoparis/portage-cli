@@ -2,7 +2,7 @@
 //! the solution implies (the "needed" set) — autounmask suggestions for new
 //! packages and rebuild requirements for installed ones.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{UseDefault, UseDepKind, Version};
@@ -13,6 +13,15 @@ use crate::package::PortagePackage;
 use crate::use_config::UseFlagState;
 
 use super::{PortageDependencyProvider, UseFlagRequirement};
+
+/// Per-target accumulator in the post-solve fixpoint: the resolved version, the
+/// flags that must be enabled / disabled, and the requiring packages' CPNs.
+type TargetAcc = (
+    Version,
+    BTreeSet<Interned<DefaultInterner>>,
+    BTreeSet<Interned<DefaultInterner>>,
+    BTreeSet<String>,
+);
 
 fn eval_violated_use_dep(
     kind: UseDepKind,
@@ -54,20 +63,128 @@ impl PortageDependencyProvider {
     ///
     /// The full solution (with virtual nodes) is required so that per-branch
     /// USE dep constraints from OR-group choices are also checked.
+    /// Evaluate one parent's USE-dep constraints against the current solution and
+    /// accumulate any violations into `by_target`. Shared by the two passes of the
+    /// [`compute_use_flag_requirements`] fixpoint: the main-solution pass (parent
+    /// = a solved package at its solution version) and the upgrade-expansion pass
+    /// (parent = an installed package at its pending upgrade version). `parent_ver`
+    /// is the version whose constraints are being expanded.
+    fn accumulate_use_dep_violations(
+        &self,
+        parent: &PortagePackage,
+        parent_ver: &Version,
+        parent_is_installed: bool,
+        udeps: &[convert::UseDepConstraint],
+        solution: &SelectedDependencies<PortagePackage, Version>,
+        by_target: &mut HashMap<PortagePackage, TargetAcc>,
+    ) {
+        for constraint in udeps {
+            let (target_pkg, vs) = &constraint.target;
+            if target_pkg.is_virtual() {
+                continue;
+            }
+
+            // Resolve target version and whether it is installed.
+            let (target_ver, is_installed) =
+                if let Some((inst_ver, _)) = self.installed.get(target_pkg) {
+                    if vs.contains(inst_ver) {
+                        (inst_ver, true)
+                    } else {
+                        continue;
+                    }
+                } else if let Some(sol_ver) = solution.get(target_pkg) {
+                    if vs.contains(sol_ver) {
+                        (sol_ver, false)
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                };
+
+            for ud in &constraint.use_deps {
+                // Parent's flag state: currently active OR will be enabled after
+                // this build run (already recorded in by_target.required_enabled).
+                let parent_flag_enabled = if parent_is_installed {
+                    self.installed_use
+                        .get(parent)
+                        .map_or(false, |u| u.contains(&ud.flag))
+                        || by_target
+                            .get(parent)
+                            .map_or(false, |(_, e, _, _)| e.contains(&ud.flag))
+                } else {
+                    self.effective_flag_new(parent, parent_ver, &ud.flag, None)
+                };
+
+                let dep_effective_enabled = if is_installed {
+                    let active = self
+                        .installed_use
+                        .get(target_pkg)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let iuse = self
+                        .packages
+                        .get(target_pkg)
+                        .and_then(|d| d.versions.get(target_ver))
+                        .map(|vd| vd.iuse.as_slice())
+                        // Empty == absent: a synthetic installed entry (or a repo
+                        // version with no IUSE) must fall back to the VDB-recorded
+                        // IUSE, matching pre-refactor behaviour.
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
+                        .unwrap_or(&[]);
+                    let in_iuse = iuse.contains(&ud.flag);
+                    if in_iuse {
+                        active.contains(&ud.flag)
+                    } else {
+                        matches!(ud.default, Some(UseDefault::Enabled))
+                    }
+                } else {
+                    self.effective_flag_new(target_pkg, target_ver, &ud.flag, ud.default)
+                };
+
+                // Account for a decision already made for this target in this pass:
+                // a pending enable/disable overrides the static state so a second
+                // requirer demanding the opposite value sees the conflict and
+                // records its (opposite) requirement too, instead of being silently
+                // satisfied. This surfaces `dev/foo[bar]` vs `dev/foo[-bar]` as both
+                // sides recorded rather than one being lost.
+                let dep_effective_enabled = match by_target.get(target_pkg) {
+                    Some((_, en, _, _)) if en.contains(&ud.flag) => true,
+                    Some((_, _, di, _)) if di.contains(&ud.flag) => false,
+                    _ => dep_effective_enabled,
+                };
+
+                if let Some(requires_enabled) =
+                    eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled)
+                {
+                    let entry = by_target.entry(target_pkg.clone()).or_insert_with(|| {
+                        (
+                            target_ver.clone(),
+                            BTreeSet::new(),
+                            BTreeSet::new(),
+                            BTreeSet::new(),
+                        )
+                    });
+                    if requires_enabled {
+                        entry.1.insert(ud.flag);
+                    } else {
+                        entry.2.insert(ud.flag);
+                    }
+                    if !parent.is_virtual() {
+                        entry.3.insert(constraint.parent_cpn_str.clone());
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn compute_use_flag_requirements(
         &self,
         solution: &SelectedDependencies<PortagePackage, Version>,
     ) -> Vec<UseFlagRequirement> {
         // Accumulate per target: (version, enable_set, disable_set, requirers).
-        let mut by_target: HashMap<
-            PortagePackage,
-            (
-                Version,
-                std::collections::BTreeSet<Interned<DefaultInterner>>,
-                std::collections::BTreeSet<Interned<DefaultInterner>>,
-                std::collections::BTreeSet<String>,
-            ),
-        > = HashMap::new();
+        let mut by_target: HashMap<PortagePackage, TargetAcc> = HashMap::new();
         // Installed packages that should be upgraded to a newer repo version
         // rather than rebuilt at the installed version.  Keyed by the installed
         // package; value is the newer version to build instead.
@@ -91,109 +208,14 @@ impl PortageDependencyProvider {
                 let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(ver)) else {
                     continue;
                 };
-                let udeps = &vd.use_deps;
-
-                for constraint in udeps {
-                    let (target_pkg, vs) = &constraint.target;
-                    if target_pkg.is_virtual() {
-                        continue;
-                    }
-
-                    // Resolve target version and whether it is installed.
-                    let (target_ver, is_installed) =
-                        if let Some((inst_ver, _)) = self.installed.get(target_pkg) {
-                            if vs.contains(inst_ver) {
-                                (inst_ver, true)
-                            } else {
-                                continue;
-                            }
-                        } else if let Some(sol_ver) = solution.get(target_pkg) {
-                            if vs.contains(sol_ver) {
-                                (sol_ver, false)
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        };
-
-                    for ud in &constraint.use_deps {
-                        // Parent's flag state: currently active OR will be enabled
-                        // after this build run (already in by_target.required_enabled).
-                        let parent_flag_enabled = if self.installed.contains_key(pkg) {
-                            self.installed_use
-                                .get(pkg)
-                                .map_or(false, |u| u.contains(&ud.flag))
-                                || by_target
-                                    .get(pkg)
-                                    .map_or(false, |(_, e, _, _)| e.contains(&ud.flag))
-                        } else {
-                            self.effective_flag_new(pkg, ver, &ud.flag, None)
-                        };
-
-                        let dep_effective_enabled = if is_installed {
-                            let active = self
-                                .installed_use
-                                .get(target_pkg)
-                                .map(Vec::as_slice)
-                                .unwrap_or(&[]);
-                            let iuse = self
-                                .packages
-                                .get(target_pkg)
-                                .and_then(|d| d.versions.get(target_ver))
-                                .map(|vd| vd.iuse.as_slice())
-                                // Empty == absent: a synthetic installed entry (or a
-                                // repo version with no IUSE) must fall back to the
-                                // VDB-recorded IUSE, matching pre-refactor behaviour.
-                                .filter(|s| !s.is_empty())
-                                .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
-                                .unwrap_or(&[]);
-                            let in_iuse = iuse.contains(&ud.flag);
-                            if in_iuse {
-                                active.contains(&ud.flag)
-                            } else {
-                                matches!(ud.default, Some(UseDefault::Enabled))
-                            }
-                        } else {
-                            self.effective_flag_new(target_pkg, target_ver, &ud.flag, ud.default)
-                        };
-
-                        // Account for a decision already made for this target in
-                        // this pass: a pending enable/disable overrides the static
-                        // state so a second requirer demanding the opposite value
-                        // sees the conflict and records its (opposite) requirement
-                        // too, instead of being silently satisfied. This surfaces
-                        // `dev/foo[bar]` vs `dev/foo[-bar]` as both sides recorded.
-                        let dep_effective_enabled = match by_target.get(target_pkg) {
-                            Some((_, en, _, _)) if en.contains(&ud.flag) => true,
-                            Some((_, _, di, _)) if di.contains(&ud.flag) => false,
-                            _ => dep_effective_enabled,
-                        };
-
-                        if let Some(requires_enabled) = eval_violated_use_dep(
-                            ud.kind,
-                            dep_effective_enabled,
-                            parent_flag_enabled,
-                        ) {
-                            let entry = by_target.entry(target_pkg.clone()).or_insert_with(|| {
-                                (
-                                    target_ver.clone(),
-                                    std::collections::BTreeSet::new(),
-                                    std::collections::BTreeSet::new(),
-                                    std::collections::BTreeSet::new(),
-                                )
-                            });
-                            if requires_enabled {
-                                entry.1.insert(ud.flag);
-                            } else {
-                                entry.2.insert(ud.flag);
-                            }
-                            if !pkg.is_virtual() {
-                                entry.3.insert(constraint.parent_cpn_str.clone());
-                            }
-                        }
-                    }
-                }
+                self.accumulate_use_dep_violations(
+                    pkg,
+                    ver,
+                    self.installed.contains_key(pkg),
+                    &vd.use_deps,
+                    solution,
+                    &mut by_target,
+                );
             }
 
             // -- upgrade expansion --
@@ -215,7 +237,8 @@ impl PortageDependencyProvider {
             for (pkg, new_ver) in installed_with_violations {
                 upgrade_to.insert(pkg.clone(), new_ver.clone());
 
-                // Expand the newer version's USE dep constraints.
+                // Expand the newer version's USE dep constraints. The "parent" is
+                // the upgraded package itself at its new version.
                 let Some(vd) = self
                     .packages
                     .get(&pkg)
@@ -223,97 +246,14 @@ impl PortageDependencyProvider {
                 else {
                     continue;
                 };
-                let udeps = &vd.use_deps;
-
-                // The "parent" is the upgraded package itself.
-                let parent_is_installed = self.installed.contains_key(&pkg);
-                for constraint in udeps {
-                    let (target_pkg, vs) = &constraint.target;
-                    if target_pkg.is_virtual() {
-                        continue;
-                    }
-                    let (target_ver, is_installed) =
-                        if let Some((inst_ver, _)) = self.installed.get(target_pkg) {
-                            if vs.contains(inst_ver) {
-                                (inst_ver, true)
-                            } else {
-                                continue;
-                            }
-                        } else if let Some(sol_ver) = solution.get(target_pkg) {
-                            if vs.contains(sol_ver) {
-                                (sol_ver, false)
-                            } else {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        };
-
-                    for ud in &constraint.use_deps {
-                        let parent_flag_enabled = if parent_is_installed {
-                            self.installed_use
-                                .get(&pkg)
-                                .map_or(false, |u| u.contains(&ud.flag))
-                                || by_target
-                                    .get(&pkg)
-                                    .map_or(false, |(_, e, _, _)| e.contains(&ud.flag))
-                        } else {
-                            self.effective_flag_new(&pkg, &new_ver, &ud.flag, None)
-                        };
-
-                        let dep_effective_enabled = if is_installed {
-                            let active = self
-                                .installed_use
-                                .get(target_pkg)
-                                .map(Vec::as_slice)
-                                .unwrap_or(&[]);
-                            let iuse = self
-                                .packages
-                                .get(target_pkg)
-                                .and_then(|d| d.versions.get(target_ver))
-                                .map(|vd| vd.iuse.as_slice())
-                                .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
-                                .unwrap_or(&[]);
-                            let in_iuse = iuse.contains(&ud.flag);
-                            if in_iuse {
-                                active.contains(&ud.flag)
-                            } else {
-                                matches!(ud.default, Some(UseDefault::Enabled))
-                            }
-                        } else {
-                            self.effective_flag_new(target_pkg, target_ver, &ud.flag, ud.default)
-                        };
-
-                        // See the main loop: fold in this pass's pending decision
-                        // so a conflicting second requirer records the opposite side.
-                        let dep_effective_enabled = match by_target.get(target_pkg) {
-                            Some((_, en, _, _)) if en.contains(&ud.flag) => true,
-                            Some((_, _, di, _)) if di.contains(&ud.flag) => false,
-                            _ => dep_effective_enabled,
-                        };
-
-                        if let Some(req_en) = eval_violated_use_dep(
-                            ud.kind,
-                            dep_effective_enabled,
-                            parent_flag_enabled,
-                        ) {
-                            let entry = by_target.entry(target_pkg.clone()).or_insert_with(|| {
-                                (
-                                    target_ver.clone(),
-                                    std::collections::BTreeSet::new(),
-                                    std::collections::BTreeSet::new(),
-                                    std::collections::BTreeSet::new(),
-                                )
-                            });
-                            if req_en {
-                                entry.1.insert(ud.flag);
-                            } else {
-                                entry.2.insert(ud.flag);
-                            }
-                            entry.3.insert(constraint.parent_cpn_str.clone());
-                        }
-                    }
-                }
+                self.accumulate_use_dep_violations(
+                    &pkg,
+                    &new_ver,
+                    self.installed.contains_key(&pkg),
+                    &vd.use_deps,
+                    solution,
+                    &mut by_target,
+                );
             }
 
             let new_total: usize = by_target
