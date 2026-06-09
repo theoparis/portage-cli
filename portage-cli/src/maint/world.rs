@@ -23,7 +23,12 @@ pub fn run(vdb: &Vdb, fix: bool, root: Option<&Utf8Path>) -> Result<()> {
         &mut total_orphaned,
         &mut total_invalid,
     )?;
-    check_world_sets_file(&world_sets_path(root), &known_sets, fix, &mut total_orphaned)?;
+    check_world_sets_file(
+        &world_sets_path(root),
+        &known_sets,
+        fix,
+        &mut total_orphaned,
+    )?;
 
     if total_orphaned == 0 && total_invalid == 0 {
         println!("World files are consistent.");
@@ -31,7 +36,11 @@ pub fn run(vdb: &Vdb, fix: bool, root: Option<&Utf8Path>) -> Result<()> {
         eprintln!(
             "\n{} issue{} found. Run with --fix to remove them.",
             total_orphaned + total_invalid,
-            if total_orphaned + total_invalid == 1 { "" } else { "s" }
+            if total_orphaned + total_invalid == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
 
@@ -46,8 +55,7 @@ fn check_world_file(
     orphaned_count: &mut usize,
     invalid_count: &mut usize,
 ) -> Result<()> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {path}"))?;
+    let content = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
 
     let mut orphaned: Vec<String> = Vec::new();
     let mut invalid: Vec<String> = Vec::new();
@@ -110,8 +118,7 @@ fn check_world_sets_file(
     if !path.exists() {
         return Ok(());
     }
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {path}"))?;
+    let content = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
 
     let mut orphaned: Vec<String> = Vec::new();
     let mut kept: Vec<&str> = Vec::new();

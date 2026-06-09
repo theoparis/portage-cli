@@ -33,7 +33,8 @@ pub struct DepEdge {
     /// Which dependency class this edge belongs to.
     pub class: DepClass,
     /// The USE flag in `from` that gates this dep, if it was inside `flag? ( dep )`.
-    pub via_use_flag: Option<portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>>,
+    pub via_use_flag:
+        Option<portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>>,
 }
 
 impl PortageDependencyProvider {
@@ -129,8 +130,11 @@ impl PortageDependencyProvider {
             .collect();
         node_pv.sort_by(|a, b| a.0.cmp(&b.0));
         let n = node_pv.len();
-        let idx: HashMap<&str, usize> =
-            node_pv.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
+        let idx: HashMap<&str, usize> = node_pv
+            .iter()
+            .enumerate()
+            .map(|(i, (k, _))| (k.as_str(), i))
+            .collect();
 
         // Adjacency: dependency → dependent ("dependency comes first").
         // `succ_all` = hard (DEPEND/BDEPEND) + soft (RDEPEND); `succ_hard` only
@@ -186,7 +190,11 @@ impl PortageDependencyProvider {
         // keeping the requested target — which has no dependents and so becomes
         // ready last — near the end.
         let comp_key = |c: usize| -> &str {
-            members[c].iter().map(|&i| node_pv[i].0.as_str()).max().unwrap_or("")
+            members[c]
+                .iter()
+                .map(|&i| node_pv[i].0.as_str())
+                .max()
+                .unwrap_or("")
         };
 
         let mut comp_ready: BinaryHeap<(String, usize)> = (0..num_comps)
@@ -467,7 +475,10 @@ mod tests {
     fn rdepend(atoms: &[&str]) -> PackageDeps {
         PackageDeps {
             depend: vec![],
-            rdepend: atoms.iter().map(|a| DepEntry::Atom(Dep::parse(a).unwrap())).collect(),
+            rdepend: atoms
+                .iter()
+                .map(|a| DepEntry::Atom(Dep::parse(a).unwrap()))
+                .collect(),
             bdepend: vec![],
             pdepend: vec![],
             idepend: vec![],
@@ -578,10 +589,7 @@ mod tests {
         );
         for v_str in ["6.4.0_p20240311", "6.4.0_p20240311-r1", "6.5.0"] {
             let v = Version::parse(v_str).unwrap();
-            assert!(
-                vs.contains(&v),
-                "VersionSet >=6.4.0 must contain {v_str}"
-            );
+            assert!(vs.contains(&v), "VersionSet >=6.4.0 must contain {v_str}");
         }
         for v_str in ["6.3.9", "6.4.0_alpha"] {
             let v = Version::parse(v_str).unwrap();

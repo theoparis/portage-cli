@@ -21,8 +21,8 @@
 use std::collections::BTreeSet;
 
 use portage_atom::Cpv;
-use portage_atom::interner::Interned;
 use portage_atom::Dep;
+use portage_atom::interner::Interned;
 use portage_atom_pubgrub::UseConfig;
 use portage_metadata::Keyword;
 
@@ -65,7 +65,11 @@ impl ForceMask {
     /// the base config — i.e. package-level force/mask always, plus the
     /// `*.stable.*` sets when `stable`. Global non-stable `use.force`/`use.mask`
     /// are excluded (they live in the base config). Mask wins over force.
-    pub(super) fn effective(&self, cpv: &Cpv, stable: bool) -> (BTreeSet<String>, BTreeSet<String>) {
+    pub(super) fn effective(
+        &self,
+        cpv: &Cpv,
+        stable: bool,
+    ) -> (BTreeSet<String>, BTreeSet<String>) {
         let mut forced = BTreeSet::new();
         let mut masked = BTreeSet::new();
         accumulate(&self.pkg_force, cpv, &mut forced);
@@ -165,21 +169,30 @@ mod tests {
     #[test]
     fn package_force_and_mask_apply_with_mask_winning() {
         let fm = ForceMask {
-            pkg_force: vec![(dep("cross-foo/gcc"), vec!["multilib".into(), "shared".into()])],
+            pkg_force: vec![(
+                dep("cross-foo/gcc"),
+                vec!["multilib".into(), "shared".into()],
+            )],
             pkg_mask: vec![(dep("cross-foo/gcc"), vec!["cet".into(), "shared".into()])],
             ..Default::default()
         };
         let c = cpv("cross-foo/gcc-13.2");
         let (forced, masked) = fm.effective(&c, false);
         assert!(forced.contains("multilib"));
-        assert!(!forced.contains("shared"), "shared is masked → dropped from force");
+        assert!(
+            !forced.contains("shared"),
+            "shared is masked → dropped from force"
+        );
         assert!(masked.contains("cet"));
         assert!(masked.contains("shared"));
 
         let mut cfg = UseConfig::new();
         cfg.enable(Interned::intern("cet")); // user tried to enable a masked flag
         fm.apply(&mut cfg, &c, false);
-        assert_eq!(cfg.get(&Interned::intern("multilib")), UseFlagState::Enabled);
+        assert_eq!(
+            cfg.get(&Interned::intern("multilib")),
+            UseFlagState::Enabled
+        );
         assert_eq!(cfg.get(&Interned::intern("cet")), UseFlagState::Disabled);
         assert_eq!(cfg.get(&Interned::intern("shared")), UseFlagState::Disabled);
     }
@@ -205,8 +218,14 @@ mod tests {
             ..Default::default()
         };
         let c = cpv("dev-libs/foo-1");
-        assert!(!fm.effective(&c, false).1.contains("risky"), "ignored when unstable");
-        assert!(fm.effective(&c, true).1.contains("risky"), "applied when stable");
+        assert!(
+            !fm.effective(&c, false).1.contains("risky"),
+            "ignored when unstable"
+        );
+        assert!(
+            fm.effective(&c, true).1.contains("risky"),
+            "applied when stable"
+        );
     }
 
     #[test]
@@ -215,7 +234,11 @@ mod tests {
         // pure-stable config → stable
         assert!(is_stable(&keywords, "arm64", &["arm64".into()]));
         // testing accepted → never stable
-        assert!(!is_stable(&keywords, "arm64", &["arm64".into(), "~arm64".into()]));
+        assert!(!is_stable(
+            &keywords,
+            "arm64",
+            &["arm64".into(), "~arm64".into()]
+        ));
         assert!(!is_stable(&keywords, "arm64", &["~arm64".into()]));
         // not accepted at all → not stable
         assert!(!is_stable(&keywords, "arm64", &["amd64".into()]));

@@ -11,7 +11,9 @@ use portage_atom::interner::{DefaultInterner, Interned};
 
 use super::shell::EbuildShell;
 use crate::error::Result;
-use crate::repo::profile::{merge_flag_lists, Profile, ProfileEnv, ProfileEnvLayer, ProfileStack, UseFlags};
+use crate::repo::profile::{
+    Profile, ProfileEnv, ProfileEnvLayer, ProfileStack, UseFlags, merge_flag_lists,
+};
 
 impl Profile {
     /// Source this profile's `make.defaults` into the shell, if present.
@@ -89,10 +91,7 @@ impl ProfileStack {
                 "USE_EXPAND_IMPLICIT".into(),
                 "USE_EXPAND_UNPREFIXED".into(),
             ];
-            let expand_now = acc
-                .get("USE_EXPAND")
-                .cloned()
-                .unwrap_or_default();
+            let expand_now = acc.get("USE_EXPAND").cloned().unwrap_or_default();
             for key in expand_now.split_whitespace() {
                 if !incr.contains(&key.to_string()) {
                     incr.push(key.to_string());
@@ -110,10 +109,7 @@ impl ProfileStack {
 
             // Reset all incremental vars to empty so this file's assignments
             // are its pure contribution, not a replacement of accumulated state.
-            let reset: String = incr
-                .iter()
-                .map(|v| format!("{}=\"\"\n", v))
-                .collect();
+            let reset: String = incr.iter().map(|v| format!("{}=\"\"\n", v)).collect();
             shell.run_string(&reset).await?;
 
             // Source the file through brush — all bash features available,
@@ -157,9 +153,7 @@ impl ProfileStack {
             // Merge this layer's contributions into the external accumulator.
             for (var, val) in &vars {
                 let prev = acc.get(var.as_str()).cloned().unwrap_or_default();
-                let merged = merge_flag_lists(
-                    [prev.as_str(), val.as_str()].into_iter(),
-                );
+                let merged = merge_flag_lists([prev.as_str(), val.as_str()].into_iter());
                 acc.insert(var.clone(), merged.join(" "));
             }
 
@@ -299,10 +293,7 @@ async fn apply_env_layer(shell: &mut EbuildShell) -> Result<()> {
 /// keys) are reset to empty so the file's own assignments represent its pure
 /// contribution.  After sourcing, those contributions are merged back into
 /// the accumulated shell state using [`merge_flag_lists`].
-async fn source_incremental(
-    shell: &mut EbuildShell,
-    path: &std::path::Path,
-) -> Result<()> {
+async fn source_incremental(shell: &mut EbuildShell, path: &std::path::Path) -> Result<()> {
     // Collect the set of incremental vars to isolate.
     let mut incr: Vec<String> = vec![
         "USE".into(),
@@ -330,10 +321,7 @@ async fn source_incremental(
         .filter_map(|v| shell.get_var(v).map(|val| (v.clone(), val)))
         .collect();
 
-    let reset: String = incr
-        .iter()
-        .map(|v| format!("{}=\"\"\n", v))
-        .collect();
+    let reset: String = incr.iter().map(|v| format!("{}=\"\"\n", v)).collect();
     shell.run_string(&reset).await?;
 
     // Source the file through brush.

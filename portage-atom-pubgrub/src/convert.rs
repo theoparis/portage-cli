@@ -24,7 +24,14 @@ pub(crate) struct VirtualChoice {
     /// The virtual package to register in the provider.
     pub package: PortagePackage,
     /// (version, dependencies for that version with optional gating flag).
-    pub versions: Vec<(Version, Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>)>,
+    pub versions: Vec<(
+        Version,
+        Vec<(
+            PortagePackage,
+            PortageVersionSet,
+            Option<Interned<DefaultInterner>>,
+        )>,
+    )>,
     /// Per-branch USE dep constraints, indexed parallel to `versions`.
     ///
     /// Stored separately so `choose_version` can check USE dep satisfiability
@@ -36,7 +43,11 @@ pub(crate) struct VirtualChoice {
 #[derive(Clone)]
 pub(crate) struct ConversionResult {
     /// Direct dependency constraints with the outermost gating USE flag, if any.
-    pub requirements: Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>,
+    pub requirements: Vec<(
+        PortagePackage,
+        PortageVersionSet,
+        Option<Interned<DefaultInterner>>,
+    )>,
     /// Blocker atoms for post-solve validation.
     pub blockers: Vec<Dep>,
     /// Virtual choice packages to register in the provider.
@@ -160,7 +171,11 @@ struct ConvertCtx<'a> {
     cpn_str: &'a str,
     use_config: &'a UseConfig,
     slot_map: &'a SlotMap,
-    requirements: Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>,
+    requirements: Vec<(
+        PortagePackage,
+        PortageVersionSet,
+        Option<Interned<DefaultInterner>>,
+    )>,
     blockers: Vec<Dep>,
     virtual_choices: Vec<VirtualChoice>,
     use_deps: Vec<UseDepConstraint>,
@@ -251,8 +266,11 @@ impl ConvertCtx<'_> {
                             ],
                             branch_use_deps: vec![],
                         });
-                        self.requirements
-                            .push((virtual_pkg, PortageVersionSet::any(), self.gating_flag));
+                        self.requirements.push((
+                            virtual_pkg,
+                            PortageVersionSet::any(),
+                            self.gating_flag,
+                        ));
                     }
                 }
             }
@@ -386,11 +404,15 @@ impl ConvertCtx<'_> {
 
         match target_slots {
             None | Some([]) => {
-                self.requirements
-                    .push((PortagePackage::unslotted(*cpn), version_set, self.gating_flag));
+                self.requirements.push((
+                    PortagePackage::unslotted(*cpn),
+                    version_set,
+                    self.gating_flag,
+                ));
             }
             Some([(_, sole_pkg)]) => {
-                self.requirements.push((sole_pkg.clone(), version_set, self.gating_flag));
+                self.requirements
+                    .push((sole_pkg.clone(), version_set, self.gating_flag));
             }
             Some(slots) => {
                 let id = next_choice_id();
@@ -398,7 +420,14 @@ impl ConvertCtx<'_> {
                     PortagePackage::slot_choice(Interned::intern(&format!("slot_{id}")));
                 let n = slots.len();
                 let gf = self.gating_flag;
-                let versions: Vec<(Version, Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>)> = slots
+                let versions: Vec<(
+                    Version,
+                    Vec<(
+                        PortagePackage,
+                        PortageVersionSet,
+                        Option<Interned<DefaultInterner>>,
+                    )>,
+                )> = slots
                     .iter()
                     .enumerate()
                     .map(|(i, (_, slot_pkg))| {
@@ -427,7 +456,7 @@ impl ConvertCtx<'_> {
         let mut branch_use_deps: Vec<(Version, Vec<UseDepConstraint>)> = Vec::new();
 
         if allow_none {
-            versions.push((Version::new(&[0]), vec![]));  // empty: no deps for "none" branch
+            versions.push((Version::new(&[0]), vec![])); // empty: no deps for "none" branch
             branch_use_deps.push((Version::new(&[0]), vec![]));
         }
 
@@ -462,7 +491,8 @@ impl ConvertCtx<'_> {
             branch_use_deps,
         });
         // The choice virtual itself carries the current gating flag.
-        self.requirements.push((pkg, PortageVersionSet::any(), self.gating_flag));
+        self.requirements
+            .push((pkg, PortageVersionSet::any(), self.gating_flag));
     }
 }
 
@@ -470,7 +500,11 @@ impl ConvertCtx<'_> {
 // Level-C REQUIRED_USE encoding  (docs/required-use-level-c.md)
 // ===========================================================================
 
-type Req = (PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>);
+type Req = (
+    PortagePackage,
+    PortageVersionSet,
+    Option<Interned<DefaultInterner>>,
+);
 
 /// Result of encoding a package's `REQUIRED_USE` into solver constraints.
 pub(crate) struct RequiredUseEncoding {
@@ -510,9 +544,11 @@ type FreeLit = (PortagePackage, u64, u64);
 fn free_operands(ops: &[Operand]) -> Vec<FreeLit> {
     ops.iter()
         .filter_map(|o| match o {
-            Operand::Free { node, sat_ver, prefer_ver } => {
-                Some((node.clone(), *sat_ver, *prefer_ver))
-            }
+            Operand::Free {
+                node,
+                sat_ver,
+                prefer_ver,
+            } => Some((node.clone(), *sat_ver, *prefer_ver)),
             Operand::Fixed { .. } => None,
         })
         .collect()
@@ -628,7 +664,10 @@ impl RuBuilder<'_> {
         let mut versions = Vec::with_capacity(n);
         for (i, (node, sat_ver)) in ordered.iter().enumerate() {
             // n..1 numbering (parallel to convert_choice_group), one branch per flag.
-            versions.push((Self::ver((n - i) as u64), vec![Self::singleton(node, *sat_ver)]));
+            versions.push((
+                Self::ver((n - i) as u64),
+                vec![Self::singleton(node, *sat_ver)],
+            ));
             self.touched.insert(node.clone());
         }
         self.virtual_choices.push(VirtualChoice {
@@ -636,7 +675,8 @@ impl RuBuilder<'_> {
             versions,
             branch_use_deps: Vec::new(),
         });
-        self.requirements.push((pkg, PortageVersionSet::any(), None));
+        self.requirements
+            .push((pkg, PortageVersionSet::any(), None));
     }
 
     /// At most one of the ceded operands may be satisfied (pairwise exclusion).
@@ -733,7 +773,12 @@ impl RuBuilder<'_> {
         }
     }
 
-    fn conditional(&mut self, flag: &Interned<DefaultInterner>, negated: bool, entries: &[RequiredUse]) {
+    fn conditional(
+        &mut self,
+        flag: &Interned<DefaultInterner>,
+        negated: bool,
+        entries: &[RequiredUse],
+    ) {
         match self.desired.get(flag) {
             UseFlagState::SolverDecided { .. } => {
                 let guard = use_decision_package(self.cpn_str, flag);
@@ -825,7 +870,10 @@ impl RuBuilder<'_> {
         let Some(ops) = self.flag_operands(children) else {
             return; // deeper-nested operands deferred
         };
-        if ops.iter().any(|o| matches!(o, Operand::Fixed { satisfied: true })) {
+        if ops
+            .iter()
+            .any(|o| matches!(o, Operand::Fixed { satisfied: true }))
+        {
             return; // already satisfied regardless of the guard
         }
         let free: Vec<FreeLit> = free_operands(&ops);
@@ -891,7 +939,10 @@ impl RuBuilder<'_> {
         let n = ordered.len();
         let mut versions = Vec::with_capacity(n);
         for (i, (node, sat_ver)) in ordered.iter().enumerate() {
-            versions.push((Self::ver((n - i) as u64), vec![Self::singleton(node, *sat_ver)]));
+            versions.push((
+                Self::ver((n - i) as u64),
+                vec![Self::singleton(node, *sat_ver)],
+            ));
             self.touched.insert(node.clone());
         }
         self.virtual_choices.push(VirtualChoice {
@@ -946,17 +997,11 @@ mod tests {
         HashMap::new()
     }
 
-
     #[test]
     fn convert_simple_atom() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("dev-libs/openssl").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.requirements[0].0.to_string(), "dev-libs/openssl");
         assert!(result.requirements[0].1.is_full());
@@ -966,12 +1011,7 @@ mod tests {
     fn convert_versioned_atom() {
         let config = UseConfig::new();
         let entries = DepEntry::parse(">=dev-libs/openssl-3.0.0").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.requirements.len(), 1);
         assert!(
             result.requirements[0]
@@ -995,12 +1035,7 @@ mod tests {
         let mut config = UseConfig::new();
         config.enable(Interned::intern("ssl"));
         let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.requirements.len(), 1);
     }
 
@@ -1008,12 +1043,7 @@ mod tests {
     fn convert_eager_use_disabled() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert!(result.requirements.is_empty());
     }
 
@@ -1021,12 +1051,7 @@ mod tests {
     fn convert_blocker_collected() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("!dev-libs/openssl-compat").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.blockers.len(), 1);
     }
 
@@ -1034,12 +1059,7 @@ mod tests {
     fn convert_any_of_creates_virtual_choice() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("|| ( dev-libs/openssl dev-libs/libressl )").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
 
         // Should have 1 requirement: the virtual choice package
         assert_eq!(result.requirements.len(), 1);
@@ -1068,12 +1088,7 @@ mod tests {
     fn convert_at_most_one_adds_empty_version() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("?? ( dev-libs/openssl dev-libs/libressl )").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
 
         assert_eq!(result.virtual_choices.len(), 1);
         let vc = &result.virtual_choices[0];
@@ -1087,12 +1102,7 @@ mod tests {
         let mut config = UseConfig::new();
         config.solver_decide(Interned::intern("ssl"), false);
         let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
 
         // Should have 1 requirement: the virtual USE package
         assert_eq!(result.requirements.len(), 1);
@@ -1124,12 +1134,7 @@ mod tests {
                 PortagePackage::slotted(openssl_cpn, Interned::intern("0")),
             )],
         );
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &slots,
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &slots);
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.requirements[0].0.to_string(), "dev-libs/openssl:0");
         assert!(result.virtual_choices.is_empty());
@@ -1154,12 +1159,7 @@ mod tests {
                 ),
             ],
         );
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &slots,
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &slots);
         assert_eq!(result.requirements.len(), 1);
         assert!(
             result.requirements[0]
@@ -1184,12 +1184,7 @@ mod tests {
                 PortagePackage::slotted(openssl_cpn, Interned::intern("0")),
             )],
         );
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &slots,
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &slots);
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.requirements[0].0.to_string(), "dev-libs/openssl:0");
     }
@@ -1207,12 +1202,7 @@ mod tests {
                 PortagePackage::slotted(openssl_cpn, Interned::intern("0")),
             )],
         );
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &slots,
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &slots);
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.requirements[0].0.to_string(), "dev-libs/openssl:0");
     }
@@ -1221,12 +1211,7 @@ mod tests {
     fn convert_named_slot_with_operator() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("dev-libs/openssl:0=").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.requirements[0].0.to_string(), "dev-libs/openssl:0");
     }
@@ -1235,12 +1220,7 @@ mod tests {
     fn convert_use_dep_collected() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("dev-libs/openssl[ssl]").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.requirements.len(), 1);
         assert_eq!(result.use_deps.len(), 1);
         assert_eq!(result.use_deps[0].use_deps.len(), 1);
@@ -1251,12 +1231,7 @@ mod tests {
     fn convert_use_dep_disabled_collected() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("dev-libs/openssl[-debug]").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.use_deps.len(), 1);
         assert_eq!(
             result.use_deps[0].use_deps[0].kind,
@@ -1268,12 +1243,7 @@ mod tests {
     fn convert_use_dep_multiple_collected() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("dev-libs/openssl[ssl,-debug]").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.use_deps.len(), 1);
         assert_eq!(result.use_deps[0].use_deps.len(), 2);
     }
@@ -1282,12 +1252,7 @@ mod tests {
     fn convert_no_use_deps() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("dev-libs/openssl").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert!(result.use_deps.is_empty());
     }
 
@@ -1295,12 +1260,7 @@ mod tests {
     fn convert_blocker_in_or_group_preserved() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("|| ( dev-libs/a !dev-libs/b )").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(
             result.blockers.len(),
             1,
@@ -1314,12 +1274,7 @@ mod tests {
         let mut config = UseConfig::new();
         config.solver_decide(Interned::intern("ssl"), false);
         let entries = DepEntry::parse("ssl? ( !dev-libs/openssl-compat )").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(
             result.blockers.len(),
             1,
@@ -1380,12 +1335,7 @@ mod tests {
         let mut config = UseConfig::new();
         config.disable(Interned::intern("ssl"));
         let entries = DepEntry::parse("!ssl? ( dev-libs/openssl )").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(
             result.requirements.len(),
             1,
@@ -1394,12 +1344,7 @@ mod tests {
 
         let mut config2 = UseConfig::new();
         config2.enable(Interned::intern("ssl"));
-        let result2 = convert_deps(
-            &entries,
-            "test/pkg",
-            &config2,
-            &empty_slots(),
-        );
+        let result2 = convert_deps(&entries, "test/pkg", &config2, &empty_slots());
         assert!(
             result2.requirements.is_empty(),
             "!ssl? with ssl enabled should skip deps"
@@ -1410,12 +1355,7 @@ mod tests {
     fn convert_exactly_one_of_creates_choice() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("^^ ( dev-libs/a dev-libs/b )").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.virtual_choices.len(), 1);
         assert_eq!(result.virtual_choices[0].versions.len(), 2);
     }
@@ -1423,12 +1363,7 @@ mod tests {
     #[test]
     fn convert_empty_input() {
         let config = UseConfig::new();
-        let result = convert_deps(
-            &[],
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&[], "test/pkg", &config, &empty_slots());
         assert!(result.requirements.is_empty());
         assert!(result.blockers.is_empty());
         assert!(result.virtual_choices.is_empty());
@@ -1438,12 +1373,7 @@ mod tests {
     fn convert_repo_constraint_collected() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("dev-libs/openssl::gentoo").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.repo_constraints.len(), 1);
         assert_eq!(result.repo_constraints[0].repo.as_str(), "gentoo");
     }
@@ -1452,12 +1382,7 @@ mod tests {
     fn convert_strictly_greater_atom() {
         let config = UseConfig::new();
         let entries = DepEntry::parse(">dev-libs/openssl-3.0.0").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.requirements.len(), 1);
         assert!(
             !result.requirements[0]
@@ -1475,12 +1400,7 @@ mod tests {
     fn convert_less_or_equal_atom() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("<=dev-libs/openssl-3.0.0").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.requirements.len(), 1);
         assert!(
             result.requirements[0]
@@ -1512,12 +1432,7 @@ mod tests {
                 PortagePackage::slotted(openssl_cpn, Interned::intern("0")),
             )],
         );
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &slots,
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &slots);
         assert_eq!(result.slot_operator_deps.len(), 1);
         assert_eq!(result.slot_operator_deps[0].operator, SlotOperator::Equal);
         assert!(result.slot_operator_deps[0].slot.is_none());
@@ -1527,12 +1442,7 @@ mod tests {
     fn convert_named_slot_operator_equals_collected() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("dev-libs/openssl:0=").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(result.slot_operator_deps.len(), 1);
         assert_eq!(result.slot_operator_deps[0].operator, SlotOperator::Equal);
         assert_eq!(
@@ -1545,12 +1455,7 @@ mod tests {
     fn convert_slot_star_not_collected() {
         let config = UseConfig::new();
         let entries = DepEntry::parse("dev-libs/openssl:*").unwrap();
-        let result = convert_deps(
-            &entries,
-            "test/pkg",
-            &config,
-            &empty_slots(),
-        );
+        let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert!(
             result.slot_operator_deps.is_empty(),
             ":* should not produce slot-operator dep"

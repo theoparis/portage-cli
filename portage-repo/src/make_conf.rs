@@ -18,11 +18,11 @@
 
 use std::ops::Range;
 
-use camino::Utf8Path;
 use brush_parser::ast::{
     AssignmentName, AssignmentValue, Command, CommandPrefixOrSuffixItem, SourceLocation,
 };
 use brush_parser::{ParserOptions, SourceInfo};
+use camino::Utf8Path;
 
 use crate::{Error, Result};
 
@@ -231,11 +231,7 @@ fn parse_program(src: &str) -> Result<brush_parser::ast::Program> {
 /// statement span past any trailing inline comment before the final `\n`.
 fn build_entries(src: &str, program: &brush_parser::ast::Program) -> Vec<Entry> {
     // Sorted comment end-positions for fast lookup.
-    let mut comment_ends: Vec<usize> = program
-        .comments
-        .iter()
-        .map(|s| s.end.index)
-        .collect();
+    let mut comment_ends: Vec<usize> = program.comments.iter().map(|s| s.end.index).collect();
     comment_ends.sort_unstable();
 
     // Collect (logical-line-span, vars) for each pure-assignment statement.

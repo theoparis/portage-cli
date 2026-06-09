@@ -20,9 +20,7 @@ pub fn run(vdb: &Vdb, atoms: &[String]) -> Result<()> {
 }
 
 fn check_package(pkg: &InstalledPackage) -> Result<()> {
-    let entries = pkg
-        .contents()
-        .with_context(|| format!("{pkg}"))?;
+    let entries = pkg.contents().with_context(|| format!("{pkg}"))?;
 
     let mut ok: u32 = 0;
     let mut fail: u32 = 0;
@@ -59,9 +57,7 @@ fn check_package(pkg: &InstalledPackage) -> Result<()> {
                             let actual = meta
                                 .modified()
                                 .ok()
-                                .and_then(|t| {
-                                    t.duration_since(std::time::UNIX_EPOCH).ok()
-                                })
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                                 .map(|d| d.as_secs());
                             if actual != Some(expected) {
                                 eprintln!("  !!! sym  MTIME {path}");

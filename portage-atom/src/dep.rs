@@ -507,7 +507,10 @@ mod tests {
         }
         let use_deps = dep.use_deps.as_ref().unwrap();
         assert_eq!(use_deps.len(), 2);
-        assert_eq!(dep.to_string(), ">=media-libs/harfbuzz-1.4.5:=[icu,graphite]");
+        assert_eq!(
+            dep.to_string(),
+            ">=media-libs/harfbuzz-1.4.5:=[icu,graphite]"
+        );
     }
 
     #[test]
@@ -528,7 +531,11 @@ mod tests {
     #[test]
     fn slot_equals_alone() {
         // simple `:=` with no use deps (zlib, zziplib, kpathsea style)
-        for atom in ["virtual/zlib:=", "dev-libs/zziplib:=", ">=dev-libs/kpathsea-6.4.0:="] {
+        for atom in [
+            "virtual/zlib:=",
+            "dev-libs/zziplib:=",
+            ">=dev-libs/kpathsea-6.4.0:=",
+        ] {
             let dep = Dep::parse(atom).unwrap();
             match dep.slot_dep.as_ref().unwrap() {
                 SlotDep::Operator(SlotOperator::Equal) => {}

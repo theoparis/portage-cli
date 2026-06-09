@@ -29,13 +29,14 @@ pub(super) fn report_conflicts(conflicts: &[super::conflicts::Conflict]) {
     // Group by the package whose version is in conflict.
     let mut by_target: BTreeMap<String, Vec<&super::conflicts::Conflict>> = BTreeMap::new();
     for c in conflicts {
-        by_target
-            .entry(c.dep.cpn.to_string())
-            .or_default()
-            .push(c);
+        by_target.entry(c.dep.cpn.to_string()).or_default().push(c);
     }
     let mut out = anstream::stderr();
-    writeln!(out, "\n{C_OFF}!!!{C_OFF:#} Dependency constraint conflict(s) detected:\n").ok();
+    writeln!(
+        out,
+        "\n{C_OFF}!!!{C_OFF:#} Dependency constraint conflict(s) detected:\n"
+    )
+    .ok();
     for (target, cs) in &by_target {
         writeln!(out, "  {C_PKG}{target}{C_PKG:#}").ok();
         for c in cs {
@@ -43,12 +44,14 @@ pub(super) fn report_conflicts(conflicts: &[super::conflicts::Conflict]) {
                 out,
                 "    ({C_PKG}{}-{}{C_PKG:#}, installed) requires {C_OFF}{}{C_OFF:#}",
                 c.installed_cpn, c.installed_ver, c.dep,
-            ).ok();
+            )
+            .ok();
             writeln!(
                 out,
                 "    proposed: {C_PKG}{target}-{}{C_PKG:#}",
                 c.proposed_ver,
-            ).ok();
+            )
+            .ok();
         }
         writeln!(out).ok();
     }
@@ -68,7 +71,12 @@ pub(super) fn report_solver_violations(violations: &[portage_atom_pubgrub::Error
     if !blockers.is_empty() {
         writeln!(out, "\n{C_OFF}!!!{C_OFF:#} Blocker conflict(s) detected:\n").ok();
         for e in blockers {
-            if let Error::BlockerConflict { pkg, blocker, strength } = e {
+            if let Error::BlockerConflict {
+                pkg,
+                blocker,
+                strength,
+            } = e
+            {
                 writeln!(
                     out,
                     "  {C_PKG}{pkg}{C_PKG:#} blocks {C_OFF}{blocker}{C_OFF:#} ({strength})",
@@ -83,7 +91,11 @@ pub(super) fn report_solver_violations(violations: &[portage_atom_pubgrub::Error
         .filter(|e| matches!(e, Error::RepoConstraintConflict(..)))
         .collect();
     if !repos.is_empty() {
-        writeln!(out, "\n{C_OFF}!!!{C_OFF:#} Repository constraint conflict(s) detected:\n").ok();
+        writeln!(
+            out,
+            "\n{C_OFF}!!!{C_OFF:#} Repository constraint conflict(s) detected:\n"
+        )
+        .ok();
         for e in repos {
             if let Error::RepoConstraintConflict(pkg, msg) = e {
                 writeln!(out, "  {C_PKG}{pkg}{C_PKG:#}: {msg}").ok();
@@ -130,7 +142,10 @@ pub(super) fn report_autosolved_use<'a>(
     // A flip on a CPN applies to every in-plan version of it (the synthetic
     // package.use above keys per cpv); list each cpv so the report is actionable.
     // BTreeMap keeps the output stable across runs.
-    type Block<'a> = (Option<&'a portage_metadata::RequiredUseExpr>, Vec<&'a CededFlag>);
+    type Block<'a> = (
+        Option<&'a portage_metadata::RequiredUseExpr>,
+        Vec<&'a CededFlag>,
+    );
     let mut blocks: BTreeMap<String, Block> = BTreeMap::new();
     for (pkg, ver) in solution {
         if pkg.is_virtual() {
@@ -213,7 +228,10 @@ pub(super) fn report_dropped_deps(dropped: &[DroppedDep], data: &RepoData, arch:
         let alt_str = if alts.is_empty() {
             String::new()
         } else {
-            format!(", alternatives: {}", alts.iter().cloned().collect::<Vec<_>>().join(" | "))
+            format!(
+                ", alternatives: {}",
+                alts.iter().cloned().collect::<Vec<_>>().join(" | ")
+            )
         };
         eprintln!("note: dropped {pkg_str} ({reason}){alt_str}");
     }
@@ -302,7 +320,11 @@ fn format_flags(
     }
 
     let join_bucket = |(on, off): &(Vec<String>, Vec<String>)| -> String {
-        on.iter().chain(off.iter()).cloned().collect::<Vec<_>>().join(" ")
+        on.iter()
+            .chain(off.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
     };
 
     let mut parts = Vec::new();
@@ -363,17 +385,32 @@ fn total_line(
     // Order mirrors portage's PackageCounters.__str__: upgrades, downgrades,
     // new, in new slot, reinstall.
     let mut parts = Vec::new();
-    if up > 0 { parts.push(plural(up, "upgrade")); }
-    if down > 0 { parts.push(plural(down, "downgrade")); }
-    if new > 0 { parts.push(format!("{new} new")); }
-    if new_slot > 0 { parts.push(plural(new_slot, "in new slot")); }
-    if re > 0 { parts.push(plural(re, "reinstall")); }
+    if up > 0 {
+        parts.push(plural(up, "upgrade"));
+    }
+    if down > 0 {
+        parts.push(plural(down, "downgrade"));
+    }
+    if new > 0 {
+        parts.push(format!("{new} new"));
+    }
+    if new_slot > 0 {
+        parts.push(plural(new_slot, "in new slot"));
+    }
+    if re > 0 {
+        parts.push(plural(re, "reinstall"));
+    }
 
     let n = order.len();
     let pkgs = if n == 1 { "package" } else { "packages" };
     let total_bytes: u64 = order
         .iter()
-        .map(|(pkg, ver)| sizes.get(&Cpv::new(*pkg.cpn(), ver.clone())).copied().unwrap_or(0))
+        .map(|(pkg, ver)| {
+            sizes
+                .get(&Cpv::new(*pkg.cpn(), ver.clone()))
+                .copied()
+                .unwrap_or(0)
+        })
         .sum();
     let downloads = format!(", Size of downloads: {}", format_kib(total_bytes));
     if parts.is_empty() {
@@ -429,7 +466,11 @@ pub(super) fn print_pretty(
 ) {
     let mut out = anstream::stdout();
 
-    writeln!(out, "{C_PKG}These are the packages that would be merged, in order:{C_PKG:#}\n").ok();
+    writeln!(
+        out,
+        "{C_PKG}These are the packages that would be merged, in order:{C_PKG:#}\n"
+    )
+    .ok();
     writeln!(out, "Calculating dependencies... done!").ok();
 
     for (pkg, ver) in order {
@@ -445,7 +486,16 @@ pub(super) fn print_pretty(
             let cpv = Cpv::new(*cpn, ver.clone());
             let effective_use = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
             let flags = cache
-                .map(|c| format_flags(c, &effective_use, use_expand, use_expand_hidden, is_reinstall, req))
+                .map(|c| {
+                    format_flags(
+                        c,
+                        &effective_use,
+                        use_expand,
+                        use_expand_hidden,
+                        is_reinstall,
+                        req,
+                    )
+                })
                 .unwrap_or_default();
             let suffix = cache
                 .map(|c| slot_repo_suffix(c, &data.repo_name))
@@ -661,7 +711,11 @@ fn tree_node(
         writeln!(
             out,
             "{prefix}{connector}{C_PKG}{cpn}-{ver}{C_PKG:#}{}",
-            if already { format!(" {C_DIM}(*){C_DIM:#}") } else { String::new() }
+            if already {
+                format!(" {C_DIM}(*){C_DIM:#}")
+            } else {
+                String::new()
+            }
         )
         .ok();
     }

@@ -9,7 +9,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use portage_distfiles::{DistfileResolver, FetchConfig, FetchStatus, Fetcher};
 use portage_metadata::SrcUriEntry;
 use portage_repo::{
-    Ebuild, EbuildEnv, MakeConf, Manifest, Repository, DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF,
+    DEFAULT_MAKE_CONF, Ebuild, EbuildEnv, LEGACY_MAKE_CONF, MakeConf, Manifest, Repository,
 };
 use portage_vdb::{ContentsEntry, ContentsKind, InstalledPackage, MergeSpec, Vdb};
 
@@ -21,8 +21,7 @@ pub async fn run(
     root: &Utf8Path,
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
-    let ebuild = Ebuild::from_path(path)
-        .with_context(|| format!("loading {ebuild_path}"))?;
+    let ebuild = Ebuild::from_path(path).with_context(|| format!("loading {ebuild_path}"))?;
 
     let repo_root = match repo_override {
         Some(r) => Utf8PathBuf::from(r),
@@ -51,7 +50,10 @@ pub async fn run(
     }
 
     for phase in phases {
-        run_one_phase(&mut shell, &ebuild, &repo, &repo_root, phase, &work_root, root).await?;
+        run_one_phase(
+            &mut shell, &ebuild, &repo, &repo_root, phase, &work_root, root,
+        )
+        .await?;
     }
 
     Ok(())
@@ -111,8 +113,7 @@ async fn run_fetch(
         .collect();
 
     let gentoo_mirrors = gentoo_mirrors_list();
-    let resolver = DistfileResolver::from_repo(repo, gentoo_mirrors)
-        .context("loading mirrors")?;
+    let resolver = DistfileResolver::from_repo(repo, gentoo_mirrors).context("loading mirrors")?;
     let distfiles = resolver.resolve(&entries, &use_flags);
 
     if distfiles.is_empty() {
@@ -149,7 +150,10 @@ async fn run_fetch(
             Ok(FetchStatus::AlreadyPresent) => println!("fetch: {} (already present)", df.filename),
             Ok(FetchStatus::Downloaded) => println!("fetch: {} ok", df.filename),
             Ok(FetchStatus::FetchRestricted) => {
-                eprintln!("fetch: {} is fetch-restricted (RESTRICT=fetch)", df.filename);
+                eprintln!(
+                    "fetch: {} is fetch-restricted (RESTRICT=fetch)",
+                    df.filename
+                );
                 any_restricted = true;
             }
             Err(e) => {
@@ -182,10 +186,12 @@ async fn run_merge(
     root: &Utf8Path,
 ) -> Result<()> {
     let temp_dir = work_root.join("temp");
-    std::fs::create_dir_all(temp_dir.as_std_path())
-        .context("creating temp dir")?;
+    std::fs::create_dir_all(temp_dir.as_std_path()).context("creating temp dir")?;
 
-    shell.source_ebuild(ebuild).await.context("sourcing ebuild")?;
+    shell
+        .source_ebuild(ebuild)
+        .await
+        .context("sourcing ebuild")?;
     let env = shell.collect_env();
 
     let env_dump = capture_environment(shell, work_root).await;
@@ -200,7 +206,12 @@ async fn run_merge(
         .filter(|old| old.cpv() != ebuild.cpv());
 
     shell
-        .run_phase(ebuild, "preinst", work_root.as_std_path(), root.as_std_path())
+        .run_phase(
+            ebuild,
+            "preinst",
+            work_root.as_std_path(),
+            root.as_std_path(),
+        )
         .await
         .context("pkg_preinst failed")?;
 
@@ -215,7 +226,10 @@ async fn run_merge(
         for c in &collisions {
             eprintln!("collision: {} is already owned by {}", c.path, c.owner);
         }
-        bail!("{} file collision(s) detected — aborting merge", collisions.len());
+        bail!(
+            "{} file collision(s) detected — aborting merge",
+            collisions.len()
+        );
     }
 
     if let Some(ref old) = old_pkg {
@@ -227,7 +241,14 @@ async fn run_merge(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let counter = vdb.next_counter()?;
-    let spec = merge_spec_from_env(env, ebuild.cpv().clone(), contents, size, build_time, counter);
+    let spec = merge_spec_from_env(
+        env,
+        ebuild.cpv().clone(),
+        contents,
+        size,
+        build_time,
+        counter,
+    );
     let installed = vdb.register(&spec)?;
 
     if let Ok(ref data) = env_dump {
@@ -244,7 +265,12 @@ async fn run_merge(
     );
 
     shell
-        .run_phase(ebuild, "postinst", work_root.as_std_path(), root.as_std_path())
+        .run_phase(
+            ebuild,
+            "postinst",
+            work_root.as_std_path(),
+            root.as_std_path(),
+        )
         .await
         .context("pkg_postinst failed")?;
 
@@ -304,7 +330,8 @@ async fn unmerge_slot_occupant(
     let old_contents = old_pkg.contents().context("reading old CONTENTS")?;
     remove_old_unique_files(&old_contents, new_contents, root)?;
 
-    vdb.unregister(old_pkg).context("unregistering old package")?;
+    vdb.unregister(old_pkg)
+        .context("unregistering old package")?;
 
     if old_sourced {
         match &old_ebuild {
@@ -372,7 +399,11 @@ async fn try_run_phase_from_env_bz2(
 
     let root_str = {
         let s = root.as_str();
-        if s.ends_with('/') { s.to_owned() } else { format!("{s}/") }
+        if s.ends_with('/') {
+            s.to_owned()
+        } else {
+            format!("{s}/")
+        }
     };
     if let Err(e) = shell
         .run_string(&format!(
@@ -419,8 +450,7 @@ fn remove_old_unique_files(
 
 fn run_clean(work_root: &Utf8Path) -> Result<()> {
     if work_root.exists() {
-        std::fs::remove_dir_all(work_root)
-            .with_context(|| format!("cleaning {work_root}"))?;
+        std::fs::remove_dir_all(work_root).with_context(|| format!("cleaning {work_root}"))?;
         println!("clean: removed {work_root}");
     } else {
         println!("clean: {work_root} does not exist, nothing to do");
@@ -464,8 +494,7 @@ fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<Content
                 let target: Utf8PathBuf = raw_target
                     .try_into()
                     .map_err(|_| anyhow::anyhow!("non-UTF-8 symlink target"))?;
-                if dest_path.exists()
-                    || std::fs::symlink_metadata(dest_path.as_std_path()).is_ok()
+                if dest_path.exists() || std::fs::symlink_metadata(dest_path.as_std_path()).is_ok()
                 {
                     std::fs::remove_file(dest_path.as_std_path())
                         .with_context(|| format!("removing {dest_path}"))?;
@@ -548,7 +577,9 @@ fn write_environment_bz2(pkg: &InstalledPackage, env_data: &[u8]) -> Result<()> 
 
     let path = pkg.path().join("environment.bz2");
     let mut encoder = BzEncoder::new(Vec::new(), Compression::best());
-    encoder.write_all(env_data).context("compressing environment")?;
+    encoder
+        .write_all(env_data)
+        .context("compressing environment")?;
     let compressed = encoder.finish().context("finalizing bzip2")?;
     std::fs::write(path.as_std_path(), compressed).context("writing environment.bz2")
 }
@@ -685,11 +716,25 @@ mod tests {
         let (contents, size) = walk_image(&image, &root).unwrap();
 
         assert!(root.join("usr/bin/testprog").exists());
-        assert!(root.join("usr/bin/tp").as_std_path().symlink_metadata().is_ok());
+        assert!(
+            root.join("usr/bin/tp")
+                .as_std_path()
+                .symlink_metadata()
+                .is_ok()
+        );
 
-        let dirs: Vec<_> = contents.iter().filter(|e| e.kind == ContentsKind::Dir).collect();
-        let objs: Vec<_> = contents.iter().filter(|e| e.kind == ContentsKind::Obj).collect();
-        let syms: Vec<_> = contents.iter().filter(|e| e.kind == ContentsKind::Sym).collect();
+        let dirs: Vec<_> = contents
+            .iter()
+            .filter(|e| e.kind == ContentsKind::Dir)
+            .collect();
+        let objs: Vec<_> = contents
+            .iter()
+            .filter(|e| e.kind == ContentsKind::Obj)
+            .collect();
+        let syms: Vec<_> = contents
+            .iter()
+            .filter(|e| e.kind == ContentsKind::Sym)
+            .collect();
         assert!(!dirs.is_empty());
         assert_eq!(objs.len(), 1);
         assert_eq!(syms.len(), 1);

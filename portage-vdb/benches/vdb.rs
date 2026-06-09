@@ -7,9 +7,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use portage_vdb::Vdb;
 
 fn bench_vdb_open(c: &mut Criterion) {
-    c.bench_function("vdb_open", |b| {
-        b.iter(|| Vdb::open("/var/db/pkg").unwrap())
-    });
+    c.bench_function("vdb_open", |b| b.iter(|| Vdb::open("/var/db/pkg").unwrap()));
 }
 
 fn bench_vdb_iterate_all(c: &mut Criterion) {

@@ -51,7 +51,11 @@ fn collect_from_conf_dir(dir: &Utf8Path, names: &mut HashSet<String>) {
         .flatten()
         .filter_map(|e| {
             let p = Utf8PathBuf::try_from(e.path()).ok()?;
-            if p.extension() == Some("conf") { Some(p) } else { None }
+            if p.extension() == Some("conf") {
+                Some(p)
+            } else {
+                None
+            }
         })
         .collect();
     files.sort();
@@ -121,10 +125,7 @@ mod tests {
 
     #[test]
     fn builtin_sets_from_conf() {
-        let dir = make_root(
-            "[world]\nclass = foo\n\n[system]\nclass = bar\n",
-            &[],
-        );
+        let dir = make_root("[world]\nclass = foo\n\n[system]\nclass = bar\n", &[]);
         let sets = KnownSets::load(Some(Utf8Path::from_path(dir.path()).unwrap()));
         assert!(sets.contains("world"));
         assert!(sets.contains("system"));

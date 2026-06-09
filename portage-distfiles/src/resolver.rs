@@ -68,8 +68,7 @@ impl DistfileResolver {
                 // - not mirror-restricted (EAPI 8 `mirror+` prefix), AND
                 // - not mirror://gentoo/ (expand_url already resolved those to
                 //   GENTOO_MIRRORS with the correct full path suffix).
-                if restriction.as_deref() != Some("mirror")
-                    && !url.starts_with("mirror://gentoo/")
+                if restriction.as_deref() != Some("mirror") && !url.starts_with("mirror://gentoo/")
                 {
                     for mirror in &self.gentoo_mirrors {
                         let mirror = mirror.trim_end_matches('/');
@@ -79,7 +78,11 @@ impl DistfileResolver {
                         }
                     }
                 }
-                Distfile { filename, urls, restriction }
+                Distfile {
+                    filename,
+                    urls,
+                    restriction,
+                }
             })
             .collect()
     }
@@ -96,12 +99,15 @@ impl DistfileResolver {
             if mirror_name == "gentoo" {
                 // mirror://gentoo/path → GENTOO_MIRRORS with the full path suffix.
                 // Using the path (not just filename) preserves any subdirectory.
-                return self.gentoo_mirrors.iter()
+                return self
+                    .gentoo_mirrors
+                    .iter()
                     .map(|m| format!("{}/distfiles/{path}", m.trim_end_matches('/')))
                     .collect();
             }
             if let Some(bases) = self.thirdparty.get(mirror_name) {
-                return bases.iter()
+                return bases
+                    .iter()
                     .map(|base| format!("{}/{path}", base.trim_end_matches('/')))
                     .collect();
             }
@@ -134,7 +140,11 @@ fn collect_filenames_inner(
         match entry {
             SrcUriEntry::Uri { filename, .. } => out.push(filename.clone()),
             SrcUriEntry::Renamed { target, .. } => out.push(target.clone()),
-            SrcUriEntry::UseConditional { flag, negated, entries } => {
+            SrcUriEntry::UseConditional {
+                flag,
+                negated,
+                entries,
+            } => {
                 let active = use_flags.contains(flag.as_str());
                 if active != *negated {
                     collect_filenames_inner(entries, use_flags, out);
@@ -154,13 +164,25 @@ fn collect_uri_pairs(
 ) {
     for entry in entries {
         match entry {
-            SrcUriEntry::Uri { url, filename, restriction } => {
+            SrcUriEntry::Uri {
+                url,
+                filename,
+                restriction,
+            } => {
                 out.push((url.clone(), filename.clone(), restriction.clone()));
             }
-            SrcUriEntry::Renamed { url, target, restriction } => {
+            SrcUriEntry::Renamed {
+                url,
+                target,
+                restriction,
+            } => {
                 out.push((url.clone(), target.clone(), restriction.clone()));
             }
-            SrcUriEntry::UseConditional { flag, negated, entries } => {
+            SrcUriEntry::UseConditional {
+                flag,
+                negated,
+                entries,
+            } => {
                 let active = use_flags.contains(flag.as_str());
                 if active != *negated {
                     collect_uri_pairs(entries, use_flags, out);
@@ -179,7 +201,10 @@ mod tests {
 
     fn resolver(gentoo_mirrors: &[&str]) -> DistfileResolver {
         DistfileResolver::new(
-            vec![("kde".to_owned(), vec!["https://mirrors.kde.org/".to_owned()])],
+            vec![(
+                "kde".to_owned(),
+                vec!["https://mirrors.kde.org/".to_owned()],
+            )],
             gentoo_mirrors.iter().map(|s| s.to_string()).collect(),
         )
     }
@@ -189,10 +214,13 @@ mod tests {
         let r = resolver(&["https://mirror.gentoo.org"]);
         let entries = SrcUriEntry::parse("https://example.com/foo-1.0.tar.gz").unwrap();
         let dfs = r.resolve(&entries, &HashSet::new());
-        assert_eq!(dfs[0].urls, [
-            "https://example.com/foo-1.0.tar.gz",
-            "https://mirror.gentoo.org/distfiles/foo-1.0.tar.gz",
-        ]);
+        assert_eq!(
+            dfs[0].urls,
+            [
+                "https://example.com/foo-1.0.tar.gz",
+                "https://mirror.gentoo.org/distfiles/foo-1.0.tar.gz",
+            ]
+        );
     }
 
     #[test]
@@ -201,7 +229,10 @@ mod tests {
         let entries = SrcUriEntry::parse("mirror://gentoo/subdir/foo-1.0.tar.gz").unwrap();
         let dfs = r.resolve(&entries, &HashSet::new());
         // Full path preserved, not just filename.
-        assert_eq!(dfs[0].urls, ["https://mirror.gentoo.org/distfiles/subdir/foo-1.0.tar.gz"]);
+        assert_eq!(
+            dfs[0].urls,
+            ["https://mirror.gentoo.org/distfiles/subdir/foo-1.0.tar.gz"]
+        );
         assert_eq!(dfs[0].urls.len(), 1);
     }
 
@@ -214,7 +245,10 @@ mod tests {
             restriction: Some("mirror".to_owned()),
         }];
         let dfs = r.resolve(&entries, &HashSet::new());
-        assert_eq!(dfs[0].urls, ["https://proprietary.example.com/secret.tar.gz"]);
+        assert_eq!(
+            dfs[0].urls,
+            ["https://proprietary.example.com/secret.tar.gz"]
+        );
         assert_eq!(dfs[0].urls.len(), 1);
     }
 
@@ -223,6 +257,9 @@ mod tests {
         let r = resolver(&[]);
         let entries = SrcUriEntry::parse("mirror://kde/stable/frameworks/foo.tar.xz").unwrap();
         let dfs = r.resolve(&entries, &HashSet::new());
-        assert_eq!(dfs[0].urls, ["https://mirrors.kde.org/stable/frameworks/foo.tar.xz"]);
+        assert_eq!(
+            dfs[0].urls,
+            ["https://mirrors.kde.org/stable/frameworks/foo.tar.xz"]
+        );
     }
 }

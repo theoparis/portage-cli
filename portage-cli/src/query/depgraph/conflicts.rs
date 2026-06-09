@@ -28,14 +28,10 @@ pub(super) fn find_conflicts(
     let mut conflicts = Vec::new();
 
     for entry in installed {
-        let active_flags: std::collections::HashSet<&str> = entry
-            .active_use
-            .iter()
-            .map(|f| f.as_str())
-            .collect();
+        let active_flags: std::collections::HashSet<&str> =
+            entry.active_use.iter().map(|f| f.as_str()).collect();
 
-        let evaluated =
-            DepEntry::evaluate_use(&entry.deps, |f| active_flags.contains(f));
+        let evaluated = DepEntry::evaluate_use(&entry.deps, |f| active_flags.contains(f));
 
         collect_violations(&evaluated, entry, proposed, &mut conflicts);
     }
@@ -77,12 +73,7 @@ fn collect_violations(
                     .iter()
                     .map(|child| {
                         let mut v = Vec::new();
-                        collect_violations(
-                            std::slice::from_ref(child),
-                            owner,
-                            proposed,
-                            &mut v,
-                        );
+                        collect_violations(std::slice::from_ref(child), owner, proposed, &mut v);
                         v
                     })
                     .collect();

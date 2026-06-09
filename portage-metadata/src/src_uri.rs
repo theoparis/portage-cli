@@ -313,8 +313,7 @@ mod tests {
     use super::*;
 
     fn enabled_set(flags: &[&str]) -> impl Fn(&str) -> bool {
-        let set: std::collections::HashSet<String> =
-            flags.iter().map(|s| s.to_string()).collect();
+        let set: std::collections::HashSet<String> = flags.iter().map(|s| s.to_string()).collect();
         move |f: &str| set.contains(f)
     }
 

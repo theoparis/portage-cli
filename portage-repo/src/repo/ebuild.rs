@@ -73,9 +73,7 @@ impl Ebuild {
     /// The CPV is derived from the directory structure:
     /// `<repo>/<category>/<pkg>/<pkg>-<ver>.ebuild`
     pub fn from_path(path: &Utf8Path) -> Result<Self> {
-        let path = path
-            .canonicalize_utf8()
-            .unwrap_or_else(|_| path.to_owned());
+        let path = path.canonicalize_utf8().unwrap_or_else(|_| path.to_owned());
 
         let filename = path
             .file_name()

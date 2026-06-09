@@ -68,7 +68,7 @@ impl Vdb {
                 if target_paths.contains(&&entry.path) {
                     collisions.push(Collision {
                         path: entry.path.clone(),
-                        owner: pkg.clone(),  // clone the package handle
+                        owner: pkg.clone(), // clone the package handle
                     });
                 }
             }
@@ -81,12 +81,18 @@ impl Vdb {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::MergeSpec;
     use crate::ContentsKind;
+    use crate::write::MergeSpec;
     use portage_atom::Cpv;
 
     fn dir_entry(path: &str) -> ContentsEntry {
-        ContentsEntry { kind: ContentsKind::Dir, path: path.into(), md5: None, mtime: None, target: None }
+        ContentsEntry {
+            kind: ContentsKind::Dir,
+            path: path.into(),
+            md5: None,
+            mtime: None,
+            target: None,
+        }
     }
 
     fn obj_entry(path: &str) -> ContentsEntry {
@@ -156,7 +162,8 @@ mod tests {
         let vdb = open_vdb(tmp.path());
 
         let cpv = Cpv::parse("app-misc/foo-1.0").unwrap();
-        vdb.register(&simple_spec(cpv, vec![obj_entry("/usr/bin/foo")])).unwrap();
+        vdb.register(&simple_spec(cpv, vec![obj_entry("/usr/bin/foo")]))
+            .unwrap();
 
         let planned = vec![obj_entry("/usr/bin/bar")];
         let collisions = vdb.find_collisions(&planned, None).unwrap();
@@ -169,7 +176,8 @@ mod tests {
         let vdb = open_vdb(tmp.path());
 
         let cpv = Cpv::parse("app-misc/foo-1.0").unwrap();
-        vdb.register(&simple_spec(cpv, vec![obj_entry("/usr/bin/shared")])).unwrap();
+        vdb.register(&simple_spec(cpv, vec![obj_entry("/usr/bin/shared")]))
+            .unwrap();
 
         let planned = vec![obj_entry("/usr/bin/shared")];
         let collisions = vdb.find_collisions(&planned, None).unwrap();
@@ -184,7 +192,11 @@ mod tests {
         let vdb = open_vdb(tmp.path());
 
         let cpv = Cpv::parse("app-misc/foo-1.0").unwrap();
-        vdb.register(&simple_spec(cpv, vec![sym_entry("/usr/lib/libfoo.so", "libfoo.so.1")])).unwrap();
+        vdb.register(&simple_spec(
+            cpv,
+            vec![sym_entry("/usr/lib/libfoo.so", "libfoo.so.1")],
+        ))
+        .unwrap();
 
         let planned = vec![sym_entry("/usr/lib/libfoo.so", "libfoo.so.2")];
         let collisions = vdb.find_collisions(&planned, None).unwrap();
@@ -197,7 +209,8 @@ mod tests {
         let vdb = open_vdb(tmp.path());
 
         let cpv = Cpv::parse("app-misc/foo-1.0").unwrap();
-        vdb.register(&simple_spec(cpv, vec![dir_entry("/usr/share/doc")])).unwrap();
+        vdb.register(&simple_spec(cpv, vec![dir_entry("/usr/share/doc")]))
+            .unwrap();
 
         // Same directory in planned install — should not collide.
         let planned = vec![dir_entry("/usr/share/doc"), obj_entry("/usr/share/doc/bar")];
@@ -211,11 +224,16 @@ mod tests {
         let vdb = open_vdb(tmp.path());
 
         let cpv = Cpv::parse("app-misc/foo-1.0").unwrap();
-        vdb.register(&simple_spec(cpv.clone(), vec![obj_entry("/usr/bin/foo")])).unwrap();
+        vdb.register(&simple_spec(cpv.clone(), vec![obj_entry("/usr/bin/foo")]))
+            .unwrap();
 
         // Re-merging the same CPV: with exclude it's clean, without it collides.
         let planned = vec![obj_entry("/usr/bin/foo")];
-        assert!(vdb.find_collisions(&planned, Some(&cpv)).unwrap().is_empty());
+        assert!(
+            vdb.find_collisions(&planned, Some(&cpv))
+                .unwrap()
+                .is_empty()
+        );
         assert!(!vdb.find_collisions(&planned, None).unwrap().is_empty());
     }
 
@@ -226,8 +244,10 @@ mod tests {
 
         let cpv_a = Cpv::parse("app-misc/a-1.0").unwrap();
         let cpv_b = Cpv::parse("app-misc/b-1.0").unwrap();
-        vdb.register(&simple_spec(cpv_a, vec![obj_entry("/usr/bin/x")])).unwrap();
-        vdb.register(&simple_spec(cpv_b, vec![obj_entry("/usr/bin/y")])).unwrap();
+        vdb.register(&simple_spec(cpv_a, vec![obj_entry("/usr/bin/x")]))
+            .unwrap();
+        vdb.register(&simple_spec(cpv_b, vec![obj_entry("/usr/bin/y")]))
+            .unwrap();
 
         let planned = vec![obj_entry("/usr/bin/x"), obj_entry("/usr/bin/y")];
         let collisions = vdb.find_collisions(&planned, None).unwrap();

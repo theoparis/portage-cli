@@ -9,8 +9,7 @@ pub fn run(add: &[String], remove: &[String], make_conf: Option<&Utf8Path>) -> R
         return show(&path);
     }
 
-    let mut mc = MakeConf::load(&path)
-        .with_context(|| format!("reading {path}"))?;
+    let mut mc = MakeConf::load(&path).with_context(|| format!("reading {path}"))?;
 
     let current = mc.get("USE").unwrap_or("").to_string();
     let mut flags: Vec<String> = current.split_whitespace().map(str::to_string).collect();
@@ -22,9 +21,7 @@ pub fn run(add: &[String], remove: &[String], make_conf: Option<&Utf8Path>) -> R
 
     for flag in add {
         let flag = flag.trim_start_matches('+');
-        flags.retain(|f| {
-            f != flag && f != &format!("+{flag}") && f != &format!("-{flag}")
-        });
+        flags.retain(|f| f != flag && f != &format!("+{flag}") && f != &format!("-{flag}"));
         flags.push(flag.to_string());
     }
 

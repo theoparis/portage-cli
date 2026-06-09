@@ -69,13 +69,20 @@ pub(super) fn action_tag<'a>(
     let Some(by_slot) = installed.get(pkg.cpn()) else {
         return ("N", None);
     };
-    let slot_key = pkg.slot()
+    let slot_key = pkg
+        .slot()
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
     match by_slot.get(&slot_key) {
         None => ("NS", None),
         Some(inst) => {
-            let tag = if ver > inst { "U" } else if ver < inst { "D" } else { "R" };
+            let tag = if ver > inst {
+                "U"
+            } else if ver < inst {
+                "D"
+            } else {
+                "R"
+            };
             (tag, Some(inst))
         }
     }

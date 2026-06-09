@@ -48,7 +48,9 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
         .map_err(|e| anyhow::anyhow!("failed to build profile stack: {e}"))?
         .with_user_profile(portage_dir.join("profile").into_std_path_buf())
         .map_err(|e| anyhow::anyhow!("failed to load /etc/portage/profile: {e}"))?;
-    let mut shell = repo.shell().await
+    let mut shell = repo
+        .shell()
+        .await
         .map_err(|e| anyhow::anyhow!("failed to start ebuild shell: {e}"))?;
 
     let make_conf_candidates = [
@@ -61,7 +63,9 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
         .map(|p| p.as_std_path())
         .collect();
 
-    let flags = stack.use_flags(&mut shell, &confs).await
+    let flags = stack
+        .use_flags(&mut shell, &confs)
+        .await
         .map_err(|e| anyhow::anyhow!("failed to evaluate USE flags: {e}"))?;
 
     let split_var = |name: &str| -> Vec<String> {
@@ -78,7 +82,11 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
     let accept_keywords = split_var("ACCEPT_KEYWORDS");
     let accept_license = {
         let v = split_var("ACCEPT_LICENSE");
-        if v.is_empty() { vec!["*".to_string()] } else { v }
+        if v.is_empty() {
+            vec!["*".to_string()]
+        } else {
+            v
+        }
     };
     let distdir = shell
         .get_var("DISTDIR")

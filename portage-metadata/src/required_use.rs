@@ -154,9 +154,11 @@ impl RequiredUseExpr {
             | RequiredUseExpr::ExactlyOne(children)
             | RequiredUseExpr::AtMostOne(children)
             | RequiredUseExpr::All(children) => children.iter().any(|c| c.mentions(flag)),
-            RequiredUseExpr::UseConditional { flag: guard, entries, .. } => {
-                guard == flag || entries.iter().any(|c| c.mentions(flag))
-            }
+            RequiredUseExpr::UseConditional {
+                flag: guard,
+                entries,
+                ..
+            } => guard == flag || entries.iter().any(|c| c.mentions(flag)),
         }
     }
 
@@ -559,8 +561,7 @@ mod tests {
 
     /// Build a predicate from a set of enabled flag names.
     fn enabled_set(flags: &[&str]) -> impl Fn(&str) -> bool {
-        let set: std::collections::HashSet<String> =
-            flags.iter().map(|s| s.to_string()).collect();
+        let set: std::collections::HashSet<String> = flags.iter().map(|s| s.to_string()).collect();
         move |f: &str| set.contains(f)
     }
 
@@ -611,17 +612,15 @@ mod tests {
     #[test]
     fn unsatisfied_reports_failing_clauses_granularly() {
         // firefox-like: a top-level All of several constraints.
-        let expr =
-            RequiredUseExpr::parse("|| ( X wayland ) wayland? ( dbus ) ^^ ( a b )").unwrap();
+        let expr = RequiredUseExpr::parse("|| ( X wayland ) wayland? ( dbus ) ^^ ( a b )").unwrap();
         // wayland on without dbus → conditional fails; X on satisfies ||; pick a so ^^ ok.
         let bad = expr.unsatisfied(&enabled_set(&["X", "wayland", "a"]));
         assert_eq!(bad.len(), 1);
         assert_eq!(bad[0].to_string(), "wayland? ( dbus )");
         // everything satisfied → empty
-        assert!(
-            expr.unsatisfied(&enabled_set(&["X", "wayland", "dbus", "a"]))
-                .is_empty()
-        );
+        assert!(expr
+            .unsatisfied(&enabled_set(&["X", "wayland", "dbus", "a"]))
+            .is_empty());
     }
 
     #[test]

@@ -811,7 +811,10 @@ mod tests {
             .with_user_profile(user)
             .unwrap();
         let forced = stack.use_force().unwrap();
-        assert!(!forced.contains(&"ipv6".to_string()), "user layer unforced ipv6");
+        assert!(
+            !forced.contains(&"ipv6".to_string()),
+            "user layer unforced ipv6"
+        );
         assert!(forced.contains(&"nls".to_string()), "user layer forced nls");
     }
 

@@ -54,7 +54,9 @@ pub(super) fn build_entries(
         );
 
         let ver = req.upgrade_to.as_ref().unwrap_or(&req.version);
-        let slot_suffix = req.package.slot()
+        let slot_suffix = req
+            .package
+            .slot()
             .map(|s| format!(":{}", s.as_str()))
             .unwrap_or_default();
         let atom = format!(">={}-{}{}", cpn, ver_str(ver), slot_suffix);
@@ -82,10 +84,11 @@ pub(super) fn build_entries(
 
         let comments = build_comments(req, root_atoms, &root_cpns, &adj);
 
-        by_file
-            .entry(filename)
-            .or_default()
-            .push(PackageUseLine { comments, atom, flags });
+        by_file.entry(filename).or_default().push(PackageUseLine {
+            comments,
+            atom,
+            flags,
+        });
     }
 
     // by_file is a HashMap; sort by filename so the report/written output is
@@ -126,7 +129,9 @@ where
 
     let mut applied: HashMap<(Cpn, Interned<DefaultInterner>), bool> = HashMap::new();
     for _ in 0..8 {
-        let Some(reqs) = solve(&package_use) else { break };
+        let Some(reqs) = solve(&package_use) else {
+            break;
+        };
         let mut new_by_cpn: HashMap<Cpn, Vec<String>> = HashMap::new();
         for (cpn, flag, enable) in solver_use_dep_targets(&reqs, data) {
             if applied.contains_key(&(cpn, flag)) {
@@ -175,7 +180,13 @@ pub(super) fn solver_use_dep_targets(
         let cpn = *req.package.cpn();
         let ver = req.upgrade_to.as_ref().unwrap_or(&req.version);
         let iuse: HashSet<String> = super::repo::find_cache(data, &req.package, ver)
-            .map(|c| c.metadata.iuse.iter().map(|i| i.name().to_string()).collect())
+            .map(|c| {
+                c.metadata
+                    .iuse
+                    .iter()
+                    .map(|i| i.name().to_string())
+                    .collect()
+            })
             .unwrap_or_default();
         for f in &req.required_enabled {
             if iuse.contains(f.as_str()) {
@@ -215,19 +226,25 @@ fn build_adjacency(edges: &[DepEdge]) -> Adjacency {
 
 /// Strip operators and version suffix from a root atom to get "cat/pkg".
 fn parse_root_cpns(root_atoms: &[String]) -> HashSet<String> {
-    root_atoms.iter().map(|r| {
-        let base = r.trim_start_matches(['>', '<', '=', '~', '!']);
-        if let Some(slash) = base.find('/') {
-            let after_slash = &base[slash + 1..];
-            if let Some(rel) = after_slash.rfind(|c: char| c == '-')
-                .and_then(|i| after_slash[i+1..].chars().next()
-                    .filter(char::is_ascii_digit).map(|_| i))
-            {
-                return format!("{}/{}", &base[..slash], &after_slash[..rel]);
+    root_atoms
+        .iter()
+        .map(|r| {
+            let base = r.trim_start_matches(['>', '<', '=', '~', '!']);
+            if let Some(slash) = base.find('/') {
+                let after_slash = &base[slash + 1..];
+                if let Some(rel) = after_slash.rfind(|c: char| c == '-').and_then(|i| {
+                    after_slash[i + 1..]
+                        .chars()
+                        .next()
+                        .filter(char::is_ascii_digit)
+                        .map(|_| i)
+                }) {
+                    return format!("{}/{}", &base[..slash], &after_slash[..rel]);
+                }
             }
-        }
-        base.to_string()
-    }).collect()
+            base.to_string()
+        })
+        .collect()
 }
 
 fn build_comments(
@@ -301,20 +318,33 @@ pub(super) fn report(entries: &[PackageUseEntry]) {
         return;
     }
     let mut out = anstream::stderr();
-    writeln!(out, "\n{C_PKG}The following USE changes are necessary to proceed:{C_PKG:#}").ok();
-    writeln!(out, " (see \"package.use\" in the portage(5) man page for more details)").ok();
+    writeln!(
+        out,
+        "\n{C_PKG}The following USE changes are necessary to proceed:{C_PKG:#}"
+    )
+    .ok();
+    writeln!(
+        out,
+        " (see \"package.use\" in the portage(5) man page for more details)"
+    )
+    .ok();
     for entry in entries {
         for line in &entry.lines {
             for comment in &line.comments {
                 writeln!(out, "{C_DIM}{comment}{C_DIM:#}").ok();
             }
-            let flag_str: String = line.flags.iter().map(|f| {
-                if f.starts_with('-') {
-                    format!("{C_OFF}{f}{C_OFF:#}")
-                } else {
-                    format!("{C_ON}{f}{C_ON:#}")
-                }
-            }).collect::<Vec<_>>().join(" ");
+            let flag_str: String = line
+                .flags
+                .iter()
+                .map(|f| {
+                    if f.starts_with('-') {
+                        format!("{C_OFF}{f}{C_OFF:#}")
+                    } else {
+                        format!("{C_ON}{f}{C_ON:#}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
             writeln!(out, "{C_PKG}{}{C_PKG:#} {flag_str}", line.atom).ok();
         }
     }
@@ -330,8 +360,7 @@ pub(super) fn write(entries: &[PackageUseEntry], package_use_dir: &Utf8Path) -> 
     for entry in entries {
         let path = package_use_dir.join(&entry.filename);
         let existing = if path.exists() {
-            std::fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {path}"))?
+            std::fs::read_to_string(&path).with_context(|| format!("failed to read {path}"))?
         } else {
             String::new()
         };
@@ -339,8 +368,7 @@ pub(super) fn write(entries: &[PackageUseEntry], package_use_dir: &Utf8Path) -> 
         // Build the new content: keep existing lines, append new atoms that
         // aren't already present, update atoms whose flags have changed.
         let new_content = merge_content(&existing, &entry.lines);
-        std::fs::write(&path, &new_content)
-            .with_context(|| format!("failed to write {path}"))?;
+        std::fs::write(&path, &new_content).with_context(|| format!("failed to write {path}"))?;
         eprintln!("Written: {path}");
     }
     Ok(())
@@ -352,13 +380,14 @@ pub(super) fn write(entries: &[PackageUseEntry], package_use_dir: &Utf8Path) -> 
 /// both replaced); new ones are appended.  Existing lines unrelated to the
 /// new entries are preserved.
 fn merge_content(existing: &str, lines: &[PackageUseLine]) -> String {
-    let mut output: Vec<String> = existing
-        .lines()
-        .map(|l| l.to_string())
-        .collect();
+    let mut output: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
 
     // Remove trailing blank lines so we append cleanly.
-    while output.last().map(|l: &String| l.trim().is_empty()).unwrap_or(false) {
+    while output
+        .last()
+        .map(|l: &String| l.trim().is_empty())
+        .unwrap_or(false)
+    {
         output.pop();
     }
 
@@ -375,12 +404,13 @@ fn merge_content(existing: &str, lines: &[PackageUseLine]) -> String {
             // Scan backwards to find the start of the comment block above
             // this atom line, so we can replace it along with the atom.
             let mut comment_start = pos;
-            while comment_start > 0
-                && output[comment_start - 1].trim_start().starts_with('#')
-            {
+            while comment_start > 0 && output[comment_start - 1].trim_start().starts_with('#') {
                 comment_start -= 1;
             }
-            let new_block: Vec<String> = line.comments.iter().cloned()
+            let new_block: Vec<String> = line
+                .comments
+                .iter()
+                .cloned()
                 .chain(std::iter::once(new_line))
                 .collect();
             output.splice(comment_start..=pos, new_block);

@@ -56,10 +56,7 @@ impl Default for FetchConfig {
 
 impl FetchConfig {
     /// Build from `make.conf`-style environment/config values.
-    pub fn from_make_conf(
-        fetch_command: Option<String>,
-        resume_command: Option<String>,
-    ) -> Self {
+    pub fn from_make_conf(fetch_command: Option<String>, resume_command: Option<String>) -> Self {
         match fetch_command {
             Some(cmd) => Self {
                 strategy: FetchStrategy::Command(cmd),
@@ -114,11 +111,7 @@ impl Fetcher {
     ///
     /// If the file already exists and passes verification it is not
     /// re-downloaded.  If a partial file is present a resume is attempted.
-    pub async fn fetch_distfile(
-        &self,
-        df: &Distfile,
-        manifest: &Manifest,
-    ) -> Result<FetchStatus> {
+    pub async fn fetch_distfile(&self, df: &Distfile, manifest: &Manifest) -> Result<FetchStatus> {
         // RESTRICT=fetch: the ebuild forbids automatic downloading.
         // Return immediately so the caller can run pkg_nofetch.
         if df.restriction.as_deref() == Some("fetch") {
@@ -142,7 +135,9 @@ impl Fetcher {
         }
 
         if df.urls.is_empty() {
-            return Err(Error::AllFailed { filename: df.filename.clone() });
+            return Err(Error::AllFailed {
+                filename: df.filename.clone(),
+            });
         }
 
         // Try each URL in order.
@@ -167,10 +162,12 @@ impl Fetcher {
                 if result.is_ok() {
                     // Verify after command download.
                     if let Some(entry) = manifest_entry {
-                        entry.verify_file(dest.as_std_path()).map_err(|e| Error::Verify {
-                            filename: df.filename.clone(),
-                            reason: e.to_string(),
-                        })?;
+                        entry
+                            .verify_file(dest.as_std_path())
+                            .map_err(|e| Error::Verify {
+                                filename: df.filename.clone(),
+                                reason: e.to_string(),
+                            })?;
                     }
                     return Ok(FetchStatus::Downloaded);
                 }
@@ -178,7 +175,9 @@ impl Fetcher {
             }
         }
 
-        Err(last_err.unwrap_or(Error::AllFailed { filename: df.filename.clone() }))
+        Err(last_err.unwrap_or(Error::AllFailed {
+            filename: df.filename.clone(),
+        }))
     }
 
     /// Fetch all distfiles in parallel, returning per-file results in input order.
@@ -222,17 +221,19 @@ impl Fetcher {
         manifest_entry: Option<&ManifestEntry>,
     ) -> Result<()> {
         match &self.config.strategy {
-            FetchStrategy::Builtin => {
-                self.fetch_builtin(url, dest, manifest_entry).await
-            }
+            FetchStrategy::Builtin => self.fetch_builtin(url, dest, manifest_entry).await,
             FetchStrategy::Command(template) => {
-                let r = self.run_command(template, url, dest.file_name().unwrap_or(""), dest).await;
+                let r = self
+                    .run_command(template, url, dest.file_name().unwrap_or(""), dest)
+                    .await;
                 if r.is_ok() {
                     if let Some(entry) = manifest_entry {
-                        entry.verify_file(dest.as_std_path()).map_err(|e| Error::Verify {
-                            filename: dest.file_name().unwrap_or("?").to_owned(),
-                            reason: e.to_string(),
-                        })?;
+                        entry
+                            .verify_file(dest.as_std_path())
+                            .map_err(|e| Error::Verify {
+                                filename: dest.file_name().unwrap_or("?").to_owned(),
+                                reason: e.to_string(),
+                            })?;
                     }
                 }
                 r
@@ -258,7 +259,9 @@ impl Fetcher {
         // If there's a resume command and a partial file, try it first.
         if existing_size > 0 {
             if let Some(resume_tmpl) = &self.config.resume_command {
-                let r = self.run_command(resume_tmpl, url, dest.file_name().unwrap_or(""), dest).await;
+                let r = self
+                    .run_command(resume_tmpl, url, dest.file_name().unwrap_or(""), dest)
+                    .await;
                 if r.is_ok() {
                     if let Some(entry) = manifest_entry {
                         if entry.verify_file(dest.as_std_path()).is_ok() {
@@ -300,11 +303,17 @@ impl Fetcher {
                 .append(true)
                 .open(dest.as_std_path())
                 .await
-                .map_err(|e| Error::Io { path: dest.to_path_buf().into_std_path_buf(), source: e })?
+                .map_err(|e| Error::Io {
+                    path: dest.to_path_buf().into_std_path_buf(),
+                    source: e,
+                })?
         } else {
             tokio::fs::File::create(dest.as_std_path())
                 .await
-                .map_err(|e| Error::Io { path: dest.to_path_buf().into_std_path_buf(), source: e })?
+                .map_err(|e| Error::Io {
+                    path: dest.to_path_buf().into_std_path_buf(),
+                    source: e,
+                })?
         };
 
         let mut sha512 = Sha512::new();
@@ -313,23 +322,30 @@ impl Fetcher {
         use futures_util::StreamExt;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| Error::Network { url: url.to_owned(), source: e })?;
+            let chunk = chunk.map_err(|e| Error::Network {
+                url: url.to_owned(),
+                source: e,
+            })?;
             sha512.update(&chunk);
             blake2b.update(&chunk);
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| Error::Io { path: dest.to_path_buf().into_std_path_buf(), source: e })?;
+            file.write_all(&chunk).await.map_err(|e| Error::Io {
+                path: dest.to_path_buf().into_std_path_buf(),
+                source: e,
+            })?;
         }
-        file.flush()
-            .await
-            .map_err(|e| Error::Io { path: dest.to_path_buf().into_std_path_buf(), source: e })?;
+        file.flush().await.map_err(|e| Error::Io {
+            path: dest.to_path_buf().into_std_path_buf(),
+            source: e,
+        })?;
 
         // Verify against manifest if available.
         if let Some(entry) = manifest_entry {
-            entry.verify_file(dest.as_std_path()).map_err(|e| Error::Verify {
-                filename: dest.file_name().unwrap_or("?").to_owned(),
-                reason: e.to_string(),
-            })?;
+            entry
+                .verify_file(dest.as_std_path())
+                .map_err(|e| Error::Verify {
+                    filename: dest.file_name().unwrap_or("?").to_owned(),
+                    reason: e.to_string(),
+                })?;
         }
 
         Ok(())

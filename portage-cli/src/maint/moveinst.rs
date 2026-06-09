@@ -3,8 +3,15 @@ use camino::Utf8Path;
 use portage_vdb::Vdb;
 
 enum UpdateEntry {
-    Move { from: String, to: String },
-    SlotMove { cpn: String, from_slot: String, to_slot: String },
+    Move {
+        from: String,
+        to: String,
+    },
+    SlotMove {
+        cpn: String,
+        from_slot: String,
+        to_slot: String,
+    },
 }
 
 /// Detect installed packages that are affected by package moves recorded in
@@ -42,7 +49,11 @@ pub fn run(repo_path: &Utf8Path, vdb: &Vdb) -> Result<()> {
                     println!("move:     {old_cpv}  →  {new_cpv}");
                 }
             }
-            UpdateEntry::SlotMove { cpn, from_slot, to_slot } => {
+            UpdateEntry::SlotMove {
+                cpn,
+                from_slot,
+                to_slot,
+            } => {
                 let affected: Vec<_> = installed
                     .iter()
                     .filter(|pkg| {
@@ -52,12 +63,7 @@ pub fn run(repo_path: &Utf8Path, vdb: &Vdb) -> Result<()> {
                     .collect();
                 for pkg in affected {
                     any = true;
-                    println!(
-                        "slotmove: {}  slot {} → {}",
-                        pkg.cpv(),
-                        from_slot,
-                        to_slot
-                    );
+                    println!("slotmove: {}  slot {} → {}", pkg.cpv(), from_slot, to_slot);
                 }
             }
         }
@@ -89,8 +95,7 @@ fn load_moves(updates_dir: &Utf8Path) -> Result<Vec<UpdateEntry>> {
     files.sort();
 
     for file in &files {
-        let content = std::fs::read_to_string(file)
-            .with_context(|| format!("reading {file}"))?;
+        let content = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
 
         for line in content.lines() {
             let line = line.trim();

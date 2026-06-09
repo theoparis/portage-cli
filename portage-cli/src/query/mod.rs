@@ -1,6 +1,6 @@
 pub mod check;
-pub mod depgraph;
 pub mod depends;
+pub mod depgraph;
 pub mod has;
 pub mod hasuse;
 pub mod keywords;

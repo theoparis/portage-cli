@@ -4,8 +4,8 @@ use camino::Utf8Path;
 pub fn run(repo_path: &Utf8Path, output: Option<&str>) -> Result<()> {
     let repo = portage_repo::Repository::open(repo_path)
         .with_context(|| format!("opening repo at {repo_path}"))?;
-    let use_db = portage_repo::UseDb::build_local_from_repo(&repo)
-        .context("building use.local.desc")?;
+    let use_db =
+        portage_repo::UseDb::build_local_from_repo(&repo).context("building use.local.desc")?;
     let pkg_count = use_db.packages_with_local_flags().count();
     let flag_count: usize = use_db
         .packages_with_local_flags()

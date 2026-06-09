@@ -12,7 +12,9 @@ use crate::vdb::find_packages;
 
 pub fn run(repo_path: &Path, vdb: Option<&Vdb>, atoms: &[String]) -> Result<()> {
     let repo = Repository::open(repo_path)?;
-    let use_db = repo.use_db().unwrap_or_else(|_| portage_repo::UseDb::default());
+    let use_db = repo
+        .use_db()
+        .unwrap_or_else(|_| portage_repo::UseDb::default());
 
     let ebuilds: Vec<_> = repo.ebuilds()?.into_iter().collect();
 

@@ -41,7 +41,11 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, atoms: &[String]) -> Result<()> 
 
         let pkg_meta = repo
             .category(cpv.cpn.category.as_ref())
-            .and_then(|c| c.packages().into_iter().find(|p| p.name() == cpv.cpn.package.as_ref()))
+            .and_then(|c| {
+                c.packages()
+                    .into_iter()
+                    .find(|p| p.name() == cpv.cpn.package.as_ref())
+            })
             .and_then(|p| p.metadata_xml().ok().flatten());
 
         println!(" * {cpv}");

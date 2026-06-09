@@ -1121,7 +1121,11 @@ impl EbuildShell {
         // Normalise root: always ends with '/'.
         let root_str = {
             let s = root.to_string_lossy();
-            if s.ends_with('/') { s.into_owned() } else { format!("{s}/") }
+            if s.ends_with('/') {
+                s.into_owned()
+            } else {
+                format!("{s}/")
+            }
         };
         self.set_var("ROOT", &root_str);
         self.set_var("MERGE_TYPE", "source");
@@ -1319,12 +1323,9 @@ impl EbuildShell {
     /// Call this after [`source_ebuild`](Self::source_ebuild) to capture the
     /// stable per-package metadata before running any build phases.
     pub fn collect_env(&self) -> crate::build::env::EbuildEnv {
-        let get = |name: &str| -> String {
-            self.get_var(name).unwrap_or_default()
-        };
-        let get_opt = |name: &str| -> Option<String> {
-            self.get_var(name).filter(|s| !s.is_empty())
-        };
+        let get = |name: &str| -> String { self.get_var(name).unwrap_or_default() };
+        let get_opt =
+            |name: &str| -> Option<String> { self.get_var(name).filter(|s| !s.is_empty()) };
         let split = |name: &str| -> Vec<String> {
             get(name).split_whitespace().map(str::to_owned).collect()
         };

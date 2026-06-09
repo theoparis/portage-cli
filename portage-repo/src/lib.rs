@@ -41,8 +41,8 @@ pub mod package_conf;
 pub(crate) mod repo;
 pub mod source;
 
-pub use build::inherit;
 pub use build::EbuildEnv;
+pub use build::inherit;
 
 pub use error::{Error, Result};
 
@@ -53,19 +53,23 @@ pub use cache::{
 };
 pub use gentoo_core::arch::ExoticKey;
 pub use gentoo_core::{Arch, KnownArch, arch};
+pub use make_conf::{DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF, MakeConf};
+pub use package_conf::{PackageConf, Token as PackageToken};
 pub use portage_metadata::EbuildMetadata;
-pub use portage_metadata::interner::{DefaultInterner, GlobalInterner, Interned, Interner, NoInterner};
-pub use repo::{Categories, CategoriesIter, Category, Packages, PackagesIter};
+pub use portage_metadata::interner::{
+    DefaultInterner, GlobalInterner, Interned, Interner, NoInterner,
+};
 pub use repo::Ebuild;
 pub use repo::LayoutConf;
 pub use repo::Package;
-pub use make_conf::{MakeConf, DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF};
-pub use package_conf::{PackageConf, Token as PackageToken};
-pub use repo::{Maintainer, MaintainerKind, PkgMetadata};
 pub use repo::UseDb;
 pub use repo::UseExpand;
 pub use repo::{CacheEntries, CacheEntriesIter, Ebuilds, EbuildsIter, ProfileUpdate, Repository};
+pub use repo::{Categories, CategoriesIter, Category, Packages, PackagesIter};
+pub use repo::{Maintainer, MaintainerKind, PkgMetadata};
 pub use repo::{Manifest, ManifestEntry};
-pub use repo::{Profile, ProfileDesc, ProfileEnv, ProfileEnvLayer, ProfileStack, ProfileStatus, UseFlags};
+pub use repo::{
+    Profile, ProfileDesc, ProfileEnv, ProfileEnvLayer, ProfileStack, ProfileStatus, UseFlags,
+};
 pub use repo::{RepoEntry, ReposConf};
 pub use source::{SourceContext, SourceOpts, source_parallel, source_single};

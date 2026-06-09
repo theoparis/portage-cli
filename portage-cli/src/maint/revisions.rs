@@ -26,8 +26,7 @@ pub fn run(repos: &[String], root: Option<&Utf8Path>) -> Result<()> {
 }
 
 fn purge_repos(path: &Utf8Path, repos: &[String]) -> Result<()> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {path}"))?;
+    let content = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
 
     let mut map: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&content).with_context(|| format!("parsing {path}"))?;
@@ -47,7 +46,10 @@ fn purge_repos(path: &Utf8Path, repos: &[String]) -> Result<()> {
 
     if map.is_empty() {
         std::fs::remove_file(path).with_context(|| format!("removing {path}"))?;
-        println!("Purged {path} (empty after removing {}).", removed.join(", "));
+        println!(
+            "Purged {path} (empty after removing {}).",
+            removed.join(", ")
+        );
     } else {
         let out = serde_json::to_string(&map).context("serialising")?;
         std::fs::write(path, out).with_context(|| format!("writing {path}"))?;

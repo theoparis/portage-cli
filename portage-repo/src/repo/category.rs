@@ -136,7 +136,9 @@ impl IntoIterator for Packages {
             if name.starts_with('.') || name == "CVS" {
                 continue;
             }
-            let Ok(path) = entry.path().try_into() else { continue };
+            let Ok(path) = entry.path().try_into() else {
+                continue;
+            };
             packages.push(Package::new(&self.category, name.into_owned(), path));
         }
         packages.sort_by(|a, b| a.name().cmp(b.name()));

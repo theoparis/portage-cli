@@ -103,15 +103,13 @@ impl DependencyProvider for PortageDependencyProvider {
             let direct_installed: Vec<bool> = candidates
                 .iter()
                 .map(|&ver| {
-                    data.versions
-                        .get(ver)
-                        .is_some_and(|vd| {
-                            if let Dependencies::Available(ref cs) = vd.merged {
-                                cs.iter().any(|(pkg, _)| self.installed.contains_key(pkg))
-                            } else {
-                                false
-                            }
-                        })
+                    data.versions.get(ver).is_some_and(|vd| {
+                        if let Dependencies::Available(ref cs) = vd.merged {
+                            cs.iter().any(|(pkg, _)| self.installed.contains_key(pkg))
+                        } else {
+                            false
+                        }
+                    })
                 })
                 .collect();
             let directly_installed_count = direct_installed.iter().filter(|&&x| x).count();
@@ -235,13 +233,17 @@ impl DependencyProvider for PortageDependencyProvider {
         // built; re-solving its build deps would drag in bootstrap toolchain
         // packages (old gcc to build new gcc, etc.) that portage never shows.
         // Only RDEPEND (1), PDEPEND (3), and IDEPEND (4) matter at install time.
-        if self.installed.get(package).is_some_and(|(inst, _)| inst == version) {
-            let runtime: DependencyConstraints<PortagePackage, PortageVersionSet> =
-                vd.by_class[1].iter()  // RDEPEND
-                    .chain(vd.by_class[3].iter())  // PDEPEND
-                    .chain(vd.by_class[4].iter())  // IDEPEND
-                    .map(|(p, vs, _)| (p.clone(), vs.clone()))
-                    .collect();
+        if self
+            .installed
+            .get(package)
+            .is_some_and(|(inst, _)| inst == version)
+        {
+            let runtime: DependencyConstraints<PortagePackage, PortageVersionSet> = vd.by_class[1]
+                .iter() // RDEPEND
+                .chain(vd.by_class[3].iter()) // PDEPEND
+                .chain(vd.by_class[4].iter()) // IDEPEND
+                .map(|(p, vs, _)| (p.clone(), vs.clone()))
+                .collect();
             return Ok(Dependencies::Available(runtime));
         }
 

@@ -54,7 +54,8 @@ impl UseConfig {
 
     /// Mark a flag as solver-decided, with the caller's preferred value.
     pub fn solver_decide(&mut self, flag: Interned<DefaultInterner>, prefer: bool) {
-        self.flags.insert(flag, UseFlagState::SolverDecided { prefer });
+        self.flags
+            .insert(flag, UseFlagState::SolverDecided { prefer });
     }
 
     /// Get the state of a flag. Unset flags default to `Disabled`.
@@ -193,7 +194,10 @@ mod tests {
         config.set(flag, UseFlagState::Enabled);
         assert_eq!(config.get(&flag), UseFlagState::Enabled);
         config.set(flag, UseFlagState::SolverDecided { prefer: false });
-        assert_eq!(config.get(&flag), UseFlagState::SolverDecided { prefer: false });
+        assert_eq!(
+            config.get(&flag),
+            UseFlagState::SolverDecided { prefer: false }
+        );
     }
 
     #[test]

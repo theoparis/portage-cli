@@ -119,7 +119,10 @@ fn vdb_pkg_size_matches() {
     let vdb = portage_vdb::Vdb::open(Utf8Path::new("/var/db/pkg")).unwrap();
 
     // Pick a known package
-    if let Some(pkg) = vdb.category("app-shells").and_then(|c| c.package("bash-5.3_p9-r2")) {
+    if let Some(pkg) = vdb
+        .category("app-shells")
+        .and_then(|c| c.package("bash-5.3_p9-r2"))
+    {
         let size = pkg.size().unwrap();
         // bash is typically ~8-12 MiB
         assert!(size.is_some());
@@ -134,7 +137,10 @@ fn vdb_pkg_size_matches() {
 fn vdb_contents_roundtrip() {
     let vdb = portage_vdb::Vdb::open(Utf8Path::new("/var/db/pkg")).unwrap();
 
-    if let Some(pkg) = vdb.category("app-shells").and_then(|c| c.package("bash-5.3_p9-r2")) {
+    if let Some(pkg) = vdb
+        .category("app-shells")
+        .and_then(|c| c.package("bash-5.3_p9-r2"))
+    {
         let entries = pkg.contents().unwrap();
         assert!(!entries.is_empty());
 

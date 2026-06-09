@@ -104,8 +104,9 @@ pub(crate) fn find_packages(vdb: &Vdb, pattern: &str) -> Vec<portage_vdb::Instal
 
 fn resolve_path(path_str: &str) -> Utf8PathBuf {
     match std::fs::canonicalize(path_str) {
-        Ok(resolved) => Utf8PathBuf::from_path_buf(resolved)
-            .unwrap_or_else(|_| Utf8PathBuf::from(path_str)),
+        Ok(resolved) => {
+            Utf8PathBuf::from_path_buf(resolved).unwrap_or_else(|_| Utf8PathBuf::from(path_str))
+        }
         Err(_) => Utf8PathBuf::from(path_str),
     }
 }

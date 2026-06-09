@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use camino::Utf8Path;
 
-use crate::{Error, Result};
 use crate::repo::repository::Repository;
+use crate::{Error, Result};
 
 /// Database of USE flag descriptions for a Gentoo repository.
 ///
@@ -198,7 +198,10 @@ mod tests {
 
     #[test]
     fn global_flags_parsed() {
-        let (_dir, db) = make_repo("# comment\nssl - Enable SSL support\ndoc - Build docs\n", "");
+        let (_dir, db) = make_repo(
+            "# comment\nssl - Enable SSL support\ndoc - Build docs\n",
+            "",
+        );
         assert_eq!(db.describe_global("ssl"), Some("Enable SSL support"));
         assert_eq!(db.describe_global("doc"), Some("Build docs"));
         assert_eq!(db.describe_global("gtk"), None);
@@ -226,7 +229,10 @@ mod tests {
             db.describe("dev-libs/openssl", "ssl"),
             Some("Package-specific SSL desc")
         );
-        assert_eq!(db.describe("dev-libs/other", "ssl"), Some("Global SSL desc"));
+        assert_eq!(
+            db.describe("dev-libs/other", "ssl"),
+            Some("Global SSL desc")
+        );
     }
 
     #[test]

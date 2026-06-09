@@ -45,9 +45,8 @@ pub fn run(vdb: &Vdb, args: &[String]) -> Result<()> {
 
 fn field_matches(raw: &str, want: &str) -> bool {
     if raw.contains(' ') {
-        raw.split_whitespace().any(|token| {
-            token.trim_start_matches(['+', '-']) == want
-        })
+        raw.split_whitespace()
+            .any(|token| token.trim_start_matches(['+', '-']) == want)
     } else {
         raw.trim() == want
     }

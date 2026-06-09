@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::repository::IUseDefault;
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Dep, Version};
-use crate::repository::IUseDefault;
 use pubgrub::{Dependencies, SelectedDependencies};
 
 use crate::convert;
@@ -11,11 +11,11 @@ use crate::repository::PackageRepository;
 use crate::use_config::{UseConfig, UseFlagState};
 use crate::version_set::PortageVersionSet;
 
+/// Post-solve USE-requirement analysis.
+mod post_solve;
 /// The PubGrub `DependencyProvider` impl (prioritise / choose_version /
 /// get_dependencies).
 mod solve;
-/// Post-solve USE-requirement analysis.
-mod post_solve;
 
 /// Whether an installed package should be favored or locked during resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +38,13 @@ pub(crate) struct VersionData {
     pub(crate) merged: Dependencies<PortagePackage, PortageVersionSet, String>,
     /// Per-class converted deps with optional gating USE flag.
     /// Index: 0=DEPEND, 1=RDEPEND, 2=BDEPEND, 3=PDEPEND, 4=IDEPEND
-    pub(crate) by_class: Vec<Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>>,
+    pub(crate) by_class: Vec<
+        Vec<(
+            PortagePackage,
+            PortageVersionSet,
+            Option<Interned<DefaultInterner>>,
+        )>,
+    >,
     pub(crate) blockers: Vec<Dep>,
     pub(crate) use_deps: Vec<convert::UseDepConstraint>,
     pub(crate) iuse: Vec<Interned<DefaultInterner>>,
@@ -62,9 +68,21 @@ impl VersionData {
     /// Build a deps-only version (no blockers/use-deps/etc.), used for synthetic
     /// solver nodes: the root target set and OR-group / USE-decision branches.
     /// `merged` is collected from a flattened view of `by_class` (flag stripped).
-    fn from_by_class(by_class: Vec<Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>>) -> Self {
+    fn from_by_class(
+        by_class: Vec<
+            Vec<(
+                PortagePackage,
+                PortageVersionSet,
+                Option<Interned<DefaultInterner>>,
+            )>,
+        >,
+    ) -> Self {
         let merged = Dependencies::Available(
-            by_class.iter().flatten().map(|(p, vs, _)| (p.clone(), vs.clone())).collect()
+            by_class
+                .iter()
+                .flatten()
+                .map(|(p, vs, _)| (p.clone(), vs.clone()))
+                .collect(),
         );
         Self {
             merged,
@@ -299,8 +317,13 @@ impl PortageDependencyProvider {
                 let mut all_repo_constraints = Vec::new();
                 let mut all_virtual_choices = Vec::new();
                 let mut all_slot_operator_deps = Vec::new();
-                let mut by_class: Vec<Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)>> =
-                    Vec::with_capacity(5);
+                let mut by_class: Vec<
+                    Vec<(
+                        PortagePackage,
+                        PortageVersionSet,
+                        Option<Interned<DefaultInterner>>,
+                    )>,
+                > = Vec::with_capacity(5);
 
                 for result in class_results {
                     all_blockers.extend(result.blockers);
@@ -333,9 +356,9 @@ impl PortageDependencyProvider {
                 version_data.desired = cpv_use_cfg;
                 version_data.required_use = meta.required_use;
 
-                let entry = packages
-                    .entry(pkg)
-                    .or_insert_with(|| PackageData { versions: BTreeMap::new() });
+                let entry = packages.entry(pkg).or_insert_with(|| PackageData {
+                    versions: BTreeMap::new(),
+                });
                 entry.versions.insert(cpv.version.clone(), version_data);
 
                 register_virtual_choices(&mut packages, all_virtual_choices);
@@ -396,7 +419,11 @@ impl PortageDependencyProvider {
                                 alts.iter().filter(|a| known.contains(a)).cloned().collect()
                             })
                             .unwrap_or_default();
-                        DroppedDep { package: pkg, version_set: vs, alternatives }
+                        DroppedDep {
+                            package: pkg,
+                            version_set: vs,
+                            alternatives,
+                        }
                     }));
                     *constraints = kept.into_iter().collect();
                 }
@@ -528,13 +555,19 @@ impl PortageDependencyProvider {
         let root_ver = Version::parse("0").unwrap();
 
         // Root targets have no gating flag; merged is derived from by_class.
-        let targets_with_flag: Vec<(PortagePackage, PortageVersionSet, Option<Interned<DefaultInterner>>)> =
-            targets.into_iter().map(|(p, vs)| (p, vs, None)).collect();
-        let vd = VersionData::from_by_class(vec![targets_with_flag, vec![], vec![], vec![], vec![]]);
+        let targets_with_flag: Vec<(
+            PortagePackage,
+            PortageVersionSet,
+            Option<Interned<DefaultInterner>>,
+        )> = targets.into_iter().map(|(p, vs)| (p, vs, None)).collect();
+        let vd =
+            VersionData::from_by_class(vec![targets_with_flag, vec![], vec![], vec![], vec![]]);
         let entry = self
             .packages
             .entry(root.clone())
-            .or_insert_with(|| PackageData { versions: BTreeMap::new() });
+            .or_insert_with(|| PackageData {
+                versions: BTreeMap::new(),
+            });
         entry.versions.insert(root_ver.clone(), vd);
 
         // Re-solve to a fixpoint so that any installed package the post-solve
@@ -578,8 +611,7 @@ impl PortageDependencyProvider {
             match pubgrub::resolve(self, root.clone(), root_ver.clone()) {
                 Ok(next) => {
                     solution = next;
-                    self.use_flag_requirements =
-                        self.compute_use_flag_requirements(&solution);
+                    self.use_flag_requirements = self.compute_use_flag_requirements(&solution);
                 }
                 Err(_) => break,
             }
@@ -657,7 +689,6 @@ impl PortageDependencyProvider {
     }
 }
 
-
 /// Evaluate a single USE dep given the dep's effective state and the parent's
 /// flag state (for Conditional/Equal kinds).
 ///
@@ -668,9 +699,9 @@ fn register_virtual_choices(
     choices: Vec<convert::VirtualChoice>,
 ) {
     for vc in choices {
-        let entry = packages
-            .entry(vc.package)
-            .or_insert_with(|| PackageData { versions: BTreeMap::new() });
+        let entry = packages.entry(vc.package).or_insert_with(|| PackageData {
+            versions: BTreeMap::new(),
+        });
         for (ver, deps) in vc.versions {
             // Merge, don't overwrite: a UseDecision node can be produced by both
             // the conditional-dep path and the REQUIRED_USE encoder for the same
@@ -688,8 +719,7 @@ fn register_virtual_choices(
                     );
                 }
                 None => {
-                    let vd =
-                        VersionData::from_by_class(vec![deps, vec![], vec![], vec![], vec![]]);
+                    let vd = VersionData::from_by_class(vec![deps, vec![], vec![], vec![], vec![]]);
                     entry.versions.insert(ver, vd);
                 }
             }
@@ -759,14 +789,20 @@ mod tests {
     fn provider_constructs() {
         let mut repo = make_simple_repo();
         let config = UseConfig::new();
-        let _provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let _provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
     }
 
     #[test]
     fn choose_highest_version() {
         let mut repo = make_simple_repo();
         let config = UseConfig::new();
-        let provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
         let openssl = PortagePackage::slotted(
             portage_atom::Cpn::parse("dev-libs/openssl").unwrap(),
             Interned::intern("0"),
@@ -781,7 +817,10 @@ mod tests {
     fn resolve_simple() {
         let mut repo = make_simple_repo();
         let config = UseConfig::new();
-        let provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
         let root = PortagePackage::slotted(
             portage_atom::Cpn::parse("dev-lang/rust").unwrap(),
             Interned::intern("0"),
@@ -1116,7 +1155,10 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
 
         provider.add_installed(InstalledPackage {
             package: PortagePackage::slotted(
@@ -1182,7 +1224,10 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
 
         for cpn in ["dev-libs/a", "dev-libs/b"] {
             provider.add_installed(InstalledPackage {
@@ -1259,7 +1304,10 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
 
         provider.add_installed(InstalledPackage {
             package: PortagePackage::slotted(
@@ -1354,7 +1402,10 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
 
         // Install python:3.14, python:3.13, and docutils with p3.13 active
         provider.add_installed(InstalledPackage {
@@ -1446,7 +1497,10 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
 
         // B is installed but flag is disabled
         provider.add_installed(InstalledPackage {
@@ -1456,7 +1510,7 @@ mod tests {
             ),
             version: Version::parse("1.0").unwrap(),
             policy: InstalledPolicy::Favor,
-            active_use: vec![],  // flag NOT active
+            active_use: vec![], // flag NOT active
             iuse: vec![Interned::intern("flag")],
         });
 
@@ -1496,7 +1550,10 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
 
         provider.add_installed(InstalledPackage {
             package: PortagePackage::slotted(
@@ -1505,7 +1562,7 @@ mod tests {
             ),
             version: Version::parse("1.0").unwrap(),
             policy: InstalledPolicy::Favor,
-            active_use: vec![Interned::intern("flag")],  // flag IS active
+            active_use: vec![Interned::intern("flag")], // flag IS active
             iuse: vec![Interned::intern("flag")],
         });
 
@@ -1572,7 +1629,10 @@ mod tests {
         );
 
         let config = UseConfig::new();
-        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
 
         // b is installed at 1.0 with flag disabled → rebuild forced by a.
         provider.add_installed(InstalledPackage {
@@ -1627,8 +1687,14 @@ mod tests {
             };
             // ^^ ( x y ) with both flags off by default → Level-A violation.
             let ru = RequiredUse::ExactlyOne(vec![
-                RequiredUse::Flag { name: Interned::intern("x"), negated: false },
-                RequiredUse::Flag { name: Interned::intern("y"), negated: false },
+                RequiredUse::Flag {
+                    name: Interned::intern("x"),
+                    negated: false,
+                },
+                RequiredUse::Flag {
+                    name: Interned::intern("y"),
+                    negated: false,
+                },
             ]);
             if with_ru {
                 repo.add_version_with_required_use(
@@ -1653,17 +1719,25 @@ mod tests {
                 None,
                 empty_deps(),
             );
-            let mut provider = { repo.set_use_config(UseConfig::new()); PortageDependencyProvider::new(repo) };
-            let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+            let mut provider = {
+                repo.set_use_config(UseConfig::new());
+                PortageDependencyProvider::new(repo)
+            };
+            let a =
+                PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
             provider
                 .resolve_targets(vec![(a, PortageVersionSet::any())])
                 .expect("unsatisfiable REQUIRED_USE must not break the solve in Phase 0")
         };
 
-        let with_ru: std::collections::BTreeSet<String> =
-            build(true).iter().map(|(p, v)| format!("{p}@{v}")).collect();
-        let without_ru: std::collections::BTreeSet<String> =
-            build(false).iter().map(|(p, v)| format!("{p}@{v}")).collect();
+        let with_ru: std::collections::BTreeSet<String> = build(true)
+            .iter()
+            .map(|(p, v)| format!("{p}@{v}"))
+            .collect();
+        let without_ru: std::collections::BTreeSet<String> = build(false)
+            .iter()
+            .map(|(p, v)| format!("{p}@{v}"))
+            .collect();
 
         assert!(
             with_ru.iter().any(|s| s.contains("app-misc/a")),
@@ -1700,8 +1774,12 @@ mod tests {
             );
             let mut cfg = UseConfig::new();
             cfg.solver_decide(Interned::intern("flag"), prefer);
-            let mut provider = { repo.set_use_config(cfg); PortageDependencyProvider::new(repo) };
-            let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+            let mut provider = {
+                repo.set_use_config(cfg);
+                PortageDependencyProvider::new(repo)
+            };
+            let a =
+                PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
             provider
                 .resolve_targets(vec![(a, PortageVersionSet::any())])
                 .unwrap()
@@ -1710,7 +1788,10 @@ mod tests {
             sol.iter().any(|(p, _)| p.cpn().package.as_str() == "b")
         };
         assert!(has_b(&build(true)), "prefer=on must enable flag → pull b");
-        assert!(!has_b(&build(false)), "prefer=off must leave flag off → no b");
+        assert!(
+            !has_b(&build(false)),
+            "prefer=off must leave flag off → no b"
+        );
     }
 
     // ---- Level-C REQUIRED_USE encoding (Phase 1b) ----
@@ -1735,7 +1816,11 @@ mod tests {
         repo.add_version_with_required_use(
             portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
             Some(Interned::intern("0")),
-            vec![Interned::intern("x"), Interned::intern("y"), Interned::intern("z")],
+            vec![
+                Interned::intern("x"),
+                Interned::intern("y"),
+                Interned::intern("z"),
+            ],
             PackageDeps {
                 rdepend: DepEntry::parse(
                     "x? ( dev-libs/px ) y? ( dev-libs/py ) z? ( dev-libs/pz )",
@@ -1750,9 +1835,16 @@ mod tests {
             cfg.solver_decide(Interned::intern(f), *p);
         }
         for (f, on) in fixed {
-            if *on { cfg.enable(Interned::intern(f)) } else { cfg.disable(Interned::intern(f)) }
+            if *on {
+                cfg.enable(Interned::intern(f))
+            } else {
+                cfg.disable(Interned::intern(f))
+            }
         }
-        let mut provider = { repo.set_use_config(cfg); PortageDependencyProvider::new(repo) };
+        let mut provider = {
+            repo.set_use_config(cfg);
+            PortageDependencyProvider::new(repo)
+        };
         let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
         let sol = provider
             .resolve_targets(vec![(a, PortageVersionSet::any())])
@@ -1765,7 +1857,10 @@ mod tests {
     }
 
     fn flag(name: &str, negated: bool) -> crate::required_use::RequiredUse {
-        crate::required_use::RequiredUse::Flag { name: Interned::intern(name), negated }
+        crate::required_use::RequiredUse::Flag {
+            name: Interned::intern(name),
+            negated,
+        }
     }
 
     #[test]
@@ -1831,7 +1926,10 @@ mod tests {
             &[("x", true)],
         );
         assert!(got.contains("px"), "x is the fixed-on choice");
-        assert!(!got.contains("py"), "y must be disabled by ^^ with x fixed on");
+        assert!(
+            !got.contains("py"),
+            "y must be disabled by ^^ with x fixed on"
+        );
     }
 
     #[test]
@@ -1860,7 +1958,10 @@ mod tests {
             &[],
         );
         assert!(got.contains("py"), "preferred y kept, got {got:?}");
-        assert!(!got.contains("px"), "x not gratuitously enabled, got {got:?}");
+        assert!(
+            !got.contains("px"),
+            "x not gratuitously enabled, got {got:?}"
+        );
     }
 
     #[test]
@@ -1874,7 +1975,10 @@ mod tests {
             &[],
         );
         assert!(got.contains("pz"), "preferred z kept");
-        assert!(!got.contains("px") && !got.contains("py"), "no extra flips, got {got:?}");
+        assert!(
+            !got.contains("px") && !got.contains("py"),
+            "no extra flips, got {got:?}"
+        );
     }
 
     #[test]
@@ -2087,7 +2191,10 @@ mod tests {
         );
         let mut config = UseConfig::new();
         config.enable(Interned::intern("flag"));
-        let mut provider = { repo.set_use_config(config); PortageDependencyProvider::new(repo) };
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
         let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
         provider
             .resolve_targets(vec![(a, PortageVersionSet::any())])

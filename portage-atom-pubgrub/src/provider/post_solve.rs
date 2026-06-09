@@ -20,16 +20,10 @@ fn eval_violated_use_dep(
     parent_flag_enabled: bool,
 ) -> Option<bool> {
     match kind {
-        UseDepKind::Enabled => {
-            (!dep_effective_enabled).then_some(true)
-        }
-        UseDepKind::Disabled => {
-            dep_effective_enabled.then_some(false)
-        }
+        UseDepKind::Enabled => (!dep_effective_enabled).then_some(true),
+        UseDepKind::Disabled => dep_effective_enabled.then_some(false),
         // [flag?]: if parent has flag → dep must have flag
-        UseDepKind::Conditional => {
-            (parent_flag_enabled && !dep_effective_enabled).then_some(true)
-        }
+        UseDepKind::Conditional => (parent_flag_enabled && !dep_effective_enabled).then_some(true),
         // [!flag?]: if parent lacks flag → dep must have flag
         UseDepKind::ConditionalInverse => {
             (!parent_flag_enabled && !dep_effective_enabled).then_some(true)
@@ -67,10 +61,12 @@ impl PortageDependencyProvider {
         // Accumulate per target: (version, enable_set, disable_set, requirers).
         let mut by_target: HashMap<
             PortagePackage,
-            (Version,
-             std::collections::BTreeSet<Interned<DefaultInterner>>,
-             std::collections::BTreeSet<Interned<DefaultInterner>>,
-             std::collections::BTreeSet<String>),
+            (
+                Version,
+                std::collections::BTreeSet<Interned<DefaultInterner>>,
+                std::collections::BTreeSet<Interned<DefaultInterner>>,
+                std::collections::BTreeSet<String>,
+            ),
         > = HashMap::new();
         // Installed packages that should be upgraded to a newer repo version
         // rather than rebuilt at the installed version.  Keyed by the installed
@@ -150,9 +146,7 @@ impl PortageDependencyProvider {
                                 // repo version with no IUSE) must fall back to the
                                 // VDB-recorded IUSE, matching pre-refactor behaviour.
                                 .filter(|s| !s.is_empty())
-                                .or_else(|| {
-                                    self.installed_iuse.get(target_pkg).map(Vec::as_slice)
-                                })
+                                .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
                                 .unwrap_or(&[]);
                             let in_iuse = iuse.contains(&ud.flag);
                             if in_iuse {
@@ -169,16 +163,14 @@ impl PortageDependencyProvider {
                             dep_effective_enabled,
                             parent_flag_enabled,
                         ) {
-                            let entry = by_target
-                                .entry(target_pkg.clone())
-                                .or_insert_with(|| {
-                                    (
-                                        target_ver.clone(),
-                                        std::collections::BTreeSet::new(),
-                                        std::collections::BTreeSet::new(),
-                                        std::collections::BTreeSet::new(),
-                                    )
-                                });
+                            let entry = by_target.entry(target_pkg.clone()).or_insert_with(|| {
+                                (
+                                    target_ver.clone(),
+                                    std::collections::BTreeSet::new(),
+                                    std::collections::BTreeSet::new(),
+                                    std::collections::BTreeSet::new(),
+                                )
+                            });
                             if requires_enabled {
                                 entry.1.insert(ud.flag);
                             } else {
@@ -212,48 +204,92 @@ impl PortageDependencyProvider {
                 upgrade_to.insert(pkg.clone(), new_ver.clone());
 
                 // Expand the newer version's USE dep constraints.
-                let Some(vd) = self.packages.get(&pkg).and_then(|d| d.versions.get(&new_ver)) else { continue };
+                let Some(vd) = self
+                    .packages
+                    .get(&pkg)
+                    .and_then(|d| d.versions.get(&new_ver))
+                else {
+                    continue;
+                };
                 let udeps = &vd.use_deps;
 
                 // The "parent" is the upgraded package itself.
                 let parent_is_installed = self.installed.contains_key(&pkg);
                 for constraint in udeps {
                     let (target_pkg, vs) = &constraint.target;
-                    if target_pkg.is_virtual() { continue; }
+                    if target_pkg.is_virtual() {
+                        continue;
+                    }
                     let (target_ver, is_installed) =
                         if let Some((inst_ver, _)) = self.installed.get(target_pkg) {
-                            if vs.contains(inst_ver) { (inst_ver, true) } else { continue }
+                            if vs.contains(inst_ver) {
+                                (inst_ver, true)
+                            } else {
+                                continue;
+                            }
                         } else if let Some(sol_ver) = solution.get(target_pkg) {
-                            if vs.contains(sol_ver) { (sol_ver, false) } else { continue }
-                        } else { continue };
+                            if vs.contains(sol_ver) {
+                                (sol_ver, false)
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        };
 
                     for ud in &constraint.use_deps {
                         let parent_flag_enabled = if parent_is_installed {
-                            self.installed_use.get(&pkg).map_or(false, |u| u.contains(&ud.flag))
-                                || by_target.get(&pkg).map_or(false, |(_, e, _, _)| e.contains(&ud.flag))
+                            self.installed_use
+                                .get(&pkg)
+                                .map_or(false, |u| u.contains(&ud.flag))
+                                || by_target
+                                    .get(&pkg)
+                                    .map_or(false, |(_, e, _, _)| e.contains(&ud.flag))
                         } else {
                             self.effective_flag_new(&pkg, &new_ver, &ud.flag, None)
                         };
 
                         let dep_effective_enabled = if is_installed {
-                            let active = self.installed_use.get(target_pkg).map(Vec::as_slice).unwrap_or(&[]);
-                            let iuse = self.packages.get(target_pkg)
+                            let active = self
+                                .installed_use
+                                .get(target_pkg)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            let iuse = self
+                                .packages
+                                .get(target_pkg)
                                 .and_then(|d| d.versions.get(target_ver))
                                 .map(|vd| vd.iuse.as_slice())
                                 .or_else(|| self.installed_iuse.get(target_pkg).map(Vec::as_slice))
                                 .unwrap_or(&[]);
                             let in_iuse = iuse.contains(&ud.flag);
-                            if in_iuse { active.contains(&ud.flag) }
-                            else { matches!(ud.default, Some(UseDefault::Enabled)) }
+                            if in_iuse {
+                                active.contains(&ud.flag)
+                            } else {
+                                matches!(ud.default, Some(UseDefault::Enabled))
+                            }
                         } else {
                             self.effective_flag_new(target_pkg, target_ver, &ud.flag, ud.default)
                         };
 
-                        if let Some(req_en) = eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled) {
+                        if let Some(req_en) = eval_violated_use_dep(
+                            ud.kind,
+                            dep_effective_enabled,
+                            parent_flag_enabled,
+                        ) {
                             let entry = by_target.entry(target_pkg.clone()).or_insert_with(|| {
-                                (target_ver.clone(), std::collections::BTreeSet::new(), std::collections::BTreeSet::new(), std::collections::BTreeSet::new())
+                                (
+                                    target_ver.clone(),
+                                    std::collections::BTreeSet::new(),
+                                    std::collections::BTreeSet::new(),
+                                    std::collections::BTreeSet::new(),
+                                )
                             });
-                            if req_en { entry.1.insert(ud.flag); } else { entry.2.insert(ud.flag); }
+                            if req_en {
+                                entry.1.insert(ud.flag);
+                            } else {
+                                entry.2.insert(ud.flag);
+                            }
                             entry.3.insert(constraint.parent_cpn_str.clone());
                         }
                     }
@@ -271,14 +307,16 @@ impl PortageDependencyProvider {
 
         let mut reqs: Vec<UseFlagRequirement> = by_target
             .into_iter()
-            .map(|(pkg, (ver, enable, disable, requirers))| UseFlagRequirement {
-                package: pkg.clone(),
-                version: ver,
-                upgrade_to: upgrade_to.remove(&pkg),
-                required_enabled: enable.into_iter().collect(),
-                required_disabled: disable.into_iter().collect(),
-                required_by: requirers.into_iter().collect(),
-            })
+            .map(
+                |(pkg, (ver, enable, disable, requirers))| UseFlagRequirement {
+                    package: pkg.clone(),
+                    version: ver,
+                    upgrade_to: upgrade_to.remove(&pkg),
+                    required_enabled: enable.into_iter().collect(),
+                    required_disabled: disable.into_iter().collect(),
+                    required_by: requirers.into_iter().collect(),
+                },
+            )
             .collect();
         // `by_target` is a HashMap, so collect order is nondeterministic; sort by
         // (package, version) so use_flag_requirements — and everything derived
@@ -381,5 +419,3 @@ impl PortageDependencyProvider {
         true
     }
 }
-
-

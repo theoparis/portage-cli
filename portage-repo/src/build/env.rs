@@ -51,6 +51,9 @@ pub struct EbuildEnv {
 impl EbuildEnv {
     /// The main slot (the part before `/`, e.g. `"0"` from `"0/5.1"`).
     pub fn slot_main(&self) -> &str {
-        self.slot.split_once('/').map(|(s, _)| s).unwrap_or(&self.slot)
+        self.slot
+            .split_once('/')
+            .map(|(s, _)| s)
+            .unwrap_or(&self.slot)
     }
 }

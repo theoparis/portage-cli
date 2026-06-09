@@ -74,28 +74,40 @@ pub struct Token {
 impl PackageConf {
     /// Load a single file.
     pub fn load_file(path: &Utf8Path) -> Result<Self> {
-        let src = std::fs::read_to_string(path)
-            .map_err(|e| Error::Io { path: path.to_path_buf().into_std_path_buf(), source: e })?;
+        let src = std::fs::read_to_string(path).map_err(|e| Error::Io {
+            path: path.to_path_buf().into_std_path_buf(),
+            source: e,
+        })?;
         Self::parse(src)
     }
 
     /// Load a directory, returning one `PackageConf` per file in alphabetical order.
     pub fn load_dir(path: &Utf8Path) -> Result<Vec<(Utf8PathBuf, PackageConf)>> {
         let mut files: Vec<Utf8PathBuf> = std::fs::read_dir(path)
-            .map_err(|e| Error::Io { path: path.to_path_buf().into_std_path_buf(), source: e })?
+            .map_err(|e| Error::Io {
+                path: path.to_path_buf().into_std_path_buf(),
+                source: e,
+            })?
             .flatten()
             .filter_map(|e| {
                 let p = Utf8PathBuf::try_from(e.path()).ok()?;
                 let name = p.file_name()?;
-                if !name.starts_with('.') && p.is_file() { Some(p) } else { None }
+                if !name.starts_with('.') && p.is_file() {
+                    Some(p)
+                } else {
+                    None
+                }
             })
             .collect();
         files.sort();
 
-        files.into_iter().map(|f| {
-            let pc = Self::load_file(&f)?;
-            Ok((f, pc))
-        }).collect()
+        files
+            .into_iter()
+            .map(|f| {
+                let pc = Self::load_file(&f)?;
+                Ok((f, pc))
+            })
+            .collect()
     }
 
     /// Load from a file path or a directory of files.
@@ -106,8 +118,10 @@ impl PackageConf {
         if path.is_dir() {
             let mut combined = String::new();
             for f in Self::load_dir(path)?.into_iter().map(|(p, _)| p) {
-                let chunk = std::fs::read_to_string(&f)
-                    .map_err(|e| Error::Io { path: f.to_path_buf().into_std_path_buf(), source: e })?;
+                let chunk = std::fs::read_to_string(&f).map_err(|e| Error::Io {
+                    path: f.to_path_buf().into_std_path_buf(),
+                    source: e,
+                })?;
                 combined.push_str(&chunk);
             }
             Self::parse(combined)
@@ -125,7 +139,13 @@ impl PackageConf {
     /// Iterate over all data entries — skips comments and blank lines.
     pub fn entries(&self) -> impl Iterator<Item = EntryRef<'_>> {
         self.entries.iter().filter_map(|e| {
-            if let Entry::Data { atom, values, atom_span, .. } = e {
+            if let Entry::Data {
+                atom,
+                values,
+                atom_span,
+                ..
+            } = e
+            {
                 Some(EntryRef {
                     src: &self.src,
                     atom,
@@ -158,13 +178,16 @@ impl PackageConf {
     pub fn set(&mut self, atom: &Dep, values: &[&str]) {
         let new_line = format!("{} {}\n", atom, values.join(" "));
 
-        let existing = self.entries.iter().position(|e| {
-            matches!(e, Entry::Data { atom: a, .. } if a.cpn == atom.cpn)
-        });
+        let existing = self
+            .entries
+            .iter()
+            .position(|e| matches!(e, Entry::Data { atom: a, .. } if a.cpn == atom.cpn));
 
         match existing {
             Some(idx) => {
-                let Entry::Data { span, .. } = &self.entries[idx] else { unreachable!() };
+                let Entry::Data { span, .. } = &self.entries[idx] else {
+                    unreachable!()
+                };
                 let span = span.clone();
                 self.src.replace_range(span, &new_line);
                 self.rebuild();
@@ -181,11 +204,14 @@ impl PackageConf {
 
     /// Remove the data line for `atom` (matched by CPN).
     pub fn remove(&mut self, atom: &Dep) -> bool {
-        let existing = self.entries.iter().position(|e| {
-            matches!(e, Entry::Data { atom: a, .. } if a.cpn == atom.cpn)
-        });
+        let existing = self
+            .entries
+            .iter()
+            .position(|e| matches!(e, Entry::Data { atom: a, .. } if a.cpn == atom.cpn));
         if let Some(idx) = existing {
-            let Entry::Data { span, .. } = &self.entries[idx] else { unreachable!() };
+            let Entry::Data { span, .. } = &self.entries[idx] else {
+                unreachable!()
+            };
             let span = span.clone();
             self.src.replace_range(span, "");
             self.rebuild();
@@ -255,10 +281,14 @@ fn parse_entries(src: &str) -> Vec<Entry> {
                 span: cursor..cursor + consumed,
                 atom_span: cursor + entry.atom_span.start..cursor + entry.atom_span.end,
                 atom: entry.atom,
-                values: entry.values.into_iter().map(|t| Token {
-                    span: cursor + t.span.start..cursor + t.span.end,
-                    text: t.text,
-                }).collect(),
+                values: entry
+                    .values
+                    .into_iter()
+                    .map(|t| Token {
+                        span: cursor + t.span.start..cursor + t.span.end,
+                        text: t.text,
+                    })
+                    .collect(),
             });
             cursor += consumed;
             continue;
@@ -299,8 +329,7 @@ fn data_line(input: &mut Stream<'_>) -> winnow::Result<DataLineResult> {
     }
 
     let atom_start = input.current_token_start();
-    let atom_raw: &str =
-        take_while(1.., |c: char| !c.is_whitespace()).parse_next(input)?;
+    let atom_raw: &str = take_while(1.., |c: char| !c.is_whitespace()).parse_next(input)?;
     let atom_end = input.current_token_start();
 
     let atom = Dep::parse(atom_raw).map_err(|_| ContextError::new())?;
@@ -320,7 +349,10 @@ fn data_line(input: &mut Stream<'_>) -> winnow::Result<DataLineResult> {
         let text: &str =
             take_while(1.., |c: char| !c.is_whitespace() && c != '#').parse_next(input)?;
         let val_end = input.current_token_start();
-        values.push(Token { span: val_start..val_end, text: text.to_owned() });
+        values.push(Token {
+            span: val_start..val_end,
+            text: text.to_owned(),
+        });
     }
 
     // Optional inline comment.
@@ -373,7 +405,10 @@ mod tests {
     fn multiple_values() {
         let pc = parse("sys-boot/grub -themes -fonts -branding\n");
         let e = pc.entries().next().unwrap();
-        assert_eq!(e.values().collect::<Vec<_>>(), ["-themes", "-fonts", "-branding"]);
+        assert_eq!(
+            e.values().collect::<Vec<_>>(),
+            ["-themes", "-fonts", "-branding"]
+        );
     }
 
     #[test]

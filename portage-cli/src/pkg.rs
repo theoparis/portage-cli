@@ -7,18 +7,39 @@ use crate::cli::PkgCommand;
 
 pub fn run(command: &PkgCommand) -> Result<()> {
     match command {
-        PkgCommand::Use { atom, add, subtract, drop, path } => {
-            edit_valued(atom, add, subtract, drop, path.as_deref(), "package.use")
-        }
-        PkgCommand::Keyword { atom, add, subtract, drop, path } => {
-            edit_valued(atom, add, subtract, drop, path.as_deref(), "package.accept_keywords")
-        }
-        PkgCommand::Mask { atom, add, drop, path } => {
-            edit_mask(atom, *add, *drop, path.as_deref())
-        }
-        PkgCommand::Env { atom, add, drop, path } => {
-            edit_valued(atom, add, &[], drop, path.as_deref(), "package.env")
-        }
+        PkgCommand::Use {
+            atom,
+            add,
+            subtract,
+            drop,
+            path,
+        } => edit_valued(atom, add, subtract, drop, path.as_deref(), "package.use"),
+        PkgCommand::Keyword {
+            atom,
+            add,
+            subtract,
+            drop,
+            path,
+        } => edit_valued(
+            atom,
+            add,
+            subtract,
+            drop,
+            path.as_deref(),
+            "package.accept_keywords",
+        ),
+        PkgCommand::Mask {
+            atom,
+            add,
+            drop,
+            path,
+        } => edit_mask(atom, *add, *drop, path.as_deref()),
+        PkgCommand::Env {
+            atom,
+            add,
+            drop,
+            path,
+        } => edit_valued(atom, add, &[], drop, path.as_deref(), "package.env"),
     }
 }
 
@@ -30,15 +51,13 @@ fn edit_valued(
     path_override: Option<&Utf8Path>,
     conf_name: &str,
 ) -> Result<()> {
-    let atom = Dep::parse(atom_str)
-        .with_context(|| format!("invalid atom {atom_str:?}"))?;
+    let atom = Dep::parse(atom_str).with_context(|| format!("invalid atom {atom_str:?}"))?;
 
     let base = Utf8Path::new("/etc/portage").join(conf_name);
     let no_edit = add.is_empty() && subtract.is_empty() && drop.is_empty();
 
     if base.is_dir() {
-        let mut all = PackageConf::load_dir(&base)
-            .with_context(|| format!("reading {base}"))?;
+        let mut all = PackageConf::load_dir(&base).with_context(|| format!("reading {base}"))?;
 
         let matches: Vec<usize> = all
             .iter()
@@ -56,8 +75,7 @@ fn edit_valued(
             0 => {
                 let target = resolve_new_path(&base, &atom, path_override);
                 let mut pc = if target.exists() {
-                    PackageConf::load_file(&target)
-                        .with_context(|| format!("reading {target}"))?
+                    PackageConf::load_file(&target).with_context(|| format!("reading {target}"))?
                 } else {
                     PackageConf::parse(String::new())?
                 };
@@ -68,7 +86,8 @@ fn edit_valued(
                 } else {
                     let refs: Vec<&str> = new_values.iter().map(String::as_str).collect();
                     pc.set(&atom, &refs);
-                    pc.save(&target).with_context(|| format!("writing {target}"))?;
+                    pc.save(&target)
+                        .with_context(|| format!("writing {target}"))?;
                     println!("{atom} {}", new_values.join(" "));
                 }
             }
@@ -78,7 +97,10 @@ fn edit_valued(
                 if let Some(path_override) = path_override {
                     let target = base.join(path_override);
                     if &target != file {
-                        eprintln!("warning: entry found in {}, ignoring --path", file.file_name().unwrap_or("?"));
+                        eprintln!(
+                            "warning: entry found in {}, ignoring --path",
+                            file.file_name().unwrap_or("?")
+                        );
                     }
                 }
                 update_valued_entry(pc, file, &atom, add, subtract, drop, conf_name)?;
@@ -94,8 +116,7 @@ fn edit_valued(
         }
     } else {
         let mut pc = if base.exists() {
-            PackageConf::load_file(&base)
-                .with_context(|| format!("reading {base}"))?
+            PackageConf::load_file(&base).with_context(|| format!("reading {base}"))?
         } else {
             PackageConf::parse(String::new())?
         };
@@ -122,7 +143,10 @@ fn update_valued_entry(
 ) -> Result<()> {
     let all_entries: Vec<_> = pc.find_all(atom).collect();
     if all_entries.len() > 1 && atom.version.is_none() {
-        eprintln!("error: multiple entries for {atom} in {}:", file.file_name().unwrap_or("?"));
+        eprintln!(
+            "error: multiple entries for {atom} in {}:",
+            file.file_name().unwrap_or("?")
+        );
         for e in &all_entries {
             let values: Vec<&str> = e.values().collect();
             if values.is_empty() {
@@ -202,14 +226,12 @@ fn edit_mask(
     drop: bool,
     path_override: Option<&Utf8Path>,
 ) -> Result<()> {
-    let atom = Dep::parse(atom_str)
-        .with_context(|| format!("invalid atom {atom_str:?}"))?;
+    let atom = Dep::parse(atom_str).with_context(|| format!("invalid atom {atom_str:?}"))?;
 
     let base = Utf8Path::new("/etc/portage/package.mask");
 
     if base.is_dir() {
-        let mut all = PackageConf::load_dir(base)
-            .with_context(|| format!("reading {base}"))?;
+        let mut all = PackageConf::load_dir(base).with_context(|| format!("reading {base}"))?;
 
         let matches: Vec<usize> = all
             .iter()
@@ -251,23 +273,25 @@ fn edit_mask(
         } else {
             let target = resolve_new_path(base, &atom, path_override);
             let mut pc = if target.exists() {
-                PackageConf::load_file(&target)
-                    .with_context(|| format!("reading {target}"))?
+                PackageConf::load_file(&target).with_context(|| format!("reading {target}"))?
             } else {
                 PackageConf::parse(String::new())?
             };
             if pc.find(&atom).is_some() {
-                println!("package.mask: {atom} already masked in {}", target.file_name().unwrap_or("?"));
+                println!(
+                    "package.mask: {atom} already masked in {}",
+                    target.file_name().unwrap_or("?")
+                );
             } else {
                 pc.set(&atom, &[]);
-                pc.save(&target).with_context(|| format!("writing {target}"))?;
+                pc.save(&target)
+                    .with_context(|| format!("writing {target}"))?;
                 println!("masked {atom} in {}", target.file_name().unwrap_or("?"));
             }
         }
     } else {
         let mut pc = if base.exists() {
-            PackageConf::load_file(base)
-                .with_context(|| format!("reading {base}"))?
+            PackageConf::load_file(base).with_context(|| format!("reading {base}"))?
         } else {
             PackageConf::parse(String::new())?
         };
@@ -298,7 +322,12 @@ fn edit_mask(
     Ok(())
 }
 
-fn apply_flags(mut values: Vec<String>, add: &[String], subtract: &[String], drop: &[String]) -> Vec<String> {
+fn apply_flags(
+    mut values: Vec<String>,
+    add: &[String],
+    subtract: &[String],
+    drop: &[String],
+) -> Vec<String> {
     for op in add.iter().chain(subtract).chain(drop) {
         let base = op.trim_start_matches('-');
         values.retain(|v| {
@@ -317,7 +346,11 @@ fn apply_flags(mut values: Vec<String>, add: &[String], subtract: &[String], dro
     values
 }
 
-fn resolve_new_path(base_dir: &Utf8Path, atom: &Dep, path_override: Option<&Utf8Path>) -> Utf8PathBuf {
+fn resolve_new_path(
+    base_dir: &Utf8Path,
+    atom: &Dep,
+    path_override: Option<&Utf8Path>,
+) -> Utf8PathBuf {
     if let Some(p) = path_override {
         if p.is_absolute() {
             return p.to_owned();

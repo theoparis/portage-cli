@@ -40,7 +40,11 @@ fn repo_from(entries: &[(&str, &str)]) -> RepoData {
         }
         versions.entry(cpv.cpn).or_default().push((cpv, entry));
     }
-    RepoData { cpns, versions, repo_name: "test".into() }
+    RepoData {
+        cpns,
+        versions,
+        repo_name: "test".into(),
+    }
 }
 
 /// The outcome of a solve: the cross-package USE-flag requirements the solver
@@ -52,7 +56,9 @@ struct Outcome {
 
 impl Outcome {
     fn req_for(&self, cpn: &str) -> Option<&UseFlagRequirement> {
-        self.reqs.iter().find(|r| r.package.cpn().to_string() == cpn)
+        self.reqs
+            .iter()
+            .find(|r| r.package.cpn().to_string() == cpn)
     }
     fn needs_enabled(&self, cpn: &str, flag: &str) -> bool {
         self.req_for(cpn)
@@ -101,7 +107,10 @@ fn solve_with(data: &RepoData, targets: &[&str], pu: &[(Dep, Vec<String>)]) -> O
         .filter(|(p, _)| !p.is_virtual())
         .map(|(p, v)| format!("{}-{}", p.cpn(), v))
         .collect();
-    Some(Outcome { reqs: provider.use_flag_requirements().to_vec(), plan })
+    Some(Outcome {
+        reqs: provider.use_flag_requirements().to_vec(),
+        plan,
+    })
 }
 
 /// A single (default, no-autosolve) solve — shows the Tier-2 behaviour.
@@ -154,11 +163,17 @@ fn cc1_plain_enabled() {
     // Default (Tier 2): detected, bar stays off (suggested only).
     let out = solve(&data, &["app/parent"]);
     assert!(out.has("dev/foo-1"), "foo is pulled into the plan");
-    assert!(out.needs_enabled("dev/foo", "bar"), "default: detected only");
+    assert!(
+        out.needs_enabled("dev/foo", "bar"),
+        "default: detected only"
+    );
     // C7 (autosolve): bar is forced on foo and the requirement is satisfied.
     let (pu, co) = cosolve(&data, &["app/parent"]);
     assert!(pu_forces(&pu, "dev/foo", "bar"), "C7 forces bar on foo");
-    assert!(!co.needs_enabled("dev/foo", "bar"), "C7: requirement satisfied");
+    assert!(
+        !co.needs_enabled("dev/foo", "bar"),
+        "C7: requirement satisfied"
+    );
     assert!(co.has("dev/foo-1"));
 }
 
@@ -171,10 +186,16 @@ fn cc2_plain_disabled() {
         ("app/parent-1", &parent("", "dev/foo[-bar]")),
         ("dev/foo-1", &leaf("+bar", "")), // bar default ON
     ]);
-    assert!(solve(&data, &["app/parent"]).needs_disabled("dev/foo", "bar"), "default: detected");
+    assert!(
+        solve(&data, &["app/parent"]).needs_disabled("dev/foo", "bar"),
+        "default: detected"
+    );
     let (pu, co) = cosolve(&data, &["app/parent"]);
     assert!(pu_forces(&pu, "dev/foo", "-bar"), "C7 forces bar off foo");
-    assert!(!co.needs_disabled("dev/foo", "bar"), "C7: requirement satisfied");
+    assert!(
+        !co.needs_disabled("dev/foo", "bar"),
+        "C7: requirement satisfied"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -186,9 +207,15 @@ fn cc3_conditional_parent_flag_on() {
         ("app/parent-1", &parent("+bar", "dev/foo[bar?]")), // parent bar on
         ("dev/foo-1", &leaf("bar", "")),
     ]);
-    assert!(solve(&data, &["app/parent"]).needs_enabled("dev/foo", "bar"), "default: detected");
+    assert!(
+        solve(&data, &["app/parent"]).needs_enabled("dev/foo", "bar"),
+        "default: detected"
+    );
     let (pu, co) = cosolve(&data, &["app/parent"]);
-    assert!(pu_forces(&pu, "dev/foo", "bar"), "C7 matches the active conditional");
+    assert!(
+        pu_forces(&pu, "dev/foo", "bar"),
+        "C7 matches the active conditional"
+    );
     assert!(!co.needs_enabled("dev/foo", "bar"));
 }
 
@@ -201,9 +228,15 @@ fn cc4_equal() {
         ("app/parent-1", &parent("+bar", "dev/foo[bar=]")), // parent bar on
         ("dev/foo-1", &leaf("bar", "")),                    // foo bar off ⇒ mismatch
     ]);
-    assert!(solve(&data, &["app/parent"]).needs_enabled("dev/foo", "bar"), "default: detected");
+    assert!(
+        solve(&data, &["app/parent"]).needs_enabled("dev/foo", "bar"),
+        "default: detected"
+    );
     let (pu, co) = cosolve(&data, &["app/parent"]);
-    assert!(pu_forces(&pu, "dev/foo", "bar"), "C7 makes foo bar equal parent bar");
+    assert!(
+        pu_forces(&pu, "dev/foo", "bar"),
+        "C7 makes foo bar equal parent bar"
+    );
     assert!(!co.needs_enabled("dev/foo", "bar"));
 }
 
@@ -217,13 +250,22 @@ fn cc5_dep_interacts_with_target_required_use() {
         ("app/parent-1", &parent("", "dev/foo[bar]")),
         ("dev/foo-1", &leaf("bar +baz", "?? ( bar baz )")), // baz on; bar+baz illegal
     ]);
-    assert!(solve(&data, &["app/parent"]).needs_enabled("dev/foo", "bar"), "default: detected");
+    assert!(
+        solve(&data, &["app/parent"]).needs_enabled("dev/foo", "bar"),
+        "default: detected"
+    );
     // C7 forces bar; the solve still succeeds because Level-C cedes baz off so
     // `?? ( bar baz )` holds — C7 and Level-C co-operate in one re-solve.
     let (pu, co) = cosolve(&data, &["app/parent"]);
     assert!(pu_forces(&pu, "dev/foo", "bar"));
-    assert!(co.has("dev/foo-1"), "plan is still produced (RU satisfied via baz)");
-    assert!(!co.needs_enabled("dev/foo", "bar"), "C7: requirement satisfied");
+    assert!(
+        co.has("dev/foo-1"),
+        "plan is still produced (RU satisfied via baz)"
+    );
+    assert!(
+        !co.needs_enabled("dev/foo", "bar"),
+        "C7: requirement satisfied"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +283,10 @@ fn cc6_conflicting_parents_terminate() {
     let (pu, _co) = cosolve(&data, &["app/p1", "app/p2"]);
     let forces_on = pu_forces(&pu, "dev/foo", "bar");
     let forces_off = pu_forces(&pu, "dev/foo", "-bar");
-    assert!(forces_on ^ forces_off, "exactly one side is applied, never both, never looping");
+    assert!(
+        forces_on ^ forces_off,
+        "exactly one side is applied, never both, never looping"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -255,5 +300,8 @@ fn cc7_flag_absent_from_target_iuse() {
     ]);
     let (pu, co) = cosolve(&data, &["app/parent"]);
     assert!(co.has("dev/foo-1"), "foo still resolves");
-    assert!(!pu_forces(&pu, "dev/foo", "bar"), "C7 never forces a non-IUSE flag");
+    assert!(
+        !pu_forces(&pu, "dev/foo", "bar"),
+        "C7 never forces a non-IUSE flag"
+    );
 }

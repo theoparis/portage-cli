@@ -876,10 +876,17 @@ _md5_=abc123";
             panic!("texlive-core cache entry failed to parse: {e}\n\nRaw:\n{raw}")
         });
         // Spot-check that RDEPEND was actually parsed.
-        assert!(!entry.metadata.rdepend.is_empty(), "RDEPEND should not be empty");
-        assert_eq!(entry.metadata.iuse.len(), 8);  // cjk X doc source tk luajittex xetex xindy
         assert!(
-            entry.metadata.iuse.iter().any(|iu| iu.name() == "luajittex"),
+            !entry.metadata.rdepend.is_empty(),
+            "RDEPEND should not be empty"
+        );
+        assert_eq!(entry.metadata.iuse.len(), 8); // cjk X doc source tk luajittex xetex xindy
+        assert!(
+            entry
+                .metadata
+                .iuse
+                .iter()
+                .any(|iu| iu.name() == "luajittex"),
             "luajittex must be in IUSE"
         );
     }
@@ -900,9 +907,8 @@ RDEPEND=virtual/tmpfiles
 SLOT=0/6.4.0
 SRC_URI=https://example.com/kpathsea.tar.xz
 _md5_=abc123";
-        let entry = CacheEntry::parse(raw).unwrap_or_else(|e| {
-            panic!("kpathsea cache entry failed to parse: {e}\n\nRaw:\n{raw}")
-        });
+        let entry = CacheEntry::parse(raw)
+            .unwrap_or_else(|e| panic!("kpathsea cache entry failed to parse: {e}\n\nRaw:\n{raw}"));
         // Subslot must be preserved.
         assert_eq!(entry.metadata.slot.slot.as_str(), "0");
         assert_eq!(

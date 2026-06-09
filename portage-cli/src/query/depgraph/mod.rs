@@ -39,7 +39,18 @@ pub struct DepgraphOpts<'a> {
 }
 
 pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
-    let DepgraphOpts { repo_path, atoms, arch, format, verbose, empty, autounmask, autounmask_write, autosolve_use, root } = opts;
+    let DepgraphOpts {
+        repo_path,
+        atoms,
+        arch,
+        format,
+        verbose,
+        empty,
+        autounmask,
+        autounmask_write,
+        autosolve_use,
+        root,
+    } = opts;
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
 
@@ -78,11 +89,15 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
     let mut root_deps = Vec::new();
     let mut root_cpns: std::collections::HashSet<Cpn> = std::collections::HashSet::new();
     for target in atoms {
-        let dep = Dep::parse(target)
-            .map_err(|e| anyhow::anyhow!("bad atom '{target}': {e}"))?;
+        let dep = Dep::parse(target).map_err(|e| anyhow::anyhow!("bad atom '{target}': {e}"))?;
         root_cpns.insert(dep.cpn);
         let pkg = repo::target_package(
-            &data, &dep, arch, &accept_keywords, &package_mask, &accept_license,
+            &data,
+            &dep,
+            arch,
+            &accept_keywords,
+            &package_mask,
+            &accept_license,
         );
         let vs = match &dep.version {
             Some(v) => {
@@ -137,7 +152,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
     let package_use = if autosolve_use {
         package_use::cosolve_use_deps(package_use, &data, |pu| {
             let (provider, result) = build_and_solve(true, pu);
-            result.ok().map(|_| provider.use_flag_requirements().to_vec())
+            result
+                .ok()
+                .map(|_| provider.use_flag_requirements().to_vec())
         })
     } else {
         package_use
@@ -155,8 +172,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
                      falling back to a fixed-USE plan."
                 );
                 let (provider, result) = build_and_solve(false, &package_use);
-                let sol = result
-                    .map_err(|e2| anyhow::anyhow!("resolution failed: {:?}", e2))?;
+                let sol = result.map_err(|e2| anyhow::anyhow!("resolution failed: {:?}", e2))?;
                 (provider, sol)
             }
             Err(e) => return Err(anyhow::anyhow!("resolution failed: {:?}", e)),
@@ -347,10 +363,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
 
     let autounmask_candidates: Vec<_> = autounmask_candidates
         .into_iter()
-        .filter(|c| {
-            !solution_cpns.contains(&c.cpv.cpn)
-                && new_needed_cpns.contains(&c.cpv.cpn)
-        })
+        .filter(|c| !solution_cpns.contains(&c.cpv.cpn) && new_needed_cpns.contains(&c.cpv.cpn))
         .collect();
 
     // Report in order of severity: mask → keywords → USE → license.
@@ -364,7 +377,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
 
     {
         let all_reqs: Vec<_> = provider.use_flag_requirements().to_vec();
-        let pkg_use_entries = package_use::build_entries(&all_reqs, atoms, &edges, &use_config, &package_use);
+        let pkg_use_entries =
+            package_use::build_entries(&all_reqs, atoms, &edges, &use_config, &package_use);
         if (autounmask || autounmask_write) && !pkg_use_entries.is_empty() {
             package_use::report(&pkg_use_entries);
             if autounmask_write {
@@ -378,15 +392,31 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
             // Verbose mode shows per-package download size and a total; skip the
             // Manifest/DISTDIR work entirely in plain mode.
             let sizes = if verbose {
-                download_size::compute(repo_path, &distdir, &data, &order, &use_config, &package_use)
+                download_size::compute(
+                    repo_path,
+                    &distdir,
+                    &data,
+                    &order,
+                    &use_config,
+                    &package_use,
+                )
             } else {
                 HashMap::new()
             };
-            output::print_pretty(&data, &order, &installed, &use_config, &package_use, &use_expand, &use_expand_hidden, &flag_reqs, &sizes, verbose)
+            output::print_pretty(
+                &data,
+                &order,
+                &installed,
+                &use_config,
+                &package_use,
+                &use_expand,
+                &use_expand_hidden,
+                &flag_reqs,
+                &sizes,
+                verbose,
+            )
         }
-        DepgraphFormat::Json => {
-            output::print_json(&data, &order, &edges, &installed, &flag_reqs)
-        }
+        DepgraphFormat::Json => output::print_json(&data, &order, &edges, &installed, &flag_reqs),
         DepgraphFormat::Tree => {
             let roots: Vec<_> = root_pkgs
                 .iter()
@@ -394,9 +424,13 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
                     let ver = edges
                         .iter()
                         .find_map(|e| {
-                            if &e.from.0 == pkg { Some(e.from.1.clone()) }
-                            else if &e.to.0 == pkg { Some(e.to.1.clone()) }
-                            else { None }
+                            if &e.from.0 == pkg {
+                                Some(e.from.1.clone())
+                            } else if &e.to.0 == pkg {
+                                Some(e.to.1.clone())
+                            } else {
+                                None
+                            }
                         })
                         .or_else(|| order.iter().find(|(p, _)| p == pkg).map(|(_, v)| v.clone()));
                     ver.map(|v| (pkg.clone(), v))
@@ -433,8 +467,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
             output::report_solver_violations(&violations);
         }
 
-        let ru_violations =
-            required_use::find_violations(&data, &order, &use_config, &package_use);
+        let ru_violations = required_use::find_violations(&data, &order, &use_config, &package_use);
         if !ru_violations.is_empty() {
             output::report_required_use(&ru_violations);
         }

@@ -146,7 +146,9 @@ impl Ord for PortagePackage {
             // (otherwise distinct nodes collapse in a `BTreeSet`/`BTreeMap`).
             (Self::UseDecision { name: a }, Self::UseDecision { name: b })
             | (Self::Choice { name: a }, Self::Choice { name: b })
-            | (Self::SlotChoice { name: a }, Self::SlotChoice { name: b }) => a.as_str().cmp(b.as_str()),
+            | (Self::SlotChoice { name: a }, Self::SlotChoice { name: b }) => {
+                a.as_str().cmp(b.as_str())
+            }
             _ => self.discriminant_ord().cmp(&other.discriminant_ord()),
         }
     }

@@ -31,23 +31,31 @@ pub(super) struct AutounmaskCandidate {
 /// Returns true if the keyword list satisfies `accept_keywords` for the given arch.
 ///
 /// Empty `accept_keywords` falls back to accepting stable + testing (tool default).
-pub(super) fn keyword_accepts(keywords: &[Keyword], arch: &str, accept_keywords: &[String]) -> bool {
+pub(super) fn keyword_accepts(
+    keywords: &[Keyword],
+    arch: &str,
+    accept_keywords: &[String],
+) -> bool {
     if accept_keywords.iter().any(|k| k == "**") {
         return true;
     }
     if accept_keywords.is_empty() {
         // No ACCEPT_KEYWORDS loaded; the profile baseline is stable-only.
-        return keywords.iter().any(|kw| {
-            kw.arch.as_str() == arch && kw.stability == Stability::Stable
-        });
+        return keywords
+            .iter()
+            .any(|kw| kw.arch.as_str() == arch && kw.stability == Stability::Stable);
     }
     // Portage semantics: accepting `~arch` (testing) implies accepting stable
     // `arch` too — testing is a superset of stable.  `*` accepts any stable
     // keyword for the arch, `~*` any testing keyword (which also implies stable).
     let testing_tok = format!("~{arch}");
-    let accept_testing = accept_keywords.iter().any(|k| *k == testing_tok || k == "~*");
-    let accept_stable =
-        accept_testing || accept_keywords.iter().any(|k| k.as_str() == arch || k == "*");
+    let accept_testing = accept_keywords
+        .iter()
+        .any(|k| *k == testing_tok || k == "~*");
+    let accept_stable = accept_testing
+        || accept_keywords
+            .iter()
+            .any(|k| k.as_str() == arch || k == "*");
 
     keywords.iter().any(|kw| {
         if kw.arch.as_str() != arch {
@@ -99,21 +107,30 @@ fn licenses_needed(expr: &LicenseExpr, accept: &[String]) -> Vec<String> {
     }
     match expr {
         LicenseExpr::License(name) => {
-            if accept.iter().any(|a| a == name) { vec![] } else { vec![name.clone()] }
+            if accept.iter().any(|a| a == name) {
+                vec![]
+            } else {
+                vec![name.clone()]
+            }
         }
         LicenseExpr::AnyOf(children) => {
             if children.iter().any(|c| license_accepted(c, accept)) {
                 vec![]
             } else {
-                children.first().map(|c| licenses_needed(c, accept)).unwrap_or_default()
+                children
+                    .first()
+                    .map(|c| licenses_needed(c, accept))
+                    .unwrap_or_default()
             }
         }
-        LicenseExpr::All(children) => {
-            children.iter().flat_map(|c| licenses_needed(c, accept)).collect()
-        }
-        LicenseExpr::UseConditional { entries, .. } => {
-            entries.iter().flat_map(|e| licenses_needed(e, accept)).collect()
-        }
+        LicenseExpr::All(children) => children
+            .iter()
+            .flat_map(|c| licenses_needed(c, accept))
+            .collect(),
+        LicenseExpr::UseConditional { entries, .. } => entries
+            .iter()
+            .flat_map(|e| licenses_needed(e, accept))
+            .collect(),
     }
 }
 
@@ -128,7 +145,11 @@ pub(super) fn mask_matches(mask_dep: &Dep, cpv: &Cpv) -> bool {
     let cand = &cpv.version;
     match op {
         Operator::Equal => {
-            if mask_dep.glob { cand.glob_matches(mask_ver) } else { cand == mask_ver }
+            if mask_dep.glob {
+                cand.glob_matches(mask_ver)
+            } else {
+                cand == mask_ver
+            }
         }
         Operator::GreaterOrEqual => cand >= mask_ver,
         Operator::Greater => cand > mask_ver,
@@ -245,8 +266,7 @@ impl PackageRepository for Adapter<'_> {
             // base leaves exactly those flags set.
             let empty = UseConfig::new();
             let pins = apply_package_use(&empty, cpv, slot, self.package_use);
-            let iuse: std::collections::HashSet<&str> =
-                m.iuse.iter().map(|iu| iu.name()).collect();
+            let iuse: std::collections::HashSet<&str> = m.iuse.iter().map(|iu| iu.name()).collect();
             // Flags pinned by use.force/use.mask (global, package-level and the
             // stable variants): hard profile decisions, never ceded.
             let forced_masked = self.force_mask.pins(cpv, stable);
@@ -279,7 +299,11 @@ impl PackageRepository for Adapter<'_> {
                     .filter(|(cpv, cache)| {
                         let meta = &cache.metadata;
                         // Keyword check
-                        if !keyword_accepts(&meta.keywords, self.arch.as_str(), self.accept_keywords) {
+                        if !keyword_accepts(
+                            &meta.keywords,
+                            self.arch.as_str(),
+                            self.accept_keywords,
+                        ) {
                             return false;
                         }
                         // Mask check
@@ -302,8 +326,7 @@ impl PackageRepository for Adapter<'_> {
                             Some(meta.slot.slot)
                         };
                         let subslot = meta.slot.subslot;
-                        let repo =
-                            Some(Interned::<DefaultInterner>::intern(&self.data.repo_name));
+                        let repo = Some(Interned::<DefaultInterner>::intern(&self.data.repo_name));
                         let iuse: Vec<Interned<DefaultInterner>> = meta
                             .iuse
                             .iter()
@@ -336,10 +359,7 @@ impl PackageRepository for Adapter<'_> {
                         // Translate the parsed metadata grammar into the solver's
                         // interned-flag fact vocabulary (the crate stays free of
                         // portage-metadata). Dormant until Level-C consumes it.
-                        let required_use = meta
-                            .required_use
-                            .as_ref()
-                            .map(translate_required_use);
+                        let required_use = meta.required_use.as_ref().map(translate_required_use);
                         (
                             cpv.clone(),
                             PackageVersions {
@@ -390,7 +410,10 @@ fn translate_required_use(expr: &RequiredUseExpr) -> RequiredUse {
 
 /// Collect every flag name mentioned in a `REQUIRED_USE` expression (guards and
 /// operands, ignoring `!`), for deciding which flags to cede.
-fn collect_required_use_flags(expr: &RequiredUseExpr, out: &mut std::collections::BTreeSet<String>) {
+fn collect_required_use_flags(
+    expr: &RequiredUseExpr,
+    out: &mut std::collections::BTreeSet<String>,
+) {
     match expr {
         RequiredUseExpr::Flag { name, .. } => {
             out.insert(name.clone());
@@ -460,7 +483,10 @@ pub(super) fn target_package(
         .filter(|(cpv, cache)| {
             keyword_accepts(&cache.metadata.keywords, arch.as_str(), accept_keywords)
                 && !package_mask.iter().any(|m| mask_matches(m, cpv))
-                && cache.metadata.license.as_ref()
+                && cache
+                    .metadata
+                    .license
+                    .as_ref()
                     .map_or(true, |l| license_accepted(l, accept_license))
         })
         .collect();
@@ -473,7 +499,11 @@ pub(super) fn target_package(
         .iter()
         .filter_map(|(_, cache)| {
             let s = &cache.metadata.slot.slot;
-            if s.as_str().is_empty() { None } else { Some(*s) }
+            if s.as_str().is_empty() {
+                None
+            } else {
+                Some(*s)
+            }
         })
         .collect();
     slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -487,7 +517,11 @@ pub(super) fn target_package(
                 .iter()
                 .filter_map(|(cpv, cache)| {
                     let s = &cache.metadata.slot.slot;
-                    if s.as_str().is_empty() { None } else { Some((cpv.version.clone(), *s)) }
+                    if s.as_str().is_empty() {
+                        None
+                    } else {
+                        Some((cpv.version.clone(), *s))
+                    }
                 })
                 .max_by(|a, b| a.0.cmp(&b.0))
                 .map(|(_, s)| s)
@@ -519,13 +553,21 @@ pub(super) fn cpns_for(data: &RepoData, cpn: &Cpn, ver: &Version) -> Vec<Cpn> {
         }
     }
 
-    let Some(entries) = data.versions.get(cpn) else { return vec![] };
+    let Some(entries) = data.versions.get(cpn) else {
+        return vec![];
+    };
     let Some((_, cache)) = entries.iter().find(|(cpv, _)| &cpv.version == ver) else {
         return vec![];
     };
     let meta = &cache.metadata;
     let mut out = Vec::new();
-    for deps in [&meta.depend, &meta.rdepend, &meta.bdepend, &meta.pdepend, &meta.idepend] {
+    for deps in [
+        &meta.depend,
+        &meta.rdepend,
+        &meta.bdepend,
+        &meta.pdepend,
+        &meta.idepend,
+    ] {
         walk(deps, &mut out);
     }
     out
@@ -615,8 +657,8 @@ pub(super) fn find_autounmask_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::force_mask::ForceMask;
+    use super::*;
     use portage_atom_pubgrub::{PackageRepository, UseConfig, UseFlagState};
 
     /// Build a one-package `RepoData` from md5-cache text.
@@ -626,7 +668,11 @@ mod tests {
         let mut versions = HashMap::new();
         versions.insert(cpv.cpn, vec![(cpv.clone(), entry)]);
         (
-            RepoData { cpns: vec![cpv.cpn], versions, repo_name: "test".into() },
+            RepoData {
+                cpns: vec![cpv.cpn],
+                versions,
+                repo_name: "test".into(),
+            },
             cpv,
         )
     }
@@ -645,7 +691,10 @@ mod tests {
         use_config.enable(Interned::intern("a"));
         use_config.enable(Interned::intern("b")); // both on ⇒ ?? ( a b ) violated
 
-        let fm = ForceMask { use_force: vec!["a".to_string()], ..Default::default() };
+        let fm = ForceMask {
+            use_force: vec!["a".to_string()],
+            ..Default::default()
+        };
         let adapter = Adapter {
             data: &data,
             arch: &arch,
@@ -664,7 +713,10 @@ mod tests {
             "forced flag a must stay fixed-enabled, not ceded"
         );
         assert!(
-            matches!(desired.get(&Interned::intern("b")), UseFlagState::SolverDecided { .. }),
+            matches!(
+                desired.get(&Interned::intern("b")),
+                UseFlagState::SolverDecided { .. }
+            ),
             "non-forced flag b should be ceded to satisfy the violated ?? ( a b )"
         );
     }
@@ -697,7 +749,10 @@ mod tests {
         let desired = adapter.desired_use(&cpv);
         for f in ["a", "b"] {
             assert!(
-                matches!(desired.get(&Interned::intern(f)), UseFlagState::SolverDecided { .. }),
+                matches!(
+                    desired.get(&Interned::intern(f)),
+                    UseFlagState::SolverDecided { .. }
+                ),
                 "flag {f} should be ceded when nothing pins it"
             );
         }
@@ -730,7 +785,10 @@ mod tests {
         let desired = adapter.desired_use(&cpv);
         for f in ["a", "b"] {
             assert!(
-                !matches!(desired.get(&Interned::intern(f)), UseFlagState::SolverDecided { .. }),
+                !matches!(
+                    desired.get(&Interned::intern(f)),
+                    UseFlagState::SolverDecided { .. }
+                ),
                 "flag {f} must not be ceded when REQUIRED_USE already holds"
             );
         }
@@ -749,8 +807,14 @@ mod tests {
         use_config.enable(Interned::intern("cet")); // user enabled a flag the profile masks
 
         let fm = ForceMask {
-            pkg_force: vec![(Dep::parse("cross-foo/gcc").unwrap(), vec!["multilib".to_string()])],
-            pkg_mask: vec![(Dep::parse("cross-foo/gcc").unwrap(), vec!["cet".to_string()])],
+            pkg_force: vec![(
+                Dep::parse("cross-foo/gcc").unwrap(),
+                vec!["multilib".to_string()],
+            )],
+            pkg_mask: vec![(
+                Dep::parse("cross-foo/gcc").unwrap(),
+                vec!["cet".to_string()],
+            )],
             ..Default::default()
         };
         let adapter = Adapter {

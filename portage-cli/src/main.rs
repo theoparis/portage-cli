@@ -86,12 +86,18 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         autounmask_write: cli.autounmask_write,
         autosolve_use: cli.autosolve_use,
         root,
-    }).await
+    })
+    .await
 }
 
 async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
     match applet {
-        Applet::Ebuild { ebuild_path, phase, work_dir, root } => {
+        Applet::Ebuild {
+            ebuild_path,
+            phase,
+            work_dir,
+            root,
+        } => {
             let repo_override = globals.repo.as_deref();
             ebuild::run(ebuild_path, phase, work_dir.as_deref(), repo_override, root).await
         }
@@ -109,10 +115,23 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             eprintln!("depclean: atoms={:?}", parsed);
             bail!("not implemented: depclean")
         }
-        Applet::Regen { repos, output, repos_dir, jobs, dedup } => {
+        Applet::Regen {
+            repos,
+            output,
+            repos_dir,
+            jobs,
+            dedup,
+        } => {
             let resolved = globals.repo_path();
             let repo_path = repos.first().map(|r| r.as_str()).unwrap_or(&resolved);
-            regen::run(repo_path, repos_dir.as_deref(), output.clone(), *jobs, *dedup).await
+            regen::run(
+                repo_path,
+                repos_dir.as_deref(),
+                output.clone(),
+                *jobs,
+                *dedup,
+            )
+            .await
         }
         Applet::Quickpkg { atoms } => {
             let parsed = parse_atoms(atoms);
@@ -126,9 +145,11 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
         Applet::Pkg { command } => pkg::run(command),
         Applet::Query { command } => run_query(command, globals).await,
         Applet::Clean { target } => run_clean(target),
-        Applet::Use { add, remove, make_conf } => {
-            use_flags::run(add, remove, make_conf.as_deref())
-        }
+        Applet::Use {
+            add,
+            remove,
+            make_conf,
+        } => use_flags::run(add, remove, make_conf.as_deref()),
         Applet::Revdep { args } => {
             eprintln!("revdep: args={:?}", args);
             bail!("not implemented: revdep")
@@ -144,8 +165,22 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             eprintln!("grep: pattern={} paths={:?}", pattern, paths);
             bail!("not implemented: grep")
         }
-        Applet::Search { all, desc, name_only, homepage, pattern } => {
-            search::run(&globals.search_repos(), pattern.as_deref(), *all, *desc, *name_only, *homepage).await
+        Applet::Search {
+            all,
+            desc,
+            name_only,
+            homepage,
+            pattern,
+        } => {
+            search::run(
+                &globals.search_repos(),
+                pattern.as_deref(),
+                *all,
+                *desc,
+                *name_only,
+                *homepage,
+            )
+            .await
         }
         Applet::Atom { atoms } => run_atom(atoms),
         Applet::Select { module, args } => {
@@ -217,7 +252,11 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
         QueryCommand::Depends { atom } => {
             query::depends::run(&std::path::PathBuf::from(globals.repo_path()), atom)
         }
-        QueryCommand::Depgraph { atom, format, autosolve_use } => {
+        QueryCommand::Depgraph {
+            atom,
+            format,
+            autosolve_use,
+        } => {
             let parsed = parse_atoms(atom);
             let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
             if atoms.is_empty() {
@@ -240,7 +279,8 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 autounmask_write: globals.autounmask_write,
                 autosolve_use: *autosolve_use || globals.autosolve_use,
                 root,
-            }).await
+            })
+            .await
         }
         QueryCommand::Files { atom } => {
             let vdb = open_vdb(globals)?;
@@ -266,7 +306,11 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
         }
         QueryCommand::Meta { atom } => {
             let vdb = open_vdb(globals).ok();
-            query::meta::run(&std::path::PathBuf::from(globals.repo_path()), vdb.as_ref(), atom)
+            query::meta::run(
+                &std::path::PathBuf::from(globals.repo_path()),
+                vdb.as_ref(),
+                atom,
+            )
         }
         QueryCommand::Size { atom } => {
             let vdb = open_vdb(globals)?;
@@ -274,7 +318,11 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
         }
         QueryCommand::Uses { atom } => {
             let vdb = open_vdb(globals).ok();
-            query::uses::run(&std::path::PathBuf::from(globals.repo_path()), vdb.as_ref(), atom)
+            query::uses::run(
+                &std::path::PathBuf::from(globals.repo_path()),
+                vdb.as_ref(),
+                atom,
+            )
         }
         QueryCommand::Which { atom } => {
             query::which::run(&std::path::PathBuf::from(globals.repo_path()), atom)

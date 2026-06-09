@@ -60,8 +60,7 @@ impl Vdb {
             Err(source) => return Err(Error::Io { path, source }),
         };
         let next = current + 1;
-        std::fs::write(&path, format!("{next}\n"))
-            .map_err(|source| Error::Io { path, source })?;
+        std::fs::write(&path, format!("{next}\n")).map_err(|source| Error::Io { path, source })?;
         Ok(next)
     }
 
@@ -77,8 +76,10 @@ impl Vdb {
         let pf = format!("{}-{}", spec.cpv.cpn.package.as_ref(), spec.cpv.version);
         let pkg_dir = self.root().join(category).join(&pf);
 
-        std::fs::create_dir_all(&pkg_dir)
-            .map_err(|source| Error::Io { path: pkg_dir.clone(), source })?;
+        std::fs::create_dir_all(&pkg_dir).map_err(|source| Error::Io {
+            path: pkg_dir.clone(),
+            source,
+        })?;
 
         let write_field = |name: &str, content: String| -> Result<()> {
             let p = pkg_dir.join(name);
@@ -135,8 +136,7 @@ impl Vdb {
     /// installed files (from `CONTENTS`) before calling this.
     pub fn unregister(&self, pkg: &InstalledPackage) -> Result<()> {
         let path: Utf8PathBuf = pkg.path().to_path_buf();
-        std::fs::remove_dir_all(&path)
-            .map_err(|source| Error::Io { path, source })
+        std::fs::remove_dir_all(&path).map_err(|source| Error::Io { path, source })
     }
 
     /// Find the installed package in the same main slot as the given CPN, if any.
@@ -157,12 +157,16 @@ impl Vdb {
             return Ok(None);
         }
 
-        let read_dir = std::fs::read_dir(cat_dir.as_std_path())
-            .map_err(|source| Error::Io { path: cat_dir, source })?;
+        let read_dir = std::fs::read_dir(cat_dir.as_std_path()).map_err(|source| Error::Io {
+            path: cat_dir,
+            source,
+        })?;
 
         for entry in read_dir {
-            let entry = entry
-                .map_err(|source| Error::Io { path: self.root().to_path_buf(), source })?;
+            let entry = entry.map_err(|source| Error::Io {
+                path: self.root().to_path_buf(),
+                source,
+            })?;
             let pkg_path: Utf8PathBuf = match entry.path().try_into() {
                 Ok(p) => p,
                 Err(_) => continue,
