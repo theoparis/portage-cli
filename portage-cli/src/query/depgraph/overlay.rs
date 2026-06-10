@@ -1,0 +1,208 @@
+//! Overlay metadata loading.
+//!
+//! Overlays often ship no `metadata/md5-cache` (crossdev writes plain
+//! ebuilds). Metadata for such ebuilds is extracted by sourcing them with the
+//! ebuild shell — eclasses resolved through the overlay's masters — and the
+//! result is cached under the user cache directory in md5-cache format, keyed
+//! by the ebuild's md5 and the inherited eclass digests, so later runs read it
+//! like any other cache.
+
+use std::collections::HashMap;
+
+use camino::Utf8PathBuf;
+use portage_atom::Cpv;
+use portage_metadata::CacheEntry;
+use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
+
+/// Every metadata entry of `repo`: its own md5-cache when present and fresh,
+/// the user cache when valid, sourcing as the fallback.
+pub(super) async fn overlay_entries(
+    repo: &Repository,
+    masters: &[Repository],
+) -> Vec<(Cpv, CacheEntry)> {
+    let mut cached: HashMap<Cpv, CacheEntry> = cache_entries_parallel(
+        std::slice::from_ref(repo),
+        &CacheReadOpts::default(),
+        |text| CacheEntry::parse(text).map_err(portage_repo::Error::from),
+    )
+    .await
+    .into_iter()
+    .filter_map(|(cpv, e)| e.ok().map(|e| (cpv, e)))
+    .collect();
+
+    // Valid categories are the union across the overlay and its masters
+    // (portage semantics) — crossdev-style overlays rely on this.
+    let mut categories: std::collections::HashSet<String> = std::iter::once(repo)
+        .chain(masters.iter())
+        .flat_map(|r| {
+            std::fs::read_to_string(r.path().join("profiles/categories"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    categories.retain(|c| !c.is_empty());
+    let Ok(ebuilds) = repo.ebuilds_in_categories(categories) else {
+        return cached.into_iter().collect();
+    };
+
+    let user_cache = user_cache_dir(repo.name());
+    let mut out: Vec<(Cpv, CacheEntry)> = Vec::new();
+    let mut shell = None;
+
+    for ebuild in ebuilds {
+        let cpv = ebuild.cpv().clone();
+        let Ok(bytes) = std::fs::read(ebuild.path()) else {
+            continue;
+        };
+        let digest = format!("{:x}", md5::compute(&bytes));
+        let valid = |entry: &CacheEntry| {
+            entry
+                .md5
+                .as_deref()
+                .is_some_and(|m| m.eq_ignore_ascii_case(&digest))
+                && repo.is_fresh(entry, masters)
+        };
+
+        // The overlay's own md5-cache.
+        if let Some(entry) = cached.remove(&cpv)
+            && valid(&entry)
+        {
+            out.push((cpv, entry));
+            continue;
+        }
+
+        // A symlinked ebuild (crossdev links whole package directories to the
+        // host repo) is byte-identical to a master's ebuild, so the master's
+        // md5-cache entry *is* its metadata — reuse it instead of sourcing.
+        // This also gets subtleties right that re-sourcing can miss (e.g.
+        // KEYWORDS stripped to empty on live toolchain ebuilds).
+        if let Some(entry) = master_cache_entry(&ebuild, masters, &digest) {
+            out.push((cpv, entry));
+            continue;
+        }
+
+        // Previously sourced and cached by us.
+        let cache_path = user_cache
+            .join(cpv.cpn.category.as_str())
+            .join(format!("{}-{}", cpv.cpn.package, cpv.version));
+        if let Ok(text) = std::fs::read_to_string(&cache_path)
+            && let Ok(entry) = CacheEntry::parse(&text)
+            && valid(&entry)
+        {
+            out.push((cpv, entry));
+            continue;
+        }
+
+        // A previous run failed to source this exact ebuild — don't retry
+        // every invocation (the marker holds the failing ebuild's digest).
+        let fail_path = cache_path.with_extension("fail");
+        if std::fs::read_to_string(&fail_path).is_ok_and(|d| d.trim() == digest) {
+            continue;
+        }
+
+        // Source the ebuild (shell started lazily, masters' eclasses visible).
+        let sh = match &mut shell {
+            Some(s) => s,
+            None => {
+                let master_refs: Vec<&Repository> = masters.iter().collect();
+                match repo.shell_with_masters(&master_refs).await {
+                    Ok(s) => shell.insert(s),
+                    Err(e) => {
+                        eprintln!(
+                            "!!! repo '{}': cannot start ebuild shell for metadata: {e}",
+                            repo.name()
+                        );
+                        break;
+                    }
+                }
+            }
+        };
+        match sh.source_ebuild(&ebuild).await {
+            Ok(sourced) => {
+                let eclasses = sourced
+                    .eclasses
+                    .iter()
+                    .filter_map(|(name, path)| {
+                        std::fs::read(path)
+                            .ok()
+                            .map(|b| (name.clone(), format!("{:x}", md5::compute(&b))))
+                    })
+                    .collect();
+                let entry = CacheEntry {
+                    metadata: sourced.metadata,
+                    md5: Some(digest),
+                    eclasses,
+                };
+                if let Some(parent) = cache_path.parent()
+                    && std::fs::create_dir_all(parent).is_ok()
+                {
+                    let _ = std::fs::write(&cache_path, entry.serialize());
+                }
+                out.push((cpv, entry));
+            }
+            Err(e) => {
+                eprintln!("!!! repo '{}': failed to source {cpv}: {e}", repo.name());
+                if let Some(parent) = fail_path.parent()
+                    && std::fs::create_dir_all(parent).is_ok()
+                {
+                    let _ = std::fs::write(&fail_path, &digest);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The master-repo md5-cache entry for a symlinked ebuild, when the link
+/// resolves inside a master and the cache entry matches the file (`_md5_`).
+fn master_cache_entry(
+    ebuild: &portage_repo::Ebuild,
+    masters: &[Repository],
+    digest: &str,
+) -> Option<CacheEntry> {
+    let real = ebuild.path().canonicalize_utf8().ok()?;
+    if real == ebuild.path() {
+        return None;
+    }
+    for master in masters {
+        let Ok(rel) = real.strip_prefix(master.path()) else {
+            continue;
+        };
+        // rel = <category>/<pkg>/<pkg-ver>.ebuild → md5-cache/<category>/<pkg-ver>
+        let mut comps = rel.components();
+        let category = comps.next()?.as_str();
+        let stem = rel.file_stem()?;
+        let cache_file = master
+            .path()
+            .join("metadata/md5-cache")
+            .join(category)
+            .join(stem);
+        let text = std::fs::read_to_string(&cache_file).ok()?;
+        let entry = CacheEntry::parse(&text).ok()?;
+        if entry
+            .md5
+            .as_deref()
+            .is_some_and(|m| m.eq_ignore_ascii_case(digest))
+        {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+/// `$XDG_CACHE_HOME/em/md5-cache/<repo>` (or `~/.cache/...`).
+fn user_cache_dir(repo_name: &str) -> Utf8PathBuf {
+    let base = std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(Utf8PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| Utf8PathBuf::from(h).join(".cache"))
+        })
+        .unwrap_or_else(|| Utf8PathBuf::from("/tmp"));
+    base.join("em/md5-cache").join(repo_name)
+}

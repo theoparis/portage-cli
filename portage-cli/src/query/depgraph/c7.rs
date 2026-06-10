@@ -41,6 +41,7 @@ fn repo_from(entries: &[(&str, &str)]) -> RepoData {
         versions.entry(cpv.cpn).or_default().push((cpv, entry));
     }
     RepoData {
+        repo_of: Default::default(),
         cpns,
         versions,
         repo_name: "test".into(),

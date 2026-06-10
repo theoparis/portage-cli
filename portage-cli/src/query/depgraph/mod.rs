@@ -6,6 +6,7 @@ mod download_size;
 mod force_mask;
 mod installed;
 mod output;
+mod overlay;
 mod package_use;
 mod repo;
 mod required_use;
@@ -36,6 +37,9 @@ pub struct DepgraphOpts<'a> {
     pub autounmask: bool,
     pub autounmask_write: bool,
     pub autosolve_use: bool,
+    /// Load every repo from `repos.conf` (overlays sourced as needed). Off
+    /// when the user pinned a repo with `--repo`.
+    pub multi_repo: bool,
     pub root: Option<&'a Utf8Path>,
 }
 
@@ -53,13 +57,48 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<i32> {
         autounmask,
         autounmask_write,
         autosolve_use,
+        multi_repo,
         root,
     } = opts;
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
 
+    // Overlays from repos.conf (the main repo is loaded above). Masters are
+    // resolved relative to the main repo's parent directory (e.g. the
+    // crossdev overlay's `masters = gentoo` → /var/db/repos/gentoo).
+    let overlays: Vec<(Repository, Vec<Repository>)> = if multi_repo {
+        let repos_dir = repo
+            .path()
+            .parent()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        match portage_repo::ReposConf::load() {
+            Ok(rc) => rc
+                .repos()
+                .iter()
+                .filter(|e| e.location.as_path() != repo.path().as_std_path())
+                .filter_map(|e| {
+                    match Repository::open_with_masters(e.location.clone(), &repos_dir) {
+                        Ok(pair) => Some(pair),
+                        Err(err) => {
+                            eprintln!(
+                                "!!! skipping repo '{}' at {}: {err}",
+                                e.name,
+                                e.location.display()
+                            );
+                            None
+                        }
+                    }
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
     let (data, installed_entries, use_env_result) = tokio::join!(
-        repo::load_repo(&repo),
+        repo::load_repos(&repo, &overlays),
         async { installed::load_installed() },
         use_env::build_use_env(&repo, root),
     );
@@ -112,6 +151,13 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<i32> {
             }
             None => PortageVersionSet::any(),
         };
+        if !data.versions.contains_key(&dep.cpn) {
+            anyhow::bail!(
+                "no ebuilds found for '{target}' (searched ::{}{})",
+                data.repo_name,
+                if multi_repo { " and overlays" } else { "" },
+            );
+        }
         root_deps.push((pkg, vs));
     }
 

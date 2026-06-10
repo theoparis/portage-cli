@@ -292,8 +292,20 @@ impl Repository {
             util::read_lines(self.path.join("profiles").join("categories"))?
                 .into_iter()
                 .collect();
+        self.ebuilds_in_categories(categories)
+    }
 
+    /// Like [`ebuilds`](Self::ebuilds), but with an explicit category set.
+    ///
+    /// Portage treats the valid categories as the *union* across a repo and
+    /// its masters, so an overlay may ship packages in a master's category
+    /// without listing it in its own `profiles/categories`.
+    pub fn ebuilds_in_categories(&self, categories: HashSet<String>) -> Result<Ebuilds> {
+        // Follow symlinks: overlays like crossdev's symlink whole package
+        // directories to the host repo's ebuilds (the category comes from the
+        // logical path, so cross-*/gcc stays cross-*/gcc).
         let walker = WalkDir::new(&self.path)
+            .follow_links(true)
             .min_depth(3)
             .max_depth(3)
             .process_read_dir(move |depth, _path, _state, children| {

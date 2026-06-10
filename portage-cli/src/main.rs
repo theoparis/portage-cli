@@ -92,6 +92,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         autounmask: cli.autounmask,
         autounmask_write: cli.autounmask_write,
         autosolve_use: cli.autosolve_use,
+        multi_repo: cli.repo.is_none(),
         root,
     })
     .await?;
@@ -297,6 +298,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 autounmask: globals.autounmask,
                 autounmask_write: globals.autounmask_write,
                 autosolve_use: *autosolve_use || globals.autosolve_use,
+                multi_repo: globals.repo.is_none(),
                 root,
             })
             .await?;

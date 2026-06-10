@@ -657,7 +657,7 @@ pub(super) fn print_pretty(
 
         let slot_repo = if verbose >= 1 {
             cache
-                .map(|c| slot_repo_suffix(c, &data.repo_name))
+                .map(|c| slot_repo_suffix(c, super::repo::repo_name_of(data, &cpv)))
                 .unwrap_or_default()
         } else {
             String::new()

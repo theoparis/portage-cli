@@ -197,7 +197,17 @@ pub(super) fn mask_matches(mask_dep: &Dep, cpv: &Cpv) -> bool {
 pub(super) struct RepoData {
     pub(super) cpns: Vec<Cpn>,
     pub(super) versions: HashMap<Cpn, Vec<(Cpv, CacheEntry)>>,
+    /// The main repo's name; versions from overlays are recorded in `repo_of`.
     pub(super) repo_name: String,
+    /// Source repo of overlay-provided versions (absent ⇒ the main repo).
+    pub(super) repo_of: HashMap<Cpv, String>,
+}
+
+/// The repo a version comes from (for `::repo` display and constraints).
+pub(super) fn repo_name_of<'a>(data: &'a RepoData, cpv: &Cpv) -> &'a str {
+    data.repo_of
+        .get(cpv)
+        .map_or(data.repo_name.as_str(), String::as_str)
 }
 
 pub(super) struct Adapter<'a> {
@@ -400,7 +410,9 @@ impl PackageRepository for Adapter<'_> {
                             Some(meta.slot.slot)
                         };
                         let subslot = meta.slot.subslot;
-                        let repo = Some(Interned::<DefaultInterner>::intern(&self.data.repo_name));
+                        let repo = Some(Interned::<DefaultInterner>::intern(repo_name_of(
+                            self.data, cpv,
+                        )));
                         let iuse: Vec<Interned<DefaultInterner>> = meta
                             .iuse
                             .iter()
@@ -509,9 +521,17 @@ fn collect_required_use_flags(
     }
 }
 
-pub(super) async fn load_repo(repo: &Repository) -> RepoData {
+/// Load the main repo's md5-cache plus every overlay's metadata (sourcing
+/// cache-less ebuilds — see `overlay::overlay_entries`). A cpv provided by
+/// the main repo wins over an overlay copy; among overlays, earlier wins.
+pub(super) async fn load_repos(
+    repo: &Repository,
+    overlays: &[(Repository, Vec<Repository>)],
+) -> RepoData {
     let mut cpns_set: HashSet<Cpn> = HashSet::new();
     let mut versions: HashMap<Cpn, Vec<(Cpv, CacheEntry)>> = HashMap::new();
+    let mut repo_of: HashMap<Cpv, String> = HashMap::new();
+    let mut seen: HashSet<Cpv> = HashSet::new();
 
     let entries = cache_entries_parallel(
         std::slice::from_ref(repo),
@@ -524,7 +544,19 @@ pub(super) async fn load_repo(repo: &Repository) -> RepoData {
         if let Ok(entry) = entry {
             let cpn = cpv.cpn;
             cpns_set.insert(cpn);
+            seen.insert(cpv.clone());
             versions.entry(cpn).or_default().push((cpv, entry));
+        }
+    }
+
+    for (overlay, masters) in overlays {
+        for (cpv, entry) in super::overlay::overlay_entries(overlay, masters).await {
+            if !seen.insert(cpv.clone()) {
+                continue;
+            }
+            cpns_set.insert(cpv.cpn);
+            repo_of.insert(cpv.clone(), overlay.name().to_string());
+            versions.entry(cpv.cpn).or_default().push((cpv, entry));
         }
     }
 
@@ -535,6 +567,7 @@ pub(super) async fn load_repo(repo: &Repository) -> RepoData {
         cpns,
         versions,
         repo_name: repo.name().to_string(),
+        repo_of,
     }
 }
 
@@ -749,6 +782,7 @@ mod tests {
         versions.insert(cpv.cpn, vec![(cpv.clone(), entry)]);
         (
             RepoData {
+                repo_of: Default::default(),
                 cpns: vec![cpv.cpn],
                 versions,
                 repo_name: "test".into(),
