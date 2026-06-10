@@ -2347,4 +2347,72 @@ mod tests {
             "slot 3.12 present"
         );
     }
+    #[test]
+    fn use_dep_from_new_parent_on_installed_target_built_without_flag() {
+        // The distlib case: a NEW parent version BDEPENDs `b[flag]`; b is
+        // installed at a version whose BUILD lacked `flag`, but the global
+        // config has `flag` on (so a naive desired-config check looks
+        // satisfied). The requirement must still be raised (rebuild b).
+        let mut repo = InMemoryRepository::new();
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-libs/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![Interned::intern("flag")],
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("app-misc/a-2.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            vec![Interned::intern("flag")],
+            PackageDeps {
+                bdepend: DepEntry::parse("dev-libs/b[flag(-)?]").unwrap(),
+                ..empty_deps()
+            },
+        );
+        let mut cfg = UseConfig::new();
+        cfg.enable(Interned::intern("flag"));
+        let mut provider = {
+            repo.set_use_config(cfg);
+            PortageDependencyProvider::new(repo)
+        };
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let b = PortagePackage::slotted(Cpn::parse("dev-libs/b").unwrap(), Interned::intern("0"));
+        provider.add_installed(InstalledPackage {
+            package: a.clone(),
+            version: Version::parse("1.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
+        });
+        provider.add_installed(InstalledPackage {
+            package: b.clone(),
+            version: Version::parse("1.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![], // built WITHOUT `flag`
+            iuse: vec![Interned::intern("flag")],
+        });
+        let sol = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+        assert!(
+            sol.iter()
+                .any(|(p, v)| p.cpn().package.as_str() == "a"
+                    && v == &Version::parse("2.0").unwrap())
+        );
+        let req = provider
+            .use_flag_requirements()
+            .iter()
+            .find(|r| r.package.cpn().package.as_str() == "b")
+            .cloned();
+        let req = req.expect("b[flag] from the new parent must raise a requirement");
+        assert!(req.required_enabled.contains(&Interned::intern("flag")));
+    }
 }

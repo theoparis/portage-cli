@@ -208,10 +208,16 @@ impl PortageDependencyProvider {
                 let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(ver)) else {
                     continue;
                 };
+                // "Installed" for parent-flag evaluation means *selected at its
+                // installed version*: a package being upgraded gets its NEW
+                // version's flags from the desired config, not the old build's
+                // active USE (which would silently drop `[flag?]` conditionals
+                // the upgrade newly enables).
+                let at_installed_ver = self.installed.get(pkg).is_some_and(|(iv, _)| iv == ver);
                 self.accumulate_use_dep_violations(
                     pkg,
                     ver,
-                    self.installed.contains_key(pkg),
+                    at_installed_ver,
                     &vd.use_deps,
                     solution,
                     &mut by_target,
@@ -246,10 +252,11 @@ impl PortageDependencyProvider {
                 else {
                     continue;
                 };
+                // The upgraded version is by definition not the installed build.
                 self.accumulate_use_dep_violations(
                     &pkg,
                     &new_ver,
-                    self.installed.contains_key(&pkg),
+                    false,
                     &vd.use_deps,
                     solution,
                     &mut by_target,
