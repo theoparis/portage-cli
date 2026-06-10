@@ -61,20 +61,19 @@ fn resolve_ambiguous(
     raw: &str,
     candidates: &[portage_atom::Cpn],
 ) -> anyhow::Result<portage_atom::Dep> {
-    if let ResolveMode::PreferInstalled = mode {
-        if let Some(vdb) = vdb {
-            if let Some((dep, cpn)) = pick_installed(vdb, candidates) {
-                eprintln!(
-                    "note: '{raw}' is ambiguous ({}); using installed {cpn}",
-                    candidates
-                        .iter()
-                        .map(|c| c.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                return Ok(dep);
-            }
-        }
+    if let ResolveMode::PreferInstalled = mode
+        && let Some(vdb) = vdb
+        && let Some((dep, cpn)) = pick_installed(vdb, candidates)
+    {
+        eprintln!(
+            "note: '{raw}' is ambiguous ({}); using installed {cpn}",
+            candidates
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        return Ok(dep);
     }
     let names: Vec<String> = candidates.iter().map(|c| c.to_string()).collect();
     Err(anyhow!(

@@ -342,10 +342,10 @@ impl PackageRepository for Adapter<'_> {
                             return false;
                         }
                         // License check
-                        if let Some(lic) = &meta.license {
-                            if !license_accepted(lic, self.accept_license) {
-                                return false;
-                            }
+                        if let Some(lic) = &meta.license
+                            && !license_accepted(lic, self.accept_license)
+                        {
+                            return false;
                         }
                         true
                     })
@@ -518,7 +518,7 @@ pub(super) fn target_package(
                     .metadata
                     .license
                     .as_ref()
-                    .map_or(true, |l| license_accepted(l, accept_license))
+                    .is_none_or(|l| license_accepted(l, accept_license))
         })
         .collect();
 

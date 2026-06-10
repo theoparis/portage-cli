@@ -68,7 +68,7 @@ async fn run_one_phase(
     work_root: &Utf8Path,
     root: &Utf8Path,
 ) -> Result<()> {
-    match phase.as_ref() {
+    match phase {
         "fetch" => run_fetch(shell, ebuild, repo, work_root).await,
         "clean" => run_clean(work_root),
         "merge" | "qmerge" => run_merge(shell, ebuild, repo_root, work_root, root).await,
@@ -251,10 +251,10 @@ async fn run_merge(
     );
     let installed = vdb.register(&spec)?;
 
-    if let Ok(ref data) = env_dump {
-        if let Err(e) = write_environment_bz2(&installed, data) {
-            eprintln!("warning: could not write environment.bz2: {e}");
-        }
+    if let Ok(ref data) = env_dump
+        && let Err(e) = write_environment_bz2(&installed, data)
+    {
+        eprintln!("warning: could not write environment.bz2: {e}");
     }
 
     println!(
@@ -433,10 +433,10 @@ fn remove_old_unique_files(
 
         match entry.kind {
             ContentsKind::Obj | ContentsKind::Sym => {
-                if dest.exists() || std::fs::symlink_metadata(dest.as_std_path()).is_ok() {
-                    if let Err(e) = std::fs::remove_file(dest.as_std_path()) {
-                        eprintln!("warning: could not remove {dest}: {e}");
-                    }
+                if (dest.exists() || std::fs::symlink_metadata(dest.as_std_path()).is_ok())
+                    && let Err(e) = std::fs::remove_file(dest.as_std_path())
+                {
+                    eprintln!("warning: could not remove {dest}: {e}");
                 }
             }
             ContentsKind::Dir => {
@@ -647,19 +647,18 @@ fn open_or_create_vdb(path: &Utf8Path) -> Result<Vdb> {
 }
 
 fn gentoo_mirrors_list() -> Vec<String> {
-    if let Ok(val) = std::env::var("GENTOO_MIRRORS") {
-        if !val.trim().is_empty() {
-            return val.split_whitespace().map(str::to_owned).collect();
-        }
+    if let Ok(val) = std::env::var("GENTOO_MIRRORS")
+        && !val.trim().is_empty()
+    {
+        return val.split_whitespace().map(str::to_owned).collect();
     }
     for candidate in [DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF] {
         let p = Utf8Path::new(candidate);
-        if p.exists() {
-            if let Ok(mc) = MakeConf::load(p) {
-                if let Some(val) = mc.get("GENTOO_MIRRORS") {
-                    return val.split_whitespace().map(str::to_owned).collect();
-                }
-            }
+        if p.exists()
+            && let Ok(mc) = MakeConf::load(p)
+            && let Some(val) = mc.get("GENTOO_MIRRORS")
+        {
+            return val.split_whitespace().map(str::to_owned).collect();
         }
     }
     vec![]
@@ -668,13 +667,13 @@ fn gentoo_mirrors_list() -> Vec<String> {
 fn read_fetch_commands() -> (Option<String>, Option<String>) {
     for candidate in [DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF] {
         let p = Utf8Path::new(candidate);
-        if p.exists() {
-            if let Ok(mc) = MakeConf::load(p) {
-                let fetch = mc.get("FETCHCOMMAND").map(str::to_owned);
-                let resume = mc.get("RESUMECOMMAND").map(str::to_owned);
-                if fetch.is_some() || resume.is_some() {
-                    return (fetch, resume);
-                }
+        if p.exists()
+            && let Ok(mc) = MakeConf::load(p)
+        {
+            let fetch = mc.get("FETCHCOMMAND").map(str::to_owned);
+            let resume = mc.get("RESUMECOMMAND").map(str::to_owned);
+            if fetch.is_some() || resume.is_some() {
+                return (fetch, resume);
             }
         }
     }
@@ -684,12 +683,11 @@ fn read_fetch_commands() -> (Option<String>, Option<String>) {
 fn read_use_from_make_conf() -> Option<String> {
     for candidate in [DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF] {
         let p = Utf8Path::new(candidate);
-        if p.exists() {
-            if let Ok(mc) = MakeConf::load(p) {
-                if let Some(val) = mc.get("USE") {
-                    return Some(val.to_owned());
-                }
-            }
+        if p.exists()
+            && let Ok(mc) = MakeConf::load(p)
+            && let Some(val) = mc.get("USE")
+        {
+            return Some(val.to_owned());
         }
     }
     None

@@ -66,7 +66,7 @@ impl FromStr for Pf {
 
 impl PartialEq<str> for Pf {
     fn eq(&self, other: &str) -> bool {
-        Pf::parse(other).map_or(false, |other_pf| other_pf == *self)
+        Pf::parse(other).is_ok_and(|other_pf| other_pf == *self)
     }
 }
 

@@ -454,7 +454,7 @@ mod tests {
         repo.add(pkg("dev-lib/openssl-3.0.0", "0", vec![]));
 
         let use_config = UseConfig {
-            solver_decided: ["ssl"].into_iter().map(|s| Interned::intern(s)).collect(),
+            solver_decided: ["ssl"].into_iter().map(Interned::intern).collect(),
             ..UseConfig::default()
         };
         let mut provider = PortageDependencyProvider::new(&repo, &use_config);
@@ -496,7 +496,7 @@ mod tests {
         repo.add(pkg("dev-lib/libressl-3.9.0", "0", vec![]));
 
         let use_config = UseConfig {
-            solver_decided: ["ssl"].into_iter().map(|s| Interned::intern(s)).collect(),
+            solver_decided: ["ssl"].into_iter().map(Interned::intern).collect(),
             ..UseConfig::default()
         };
         let mut provider = PortageDependencyProvider::new(&repo, &use_config);
@@ -555,7 +555,7 @@ mod tests {
         repo.add(pkg("dev-lib/libressl-3.9.0", "0", vec![]));
 
         let use_config = UseConfig {
-            solver_decided: ["ssl"].into_iter().map(|s| Interned::intern(s)).collect(),
+            solver_decided: ["ssl"].into_iter().map(Interned::intern).collect(),
             ..UseConfig::default()
         };
         let mut provider = PortageDependencyProvider::new(&repo, &use_config);
@@ -626,7 +626,7 @@ mod tests {
         ));
 
         let use_config = UseConfig {
-            solver_decided: ["ssl"].into_iter().map(|s| Interned::intern(s)).collect(),
+            solver_decided: ["ssl"].into_iter().map(Interned::intern).collect(),
             ..UseConfig::default()
         };
         let mut provider = PortageDependencyProvider::new(&repo, &use_config);
@@ -677,7 +677,7 @@ mod tests {
         repo.add(pkg("dev-lib/bar-1.0", "0", vec![]));
 
         let use_config = UseConfig {
-            solver_decided: ["ssl"].into_iter().map(|s| Interned::intern(s)).collect(),
+            solver_decided: ["ssl"].into_iter().map(Interned::intern).collect(),
             ..UseConfig::default()
         };
         let mut provider = PortageDependencyProvider::new(&repo, &use_config);

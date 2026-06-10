@@ -451,11 +451,11 @@ fn collect_entries(dir: &Path) -> BTreeMap<String, PathBuf> {
         return map;
     };
     for entry in walk.flatten() {
-        if entry.file_type().is_file() {
-            if let Ok(rel) = entry.path().strip_prefix(dir) {
-                let cpv = rel.to_string_lossy().into_owned();
-                map.insert(cpv, entry.path());
-            }
+        if entry.file_type().is_file()
+            && let Ok(rel) = entry.path().strip_prefix(dir)
+        {
+            let cpv = rel.to_string_lossy().into_owned();
+            map.insert(cpv, entry.path());
         }
     }
     map

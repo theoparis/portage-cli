@@ -80,10 +80,8 @@ fn collect_violations(
                 // If every branch is violated, the OR group as a whole is violated.
                 // We report the first branch's violations as representative.
                 let all_violated = branch_violations.iter().all(|v| !v.is_empty());
-                if all_violated {
-                    if let Some(first) = branch_violations.into_iter().next() {
-                        out.extend(first);
-                    }
+                if all_violated && let Some(first) = branch_violations.into_iter().next() {
+                    out.extend(first);
                 }
             }
             _ => {}

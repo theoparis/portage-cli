@@ -121,32 +121,30 @@ impl ProfileStack {
 
             // Collect the fixed incremental vars.
             for var in &incr {
-                if let Some(val) = shell.get_var(var) {
-                    if !val.is_empty() {
-                        vars.insert(var.clone(), val);
-                    }
+                if let Some(val) = shell.get_var(var)
+                    && !val.is_empty()
+                {
+                    vars.insert(var.clone(), val);
                 }
             }
             // Discover any new USE_EXPAND keys this file introduced.
             let new_expand = shell.get_var("USE_EXPAND").unwrap_or_default();
             for key in new_expand.split_whitespace() {
-                if !incr.contains(&key.to_string()) {
-                    if let Some(val) = shell.get_var(key) {
-                        if !val.is_empty() {
-                            vars.insert(key.to_string(), val);
-                        }
-                    }
+                if !incr.contains(&key.to_string())
+                    && let Some(val) = shell.get_var(key)
+                    && !val.is_empty()
+                {
+                    vars.insert(key.to_string(), val);
                 }
             }
             // Same for USE_EXPAND_UNPREFIXED keys.
             let new_unprefixed = shell.get_var("USE_EXPAND_UNPREFIXED").unwrap_or_default();
             for key in new_unprefixed.split_whitespace() {
-                if !incr.contains(&key.to_string()) {
-                    if let Some(val) = shell.get_var(key) {
-                        if !val.is_empty() {
-                            vars.insert(key.to_string(), val);
-                        }
-                    }
+                if !incr.contains(&key.to_string())
+                    && let Some(val) = shell.get_var(key)
+                    && !val.is_empty()
+                {
+                    vars.insert(key.to_string(), val);
                 }
             }
 
@@ -330,21 +328,20 @@ async fn source_incremental(shell: &mut EbuildShell, path: &std::path::Path) -> 
     // Collect this file's contributions.
     let mut contributed: HashMap<String, String> = HashMap::new();
     for var in &incr {
-        if let Some(val) = shell.get_var(var) {
-            if !val.is_empty() {
-                contributed.insert(var.clone(), val);
-            }
+        if let Some(val) = shell.get_var(var)
+            && !val.is_empty()
+        {
+            contributed.insert(var.clone(), val);
         }
     }
     // Pick up any new USE_EXPAND keys the file introduced.
     let new_expand = shell.get_var("USE_EXPAND").unwrap_or_default();
     for key in new_expand.split_whitespace() {
-        if !incr.contains(&key.to_string()) {
-            if let Some(val) = shell.get_var(key) {
-                if !val.is_empty() {
-                    contributed.insert(key.to_string(), val);
-                }
-            }
+        if !incr.contains(&key.to_string())
+            && let Some(val) = shell.get_var(key)
+            && !val.is_empty()
+        {
+            contributed.insert(key.to_string(), val);
         }
     }
 

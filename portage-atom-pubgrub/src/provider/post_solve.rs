@@ -108,10 +108,10 @@ impl PortageDependencyProvider {
                 let parent_flag_enabled = if parent_is_installed {
                     self.installed_use
                         .get(parent)
-                        .map_or(false, |u| u.contains(&ud.flag))
+                        .is_some_and(|u| u.contains(&ud.flag))
                         || by_target
                             .get(parent)
-                            .map_or(false, |(_, e, _, _)| e.contains(&ud.flag))
+                            .is_some_and(|(_, e, _, _)| e.contains(&ud.flag))
                 } else {
                     self.effective_flag_new(parent, parent_ver, &ud.flag, None)
                 };

@@ -226,15 +226,15 @@ impl Fetcher {
                 let r = self
                     .run_command(template, url, dest.file_name().unwrap_or(""), dest)
                     .await;
-                if r.is_ok() {
-                    if let Some(entry) = manifest_entry {
-                        entry
-                            .verify_file(dest.as_std_path())
-                            .map_err(|e| Error::Verify {
-                                filename: dest.file_name().unwrap_or("?").to_owned(),
-                                reason: e.to_string(),
-                            })?;
-                    }
+                if r.is_ok()
+                    && let Some(entry) = manifest_entry
+                {
+                    entry
+                        .verify_file(dest.as_std_path())
+                        .map_err(|e| Error::Verify {
+                            filename: dest.file_name().unwrap_or("?").to_owned(),
+                            reason: e.to_string(),
+                        })?;
                 }
                 r
             }
@@ -257,24 +257,24 @@ impl Fetcher {
         };
 
         // If there's a resume command and a partial file, try it first.
-        if existing_size > 0 {
-            if let Some(resume_tmpl) = &self.config.resume_command {
-                let r = self
-                    .run_command(resume_tmpl, url, dest.file_name().unwrap_or(""), dest)
-                    .await;
-                if r.is_ok() {
-                    if let Some(entry) = manifest_entry {
-                        if entry.verify_file(dest.as_std_path()).is_ok() {
-                            return Ok(());
-                        }
-                        // Verification failed after resume — fall through to fresh download.
-                    } else {
+        if existing_size > 0
+            && let Some(resume_tmpl) = &self.config.resume_command
+        {
+            let r = self
+                .run_command(resume_tmpl, url, dest.file_name().unwrap_or(""), dest)
+                .await;
+            if r.is_ok() {
+                if let Some(entry) = manifest_entry {
+                    if entry.verify_file(dest.as_std_path()).is_ok() {
                         return Ok(());
                     }
+                    // Verification failed after resume — fall through to fresh download.
+                } else {
+                    return Ok(());
                 }
             }
-            // No resume command: use HTTP Range header.
         }
+        // No resume command: use HTTP Range header.
 
         // Build request, possibly with Range header for resume.
         let mut req = self.client.get(url);

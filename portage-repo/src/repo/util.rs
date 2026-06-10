@@ -94,7 +94,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "# comment").unwrap();
-        writeln!(f, "").unwrap();
+        writeln!(f).unwrap();
         writeln!(f, "  alpha  ").unwrap();
         writeln!(f, "# another comment").unwrap();
         writeln!(f, "beta").unwrap();

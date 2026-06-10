@@ -242,7 +242,7 @@ fn parse_root_cpns(root_atoms: &[String]) -> HashSet<String> {
             let base = r.trim_start_matches(['>', '<', '=', '~', '!']);
             if let Some(slash) = base.find('/') {
                 let after_slash = &base[slash + 1..];
-                if let Some(rel) = after_slash.rfind(|c: char| c == '-').and_then(|i| {
+                if let Some(rel) = after_slash.rfind('-').and_then(|i| {
                     after_slash[i + 1..]
                         .chars()
                         .next()

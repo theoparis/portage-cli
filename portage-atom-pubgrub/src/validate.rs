@@ -331,10 +331,10 @@ pub(crate) fn dep_matches_cpv(
     if dep.cpn != cpv.cpn {
         return false;
     }
-    if let Some(portage_atom::SlotDep::Slot { slot: Some(s), .. }) = &dep.slot_dep {
-        if slot != Some(s.slot) {
-            return false;
-        }
+    if let Some(portage_atom::SlotDep::Slot { slot: Some(s), .. }) = &dep.slot_dep
+        && slot != Some(s.slot)
+    {
+        return false;
     }
     match (dep.op, &dep.version) {
         (None, None) => true,

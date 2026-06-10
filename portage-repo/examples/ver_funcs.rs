@@ -27,7 +27,7 @@ async fn ver_test(sh: &mut EbuildShell, args: &str) -> bool {
     let _ = sh
         .run_string(&format!("ver_test {args} && _vt=y || _vt=n"))
         .await;
-    sh.get_var("_vt").map_or(false, |v| v == "y")
+    sh.get_var("_vt").is_some_and(|v| v == "y")
 }
 
 #[tokio::main(flavor = "current_thread")]

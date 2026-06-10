@@ -267,10 +267,10 @@ fn build_entries(src: &str, program: &brush_parser::ast::Program) -> Vec<Entry> 
             let mut vars = Vec::new();
             if let Some(prefix) = &simple.prefix {
                 for item in &prefix.0 {
-                    if let CommandPrefixOrSuffixItem::AssignmentWord(assignment, _) = item {
-                        if let Some(v) = var_from_assignment(src, assignment) {
-                            vars.push(v);
-                        }
+                    if let CommandPrefixOrSuffixItem::AssignmentWord(assignment, _) = item
+                        && let Some(v) = var_from_assignment(src, assignment)
+                    {
+                        vars.push(v);
                     }
                 }
             }

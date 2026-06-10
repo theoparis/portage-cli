@@ -63,11 +63,11 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[Stri
 
         println!("   Description: {}", m.description);
 
-        if let Some(ref pm) = pkg_meta {
-            if let Some(ref ld) = pm.longdescription {
-                for line in wrap(ld, 72) {
-                    println!("                {line}");
-                }
+        if let Some(ref pm) = pkg_meta
+            && let Some(ref ld) = pm.longdescription
+        {
+            for line in wrap(ld, 72) {
+                println!("                {line}");
             }
         }
 
@@ -91,10 +91,10 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[Stri
                     if let Ok(slot) = pkg.slot() {
                         println!("     Slot:      {slot}");
                     }
-                    if let Ok(repo_name) = pkg.repository() {
-                        if let Some(r) = repo_name {
-                            println!("     Repo:      {r}");
-                        }
+                    if let Ok(repo_name) = pkg.repository()
+                        && let Some(r) = repo_name
+                    {
+                        println!("     Repo:      {r}");
                     }
                     if let Ok(Some(ts)) = pkg.build_time() {
                         let t = UNIX_EPOCH + Duration::from_secs(ts);
@@ -103,10 +103,10 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[Stri
                     if let Ok(Some(bytes)) = pkg.size() {
                         println!("     Size:      {}", format_size(bytes, BINARY));
                     }
-                    if let Ok(flags) = pkg.use_flags() {
-                        if !flags.is_empty() {
-                            println!("     USE:       {}", flags.join(" "));
-                        }
+                    if let Ok(flags) = pkg.use_flags()
+                        && !flags.is_empty()
+                    {
+                        println!("     USE:       {}", flags.join(" "));
                     }
                 }
             }

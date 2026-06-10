@@ -439,7 +439,7 @@ fn main() {
     let flags_on = UseConfig::from(
         ["ssl", "xml"]
             .iter()
-            .map(|s| interner::Interned::intern(*s))
+            .map(|s| interner::Interned::intern(s))
             .collect::<HashSet<_>>(),
     );
     println!(
@@ -453,7 +453,7 @@ fn main() {
     let flags_no_ssl = UseConfig::from(
         ["xml"]
             .iter()
-            .map(|s| interner::Interned::intern(*s))
+            .map(|s| interner::Interned::intern(s))
             .collect::<HashSet<_>>(),
     );
     println!(
@@ -475,11 +475,11 @@ fn main() {
     let flags_solver = UseConfig {
         enabled: ["xml"]
             .iter()
-            .map(|s| interner::Interned::intern(*s))
+            .map(|s| interner::Interned::intern(s))
             .collect(),
         solver_decided: ["ssl"]
             .iter()
-            .map(|s| interner::Interned::intern(*s))
+            .map(|s| interner::Interned::intern(s))
             .collect(),
         ..UseConfig::default()
     };

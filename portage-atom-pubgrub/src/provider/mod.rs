@@ -465,11 +465,11 @@ impl PortageDependencyProvider {
 
         // Ensure the installed version exists in self.packages so PubGrub can
         // use it even when it has been removed from the repository tree.
-        if let Some(pkg_data) = self.packages.get_mut(&installed.package) {
-            if !pkg_data.versions.contains_key(&installed.version) {
-                let vd = VersionData::from_by_class(vec![vec![], vec![], vec![], vec![], vec![]]);
-                pkg_data.versions.insert(installed.version.clone(), vd);
-            }
+        if let Some(pkg_data) = self.packages.get_mut(&installed.package)
+            && !pkg_data.versions.contains_key(&installed.version)
+        {
+            let vd = VersionData::from_by_class(vec![vec![], vec![], vec![], vec![], vec![]]);
+            pkg_data.versions.insert(installed.version.clone(), vd);
         }
 
         if !installed.active_use.is_empty() {

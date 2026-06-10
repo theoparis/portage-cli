@@ -321,7 +321,7 @@ mod tests {
         spec.slot = "3.11".into();
         vdb.register(&spec).unwrap();
 
-        let cpn = cpv.cpn.clone();
+        let cpn = cpv.cpn;
         let found = vdb.find_slot_occupant(&cpn, "3.11").unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().cpv().to_string(), "dev-lang/python-3.11.9");
@@ -338,7 +338,7 @@ mod tests {
         spec.slot = "3.11".into();
         vdb.register(&spec).unwrap();
 
-        let cpn = cpv.cpn.clone();
+        let cpn = cpv.cpn;
         let found = vdb.find_slot_occupant(&cpn, "3.12").unwrap();
         assert!(found.is_none());
     }

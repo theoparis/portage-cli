@@ -87,12 +87,11 @@ fn collect_from_sets_dir(dir: &Utf8Path, names: &mut HashSet<String>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if !name.starts_with('.') {
-                    names.insert(name.to_string());
-                }
-            }
+        if path.is_file()
+            && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && !name.starts_with('.')
+        {
+            names.insert(name.to_string());
         }
     }
 }

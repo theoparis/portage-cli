@@ -48,17 +48,17 @@ async fn main() {
     }
 
     // Validate the arch filter against the known arch list.
-    if let Some(arch) = filter {
-        if !arch.contains('/') {
-            let known = repo.arch_list();
-            if !known.is_empty() && !known.iter().any(|a| repo.arch_keyword(a) == arch) {
-                let keywords: Vec<&str> = known.iter().map(|a| repo.arch_keyword(a)).collect();
-                eprintln!(
-                    "Unknown arch {arch:?}. Known arches: {}",
-                    keywords.join(", ")
-                );
-                process::exit(1);
-            }
+    if let Some(arch) = filter
+        && !arch.contains('/')
+    {
+        let known = repo.arch_list();
+        if !known.is_empty() && !known.iter().any(|a| repo.arch_keyword(a) == arch) {
+            let keywords: Vec<&str> = known.iter().map(|a| repo.arch_keyword(a)).collect();
+            eprintln!(
+                "Unknown arch {arch:?}. Known arches: {}",
+                keywords.join(", ")
+            );
+            process::exit(1);
         }
     }
 
@@ -154,17 +154,17 @@ async fn inspect_profile(repo: &Repository, profile_path: &str) {
         }
     }
 
-    if let Ok(masks) = stack.package_mask() {
-        if !masks.is_empty() {
-            println!("=== package.mask ({} atoms) ===", masks.len());
-            for dep in masks.iter().take(20) {
-                println!("  {dep}");
-            }
-            if masks.len() > 20 {
-                println!("  ... ({} more)", masks.len() - 20);
-            }
-            println!();
+    if let Ok(masks) = stack.package_mask()
+        && !masks.is_empty()
+    {
+        println!("=== package.mask ({} atoms) ===", masks.len());
+        for dep in masks.iter().take(20) {
+            println!("  {dep}");
         }
+        if masks.len() > 20 {
+            println!("  ... ({} more)", masks.len() - 20);
+        }
+        println!();
     }
 
     println!("=== Resolved USE flags (after make.defaults + force/mask) ===");
