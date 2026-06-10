@@ -136,7 +136,13 @@ async fn run_fetch(
 
     let (fetch_cmd, resume_cmd) = read_fetch_commands();
     let config = FetchConfig::from_make_conf(fetch_cmd, resume_cmd);
-    let fetcher = Fetcher::new(distdir.clone(), config);
+    let ro_distdirs: Vec<Utf8PathBuf> = shell
+        .get_var("PORTAGE_RO_DISTDIRS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(Utf8PathBuf::from)
+        .collect();
+    let fetcher = Fetcher::new(distdir.clone(), config).with_ro_distdirs(ro_distdirs);
 
     std::fs::create_dir_all(distdir.as_std_path())
         .with_context(|| format!("creating distdir {distdir}"))?;

@@ -42,6 +42,10 @@ impl builtins::Command for UnpackCommand {
                 s
             }
         };
+        let ro_distdirs: Vec<String> = get("PORTAGE_RO_DISTDIRS")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
         let eapi: u32 = get("EAPI").parse().unwrap_or(0);
         let cwd = shell.working_dir().to_path_buf();
         let archives = self.archives.clone();
@@ -55,7 +59,14 @@ impl builtins::Command for UnpackCommand {
                     }
                     std::path::PathBuf::from(archive)
                 } else {
-                    std::path::PathBuf::from(&distdir).join(archive)
+                    // The writable DISTDIR first, then the read-only fallbacks
+                    // (PORTAGE_RO_DISTDIRS — e.g. the system distfiles dir when
+                    // running unprivileged).
+                    std::iter::once(&distdir)
+                        .chain(ro_distdirs.iter())
+                        .map(|d| std::path::PathBuf::from(d).join(archive))
+                        .find(|p| p.exists())
+                        .unwrap_or_else(|| std::path::PathBuf::from(&distdir).join(archive))
                 };
 
                 if !src_path.exists() {

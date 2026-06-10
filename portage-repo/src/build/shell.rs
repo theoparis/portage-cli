@@ -827,7 +827,9 @@ impl EbuildShell {
         self.set_var("TMPDIR", &format!("{base}/temp"));
         self.set_var("HOME", &format!("{base}/homedir"));
         self.set_var("D", &format!("{base}/image/"));
-        self.set_var("DISTDIR", "/var/cache/distfiles");
+        let (distdir, ro) = Self::resolved_distdir();
+        self.set_var("DISTDIR", &distdir);
+        self.set_var("PORTAGE_RO_DISTDIRS", &ro.join(" "));
 
         // Phase/merge variables (PMS 11.1)
         self.set_var("EBUILD_PHASE", "depend");
@@ -983,13 +985,9 @@ impl EbuildShell {
             self.set_var("PATH", &format!("{}:{cur_path}", helpers.display()));
         }
 
-        // Writable DISTDIR: honour env override, fall back to ~/.cache/distfiles.
-        let distdir = std::env::var("DISTDIR").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            format!("{home}/.cache/distfiles")
-        });
-        std::fs::create_dir_all(&distdir).ok();
+        let (distdir, ro) = Self::resolved_distdir();
         self.set_var("DISTDIR", &distdir);
+        self.set_var("PORTAGE_RO_DISTDIRS", &ro.join(" "));
 
         // Pass through build-tool variables from the caller's environment.
         for var in &[
@@ -1250,6 +1248,13 @@ impl EbuildShell {
         };
         self.run_string(&format!("cd {cd_target}")).await.ok();
 
+        // failglob is a *global-scope* requirement (PMS 6, Table 6.1): it
+        // applies while sourcing the ebuild, not inside phase functions —
+        // portage likewise strips it before running phases (an unmatched glob
+        // in e.g. `dodoc CHANGES*` is the install helper's error to report,
+        // not a shell abort).
+        self.run_string("shopt -u failglob").await.ok();
+
         // Run the phase function (may have been defined by the ebuild or by
         // __ebuild_phase_funcs as a fallback calling default()).
         let phase_defined = self.shell.funcs().get(func_name).is_some();
@@ -1434,6 +1439,47 @@ impl EbuildShell {
         let mut flags: Vec<_> = self.use_flags.iter().cloned().collect();
         flags.sort();
         flags.join(" ")
+    }
+
+    /// Resolve the distfiles location: the writable primary plus read-only
+    /// fallbacks (`PORTAGE_RO_DISTDIRS`). Order: `$DISTDIR` from the
+    /// environment; else the system `/var/cache/distfiles` when writable;
+    /// else `~/.cache/distfiles` (created), with the unwritable system
+    /// directory kept as a read-only fallback so already-fetched files are
+    /// still found by `fetch`-presence checks and `unpack`.
+    fn resolved_distdir() -> (String, Vec<String>) {
+        const SYSTEM: &str = "/var/cache/distfiles";
+        let writable = |dir: &str| {
+            std::fs::create_dir_all(dir).is_ok() && {
+                let probe = std::path::Path::new(dir)
+                    .join(format!(".em-write-probe-{}", std::process::id()));
+                let ok = std::fs::write(&probe, b"").is_ok();
+                let _ = std::fs::remove_file(&probe);
+                ok
+            }
+        };
+        let mut ro: Vec<String> = std::env::var("PORTAGE_RO_DISTDIRS")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let primary = if let Ok(dir) = std::env::var("DISTDIR").map(|d| d.trim().to_string())
+            && !dir.is_empty()
+        {
+            std::fs::create_dir_all(&dir).ok();
+            dir
+        } else if writable(SYSTEM) {
+            SYSTEM.to_string()
+        } else {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            let dir = format!("{home}/.cache/distfiles");
+            std::fs::create_dir_all(&dir).ok();
+            dir
+        };
+        if primary != SYSTEM && std::path::Path::new(SYSTEM).is_dir() {
+            ro.push(SYSTEM.to_string());
+        }
+        (primary, ro)
     }
 
     /// Compute `$A` from `$SRC_URI` and inject it into the shell environment.

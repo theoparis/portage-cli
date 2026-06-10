@@ -95,6 +95,10 @@ pub enum FetchStatus {
 pub struct Fetcher {
     client: reqwest::Client,
     distdir: Utf8PathBuf,
+    /// Read-only distfile locations searched before downloading
+    /// (`PORTAGE_RO_DISTDIRS` semantics — e.g. the system distdir when the
+    /// writable one is a per-user directory).
+    ro_distdirs: Vec<Utf8PathBuf>,
     config: FetchConfig,
 }
 
@@ -103,8 +107,15 @@ impl Fetcher {
         Self {
             client: reqwest::Client::new(),
             distdir,
+            ro_distdirs: Vec::new(),
             config,
         }
+    }
+
+    /// Add read-only locations consulted for already-present distfiles.
+    pub fn with_ro_distdirs(mut self, dirs: Vec<Utf8PathBuf>) -> Self {
+        self.ro_distdirs = dirs;
+        self
     }
 
     /// Fetch a single distfile, verifying it against `manifest`.
@@ -122,13 +133,18 @@ impl Fetcher {
 
         let manifest_entry = manifest_entry_for(manifest, &df.filename);
 
-        // Fast path: already present and valid.
-        if dest.exists() {
+        // Fast path: already present and valid (writable dir first, then the
+        // read-only locations).
+        for dir in std::iter::once(&self.distdir).chain(self.ro_distdirs.iter()) {
+            let candidate = dir.join(&df.filename);
+            if !candidate.exists() {
+                continue;
+            }
             if let Some(entry) = manifest_entry {
-                if entry.verify_file(dest.as_std_path()).is_ok() {
+                if entry.verify_file(candidate.as_std_path()).is_ok() {
                     return Ok(FetchStatus::AlreadyPresent);
                 }
-            } else if dest.is_file() {
+            } else if candidate.is_file() {
                 // No manifest entry to verify against — treat as present.
                 return Ok(FetchStatus::AlreadyPresent);
             }
