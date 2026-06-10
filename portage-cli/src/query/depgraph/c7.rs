@@ -87,6 +87,7 @@ fn solve_with(data: &RepoData, targets: &[&str], pu: &[(Dep, Vec<String>)]) -> O
         accept_keywords: &accept,
         package_mask: &[],
         package_unmask: &[],
+        installed_cpvs: &std::collections::HashSet::new(),
         accept_license: &lic,
         use_config: &use_config,
         package_use: pu,

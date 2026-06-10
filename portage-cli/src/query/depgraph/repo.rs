@@ -214,6 +214,11 @@ pub(super) struct Adapter<'a> {
     /// Profile USE force/mask policy: applied to each version's effective USE and
     /// consulted by the Level-C cede gate (pinned flags are never ceded).
     pub(super) force_mask: &'a super::force_mask::ForceMask,
+    /// Exact installed cpvs. A version that is installed and staying installed
+    /// never has its `REQUIRED_USE` flags ceded — its USE was decided at build
+    /// time, and only packages being built get theirs auto-satisfied (emerge
+    /// likewise leaves installed packages' constraints alone).
+    pub(super) installed_cpvs: &'a std::collections::HashSet<Cpv>,
     /// Level-C: when set, cede each package's non-pinned `REQUIRED_USE` flags to
     /// the solver (`SolverDecided`) instead of fixing them. See
     /// `portage-atom-pubgrub/docs/required-use-level-c.md`.
@@ -265,6 +270,9 @@ impl Adapter<'_> {
     ) {
         use portage_atom_pubgrub::{UseConfig, UseFlagState, apply_package_use};
 
+        if self.installed_cpvs.contains(cpv) {
+            return;
+        }
         let Some(ru) = &m.required_use else {
             return;
         };
@@ -773,6 +781,7 @@ mod tests {
             accept_keywords: &["amd64".to_string()],
             package_mask: &[],
             package_unmask: &[],
+            installed_cpvs: &std::collections::HashSet::new(),
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],
@@ -813,6 +822,7 @@ mod tests {
             accept_keywords: &["amd64".to_string()],
             package_mask: &[],
             package_unmask: &[],
+            installed_cpvs: &std::collections::HashSet::new(),
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],
@@ -850,6 +860,7 @@ mod tests {
             accept_keywords: &["amd64".to_string()],
             package_mask: &[],
             package_unmask: &[],
+            installed_cpvs: &std::collections::HashSet::new(),
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],
@@ -892,6 +903,7 @@ mod tests {
             accept_keywords: &["~amd64".to_string()],
             package_mask: &[],
             package_unmask: &[],
+            installed_cpvs: &std::collections::HashSet::new(),
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],

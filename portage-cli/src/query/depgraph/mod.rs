@@ -118,6 +118,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<i32> {
     // Build a provider (with the given cede policy) and run the solve. Factored
     // so a failed --autosolve-use attempt can fall back to a fixed-USE (Level A)
     // solve instead of erroring — matching the doc invariant.
+    let no_installed: std::collections::HashSet<Cpv> = Default::default();
     let build_and_solve = |autosolve_use: bool, pkg_use: &[(Dep, Vec<String>)]| {
         let adapter = repo::Adapter {
             data: &data,
@@ -129,6 +130,11 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<i32> {
             use_config: &use_config,
             package_use: pkg_use,
             force_mask: &force_mask,
+            installed_cpvs: if empty {
+                &no_installed
+            } else {
+                &installed_cpvs
+            },
             autosolve_use,
         };
         let mut provider = PortageDependencyProvider::new(adapter);
