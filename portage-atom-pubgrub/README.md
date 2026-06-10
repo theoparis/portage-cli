@@ -141,7 +141,9 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   solver *chooses* satisfying flag values, biased toward the configured value
   (**Level C**, intra-package); see `docs/required-use-level-c.md`. Level C now
   also encodes **nested groups under a ceded guard** (`a? ( ^^ ( b c ) )`) by
-  gating their constraints behind the guard, orders choice branches toward the
+  gating their constraints behind the guard, **nested ceded-guard chains**
+  (`a? ( b? ( c ) )`) as preference-ordered escape clauses (`¬a ∨ ¬b ∨ c`),
+  orders choice branches toward the
   configured value to avoid gratuitous flips, and (in the consumer) cedes a
   package's flags only when its `REQUIRED_USE` is actually violated and the flag
   is not pinned by `package.use` or any force/mask (`use.force`/`use.mask`,
@@ -151,7 +153,7 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   `[flag]` USE-deps are also **co-solved** under `--autosolve-use` (the consumer
   forces the demanded flags on real-IUSE targets and re-solves to a fixpoint,
   co-operating with Level-C; default stays advisory/autounmask). Not yet built:
-  per-slot cede and nested *ceded-guard chains* (deferred to Level A).
+  per-slot cede.
 - **Upgraded versions are re-solved.** When a forced rebuild is favoured up to a
   newer version (`upgrade_to`), `resolve_targets` pins that version and re-solves
   to a fixpoint (bounded), so the upgraded version's full dependency closure

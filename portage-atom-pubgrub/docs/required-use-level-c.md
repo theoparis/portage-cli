@@ -214,8 +214,6 @@ co-solve outcome under autosolve:
 
 ### Later / out of scope
 
-- **Nested ceded-guard chains** (`a? ( b? ( c ) )`, both ceded) — needs a
-  2-antecedent implication PubGrub Horn clauses can't express (C6).
 - **Per-slot `UseDecision` nodes** — kept as a Tier-2 advisory edge rather than a
   node rename, because per-slot naming conflicts with cross-package references
   from unslotted deps (C5).
@@ -270,8 +268,6 @@ co-solve outcome under autosolve:
     `guarded_at_most`/`imply_choice` *gate* the body's constraints behind
     `guard@active` (a `Choice` pulled only from the guard's version bucket), so an
     inactive guard removes the constraint structurally — no escape-literal heuristics.
-    A nested conditional whose *inner* guard is also ceded is deferred to Level A
-    (a two-antecedent implication PubGrub Horn clauses can't model).
   - **Preference-ordered choice branches.** `Operand::Free` now carries
     `prefer_ver`; `at_least_one`/`imply_choice` order branches preference-satisfied
     first (`order_by_preference`) so the solver meets a clause without a flip when
@@ -324,8 +320,28 @@ co-solve outcome under autosolve:
     `multilib`/`cet`/`nopie` pins take effect. The cede gate's never-cede set is
     now `ForceMask::pins`.
 
+  - **Nested ceded-guard chains — clause encoding (C6, 2026-06-10).**
+    `a? ( b? ( c ) )` with *both* guards ceded needs `D_a=1 ∧ D_b=1 ⇒ D_c=1` — a
+    two-antecedent implication a single PubGrub dependency edge (one-antecedent
+    Horn clause) cannot express, and pubgrub 0.4 keeps `add_incompatibility`
+    `pub(crate)`, so a true multi-literal incompatibility can't be injected.
+    Instead the implication is encoded in *clause form*: `¬a ∨ ¬b ∨ c`, an
+    always-pulled `Choice` whose branches are preference-carrying literals — the
+    exact shape `at_least_one` already builds. `guarded` now threads a guard
+    *context* (`Vec<FreeLit>` of negated-guard "escape" literals, one per
+    enclosing ceded conditional) instead of a single `(guard, ver)`; a nested
+    ceded guard pushes its literal and recurses, so chains of any depth and
+    groups under chains (`x? ( y? ( || ( w z ) ) )`, `?? ( … )` pairwise) fall
+    out of the same `emit_clause`. A single guard keeps the cheaper directional
+    bucket form (unchanged encoding). Branch order is body-before-escapes after
+    the preference sort, so the solver satisfies the consequent (`+egl`) before
+    flipping a guard the user configured (`X`, `gles2-only`) — and a
+    pre-satisfied escape (guard already off) means zero flips. Tree incidence:
+    120/31 945 md5-cache entries have such chains; verified live on
+    `dev-qt/qtgui` (`X? ( gles2-only? ( egl ) )` → `+egl (configured off)`).
+
   *Still pending in Phase 2:* per-slot `UseDecision` nodes (a multi-slot package's
-  slots share one decision); nested *ceded-guard chains* (deferred to Level A).
+  slots share one decision).
 - **Phase 3** (maybe) — cross-package USE-dep co-solve (§6).
 
 ## 8. Invariants to hold (acceptance)

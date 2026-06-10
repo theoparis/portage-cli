@@ -557,9 +557,9 @@ fn free_operands(ops: &[Operand]) -> Vec<FreeLit> {
 /// Encode a package's `REQUIRED_USE` into `UseDecision`/`Choice` constraints.
 ///
 /// Fixed flags are partially evaluated; ceded (`SolverDecided`) flags are
-/// constrained. Constructs the encoder does not handle (nested groups under a
-/// *ceded* guard, group operands that are not bare flags) are left unencoded —
-/// the cli's Level-A check still reports them. See `docs/required-use-level-c.md`.
+/// constrained. The one construct the encoder does not handle (group operands
+/// that are not bare flags) is left unencoded — the cli's Level-A check still
+/// reports it. See `docs/required-use-level-c.md`.
 pub(crate) fn encode_required_use(
     cpn_str: &str,
     ru: &RequiredUse,
@@ -780,14 +780,15 @@ impl RuBuilder<'_> {
         entries: &[RequiredUse],
     ) {
         match self.desired.get(flag) {
-            UseFlagState::SolverDecided { .. } => {
+            UseFlagState::SolverDecided { prefer } => {
+                // Gate every consequent behind the guard: the context literal is
+                // the guard's *escape* (its inactive value) — a clause holds when
+                // any guard is inactive or the body is satisfied.
                 let guard = use_decision_package(self.cpn_str, flag);
                 let active_ver = if negated { Self::OFF } else { Self::ON };
-                // Gate every consequent behind `guard@active_ver`: the body's
-                // constraints are pulled into the solve only when the guard is
-                // active, so an inactive guard leaves the body free.
+                let mut ctx = vec![(guard, Self::ON + Self::OFF - active_ver, u64::from(prefer))];
                 for e in entries {
-                    self.guarded(e, &guard, active_ver);
+                    self.guarded(e, &mut ctx);
                 }
             }
             state => {
@@ -815,49 +816,85 @@ impl RuBuilder<'_> {
             .collect()
     }
 
-    /// Gate `expr`'s constraints behind `guard@gv` (a ceded conditional's guard).
-    /// Constraints are only pulled into the solve when the guard takes value
-    /// `gv`, so an inactive guard leaves the body's flags free — no gratuitous
-    /// flips. This is the nested-group case the flat encoder defers.
-    ///
-    /// A nested conditional whose *inner* guard is also ceded is left to the
-    /// Level-A reporter: gating it would need a two-antecedent implication
-    /// (`outer ∧ inner ⇒ …`), which PubGrub's Horn-style clauses can't express
-    /// without a fragile choice that ignores the keep-config preference.
-    fn guarded(&mut self, expr: &RequiredUse, guard: &PortagePackage, gv: u64) {
+    /// Negate a ceded literal (the preference stays the flag's own).
+    fn negate(l: &FreeLit) -> FreeLit {
+        (l.0.clone(), Self::ON + Self::OFF - l.1, l.2)
+    }
+
+    /// Emit `(⋁ ctx) ∨ (⋁ body)` — the clause form of "all guards active ⇒
+    /// body", where each `ctx` literal is a guard's *inactive* value (its
+    /// escape). A single guard keeps the cheaper directional bucket form (no
+    /// extra `Choice` node); two or more guards — the case a Horn-style
+    /// dependency edge cannot express — become a preference-ordered `Choice`
+    /// over body-then-guard literals, so the solver first tries satisfying the
+    /// consequent before flipping a guard the user configured.
+    fn emit_clause(&mut self, ctx: &[FreeLit], body: &[FreeLit]) {
+        match (ctx, body) {
+            ([], []) => {}
+            ([], [single]) => self.force(&single.0, single.1),
+            ([], many) => self.at_least_one(many),
+            // Body unsatisfiable when all guards active ⇒ some guard inactive.
+            ([g], []) => self.force(&g.0, g.1),
+            ([g], [single]) => {
+                self.imply(&g.0, Self::ON + Self::OFF - g.1, &single.0, single.1);
+            }
+            ([g], many) => self.imply_choice(&g.0, Self::ON + Self::OFF - g.1, many),
+            (guards, body) => {
+                let mut lits = body.to_vec();
+                lits.extend_from_slice(guards);
+                self.at_least_one(&lits);
+            }
+        }
+    }
+
+    /// Gate `expr`'s constraints behind the guard context `ctx` (one negated
+    /// literal per enclosing ceded conditional). Constraints bind only when
+    /// every guard takes its active value, so an inactive guard leaves the
+    /// body's flags free — no gratuitous flips. Nested ceded guards push their
+    /// own literal, turning `a? ( b? ( c ) )` into the clause `¬a ∨ ¬b ∨ c`.
+    fn guarded(&mut self, expr: &RequiredUse, ctx: &mut Vec<FreeLit>) {
         match expr {
             RequiredUse::All(children) => {
                 for c in children {
-                    self.guarded(c, guard, gv);
+                    self.guarded(c, ctx);
                 }
             }
             RequiredUse::Flag { name, negated } => match self.operand(name, *negated) {
-                Operand::Free { node, sat_ver, .. } => self.imply(guard, gv, &node, sat_ver),
+                Operand::Free {
+                    node,
+                    sat_ver,
+                    prefer_ver,
+                } => self.emit_clause(ctx, &[(node, sat_ver, prefer_ver)]),
                 Operand::Fixed { satisfied: true } => {}
-                Operand::Fixed { satisfied: false } => {
-                    // guard active ⇒ a fixed flag would be violated, so the guard
-                    // must take its inactive value.
-                    self.force(guard, Self::ON + Self::OFF - gv);
-                }
+                // All guards active ⇒ a fixed flag would be violated, so some
+                // guard must take its inactive value.
+                Operand::Fixed { satisfied: false } => self.emit_clause(ctx, &[]),
             },
-            RequiredUse::AnyOf(ch) => self.guarded_any(ch, guard, gv),
+            RequiredUse::AnyOf(ch) => self.guarded_any(ch, ctx),
             RequiredUse::ExactlyOne(ch) => {
-                self.guarded_any(ch, guard, gv);
-                self.guarded_at_most(ch, guard, gv);
+                self.guarded_any(ch, ctx);
+                self.guarded_at_most(ch, ctx);
             }
-            RequiredUse::AtMostOne(ch) => self.guarded_at_most(ch, guard, gv),
+            RequiredUse::AtMostOne(ch) => self.guarded_at_most(ch, ctx),
             RequiredUse::UseConditional {
                 flag,
                 negated,
                 entries,
             } => match self.desired.get(flag) {
-                // Inner guard also ceded → defer (see method doc).
-                UseFlagState::SolverDecided { .. } => {}
+                UseFlagState::SolverDecided { prefer } => {
+                    let node = use_decision_package(self.cpn_str, flag);
+                    let active_ver = if *negated { Self::OFF } else { Self::ON };
+                    ctx.push((node, Self::ON + Self::OFF - active_ver, u64::from(prefer)));
+                    for e in entries {
+                        self.guarded(e, ctx);
+                    }
+                    ctx.pop();
+                }
                 state => {
                     let on = matches!(state, UseFlagState::Enabled);
                     if on != *negated {
                         for e in entries {
-                            self.guarded(e, guard, gv);
+                            self.guarded(e, ctx);
                         }
                     }
                 }
@@ -865,28 +902,23 @@ impl RuBuilder<'_> {
         }
     }
 
-    /// `guard@gv ⇒ at least one of the bare-flag operands satisfied`.
-    fn guarded_any(&mut self, children: &[RequiredUse], guard: &PortagePackage, gv: u64) {
+    /// `all guards active ⇒ at least one of the bare-flag operands satisfied`.
+    fn guarded_any(&mut self, children: &[RequiredUse], ctx: &[FreeLit]) {
         let Some(ops) = self.flag_operands(children) else {
-            return; // deeper-nested operands deferred
+            return; // non-flag operands deferred
         };
         if ops
             .iter()
             .any(|o| matches!(o, Operand::Fixed { satisfied: true }))
         {
-            return; // already satisfied regardless of the guard
+            return; // already satisfied regardless of the guards
         }
         let free: Vec<FreeLit> = free_operands(&ops);
-        match free.len() {
-            // No way to satisfy when active ⇒ the guard must stay inactive.
-            0 => self.force(guard, Self::ON + Self::OFF - gv),
-            1 => self.imply(guard, gv, &free[0].0, free[0].1),
-            _ => self.imply_choice(guard, gv, &free),
-        }
+        self.emit_clause(ctx, &free);
     }
 
-    /// `guard@gv ⇒ at most one of the bare-flag operands satisfied`.
-    fn guarded_at_most(&mut self, children: &[RequiredUse], guard: &PortagePackage, gv: u64) {
+    /// `all guards active ⇒ at most one of the bare-flag operands satisfied`.
+    fn guarded_at_most(&mut self, children: &[RequiredUse], ctx: &[FreeLit]) {
         let Some(ops) = self.flag_operands(children) else {
             return;
         };
@@ -895,34 +927,23 @@ impl RuBuilder<'_> {
             .filter(|o| matches!(o, Operand::Fixed { satisfied: true }))
             .count();
         if fixed_sat >= 2 {
-            // Two fixed-on operands ⇒ unsatisfiable when active ⇒ guard inactive.
-            self.force(guard, Self::ON + Self::OFF - gv);
+            // Two fixed-on operands ⇒ unsatisfiable when active ⇒ guard escape.
+            self.emit_clause(ctx, &[]);
             return;
         }
         let free: Vec<FreeLit> = free_operands(&ops);
         if fixed_sat == 1 {
             // The fixed-on operand is "the" one; all free must be off when active.
-            for (node, sv, _) in &free {
-                self.imply(guard, gv, node, Self::ON + Self::OFF - sv);
+            for lit in &free {
+                self.emit_clause(ctx, &[Self::negate(lit)]);
             }
         } else {
             for i in 0..free.len() {
                 for j in (i + 1)..free.len() {
-                    // guard@gv ⇒ (¬free[i] ∨ ¬free[j]); each negated literal keeps
-                    // its own preference so the choice can avoid a flip.
-                    let pair = [
-                        (
-                            free[i].0.clone(),
-                            Self::ON + Self::OFF - free[i].1,
-                            free[i].2,
-                        ),
-                        (
-                            free[j].0.clone(),
-                            Self::ON + Self::OFF - free[j].1,
-                            free[j].2,
-                        ),
-                    ];
-                    self.imply_choice(guard, gv, &pair);
+                    // guards active ⇒ (¬free[i] ∨ ¬free[j]); each negated literal
+                    // keeps its own preference so the choice can avoid a flip.
+                    let pair = [Self::negate(&free[i]), Self::negate(&free[j])];
+                    self.emit_clause(ctx, &pair);
                 }
             }
         }

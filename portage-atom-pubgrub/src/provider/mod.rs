@@ -1805,7 +1805,7 @@ mod tests {
         fixed: &[(&str, bool)],
     ) -> std::collections::BTreeSet<String> {
         let mut repo = InMemoryRepository::new();
-        for f in ["x", "y", "z"] {
+        for f in ["w", "x", "y", "z"] {
             repo.add_version(
                 portage_atom::Cpv::parse(&format!("dev-libs/p{f}-1.0")).unwrap(),
                 Some(Interned::intern("0")),
@@ -1817,13 +1817,14 @@ mod tests {
             portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
             Some(Interned::intern("0")),
             vec![
+                Interned::intern("w"),
                 Interned::intern("x"),
                 Interned::intern("y"),
                 Interned::intern("z"),
             ],
             PackageDeps {
                 rdepend: DepEntry::parse(
-                    "x? ( dev-libs/px ) y? ( dev-libs/py ) z? ( dev-libs/pz )",
+                    "w? ( dev-libs/pw ) x? ( dev-libs/px ) y? ( dev-libs/py ) z? ( dev-libs/pz )",
                 )
                 .unwrap(),
                 ..empty_deps()
@@ -1860,6 +1861,18 @@ mod tests {
         crate::required_use::RequiredUse::Flag {
             name: Interned::intern(name),
             negated,
+        }
+    }
+
+    fn cond(
+        name: &str,
+        negated: bool,
+        entries: Vec<crate::required_use::RequiredUse>,
+    ) -> crate::required_use::RequiredUse {
+        crate::required_use::RequiredUse::UseConditional {
+            flag: Interned::intern(name),
+            negated,
+            entries,
         }
     }
 
@@ -2040,28 +2053,135 @@ mod tests {
     }
 
     #[test]
-    fn required_use_doubly_ceded_chain_defers_safely() {
-        use crate::required_use::RequiredUse::UseConditional;
-        // x? ( y? ( z ) ) with BOTH x and y ceded: a two-antecedent implication
-        // PubGrub can't model, so it is deferred to the Level-A reporter — the
-        // solve must still succeed and leave the flags at their preferences (no
-        // gratuitous flip, no panic).
+    fn required_use_doubly_ceded_chain_forces_consequent() {
+        // x? ( y? ( z ) ) with BOTH x and y ceded ON: the clause encoding
+        // (¬x ∨ ¬y ∨ z) must fire, and the body-first branch order prefers
+        // enabling the consequent over flipping a user-configured guard.
         let got = solve_required_use(
-            UseConditional {
-                flag: Interned::intern("x"),
-                negated: false,
-                entries: vec![UseConditional {
-                    flag: Interned::intern("y"),
-                    negated: false,
-                    entries: vec![flag("z", false)],
-                }],
-            },
+            cond("x", false, vec![cond("y", false, vec![flag("z", false)])]),
             &[("x", true), ("y", true), ("z", false)],
             &[],
         );
-        // x,y kept at preferred on; z is NOT auto-forced (left to Level A).
         assert!(got.contains("px") && got.contains("py"), "guards kept on");
-        assert!(!got.contains("pz"), "deferred: z not auto-forced");
+        assert!(got.contains("pz"), "z forced on by x? ( y? ( z ) )");
+    }
+
+    #[test]
+    fn required_use_doubly_ceded_chain_inactive_guard_no_flip() {
+        // x? ( y? ( z ) ) with y preferring OFF: the clause is already met by
+        // the ¬y escape, so nothing is flipped (z stays off).
+        let got = solve_required_use(
+            cond("x", false, vec![cond("y", false, vec![flag("z", false)])]),
+            &[("x", true), ("y", false), ("z", false)],
+            &[],
+        );
+        assert!(got.contains("px"), "x kept on");
+        assert!(
+            !got.contains("py") && !got.contains("pz"),
+            "no flips: {got:?}"
+        );
+    }
+
+    #[test]
+    fn required_use_chain_negated_inner_guard() {
+        // x? ( !y? ( z ) ) with x on, y OFF (so the inner guard is active):
+        // clause ¬x ∨ y ∨ z; body-first ⇒ z forced on, y stays off.
+        let got = solve_required_use(
+            cond("x", false, vec![cond("y", true, vec![flag("z", false)])]),
+            &[("x", true), ("y", false), ("z", false)],
+            &[],
+        );
+        assert!(got.contains("px"), "x kept on");
+        assert!(!got.contains("py"), "y not gratuitously enabled");
+        assert!(got.contains("pz"), "z forced on by x? ( !y? ( z ) )");
+    }
+
+    #[test]
+    fn required_use_triple_ceded_chain() {
+        // w? ( x? ( y? ( z ) ) ), all guards ceded ON: depth-3 chain is one
+        // 4-literal clause; z is forced on.
+        let got = solve_required_use(
+            cond(
+                "w",
+                false,
+                vec![cond(
+                    "x",
+                    false,
+                    vec![cond("y", false, vec![flag("z", false)])],
+                )],
+            ),
+            &[("w", true), ("x", true), ("y", true), ("z", false)],
+            &[],
+        );
+        assert!(
+            got.contains("pw") && got.contains("px") && got.contains("py"),
+            "guards kept on: {got:?}"
+        );
+        assert!(got.contains("pz"), "z forced on by the depth-3 chain");
+    }
+
+    #[test]
+    fn required_use_chain_fixed_false_body_escapes_guard() {
+        // x? ( y? ( z ) ) with z FIXED off: unsatisfiable body ⇒ one guard
+        // must flip off (the escape clause ¬x ∨ ¬y), the other stays on.
+        let got = solve_required_use(
+            cond("x", false, vec![cond("y", false, vec![flag("z", false)])]),
+            &[("x", true), ("y", true)],
+            &[("z", false)],
+        );
+        assert!(!got.contains("pz"), "z is fixed off");
+        let guards = got.iter().filter(|n| *n == "px" || *n == "py").count();
+        assert_eq!(guards, 1, "exactly one guard escapes, got {got:?}");
+    }
+
+    #[test]
+    fn required_use_any_of_under_ceded_chain() {
+        // x? ( y? ( || ( w z ) ) ), guards ceded ON, w/z OFF: one clause
+        // ¬x ∨ ¬y ∨ w ∨ z; at least one of w/z comes on, guards stay on.
+        let got = solve_required_use(
+            cond(
+                "x",
+                false,
+                vec![cond(
+                    "y",
+                    false,
+                    vec![crate::required_use::RequiredUse::AnyOf(vec![
+                        flag("w", false),
+                        flag("z", false),
+                    ])],
+                )],
+            ),
+            &[("w", false), ("x", true), ("y", true), ("z", false)],
+            &[],
+        );
+        assert!(got.contains("px") && got.contains("py"), "guards kept on");
+        let wz = got.iter().filter(|n| *n == "pw" || *n == "pz").count();
+        assert!(wz >= 1, "at least one of w/z under the chain, got {got:?}");
+    }
+
+    #[test]
+    fn required_use_at_most_one_under_ceded_chain() {
+        // x? ( y? ( ?? ( w z ) ) ), guards ON, w/z both ON: pairwise clause
+        // ¬x ∨ ¬y ∨ ¬w ∨ ¬z; at most one of w/z survives, guards stay on.
+        let got = solve_required_use(
+            cond(
+                "x",
+                false,
+                vec![cond(
+                    "y",
+                    false,
+                    vec![crate::required_use::RequiredUse::AtMostOne(vec![
+                        flag("w", false),
+                        flag("z", false),
+                    ])],
+                )],
+            ),
+            &[("w", true), ("x", true), ("y", true), ("z", true)],
+            &[],
+        );
+        assert!(got.contains("px") && got.contains("py"), "guards kept on");
+        let wz = got.iter().filter(|n| *n == "pw" || *n == "pz").count();
+        assert!(wz <= 1, "at most one of w/z under the chain, got {got:?}");
     }
 
     #[test]

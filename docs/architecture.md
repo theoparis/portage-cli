@@ -160,7 +160,8 @@ package's own facts):
   choices fold back into the displayed USE via synthetic `package.use`, and any
   flips are reported in a dedicated per-package report that cites the driving
   `REQUIRED_USE` clause (`output::report_autosolved_use`). Nested groups under a
-  ceded guard (`a? ( ^^ ( b c ) )`) are encoded by gating, and choice branches are
+  ceded guard (`a? ( ^^ ( b c ) )`) are encoded by gating, nested ceded-guard
+  chains (`a? ( b? ( c ) )`) as escape clauses (`¬a ∨ ¬b ∨ c`), and choice branches are
   ordered toward the configured value so already-valid packages are left
   untouched. The cli cedes a package's flags **only when its `REQUIRED_USE` is
   actually violated**, and never cedes a flag pinned by `package.use` or by any
