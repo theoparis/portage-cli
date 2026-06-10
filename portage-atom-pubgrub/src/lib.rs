@@ -20,24 +20,25 @@
 //!   (0 = OFF, 1 = ON). PubGrub's one-version-per-package constraint provides
 //!   mutual exclusion for free.
 //!
-//! ## `SolverDecided` is experimental and currently dormant
+//! ## `SolverDecided` drives Level-C `REQUIRED_USE` auto-satisfaction
 //!
 //! The solver-decided path lets PubGrub *choose* a flag's value to satisfy
 //! constraints — strictly more powerful than portage, which freezes USE before
-//! resolving. It is the intended lever for two things portage does poorly:
-//! automatic `REQUIRED_USE` satisfaction (the constraint is parsed and
-//! evaluated by `portage-metadata`, and validated post-solve by the cli — the
-//! "Level A" path; solver auto-satisfaction is "Level C", see
-//! `docs/use-and-solver-boundary.md`) and minimal-USE-change conflict resolution.
+//! resolving. A flag the caller marks [`UseFlagState::SolverDecided`] (with a
+//! `prefer` value — the greedy keep-configured bias `choose_version` applies)
+//! becomes a two-version `UseDecision` node; the package's `REQUIRED_USE` is
+//! encoded over those nodes at ingestion (`convert::encode_required_use`),
+//! so the emitted plan satisfies it by construction.
 //!
-//! No current caller emits [`UseFlagState::SolverDecided`] — the cli hands the
-//! solver a fully fixed USE set — so this path is exercised only by tests. It is
-//! kept intentionally, but treat it as experimental: before it is useful it
-//! needs (a) the fixed-USE mode to match portage well as the baseline, and (b) a
-//! preference model so solver-chosen USE stays minimal and predictable. Do not
-//! rely on it being load-bearing. The Level-C plan (the `REQUIRED_USE` →
-//! `UseDecision` encoding, concern split, opt-in/parity, phasing) is in
-//! `docs/required-use-level-c.md`.
+//! By default nothing is ceded: the cli hands the solver a fully fixed USE
+//! set, `REQUIRED_USE` violations stay post-solve advisories ("Level A"), and
+//! the plan matches portage's. The reference consumer cedes flags only under
+//! its opt-in `--autosolve-use`, and only for packages whose `REQUIRED_USE`
+//! the fixed config actually violates ("Level C"). The concern split (caller
+//! decides *which* flags are free and the preference; the crate decides
+//! *values*), encoding, and phasing live in `docs/required-use-level-c.md`
+//! and `docs/use-and-solver-boundary.md`. Global minimal-flip optimisation is
+//! out of scope — the preference is greedy, per flag.
 
 mod convert;
 mod error;

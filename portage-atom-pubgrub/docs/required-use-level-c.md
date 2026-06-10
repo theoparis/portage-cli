@@ -1,6 +1,7 @@
 # Design: Level-C `REQUIRED_USE` (solver auto-satisfaction)
 
-Status: **Proposed** (2026-06-08) — design only, not implemented.
+Status: **Implemented** — Phases 0–2 + C5/C6/C7 live behind `--autosolve-use`
+(see §7 for the per-phase log; original proposal 2026-06-08).
 Scope: `portage-atom-pubgrub` (+ the `portage-cli` Adapter that feeds it).
 Builds on: [`use-and-solver-boundary.md`](use-and-solver-boundary.md) §4.
 
@@ -226,7 +227,8 @@ co-solve outcome under autosolve:
   flags) carries it; the cli Adapter translates `portage_metadata::RequiredUseExpr`
   into it (`translate_required_use`), so the solver crate stays decoupled from the
   md5-cache parser. Field on `PackageVersions` (fact in) and `VersionData`
-  (stored, unread). `required_use_is_dormant_phase0` proves inertness (an
+  (stored, unread). The dormancy test (now
+  `required_use_of_fixed_flags_never_constrains_the_solve`) proves inertness (an
   unsatisfiable `REQUIRED_USE` neither breaks the solve nor changes the
   solution); basket still matches `emerge -p` (0 diffs). *Not yet done:* the
   preference channel on the ceded state — deferred to Phase 1 where it is first

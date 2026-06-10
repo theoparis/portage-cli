@@ -51,11 +51,6 @@ pub(crate) struct VersionData {
     /// single source of truth for "is flag F on for this version" during both
     /// branch conversion and the post-solve passes.
     pub(crate) desired: UseConfig,
-    /// `REQUIRED_USE` fact for this version (interned), carried from
-    /// [`PackageVersions::required_use`].  Stored for the Level-C encoder; not
-    /// yet read by the solver (Phase 0 — see `docs/required-use-level-c.md`).
-    #[allow(dead_code)]
-    pub(crate) required_use: Option<crate::required_use::RequiredUse>,
 }
 
 impl VersionData {
@@ -81,7 +76,6 @@ impl VersionData {
             repo_constraints: Vec::new(),
             slot_operator_deps: Vec::new(),
             desired: UseConfig::new(),
-            required_use: None,
         }
     }
 }
@@ -334,7 +328,6 @@ impl PortageDependencyProvider {
                 version_data.repo_constraints = all_repo_constraints;
                 version_data.slot_operator_deps = all_slot_operator_deps;
                 version_data.desired = cpv_use_cfg;
-                version_data.required_use = meta.required_use;
 
                 let entry = packages.entry(pkg).or_insert_with(|| PackageData {
                     versions: BTreeMap::new(),
@@ -1651,9 +1644,10 @@ mod tests {
     }
 
     #[test]
-    fn required_use_is_dormant_phase0() {
-        // Phase 0 (docs/required-use-level-c.md): REQUIRED_USE is threaded into
-        // the provider as a fact but NOT consumed by the solver. Proven two ways:
+    fn required_use_of_fixed_flags_never_constrains_the_solve() {
+        // With no flags ceded, the encoder partially evaluates REQUIRED_USE
+        // against the fixed config and emits no constraints — violations are
+        // Level A's domain (docs/required-use-level-c.md). Proven two ways:
         // (1) a package whose REQUIRED_USE is unsatisfiable still resolves (no
         //     NoSolution, same version), and
         // (2) the solution is byte-identical to the same repo without the fact.
@@ -1707,7 +1701,7 @@ mod tests {
                 PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
             provider
                 .resolve_targets(vec![(a, PortageVersionSet::any())])
-                .expect("unsatisfiable REQUIRED_USE must not break the solve in Phase 0")
+                .expect("unsatisfiable REQUIRED_USE of fixed flags must not break the solve")
         };
 
         let with_ru: std::collections::BTreeSet<String> = build(true)
@@ -1725,7 +1719,7 @@ mod tests {
         );
         assert_eq!(
             with_ru, without_ru,
-            "REQUIRED_USE must not change the solution in Phase 0 (dormant fact)"
+            "REQUIRED_USE of fixed flags must not change the solution"
         );
     }
 

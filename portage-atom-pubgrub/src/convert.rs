@@ -108,7 +108,7 @@ pub type SlotMap = HashMap<Cpn, Vec<(Interned<DefaultInterner>, PortagePackage)>
 /// The `UseDecision` virtual package for a given package's USE flag.
 ///
 /// USE flags are package-scoped, so the node name embeds the CPN: the *same*
-/// node is shared by the conditional-dep encoding and the (future) `REQUIRED_USE`
+/// node is shared by the conditional-dep encoding and the `REQUIRED_USE`
 /// encoding, which is what makes "force flag on" also fire the deps gated on it.
 pub(crate) fn use_decision_package(
     cpn_str: &str,

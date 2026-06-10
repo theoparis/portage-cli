@@ -18,7 +18,8 @@ Scope: `portage-atom-pubgrub` (+ the `portage-cli` Adapter that feeds it)
 - ✅ **Step 4** — blockers + repo-constraints wired into `em -p`. `check_blockers`
   now evaluates the blocker's USE condition against the matched package's
   `desired` (no more false positives like `!glibc[crypt(-)]`) and dedups.
-- ✅ **Step 5** — `SolverDecided` documented as experimental/dormant in `lib.rs`.
+- ✅ **Step 5** — `SolverDecided` documented in `lib.rs` (since Level C it is
+  the live mechanism behind `--autosolve-use`, no longer dormant).
 - ✅ **Bonus** — fixed pre-existing post-solve ordering nondeterminism
   (`use_flag_requirements` and `package.use` entries were HashMap-ordered).
 
@@ -124,7 +125,7 @@ flags as `UseDecision` virtual packages (v0=off / v1=on); PubGrub's
 one-version-per-package rule gives mutual exclusion for free.
 
 Today the cli never emits `SolverDecided` (it hands the solver a fully-fixed
-USE var), so the `UseDecision` path is **dormant but preserved**. It is the
+USE var), so by default the `UseDecision` path is inert. It is the
 crate's strategic lever to eventually beat portage on:
 
 - **REQUIRED_USE satisfaction** — `^^ () / ?? () / a? ( b )` encoded as

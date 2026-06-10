@@ -9,9 +9,11 @@
 //! It is a **fact** (intrinsic ebuild metadata), not policy — so it rides on
 //! [`PackageVersions`] alongside `iuse` and `deps`, never on `desired_use`.
 //!
-//! As of Phase 0 (see `docs/required-use-level-c.md`) it is **stored but never
-//! read by the solver**: threading the fact through is inert until the Level-C
-//! encoder (Phase 1) consumes it. Default-off behaviour is therefore unchanged.
+//! The Level-C encoder (`convert::encode_required_use`, see
+//! `docs/required-use-level-c.md`) consumes it at ingestion: flags the caller
+//! ceded become constrained `UseDecision` nodes, fixed flags are partially
+//! evaluated away. With nothing ceded (the default) the fact never constrains
+//! the solve — `REQUIRED_USE` stays the cli's post-solve Level-A check.
 //!
 //! [`PackageVersions`]: crate::PackageVersions
 //! [`PackageDeps`]: crate::PackageDeps
