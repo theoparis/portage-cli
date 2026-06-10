@@ -85,7 +85,9 @@ impl DependencyProvider for PortageDependencyProvider {
                     return Ok(None);
                 }
                 InstalledPolicy::Favor => {
-                    if range.contains(installed_ver) {
+                    // Explicit targets are not favored: a named argument pulls
+                    // the best accepted version (emerge argument semantics).
+                    if !self.root_targets.contains(package) && range.contains(installed_ver) {
                         return Ok(Some(installed_ver.clone()));
                     }
                 }

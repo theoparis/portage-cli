@@ -177,6 +177,11 @@ pub struct PortageDependencyProvider {
     /// instead of leaving the upgraded version's deps unaccounted for.  Cleared
     /// at the start of every [`resolve_targets`](Self::resolve_targets) call.
     pub(crate) upgrade_pins: HashMap<PortagePackage, Version>,
+    /// Explicitly requested target packages (set by `resolve_targets`).
+    /// `choose_version` does not favor the installed version for these:
+    /// a named argument selects the best accepted version, as emerge does
+    /// (installed-and-best still resolves to the installed version).
+    pub(crate) root_targets: std::collections::HashSet<PortagePackage>,
     /// Preferred version (`0`/`1`) for each `UseDecision` node, i.e. the value
     /// the caller's policy would have given the ceded flag.  `choose_version`
     /// biases toward it so a `SolverDecided` flag only flips when a constraint
@@ -415,6 +420,7 @@ impl PortageDependencyProvider {
             dropped_deps,
             use_flag_requirements: Vec::new(),
             upgrade_pins: HashMap::new(),
+            root_targets: std::collections::HashSet::new(),
             use_decision_prefer,
             use_decision_meta,
             solved_use_decisions: HashMap::new(),
@@ -526,6 +532,8 @@ impl PortageDependencyProvider {
     > {
         let root = PortagePackage::synthetic_root();
         let root_ver = Version::parse("0").unwrap();
+
+        self.root_targets = targets.iter().map(|(p, _)| p.clone()).collect();
 
         // Root targets have no gating flag; merged is derived from by_class.
         let targets_with_flag: Vec<(

@@ -9,6 +9,7 @@ mod output;
 mod package_use;
 mod repo;
 mod required_use;
+mod subslot;
 mod use_env;
 
 use std::collections::HashMap;
@@ -66,6 +67,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         expand_hidden: use_expand_hidden,
         package_use,
         package_mask,
+        package_unmask,
         force_mask,
         accept_keywords,
         accept_license,
@@ -97,6 +99,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
             arch,
             &accept_keywords,
             &package_mask,
+            &package_unmask,
             &accept_license,
         );
         let vs = match &dep.version {
@@ -118,6 +121,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
             arch,
             accept_keywords: &accept_keywords,
             package_mask: &package_mask,
+            package_unmask: &package_unmask,
             accept_license: &accept_license,
             use_config: &use_config,
             package_use: pkg_use,
@@ -259,6 +263,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         arch.as_str(),
         &accept_keywords,
         &package_mask,
+        &package_unmask,
         &accept_license,
     );
 
@@ -354,6 +359,39 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         order.extend(targets);
     }
 
+    // Slot-operator (`:=`) rebuilds: installed consumers whose VDB-recorded
+    // subslot binding is invalidated by a planned dependency are pulled into
+    // the plan as same-version rebuilds, placed right after their trigger
+    // (emerge's __auto_slot_operator_replace_installed__ set). Both ends carry
+    // the `r` (forced rebuild) marker in the output.
+    let mut slot_op_cpns: std::collections::HashSet<Cpn> = Default::default();
+    if !empty {
+        let mut planned_slots: HashMap<Cpn, Vec<(Version, portage_atom::Slot)>> = HashMap::new();
+        for (pkg, ver) in &order {
+            if let Some(cache) = repo::find_cache(&data, pkg, ver) {
+                planned_slots
+                    .entry(*pkg.cpn())
+                    .or_default()
+                    .push((ver.clone(), cache.metadata.slot));
+            }
+        }
+        let in_plan: std::collections::HashSet<Cpn> =
+            order.iter().map(|(pkg, _)| *pkg.cpn()).collect();
+        for rb in subslot::find_rebuilds(&installed_entries, &planned_slots, &in_plan) {
+            let pos = order
+                .iter()
+                .rposition(|(pkg, _)| rb.triggers.contains(pkg.cpn()))
+                .map_or(order.len(), |i| i + 1);
+            let pkg = match rb.slot.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => PortagePackage::slotted(rb.cpn, Interned::intern(s)),
+                None => PortagePackage::unslotted(rb.cpn),
+            };
+            order.insert(pos, (pkg, rb.version.clone()));
+            slot_op_cpns.insert(rb.cpn);
+            slot_op_cpns.extend(rb.triggers.iter().copied());
+        }
+    }
+
     let flag_reqs: HashMap<&PortagePackage, &UseFlagRequirement> = provider
         .use_flag_requirements()
         .iter()
@@ -424,6 +462,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
                 &use_expand_hidden,
                 &flag_reqs,
                 &sizes,
+                &slot_op_cpns,
                 verbose,
             )
         }

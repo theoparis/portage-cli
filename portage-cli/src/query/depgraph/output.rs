@@ -536,8 +536,13 @@ fn total_line(
 /// placing each action letter at the fixed column portage uses so columns line
 /// up across rows: `N`/`NS` (new / new slot), `R` (reinstall), `U`/`D`
 /// (upgrade / downgrade).
-fn status_field(tag: &str) -> String {
+fn status_field(tag: &str, forced_rebuild: bool) -> String {
     let mut f = [b' '; 7];
+    // Portage's lowercase `r` (forced rebuild, e.g. a slot-operator `:=`
+    // rebind) shares the `N` column.
+    if forced_rebuild {
+        f[1] = b'r';
+    }
     match tag {
         "N" => f[1] = b'N',
         "NS" => {
@@ -567,6 +572,7 @@ fn colorize_status_field(field: &str) -> String {
     for (i, c) in field.chars().enumerate() {
         let style = match (i, c) {
             (1, 'N') => C_STATUS_N,
+            (1, 'r') => C_ON,
             (2, 'S') => C_STATUS_S,
             (2, 'R') => C_STATUS_R,
             (4, 'U') => C_STATUS_U,
@@ -597,6 +603,7 @@ pub(super) fn print_pretty(
     use_expand_hidden: &[String],
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
     sizes: &HashMap<Cpv, u64>,
+    slot_op_cpns: &std::collections::HashSet<Cpn>,
     verbose: u8,
 ) {
     let mut out = anstream::stdout();
@@ -668,7 +675,7 @@ pub(super) fn print_pretty(
         } else {
             String::new()
         };
-        let field = status_field(tag);
+        let field = status_field(tag, slot_op_cpns.contains(cpn));
         let colored_field = colorize_status_field(&field);
         writeln!(
             out,

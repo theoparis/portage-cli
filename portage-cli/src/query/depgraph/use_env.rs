@@ -16,8 +16,12 @@ pub(super) struct UseEnv {
     pub expand_hidden: Vec<String>,
     /// Per-package USE flag overrides from the profile and `/etc/portage/package.use`.
     pub package_use: Vec<(Dep, Vec<String>)>,
-    /// Masked packages from the profile stack and `/etc/portage/package.mask`.
+    /// Masked packages: repo-global `profiles/package.mask`, the profile
+    /// stack, and `/etc/portage/package.mask`.
     pub package_mask: Vec<Dep>,
+    /// Site unmasks from `/etc/portage/package.unmask` — a matching entry
+    /// cancels any mask for that package.
+    pub package_unmask: Vec<Dep>,
     /// Profile USE force/mask policy (global + per-package + stable variants),
     /// applied per package to effective USE and consulted by the Level-C cede gate.
     pub force_mask: ForceMask,
@@ -101,8 +105,14 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
     let mut package_use = stack.package_use().unwrap_or_default();
     package_use.extend(load_package_use(portage_dir.join("package.use").as_str()));
 
-    let mut package_mask = stack.package_mask().unwrap_or_default();
+    // Mask sources, in portage's order: the repo-global `profiles/package.mask`
+    // (applies regardless of profile), the profile chain (with `-atom` removals
+    // already resolved), and the site `/etc/portage/package.mask`. A mask is
+    // overridden per package by `/etc/portage/package.unmask`.
+    let mut package_mask = repo.repo_package_mask().unwrap_or_default();
+    package_mask.extend(stack.package_mask().unwrap_or_default());
     package_mask.extend(load_dep_list(portage_dir.join("package.mask").as_str()));
+    let package_unmask = load_dep_list(portage_dir.join("package.unmask").as_str());
 
     // Profile USE force/mask. Global use.force/use.mask are already folded into
     // `config` by resolve_use_flags; we keep them here for the Level-C cede gate.
@@ -125,6 +135,7 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
         expand_hidden,
         package_use,
         package_mask,
+        package_unmask,
         force_mask,
         accept_keywords,
         accept_license,

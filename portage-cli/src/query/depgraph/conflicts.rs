@@ -89,7 +89,7 @@ fn collect_violations(
     }
 }
 
-fn dep_to_version_set(dep: &Dep) -> PortageVersionSet {
+pub(super) fn dep_to_version_set(dep: &Dep) -> PortageVersionSet {
     match &dep.version {
         None => PortageVersionSet::any(),
         Some(v) => {

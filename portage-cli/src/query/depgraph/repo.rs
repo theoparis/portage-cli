@@ -135,6 +135,35 @@ fn licenses_needed(expr: &LicenseExpr, accept: &[String]) -> Vec<String> {
 }
 
 /// Check whether `mask_dep` matches the given `cpv` (version + CPN, no slot check).
+/// Whether `cpv` (in `slot`) is masked: some mask atom matches and no unmask
+/// atom does (`/etc/portage/package.unmask` cancels masks per package,
+/// portage(5)).
+pub(super) fn is_masked(
+    masks: &[Dep],
+    unmasks: &[Dep],
+    cpv: &Cpv,
+    slot: &portage_atom::Slot,
+) -> bool {
+    let hit = |m: &Dep| mask_matches(m, cpv) && mask_slot_matches(m, slot);
+    masks.iter().any(hit) && !unmasks.iter().any(hit)
+}
+
+/// Whether a mask atom's `:slot[/subslot]` component (if any) matches the
+/// candidate's slot. A versionless slot-scoped mask like
+/// `dev-qt/qttranslations:5` must not mask other slots.
+fn mask_slot_matches(mask_dep: &Dep, slot: &portage_atom::Slot) -> bool {
+    match &mask_dep.slot_dep {
+        Some(portage_atom::SlotDep::Slot { slot: Some(s), .. }) => {
+            s.slot == slot.slot
+                && match s.subslot {
+                    Some(ms) => slot.subslot.is_some_and(|cs| cs == ms),
+                    None => true,
+                }
+        }
+        _ => true,
+    }
+}
+
 pub(super) fn mask_matches(mask_dep: &Dep, cpv: &Cpv) -> bool {
     if mask_dep.cpn != cpv.cpn {
         return false;
@@ -176,6 +205,7 @@ pub(super) struct Adapter<'a> {
     pub(super) arch: &'a Arch,
     pub(super) accept_keywords: &'a [String],
     pub(super) package_mask: &'a [Dep],
+    pub(super) package_unmask: &'a [Dep],
     pub(super) accept_license: &'a [String],
     /// Global desired USE (profile + make.conf), folded with per-version
     /// `package.use` + IUSE defaults by `desired_use`.
@@ -338,7 +368,12 @@ impl PackageRepository for Adapter<'_> {
                             return false;
                         }
                         // Mask check
-                        if self.package_mask.iter().any(|m| mask_matches(m, cpv)) {
+                        if is_masked(
+                            self.package_mask,
+                            self.package_unmask,
+                            cpv,
+                            &cache.metadata.slot,
+                        ) {
                             return false;
                         }
                         // License check
@@ -502,6 +537,7 @@ pub(super) fn target_package(
     arch: &Arch,
     accept_keywords: &[String],
     package_mask: &[Dep],
+    package_unmask: &[Dep],
     accept_license: &[String],
 ) -> portage_atom_pubgrub::PortagePackage {
     let entries = match data.versions.get(&dep.cpn) {
@@ -513,7 +549,7 @@ pub(super) fn target_package(
         .iter()
         .filter(|(cpv, cache)| {
             keyword_accepts(&cache.metadata.keywords, arch.as_str(), accept_keywords)
-                && !package_mask.iter().any(|m| mask_matches(m, cpv))
+                && !is_masked(package_mask, package_unmask, cpv, &cache.metadata.slot)
                 && cache
                     .metadata
                     .license
@@ -624,6 +660,7 @@ pub(super) fn find_autounmask_candidates(
     arch: &str,
     accept_keywords: &[String],
     package_mask: &[Dep],
+    package_unmask: &[Dep],
     accept_license: &[String],
 ) -> Vec<AutounmaskCandidate> {
     let mut candidates = Vec::new();
@@ -658,7 +695,7 @@ pub(super) fn find_autounmask_candidates(
             if let Some(kw) = keyword_needed(&meta.keywords, arch, accept_keywords) {
                 reasons.push(FilterReason::Keyword(kw));
             }
-            if package_mask.iter().any(|m| mask_matches(m, cpv)) {
+            if is_masked(package_mask, package_unmask, cpv, &meta.slot) {
                 reasons.push(FilterReason::Masked);
             }
             if let Some(lic) = &meta.license {
@@ -735,6 +772,7 @@ mod tests {
             arch: &arch,
             accept_keywords: &["amd64".to_string()],
             package_mask: &[],
+            package_unmask: &[],
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],
@@ -774,6 +812,7 @@ mod tests {
             arch: &arch,
             accept_keywords: &["amd64".to_string()],
             package_mask: &[],
+            package_unmask: &[],
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],
@@ -810,6 +849,7 @@ mod tests {
             arch: &arch,
             accept_keywords: &["amd64".to_string()],
             package_mask: &[],
+            package_unmask: &[],
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],
@@ -851,6 +891,7 @@ mod tests {
             arch: &arch,
             accept_keywords: &["~amd64".to_string()],
             package_mask: &[],
+            package_unmask: &[],
             accept_license: &["*".to_string()],
             use_config: &use_config,
             package_use: &[],
