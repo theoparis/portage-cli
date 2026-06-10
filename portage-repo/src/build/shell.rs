@@ -525,6 +525,12 @@ einstalldocs() {
 /// for the metadata variables extracted after sourcing an ebuild.
 pub struct EbuildShell {
     shell: Shell,
+    /// Snapshot of the fully-configured shell, captured at the first sourcing
+    /// and restored before every subsequent one, so that nothing a previously
+    /// sourced ebuild defined — variables, eclass functions, aliases, shell
+    /// options — leaks into the next (`brush_core::Shell` is a deep `Clone`).
+    /// Configuration mutators reset it to `None` for re-capture.
+    baseline: Option<Box<Shell>>,
     repo_path: Utf8PathBuf,
     eclass_dirs: Vec<Utf8PathBuf>,
     /// Active USE flags for this shell session.
@@ -702,6 +708,7 @@ impl EbuildShell {
 
         let mut ebuild_shell = EbuildShell {
             shell,
+            baseline: None,
             repo_path: repo.path().to_path_buf(),
             eclass_dirs,
             use_flags: HashSet::new(),
@@ -711,8 +718,24 @@ impl EbuildShell {
         Ok(ebuild_shell)
     }
 
+    /// Restore the configured baseline, capturing it on first use. Makes each
+    /// sourcing hermetic without curated reset lists; see the `baseline` field.
+    fn restore_baseline(&mut self) {
+        match &self.baseline {
+            Some(b) => self.shell = (**b).clone(),
+            None => self.baseline = Some(Box::new(self.shell.clone())),
+        }
+    }
+
+    /// Forget the captured baseline: the caller is reconfiguring the shell, so
+    /// the next sourcing re-captures it with the new configuration included.
+    fn invalidate_baseline(&mut self) {
+        self.baseline = None;
+    }
+
     /// Append an eclass directory (searched after existing dirs).
     pub fn add_eclass_dir(&mut self, dir: Utf8PathBuf) {
+        self.invalidate_baseline();
         self.eclass_dirs.push(dir);
         self.sync_eclass_dirs_var();
     }
@@ -722,6 +745,7 @@ impl EbuildShell {
     /// Used to add master repository eclass directories so they are
     /// searched before the overlay's own eclasses.
     pub fn prepend_eclass_dir(&mut self, dir: Utf8PathBuf) {
+        self.invalidate_baseline();
         self.eclass_dirs.insert(0, dir);
         self.sync_eclass_dirs_var();
     }
@@ -750,6 +774,10 @@ impl EbuildShell {
     ///
     /// See [PMS 7.2](https://projects.gentoo.org/pms/9/pms.html#mandatory-ebuilddefined-variables).
     pub async fn source_ebuild(&mut self, ebuild: &Ebuild) -> Result<crate::source::SourcedEbuild> {
+        // Hermetic sourcing: start from the configured baseline so nothing
+        // from a previously sourced ebuild survives into this one.
+        self.restore_baseline();
+
         // Set PM-provided variables
         let category = ebuild.category();
         let pn = ebuild.name();
@@ -849,35 +877,6 @@ impl EbuildShell {
             ]
         };
 
-        // Clear every metadata variable before sourcing: on a reused shell a
-        // value from the previously sourced ebuild must not leak into an
-        // ebuild that deliberately leaves it unset (live ebuilds leave
-        // KEYWORDS unset; found via crossdev's gcc-9999 inheriting the
-        // keywords of the gcc release sourced before it).
-        for var in METADATA_VARS {
-            self.set_var(var, "");
-        }
-
-        // Clear accumulating vars and their E_* counterparts before sourcing.
-        // The ebuild's own inherit calls will repopulate E_* during sourcing.
-        let e_accum_pre: &[&str] = if eapi >= Eapi::Eight {
-            inherit::E_VARS_ALL
-        } else {
-            inherit::E_VARS_BASE
-        };
-        for (&var, &e_var) in accum_vars.iter().zip(e_accum_pre.iter()) {
-            self.set_var(var, "");
-            self.set_var(e_var, "");
-        }
-        self.set_var("INHERIT", "");
-        self.set_var("INHERITED", "");
-        if let Some(state) = self
-            .shell
-            .builtin_state_mut_of::<inherit::InheritCommand>("inherit")
-        {
-            state.inherited.clear();
-        }
-
         // EAPI 6+ requires failglob in global scope (PMS 6, Table 6.1).
         // Reset each call so re-used shells get the right state per ebuild.
         if eapi >= Eapi::Six {
@@ -975,6 +974,7 @@ impl EbuildShell {
     /// `emake`, `econf`, and `__ebuild_phase_funcs` are registered as Rust
     /// builtins in `new_with_cache` and therefore never sourced from portage.
     pub async fn init_build_env(&mut self) -> Result<()> {
+        self.invalidate_baseline();
         // Prepend portage's ebuild-helpers to PATH for do*/new* install helpers.
         if let Some(bin_path) = Self::find_portage_bin_path() {
             self.set_var("PORTAGE_BIN_PATH", &bin_path.to_string_lossy());
@@ -1066,6 +1066,9 @@ impl EbuildShell {
         work_root: &Path,
         root: &Path,
     ) -> Result<()> {
+        // Hermetic sourcing, as in `source_ebuild`.
+        self.restore_baseline();
+
         let category = ebuild.category();
         let pn = ebuild.name();
         let version = ebuild.version();
@@ -1152,7 +1155,6 @@ impl EbuildShell {
             self.set_var("BROOT", "/");
         }
 
-        // Clear eclass accumulation state (same as source_ebuild).
         let accum_vars: &[&str] = if eapi >= Eapi::Eight {
             &[
                 "IUSE",
@@ -1181,18 +1183,6 @@ impl EbuildShell {
         } else {
             inherit::E_VARS_BASE
         };
-        for (&var, &e_var) in accum_vars.iter().zip(e_vars.iter()) {
-            self.set_var(var, "");
-            self.set_var(e_var, "");
-        }
-        self.set_var("INHERIT", "");
-        self.set_var("INHERITED", "");
-        if let Some(state) = self
-            .shell
-            .builtin_state_mut_of::<inherit::InheritCommand>("inherit")
-        {
-            state.inherited.clear();
-        }
 
         if eapi >= Eapi::Six {
             self.run_string("shopt -s failglob").await?;
@@ -1283,6 +1273,7 @@ impl EbuildShell {
     ///
     /// Searches the configured eclass directories in order.
     pub async fn source_eclass(&mut self, name: &str) -> Result<()> {
+        self.invalidate_baseline();
         let filename = format!("{name}.eclass");
         for dir in &self.eclass_dirs {
             let path: Utf8PathBuf = dir.join(&filename);
@@ -1305,6 +1296,7 @@ impl EbuildShell {
     ///
     /// See [PMS 5.2.4](https://projects.gentoo.org/pms/9/pms.html#makedefaults).
     pub async fn source_make_defaults(&mut self, path: &Path) -> Result<()> {
+        self.invalidate_baseline();
         let params = self.shell.default_exec_params();
         self.shell
             .source_script(path, std::iter::empty::<&str>(), &params)
@@ -1398,6 +1390,7 @@ impl EbuildShell {
     /// # }
     /// ```
     pub fn set_use_flags(&mut self, flags: &[&str]) -> Result<()> {
+        self.invalidate_baseline();
         let mut new_flags = HashSet::new();
 
         for flag in flags {
