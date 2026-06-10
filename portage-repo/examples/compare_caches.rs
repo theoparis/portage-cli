@@ -280,18 +280,6 @@ fn normalize_required_use_entry(e: &RequiredUseExpr) -> String {
     }
 }
 
-fn normalize_required_use(s: &str, dedup: bool) -> String {
-    if let Ok(ru) = RequiredUseExpr::parse(s) {
-        let ru = if dedup { ru.dedup() } else { ru };
-        match &ru {
-            RequiredUseExpr::All(entries) => normalize_required_use_entries(entries),
-            _ => normalize_required_use_entry(&ru),
-        }
-    } else {
-        s.to_owned()
-    }
-}
-
 // ── Cache file parsing ────────────────────────────────────────────────────────
 
 fn parse_cache_file(path: &Path) -> BTreeMap<String, String> {

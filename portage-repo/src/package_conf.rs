@@ -221,11 +221,6 @@ impl PackageConf {
         }
     }
 
-    /// Serialise back to a string.  Byte-identical to input if no edits were made.
-    pub fn to_string(&self) -> String {
-        self.src.clone()
-    }
-
     /// Save to a file.
     pub fn save(&self, path: &Utf8Path) -> Result<()> {
         std::fs::write(path, &self.src).map_err(|e| Error::Io {
@@ -374,6 +369,14 @@ fn data_line(input: &mut Stream<'_>) -> winnow::Result<DataLineResult> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Serialises back to the source text; byte-identical to the input if no
+/// edits were made.
+impl std::fmt::Display for PackageConf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.src)
+    }
+}
 
 #[cfg(test)]
 mod tests {

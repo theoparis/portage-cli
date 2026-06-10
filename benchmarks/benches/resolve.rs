@@ -464,13 +464,13 @@ fn bench_load(c: &mut Criterion) {
     group.sample_size(10);
 
     group.bench_function("load_repo", |b| {
-        b.iter(|| criterion::black_box(load_repo(&repo_path, &sys)))
+        b.iter(|| std::hint::black_box(load_repo(&repo_path, &sys)))
     });
 
     group.bench_function("build_provider", |b| {
         b.iter_with_setup(
             || load_repo(&repo_path, &sys),
-            |repo| criterion::black_box(build_provider(repo, sys.use_config(), &sys.package_use)),
+            |repo| std::hint::black_box(build_provider(repo, sys.use_config(), &sys.package_use)),
         )
     });
 
@@ -520,7 +520,7 @@ fn bench_resolve(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("portage-atom-pubgrub", label),
             label,
-            |b, _| b.iter(|| criterion::black_box(provider.resolve_targets(targets.clone()))),
+            |b, _| b.iter(|| std::hint::black_box(provider.resolve_targets(targets.clone()).ok())),
         );
     }
 
@@ -581,7 +581,7 @@ fn bench_solution_size(c: &mut Criterion) {
                 }
             }
             let mut counts_vec: Vec<_> = counts.into_iter().collect();
-            counts_vec.sort_by(|a, b| b.1.cmp(&a.1));
+            counts_vec.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
             for (name, count) in counts_vec.iter().take(20) {
                 eprintln!("    dropped {name}: {count}x");
             }

@@ -70,6 +70,7 @@ impl Vdb {
     /// The caller must have already:
     /// 1. Copied files from the image directory into the real root.
     /// 2. Run `pkg_preinst`.
+    ///
     /// Call [`Vdb::next_counter`] to obtain the counter value before building `spec`.
     pub fn register(&self, spec: &MergeSpec) -> Result<InstalledPackage> {
         let category = spec.cpv.cpn.category.as_ref();

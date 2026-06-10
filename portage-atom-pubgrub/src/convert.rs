@@ -9,6 +9,14 @@ use crate::required_use::RequiredUse;
 use crate::use_config::{UseConfig, UseFlagState};
 use crate::version_set::PortageVersionSet;
 
+/// One dependency requirement: target package, version range, and the
+/// outermost eagerly-evaluated USE flag gating it (if any).
+pub(crate) type Req = (
+    PortagePackage,
+    PortageVersionSet,
+    Option<Interned<DefaultInterner>>,
+);
+
 static CHOICE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn next_choice_id() -> u64 {
@@ -24,14 +32,7 @@ pub(crate) struct VirtualChoice {
     /// The virtual package to register in the provider.
     pub package: PortagePackage,
     /// (version, dependencies for that version with optional gating flag).
-    pub versions: Vec<(
-        Version,
-        Vec<(
-            PortagePackage,
-            PortageVersionSet,
-            Option<Interned<DefaultInterner>>,
-        )>,
-    )>,
+    pub versions: Vec<(Version, Vec<Req>)>,
     /// Per-branch USE dep constraints, indexed parallel to `versions`.
     ///
     /// Stored separately so `choose_version` can check USE dep satisfiability
@@ -43,11 +44,7 @@ pub(crate) struct VirtualChoice {
 #[derive(Clone)]
 pub(crate) struct ConversionResult {
     /// Direct dependency constraints with the outermost gating USE flag, if any.
-    pub requirements: Vec<(
-        PortagePackage,
-        PortageVersionSet,
-        Option<Interned<DefaultInterner>>,
-    )>,
+    pub requirements: Vec<Req>,
     /// Blocker atoms for post-solve validation.
     pub blockers: Vec<Dep>,
     /// Virtual choice packages to register in the provider.
@@ -171,11 +168,7 @@ struct ConvertCtx<'a> {
     cpn_str: &'a str,
     use_config: &'a UseConfig,
     slot_map: &'a SlotMap,
-    requirements: Vec<(
-        PortagePackage,
-        PortageVersionSet,
-        Option<Interned<DefaultInterner>>,
-    )>,
+    requirements: Vec<Req>,
     blockers: Vec<Dep>,
     virtual_choices: Vec<VirtualChoice>,
     use_deps: Vec<UseDepConstraint>,
@@ -420,14 +413,7 @@ impl ConvertCtx<'_> {
                     PortagePackage::slot_choice(Interned::intern(&format!("slot_{id}")));
                 let n = slots.len();
                 let gf = self.gating_flag;
-                let versions: Vec<(
-                    Version,
-                    Vec<(
-                        PortagePackage,
-                        PortageVersionSet,
-                        Option<Interned<DefaultInterner>>,
-                    )>,
-                )> = slots
+                let versions: Vec<(Version, Vec<Req>)> = slots
                     .iter()
                     .enumerate()
                     .map(|(i, (_, slot_pkg))| {
@@ -499,12 +485,6 @@ impl ConvertCtx<'_> {
 // ===========================================================================
 // Level-C REQUIRED_USE encoding  (docs/required-use-level-c.md)
 // ===========================================================================
-
-type Req = (
-    PortagePackage,
-    PortageVersionSet,
-    Option<Interned<DefaultInterner>>,
-);
 
 /// Result of encoding a package's `REQUIRED_USE` into solver constraints.
 pub(crate) struct RequiredUseEncoding {

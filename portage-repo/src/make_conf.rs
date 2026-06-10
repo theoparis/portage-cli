@@ -169,34 +169,12 @@ impl MakeConf {
                     unreachable!()
                 };
                 let var = vars.iter().find(|v| v.name == name && !v.append).unwrap();
-                // Determine whether the original had quotes.
-                let value_range = var.value.clone();
-                let quoted = value_range.start > 0
-                    && matches!(
-                        self.src.as_bytes().get(value_range.start - 1),
-                        Some(b'"') | Some(b'\'')
-                    );
-                if quoted {
-                    self.src.replace_range(value_range, value);
-                } else {
-                    self.src.replace_range(value_range, value);
-                }
+                // The value span excludes any surrounding quotes, so replacing
+                // it preserves the original quoting style untouched.
+                self.src.replace_range(var.value.clone(), value);
                 self.rebuild();
             }
         }
-    }
-
-    /// Serialise back to a string.  If no edits were made via [`set`], the
-    /// output is byte-identical to the input.
-    pub fn to_string(&self) -> String {
-        let mut out = String::with_capacity(self.src.len());
-        for entry in &self.entries {
-            match entry {
-                Entry::Opaque(span) => out.push_str(&self.src[span.clone()]),
-                Entry::Statement { span, .. } => out.push_str(&self.src[span.clone()]),
-            }
-        }
-        out
     }
 
     /// Save to `path`.
@@ -378,6 +356,20 @@ fn var_from_assignment(src: &str, a: &brush_parser::ast::Assignment) -> Option<V
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Serialises back to the source text; byte-identical to the input if no
+/// edits were made via [`MakeConf::set`].
+impl std::fmt::Display for MakeConf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for entry in &self.entries {
+            match entry {
+                Entry::Opaque(span) => f.write_str(&self.src[span.clone()])?,
+                Entry::Statement { span, .. } => f.write_str(&self.src[span.clone()])?,
+            }
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {

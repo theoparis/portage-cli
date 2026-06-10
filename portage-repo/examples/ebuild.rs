@@ -7,7 +7,7 @@
 //! Phases: pretend, setup, unpack, prepare, configure, compile, test, install,
 //! preinst, postinst, prerm, postrm, nofetch, info, config
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::Parser;
@@ -110,7 +110,10 @@ async fn main() {
         eprintln!(">>> USE={}", args.r#use.join(" "));
     }
 
-    match shell.run_phase(&ebuild, &args.phase, &work_root).await {
+    match shell
+        .run_phase(&ebuild, &args.phase, &work_root, Path::new("/"))
+        .await
+    {
         Ok(()) => {
             eprintln!(">>> Phase '{}' completed successfully", args.phase);
         }

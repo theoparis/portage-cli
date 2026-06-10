@@ -205,9 +205,9 @@ fn print_use_set(name: &str, result: portage_repo::Result<Vec<String>>, expand: 
     print_grouped(&groups);
 }
 
-fn print_grouped<K: AsRef<str>, S: AsRef<str>>(groups: &std::collections::BTreeMap<K, Vec<S>>)
+fn print_grouped<K, S: AsRef<str>>(groups: &std::collections::BTreeMap<K, Vec<S>>)
 where
-    K: std::fmt::Display,
+    K: AsRef<str> + std::fmt::Display,
 {
     const MAX_WIDTH: usize = 100;
     for (group, values) in groups {

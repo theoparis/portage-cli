@@ -38,13 +38,7 @@ pub(crate) struct VersionData {
     pub(crate) merged: Dependencies<PortagePackage, PortageVersionSet, String>,
     /// Per-class converted deps with optional gating USE flag.
     /// Index: 0=DEPEND, 1=RDEPEND, 2=BDEPEND, 3=PDEPEND, 4=IDEPEND
-    pub(crate) by_class: Vec<
-        Vec<(
-            PortagePackage,
-            PortageVersionSet,
-            Option<Interned<DefaultInterner>>,
-        )>,
-    >,
+    pub(crate) by_class: Vec<Vec<convert::Req>>,
     pub(crate) blockers: Vec<Dep>,
     pub(crate) use_deps: Vec<convert::UseDepConstraint>,
     pub(crate) iuse: Vec<Interned<DefaultInterner>>,
@@ -68,15 +62,7 @@ impl VersionData {
     /// Build a deps-only version (no blockers/use-deps/etc.), used for synthetic
     /// solver nodes: the root target set and OR-group / USE-decision branches.
     /// `merged` is collected from a flattened view of `by_class` (flag stripped).
-    fn from_by_class(
-        by_class: Vec<
-            Vec<(
-                PortagePackage,
-                PortageVersionSet,
-                Option<Interned<DefaultInterner>>,
-            )>,
-        >,
-    ) -> Self {
+    fn from_by_class(by_class: Vec<Vec<convert::Req>>) -> Self {
         let merged = Dependencies::Available(
             by_class
                 .iter()
@@ -317,13 +303,7 @@ impl PortageDependencyProvider {
                 let mut all_repo_constraints = Vec::new();
                 let mut all_virtual_choices = Vec::new();
                 let mut all_slot_operator_deps = Vec::new();
-                let mut by_class: Vec<
-                    Vec<(
-                        PortagePackage,
-                        PortageVersionSet,
-                        Option<Interned<DefaultInterner>>,
-                    )>,
-                > = Vec::with_capacity(5);
+                let mut by_class: Vec<Vec<convert::Req>> = Vec::with_capacity(5);
 
                 for result in class_results {
                     all_blockers.extend(result.blockers);

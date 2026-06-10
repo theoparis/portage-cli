@@ -809,94 +809,89 @@ pub(super) fn print_tree(
         kids.retain(|(pkg, _)| seen.insert(*pkg));
     }
 
-    let mut out = anstream::stdout();
-    let mut visited: std::collections::HashSet<*const PortagePackage> = Default::default();
-
+    let mut tree = Tree {
+        out: anstream::stdout(),
+        children,
+        installed_cpvs,
+        visited: Default::default(),
+    };
     for (i, (pkg, ver)) in roots.iter().enumerate() {
         let is_last = i == roots.len() - 1;
-        tree_node(
-            &mut out,
-            pkg,
-            ver,
-            &children,
-            installed_cpvs,
-            "",
-            is_last,
-            true,
-            &mut visited,
-        );
+        tree.node(pkg, ver, "", is_last, true);
     }
 }
 
-fn tree_node(
-    out: &mut impl std::io::Write,
-    pkg: &PortagePackage,
-    ver: &Version,
-    children: &HashMap<&PortagePackage, Vec<(&PortagePackage, &Version)>>,
-    installed_cpvs: &std::collections::HashSet<Cpv>,
-    prefix: &str,
-    is_last: bool,
-    is_root: bool,
-    visited: &mut std::collections::HashSet<*const PortagePackage>,
-) {
-    let already = !visited.insert(pkg as *const _);
-    let cpn = pkg.cpn();
-    let is_installed = installed_cpvs.contains(&Cpv::new(*cpn, ver.clone()));
+/// Shared state of one `print_tree` walk; `node` renders one package and
+/// recurses into its children.
+struct Tree<'a, W: std::io::Write> {
+    out: W,
+    children: HashMap<&'a PortagePackage, Vec<(&'a PortagePackage, &'a Version)>>,
+    installed_cpvs: &'a std::collections::HashSet<Cpv>,
+    visited: std::collections::HashSet<*const PortagePackage>,
+}
 
-    let connector = if is_root {
-        ""
-    } else if is_last {
-        "└── "
-    } else {
-        "├── "
-    };
+impl<W: std::io::Write> Tree<'_, W> {
+    fn node(
+        &mut self,
+        pkg: &PortagePackage,
+        ver: &Version,
+        prefix: &str,
+        is_last: bool,
+        is_root: bool,
+    ) {
+        let already = !self.visited.insert(pkg as *const _);
+        let cpn = pkg.cpn();
+        let is_installed = self.installed_cpvs.contains(&Cpv::new(*cpn, ver.clone()));
 
-    if is_installed {
-        writeln!(
-            out,
-            "{prefix}{connector}{C_DIM}{cpn}-{ver}{C_DIM:#}{}",
-            if already { " (*)" } else { "" }
-        )
-        .ok();
-    } else {
-        writeln!(
-            out,
-            "{prefix}{connector}{C_PKG}{cpn}-{ver}{C_PKG:#}{}",
-            if already {
-                format!(" {C_DIM}(*){C_DIM:#}")
-            } else {
-                String::new()
-            }
-        )
-        .ok();
-    }
+        let connector = if is_root {
+            ""
+        } else if is_last {
+            "└── "
+        } else {
+            "├── "
+        };
 
-    if already {
-        return;
-    }
+        if is_installed {
+            writeln!(
+                self.out,
+                "{prefix}{connector}{C_DIM}{cpn}-{ver}{C_DIM:#}{}",
+                if already { " (*)" } else { "" }
+            )
+            .ok();
+        } else {
+            writeln!(
+                self.out,
+                "{prefix}{connector}{C_PKG}{cpn}-{ver}{C_PKG:#}{}",
+                if already {
+                    format!(" {C_DIM}(*){C_DIM:#}")
+                } else {
+                    String::new()
+                }
+            )
+            .ok();
+        }
 
-    let kids = children.get(pkg).map(|v| v.as_slice()).unwrap_or(&[]);
-    let child_prefix = if is_root {
-        prefix.to_string()
-    } else if is_last {
-        format!("{prefix}    ")
-    } else {
-        format!("{prefix}│   ")
-    };
+        if already {
+            return;
+        }
 
-    for (i, (child, child_ver)) in kids.iter().enumerate() {
-        let child_is_last = i == kids.len() - 1;
-        tree_node(
-            out,
-            child,
-            child_ver,
-            children,
-            installed_cpvs,
-            &child_prefix,
-            child_is_last,
-            false,
-            visited,
-        );
+        let kids: Vec<(&PortagePackage, &Version)> = self
+            .children
+            .get(pkg)
+            .map(|v| v.to_vec())
+            .unwrap_or_default();
+        let child_prefix = if is_root {
+            prefix.to_string()
+        } else if is_last {
+            format!("{prefix}    ")
+        } else {
+            format!("{prefix}│   ")
+        };
+
+        for (i, (child, child_ver)) in kids.iter().enumerate() {
+            let child_is_last = i == kids.len() - 1;
+            self.node(child, child_ver, &child_prefix, child_is_last, false);
+        }
     }
 }
 

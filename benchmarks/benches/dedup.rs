@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 use portage_atom::DepEntry;
 use portage_metadata::{LicenseExpr, RequiredUseExpr};
 
