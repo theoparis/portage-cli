@@ -159,3 +159,264 @@ async fn run_desc(
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// emerge -s / -S style search
+// ---------------------------------------------------------------------------
+
+/// Search with emerge's output format: one block per package with latest
+/// available/installed versions, distfile size, homepage, description and
+/// license, bracketed by the search-key header and the result count.
+pub async fn run_emerge_style(
+    repo_paths: &[std::path::PathBuf],
+    patterns: &[String],
+    search_desc: bool,
+) -> Result<()> {
+    if repo_paths.is_empty() {
+        bail!("no repositories configured");
+    }
+    let mut repos: Vec<Repository> = Vec::with_capacity(repo_paths.len());
+    for p in repo_paths {
+        match Repository::open(p) {
+            Ok(r) => repos.push(r),
+            Err(e) => eprintln!("em: skipping {}: {e}", p.display()),
+        }
+    }
+    if repos.is_empty() {
+        bail!("no usable repositories");
+    }
+
+    // Installed versions (best per cpn) from the VDB.
+    let mut installed: BTreeMap<Cpn, portage_atom::Version> = BTreeMap::new();
+    if let Ok(vdb) = portage_vdb::Vdb::open_default() {
+        for pkg in vdb.packages() {
+            let cpv = pkg.cpv();
+            installed
+                .entry(cpv.cpn)
+                .and_modify(|v| {
+                    if cpv.version > *v {
+                        *v = cpv.version.clone();
+                    }
+                })
+                .or_insert_with(|| cpv.version.clone());
+        }
+    }
+
+    let arch = gentoo_core::Arch::current();
+    let arch_str = arch.as_str().to_string();
+
+    for pat in patterns {
+        println!("\n[ Results for search key : {pat} ]");
+        println!("Searching...\n");
+
+        // Name matches from a category walk over every repo. For repos
+        // without an md5-cache (overlays), the description is matched here
+        // too — the parallel cache pass below cannot see them.
+        let mut matched: BTreeMap<String, (Cpn, usize)> = BTreeMap::new();
+        for (idx, repo) in repos.iter().enumerate() {
+            let has_cache = repo.path().join("metadata/md5-cache").is_dir();
+            for cat in repo.categories() {
+                for pkg in cat.packages() {
+                    let mut hit = if pat.contains('/') {
+                        contains_ci(&format!("{}/{}", cat.name(), pkg.name()), pat)
+                    } else {
+                        contains_ci(pkg.name(), pat)
+                    };
+                    if !hit && search_desc && !has_cache {
+                        hit = latest_visible(&repos, idx, pkg.cpn(), &arch_str)
+                            .is_some_and(|(_, e)| contains_ci(&e.metadata.description, pat));
+                    }
+                    if hit {
+                        matched
+                            .entry(format!("{}/{}", cat.name(), pkg.name()))
+                            .or_insert_with(|| (*pkg.cpn(), idx));
+                    }
+                }
+            }
+        }
+
+        // -S: also match descriptions (md5-cache pass over all repos).
+        if search_desc {
+            let opts = CacheReadOpts {
+                latest_per_cpn: true,
+                ..Default::default()
+            };
+            let pat_owned = pat.to_string();
+            let desc_hits = cache_entries_parallel(&repos, &opts, move |text| {
+                let raw = RawCacheEntry::new(text);
+                Ok::<_, portage_repo::Error>(contains_ci(
+                    raw.field("DESCRIPTION").unwrap_or(""),
+                    &pat_owned,
+                ))
+            })
+            .await;
+            for (cpv, hit) in desc_hits {
+                if hit.unwrap_or(false) {
+                    let key = format!("{}/{}", cpv.cpn.category, cpv.cpn.package);
+                    matched.entry(key).or_insert((cpv.cpn, 0));
+                }
+            }
+        }
+
+        for (key, (cpn, idx)) in &matched {
+            print_search_block(&repos, *idx, cpn, key, &installed, &arch_str);
+        }
+        println!("[ Applications found : {} ]\n", matched.len());
+    }
+    Ok(())
+}
+
+/// The latest version whose KEYWORDS accept this arch (stable or testing),
+/// with its metadata; falls back to the newest version with any metadata.
+fn latest_visible(
+    repos: &[Repository],
+    idx: usize,
+    cpn: &Cpn,
+    arch: &str,
+) -> Option<(portage_atom::Version, portage_metadata::CacheEntry)> {
+    let repo = &repos[idx];
+    let cat = repo.category(cpn.category.as_str())?;
+    let pkg = cat.package(cpn.package.as_str())?;
+    let ebuilds = pkg.ebuilds().ok()?;
+    let mut newest: Option<(portage_atom::Version, portage_metadata::CacheEntry)> = None;
+    for eb in ebuilds.iter().rev() {
+        let Some(entry) = entry_for(repos, idx, eb) else {
+            continue;
+        };
+        if newest.is_none() {
+            newest = Some((eb.cpv().version.clone(), entry.clone()));
+        }
+        let visible = entry.metadata.keywords.iter().any(|k| {
+            let k = k.to_string();
+            k == arch || k == format!("~{arch}") || k == "*" || k == "~*"
+        });
+        if visible {
+            return Some((eb.cpv().version.clone(), entry));
+        }
+    }
+    newest
+}
+
+/// Metadata for one ebuild: the repo's own md5-cache, the user-side sourced
+/// cache, or — for a symlinked ebuild (crossdev) — the md5-cache of the repo
+/// the link resolves into.
+fn entry_for(
+    repos: &[Repository],
+    idx: usize,
+    ebuild: &portage_repo::Ebuild,
+) -> Option<portage_metadata::CacheEntry> {
+    let repo = &repos[idx];
+    let cpv = ebuild.cpv();
+    if let Ok(Some(entry)) = repo.cache_entry(cpv) {
+        return Some(entry);
+    }
+    // User-side cache written by overlay metadata sourcing.
+    let base = std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".cache"))
+        })?;
+    let user = base
+        .join("em/md5-cache")
+        .join(repo.name())
+        .join(cpv.cpn.category.as_str())
+        .join(format!("{}-{}", cpv.cpn.package, cpv.version));
+    if let Ok(text) = std::fs::read_to_string(&user)
+        && let Ok(entry) = portage_metadata::CacheEntry::parse(&text)
+    {
+        return Some(entry);
+    }
+    // Symlinked ebuild: the target repo's cache entry is byte-exact.
+    let real = ebuild.path().canonicalize_utf8().ok()?;
+    for other in repos {
+        let Ok(rel) = real.strip_prefix(other.path()) else {
+            continue;
+        };
+        let category = rel.components().next()?.as_str();
+        let cache_file = other
+            .path()
+            .join("metadata/md5-cache")
+            .join(category)
+            .join(rel.file_stem()?);
+        if let Ok(text) = std::fs::read_to_string(&cache_file)
+            && let Ok(entry) = portage_metadata::CacheEntry::parse(&text)
+        {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+fn print_search_block(
+    repos: &[Repository],
+    idx: usize,
+    cpn: &Cpn,
+    key: &str,
+    installed: &BTreeMap<Cpn, portage_atom::Version>,
+    arch: &str,
+) {
+    let latest = latest_visible(repos, idx, cpn, arch);
+    println!("*  {key}");
+    match &latest {
+        Some((ver, _)) => println!("      Latest version available: {ver}"),
+        None => println!("      Latest version available: [ Unknown ]"),
+    }
+    match installed.get(cpn) {
+        Some(v) => println!("      Latest version installed: {v}"),
+        None => println!("      Latest version installed: [ Not Installed ]"),
+    }
+    if let Some((_, entry)) = &latest {
+        let size = distfiles_size(&repos[idx], cpn, &entry.metadata);
+        println!("      Size of files: {} KiB", size.div_ceil(1024));
+        println!("      Homepage:      {}", entry.metadata.homepage.join(" "));
+        println!("      Description:   {}", entry.metadata.description);
+        let license = entry
+            .metadata
+            .license
+            .as_ref()
+            .map(|l| l.to_string())
+            .unwrap_or_default();
+        println!("      License:       {license}");
+    }
+    println!();
+}
+
+/// Sum of the package's `Manifest` DIST sizes for every file the latest
+/// version's `SRC_URI` can reference (all USE conditionals taken, as emerge's
+/// search does).
+fn distfiles_size(repo: &Repository, cpn: &Cpn, meta: &portage_metadata::EbuildMetadata) -> u64 {
+    let manifest_path = repo
+        .path()
+        .join(cpn.category.as_str())
+        .join(cpn.package.as_str())
+        .join("Manifest");
+    let Ok(content) = std::fs::read_to_string(&manifest_path) else {
+        return 0;
+    };
+    let Ok(manifest) = portage_repo::Manifest::parse(&content) else {
+        return 0;
+    };
+    let sizes: BTreeMap<String, u64> = manifest
+        .dist_entries()
+        .filter_map(|e| match e {
+            portage_repo::ManifestEntry::Dist { filename, size, .. } => {
+                Some((filename.clone(), *size))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut filenames = Vec::new();
+    for entry in &meta.src_uri {
+        entry.collect_filenames(&|_| true, &mut filenames);
+    }
+    filenames.sort();
+    filenames.dedup();
+    filenames
+        .into_iter()
+        .filter_map(|f| sizes.get(&f).copied())
+        .sum()
+}

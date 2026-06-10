@@ -56,6 +56,10 @@ async fn main() {
 }
 
 async fn run_emerge(cli: &cli::Cli) -> Result<()> {
+    // emerge -s / -S: the arguments are search patterns, not atoms.
+    if cli.search || cli.searchdesc {
+        return search::run_emerge_style(&cli.search_repos(), &cli.atoms, cli.searchdesc).await;
+    }
     if !cli.pretend {
         bail!("not implemented: emerge (use -p for pretend mode)");
     }

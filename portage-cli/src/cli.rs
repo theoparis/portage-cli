@@ -51,6 +51,14 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub repo: Option<String>,
 
+    /// Search package names, like emerge --search (each argument is a pattern)
+    #[arg(short = 's', long)]
+    pub search: bool,
+
+    /// Search package names and descriptions, like emerge --searchdesc
+    #[arg(short = 'S', long)]
+    pub searchdesc: bool,
+
     #[arg(short = 'N', long)]
     pub newuse: bool,
 
