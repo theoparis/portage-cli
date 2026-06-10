@@ -345,8 +345,10 @@ co-solve outcome under autosolve:
     incompatibilities — tracked in
     [#1](https://github.com/lu-zero/portage-cli/issues/1).
 
-  *Still pending in Phase 2:* per-slot `UseDecision` nodes (a multi-slot package's
-  slots share one decision).
+  *Phase 2 close-out (C5, 2026-06-10):* per-slot `UseDecision` nodes stay
+  **out of scope** (see §6) — instead the cli emits a Tier-2 advisory
+  (`shared_slot_decisions`) when a ceded decision bound two or more in-plan
+  slots of the same package, pointing the user at per-slot `package.use`.
 - **Phase 3** (maybe) — cross-package USE-dep co-solve (§6).
 
 ## 8. Invariants to hold (acceptance)

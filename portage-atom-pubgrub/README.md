@@ -152,8 +152,9 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   surfaced in a per-package report citing the driving clause. Cross-package
   `[flag]` USE-deps are also **co-solved** under `--autosolve-use` (the consumer
   forces the demanded flags on real-IUSE targets and re-solves to a fixpoint,
-  co-operating with Level-C; default stays advisory/autounmask). Not yet built:
-  per-slot cede.
+  co-operating with Level-C; default stays advisory/autounmask). `UseDecision`
+  nodes are per-`(cpn, flag)` — a decision spanning several in-plan slots of one
+  package is surfaced as an advisory rather than solved per-slot.
 - **Upgraded versions are re-solved.** When a forced rebuild is favoured up to a
   newer version (`upgrade_to`), `resolve_targets` pins that version and re-solves
   to a fixpoint (bounded), so the upgraded version's full dependency closure

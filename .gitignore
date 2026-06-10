@@ -3,3 +3,4 @@ Cargo.lock
 *.rs.bk
 *.orig
 .DS_Store
+.maki
