@@ -849,6 +849,15 @@ impl EbuildShell {
             ]
         };
 
+        // Clear every metadata variable before sourcing: on a reused shell a
+        // value from the previously sourced ebuild must not leak into an
+        // ebuild that deliberately leaves it unset (live ebuilds leave
+        // KEYWORDS unset; found via crossdev's gcc-9999 inheriting the
+        // keywords of the gcc release sourced before it).
+        for var in METADATA_VARS {
+            self.set_var(var, "");
+        }
+
         // Clear accumulating vars and their E_* counterparts before sourcing.
         // The ebuild's own inherit calls will repopulate E_* during sourcing.
         let e_accum_pre: &[&str] = if eapi >= Eapi::Eight {
@@ -1657,5 +1666,71 @@ mod tests {
         assert!(use_env.contains("ssl"));
         assert!(use_env.contains("gtk"));
         assert!(!use_env.contains("doc"));
+    }
+
+    #[tokio::test]
+    async fn reused_shell_does_not_leak_metadata_between_ebuilds() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().to_path_buf();
+        std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+        std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+        std::fs::create_dir_all(repo_path.join("dev-libs/foo")).unwrap();
+        std::fs::write(
+            repo_path.join("metadata/layout.conf"),
+            "masters = 
+cache-formats = md5-dict
+",
+        )
+        .unwrap();
+        std::fs::write(
+            repo_path.join("profiles/repo_name"),
+            "test-repo
+",
+        )
+        .unwrap();
+        // First ebuild sets KEYWORDS; the second (a live-style ebuild)
+        // deliberately leaves it unset — it must not inherit the first's.
+        std::fs::write(
+            repo_path.join("dev-libs/foo/foo-1.0.ebuild"),
+            concat!(
+                "EAPI=8\n",
+                "DESCRIPTION=\"release\"\n",
+                "SLOT=\"0\"\n",
+                "LICENSE=\"MIT\"\n",
+                "KEYWORDS=\"~amd64 ~arm64\"\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            repo_path.join("dev-libs/foo/foo-9999.ebuild"),
+            concat!(
+                "EAPI=8\n",
+                "DESCRIPTION=\"live\"\n",
+                "SLOT=\"0\"\n",
+                "LICENSE=\"MIT\"\n",
+            ),
+        )
+        .unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+
+        let release = Ebuild::from_path(
+            camino::Utf8Path::from_path(&repo_path.join("dev-libs/foo/foo-1.0.ebuild")).unwrap(),
+        )
+        .unwrap();
+        let live = Ebuild::from_path(
+            camino::Utf8Path::from_path(&repo_path.join("dev-libs/foo/foo-9999.ebuild")).unwrap(),
+        )
+        .unwrap();
+
+        let first = shell.source_ebuild(&release).await.unwrap();
+        assert_eq!(first.metadata.keywords.len(), 2);
+        let second = shell.source_ebuild(&live).await.unwrap();
+        assert!(
+            second.metadata.keywords.is_empty(),
+            "live ebuild must not inherit the previous sourcing's KEYWORDS: {:?}",
+            second.metadata.keywords
+        );
     }
 }
