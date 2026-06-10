@@ -39,7 +39,10 @@ pub struct DepgraphOpts<'a> {
     pub root: Option<&'a Utf8Path>,
 }
 
-pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
+/// Returns the process exit code: `1` when configuration changes (USE
+/// adjustments) are required to realise the displayed plan — matching
+/// `emerge -p` — and `0` otherwise.
+pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<i32> {
     let DepgraphOpts {
         repo_path,
         atoms,
@@ -148,27 +151,26 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         (provider, result)
     };
 
-    // C7: under --autosolve-use, auto-apply cross-package `[flag]` USE-deps by
-    // forcing the demanded flags on real-IUSE targets via synthetic `package.use`
-    // and re-solving to a fixpoint (so they are satisfied in the plan, not just
-    // suggested). Gated on autosolve, so default `em -p` keeps emerge's advisory
-    // behaviour. See `package_use::cosolve_use_deps`.
-    // Under autosolve the fixpoint hands back the final solve it converged on, so
-    // we reuse it instead of solving again; `solved` is `None` for the default
-    // path (no fixpoint) or when the fixpoint failed/bailed and we must re-solve.
-    let (package_use, solved) = if autosolve_use {
-        package_use::cosolve_use_deps(
-            package_use,
-            &data,
-            |pu| {
-                let (provider, result) = build_and_solve(true, pu);
-                result.ok().map(|sol| (provider, sol))
-            },
-            |(provider, _)| provider.use_flag_requirements().to_vec(),
-        )
-    } else {
-        (package_use, None)
-    };
+    // Auto-apply cross-package `[flag]` USE-deps by forcing the demanded flags
+    // on real-IUSE targets via synthetic `package.use` and re-solving to a
+    // fixpoint. This mirrors emerge's default *preview* semantics: `emerge -p`
+    // computes the graph as if the needed USE changes were applied, prints a
+    // mandatory "USE changes are necessary to proceed" block, and exits
+    // non-zero. User-pinned flags are never forced. `--autosolve-use`
+    // additionally cedes REQUIRED_USE flags to the solver (Level C).
+    // The fixpoint hands back the final solve it converged on, so we reuse it
+    // instead of solving again; `solved` is `None` when the fixpoint
+    // failed/bailed and we must re-solve.
+    let pristine_package_use = package_use.clone();
+    let (package_use, applied_reqs, solved) = package_use::cosolve_use_deps(
+        package_use,
+        &data,
+        |pu| {
+            let (provider, result) = build_and_solve(autosolve_use, pu);
+            result.ok().map(|sol| (provider, sol))
+        },
+        |(provider, _)| provider.use_flag_requirements().to_vec(),
+    );
 
     let (provider, solution) = match solved {
         Some(solved) => solved,
@@ -423,17 +425,28 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         }
     }
 
-    {
-        let all_reqs: Vec<_> = provider.use_flag_requirements().to_vec();
-        let pkg_use_entries =
-            package_use::build_entries(&all_reqs, atoms, &edges, &use_config, &package_use);
-        if (autounmask || autounmask_write) && !pkg_use_entries.is_empty() {
-            package_use::report(&pkg_use_entries);
-            if autounmask_write {
-                package_use::write(&pkg_use_entries, &portage_dir.join("package.use"))?;
-            }
+    // emerge preview semantics: the plan was computed as if the needed USE
+    // changes were applied (the co-solve fixpoint), so the changes the user
+    // must make are mandatory output — `applied_reqs` (satisfied in the final
+    // solve only because they were forced) plus any leftover unapplied demands
+    // — judged against the *pristine* configuration. Reported after the merge
+    // list (emerge puts caveats at the bottom); like emerge, the run exits
+    // non-zero when changes are required.
+    let use_change_entries = {
+        let mut combined: Vec<_> = applied_reqs;
+        combined.extend(provider.use_flag_requirements().to_vec());
+        let entries = package_use::build_entries(
+            &combined,
+            atoms,
+            &edges,
+            &use_config,
+            &pristine_package_use,
+        );
+        if autounmask_write && !entries.is_empty() {
+            package_use::write(&entries, &portage_dir.join("package.use"))?;
         }
-    }
+        entries
+    };
 
     match format {
         DepgraphFormat::Pretty => {
@@ -537,7 +550,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         if !shared.is_empty() {
             output::report_shared_slot_use_decisions(&shared);
         }
+
+        package_use::report(&use_change_entries);
     }
 
-    Ok(())
+    Ok(if use_change_entries.is_empty() { 0 } else { 1 })
 }

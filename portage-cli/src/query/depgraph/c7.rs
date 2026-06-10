@@ -122,7 +122,7 @@ fn solve(data: &RepoData, targets: &[&str]) -> Outcome {
 /// Run the C7 co-solve fixpoint (as `depgraph` does under `--autosolve-use`):
 /// returns the augmented `package_use` and the final outcome.
 fn cosolve(data: &RepoData, targets: &[&str]) -> (Vec<(Dep, Vec<String>)>, Outcome) {
-    let (pu, solved) = super::package_use::cosolve_use_deps(
+    let (pu, _applied, solved) = super::package_use::cosolve_use_deps(
         Vec::new(),
         data,
         |pu| solve_with(data, targets, pu),

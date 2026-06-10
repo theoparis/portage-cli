@@ -82,7 +82,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     } else {
         cli::DepgraphFormat::Pretty
     };
-    query::depgraph::depgraph(query::depgraph::DepgraphOpts {
+    let code = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
         repo_path,
         atoms: &atoms,
         arch: &cli.arch,
@@ -94,7 +94,11 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         autosolve_use: cli.autosolve_use,
         root,
     })
-    .await
+    .await?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
@@ -283,7 +287,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 bail!("equery depgraph: no valid atoms");
             }
             let root = globals.root.as_deref().map(camino::Utf8Path::new);
-            query::depgraph::depgraph(query::depgraph::DepgraphOpts {
+            let code = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
                 repo_path,
                 atoms: &atoms,
                 arch: &globals.arch,
@@ -295,7 +299,11 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 autosolve_use: *autosolve_use || globals.autosolve_use,
                 root,
             })
-            .await
+            .await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
         }
         QueryCommand::Files { atom } => {
             let vdb = open_vdb(globals)?;

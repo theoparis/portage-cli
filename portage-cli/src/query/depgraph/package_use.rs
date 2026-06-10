@@ -106,29 +106,40 @@ fn ver_str(v: &Version) -> String {
     v.to_string()
 }
 
-/// C7: auto-apply cross-package `[flag]` USE-deps to a fixpoint.
+/// Result of [`cosolve_use_deps`]: the augmented `package.use`, the
+/// requirements that drove at least one applied flag, and the converged solve
+/// (if the fixpoint ended on a solve of the returned `package.use`).
+pub(super) type CosolveOutcome<T> = (Vec<(Dep, Vec<String>)>, Vec<UseFlagRequirement>, Option<T>);
+
+/// Auto-apply cross-package `[flag]` USE-deps to a fixpoint (emerge's
+/// autounmask-preview dependency calculation).
 ///
 /// Starting from `package_use`, repeatedly: solve (`solve` returns an opaque
 /// solve outcome `T`, or `None` if the solve failed), read the in-plan USE-flag
 /// requirements from it via `reqs_of`, force every demanded flag that is real
 /// IUSE of its target via a synthetic `cpn flags` entry, and re-solve — until no
-/// new flag is added.
+/// new flag is added. Flags the caller's *initial* `package_use` sets either
+/// way are pins and are never forced (emerge refuses to override explicit
+/// configuration; the demand is left to the advisory).
 ///
-/// Returns the augmented `package_use` and, **when the fixpoint converged on a
-/// solve of that exact `package_use`**, that final outcome — so the caller can
-/// reuse it instead of solving once more. The outcome is `None` if a solve
-/// failed or the iteration bound was hit (the returned `package_use` then has
-/// additions that were not re-solved, so the caller must solve again).
+/// Returns the augmented `package_use`, the requirements that drove at least
+/// one applied flag (for the mandatory "USE changes are necessary" report —
+/// the final solve no longer demands them, so they must be carried out), and,
+/// **when the fixpoint converged on a solve of that exact `package_use`**,
+/// that final outcome — so the caller can reuse it instead of solving once
+/// more. The outcome is `None` if a solve failed or the iteration bound was
+/// hit (the returned `package_use` then has additions that were not re-solved,
+/// so the caller must solve again).
 ///
 /// `applied` (a flag forced once) is never re-forced, so a `[bar]` vs `[-bar]`
 /// contradiction resolves to first-wins + advisory for the loser rather than
-/// oscillating; the bound is a backstop. Caller gates this on `--autosolve-use`.
+/// oscillating; the bound is a backstop.
 pub(super) fn cosolve_use_deps<T, S, R>(
     mut package_use: Vec<(Dep, Vec<String>)>,
     data: &super::repo::RepoData,
     solve: S,
     reqs_of: R,
-) -> (Vec<(Dep, Vec<String>)>, Option<T>)
+) -> CosolveOutcome<T>
 where
     S: Fn(&[(Dep, Vec<String>)]) -> Option<T>,
     R: Fn(&T) -> Vec<UseFlagRequirement>,
@@ -136,27 +147,46 @@ where
     use portage_atom::Cpn;
     use portage_atom::interner::{DefaultInterner, Interned};
 
+    // Flags pinned by the caller's configuration (profile + user package.use):
+    // never forced, matching emerge's refusal to override explicit config.
+    let pinned: HashSet<(Cpn, Interned<DefaultInterner>)> = package_use
+        .iter()
+        .flat_map(|(dep, flags)| {
+            flags
+                .iter()
+                .map(|f| (dep.cpn, Interned::intern(f.trim_start_matches('-'))))
+        })
+        .collect();
+
     let mut applied: HashMap<(Cpn, Interned<DefaultInterner>), bool> = HashMap::new();
+    let mut applied_reqs: Vec<UseFlagRequirement> = Vec::new();
     for _ in 0..8 {
         let Some(solved) = solve(&package_use) else {
-            return (package_use, None); // solve failed — caller must re-solve / fall back
+            return (package_use, applied_reqs, None); // solve failed — caller must re-solve / fall back
         };
         let mut new_by_cpn: HashMap<Cpn, Vec<String>> = HashMap::new();
-        for (cpn, flag, enable) in solver_use_dep_targets(&reqs_of(&solved), data) {
-            if applied.contains_key(&(cpn, flag)) {
-                continue; // already forced (same or opposite) — don't oscillate
+        for req in reqs_of(&solved) {
+            let mut contributed = false;
+            for (cpn, flag, enable) in req_targets(&req, data) {
+                if pinned.contains(&(cpn, flag)) || applied.contains_key(&(cpn, flag)) {
+                    continue; // pinned, or already forced (same or opposite)
+                }
+                applied.insert((cpn, flag), enable);
+                contributed = true;
+                let tok = if enable {
+                    flag.as_str().to_string()
+                } else {
+                    format!("-{}", flag.as_str())
+                };
+                new_by_cpn.entry(cpn).or_default().push(tok);
             }
-            applied.insert((cpn, flag), enable);
-            let tok = if enable {
-                flag.as_str().to_string()
-            } else {
-                format!("-{}", flag.as_str())
-            };
-            new_by_cpn.entry(cpn).or_default().push(tok);
+            if contributed {
+                applied_reqs.push(req);
+            }
         }
         if new_by_cpn.is_empty() {
             // Fixpoint: `solved` is a solve of the current `package_use`.
-            return (package_use, Some(solved));
+            return (package_use, applied_reqs, Some(solved));
         }
         for (cpn, flags) in new_by_cpn {
             if let Ok(dep) = Dep::parse(&cpn.to_string()) {
@@ -164,16 +194,16 @@ where
             }
         }
     }
-    (package_use, None) // bound hit — `package_use` has additions not yet solved
+    (package_use, applied_reqs, None) // bound hit — additions not yet solved
 }
 
-/// The `(target cpn, flag, enable)` triples that in-plan cross-package `[flag]`
-/// deps demand, filtered to flags that are **real IUSE** of the target's
-/// selected/upgrade version (a `[bar]` on a target without `bar` cannot be
-/// applied — CC7). Used by C7 (`--autosolve-use`) to auto-apply USE-deps via
-/// synthetic `package.use` and re-solve, instead of only suggesting them.
-pub(super) fn solver_use_dep_targets(
-    flag_reqs: &[UseFlagRequirement],
+/// The `(target cpn, flag, enable)` triples one requirement demands, filtered
+/// to flags that are **real IUSE** of the target's selected/upgrade version
+/// (a `[bar]` on a target without `bar` cannot be applied — CC7). Used by the
+/// co-solve to auto-apply USE-deps via synthetic `package.use` and re-solve,
+/// instead of only suggesting them.
+fn req_targets(
+    req: &UseFlagRequirement,
     data: &super::repo::RepoData,
 ) -> Vec<(
     portage_atom::Cpn,
@@ -181,11 +211,11 @@ pub(super) fn solver_use_dep_targets(
     bool,
 )> {
     let mut out = Vec::new();
-    for req in flag_reqs {
+    {
         if req.package.is_virtual()
             || (req.required_enabled.is_empty() && req.required_disabled.is_empty())
         {
-            continue;
+            return out;
         }
         let cpn = *req.package.cpn();
         let ver = req.upgrade_to.as_ref().unwrap_or(&req.version);
