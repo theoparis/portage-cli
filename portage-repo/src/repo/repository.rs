@@ -295,6 +295,20 @@ impl Repository {
         self.ebuilds_in_categories(categories)
     }
 
+    /// Like [`ebuilds`](Self::ebuilds), but with the valid categories taken
+    /// as the union across this repo and its masters (portage semantics): an
+    /// overlay may ship packages in a master's category without listing it in
+    /// its own `profiles/categories`.
+    pub fn ebuilds_with_masters(&self, masters: &[Repository]) -> Result<Ebuilds> {
+        let mut categories: HashSet<String> = HashSet::new();
+        for repo in std::iter::once(self).chain(masters.iter()) {
+            if let Ok(lines) = util::read_lines(repo.path().join("profiles").join("categories")) {
+                categories.extend(lines.into_iter().filter(|c| !c.is_empty()));
+            }
+        }
+        self.ebuilds_in_categories(categories)
+    }
+
     /// Like [`ebuilds`](Self::ebuilds), but with an explicit category set.
     ///
     /// Portage treats the valid categories as the *union* across a repo and

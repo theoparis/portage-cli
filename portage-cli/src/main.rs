@@ -138,10 +138,9 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             jobs,
             dedup,
         } => {
-            let resolved = globals.repo_path();
-            let repo_path = repos.first().map(|r| r.as_str()).unwrap_or(&resolved);
             regen::run(
-                repo_path,
+                repos,
+                &globals.repo_path(),
                 repos_dir.as_deref(),
                 output.clone(),
                 *jobs,
