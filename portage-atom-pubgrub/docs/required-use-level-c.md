@@ -339,6 +339,11 @@ co-solve outcome under autosolve:
     pre-satisfied escape (guard already off) means zero flips. Tree incidence:
     120/31 945 md5-cache entries have such chains; verified live on
     `dev-qt/qtgui` (`X? ( gles2-only? ( egl ) )` → `+egl (configured off)`).
+    If pubgrub ever exposes provider-contributed incompatibilities
+    ([pubgrub-rs#120](https://github.com/pubgrub-rs/pubgrub/issues/120)), the
+    clause `Choice` nodes can be replaced by direct multi-literal
+    incompatibilities — tracked in
+    [#1](https://github.com/lu-zero/portage-cli/issues/1).
 
   *Still pending in Phase 2:* per-slot `UseDecision` nodes (a multi-slot package's
   slots share one decision).
