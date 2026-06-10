@@ -218,6 +218,82 @@ pub(super) fn report_autosolved_use<'a>(
     }
 }
 
+/// A ceded USE decision applied to more than one in-plan slot of the same
+/// package: `(cpn, slots in the plan, decided flags)`.
+pub(super) type SharedSlotDecision = (Cpn, Vec<String>, Vec<String>);
+
+/// Find ceded USE decisions shared across multiple in-plan slots.
+///
+/// `UseDecision` nodes are keyed per `(cpn, flag)` — slot-agnostic, because
+/// cross-package USE-dep references (`Q[flag]`) and the C7 co-solve address
+/// packages without a slot. When two slots of the same package are both in the
+/// plan, one solver decision binds both, but Portage configures USE per
+/// version — each slot may legitimately want a different value. That case is
+/// surfaced as a Tier-2 advisory rather than solved per-slot (C5).
+pub(super) fn shared_slot_decisions<'a>(
+    ceded: &[CededFlag],
+    solution: impl IntoIterator<Item = (&'a PortagePackage, &'a Version)>,
+) -> Vec<SharedSlotDecision> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut flags_by_cpn: BTreeMap<Cpn, BTreeSet<String>> = BTreeMap::new();
+    for c in ceded {
+        flags_by_cpn
+            .entry(c.cpn)
+            .or_default()
+            .insert(c.flag.as_str().to_string());
+    }
+    let mut slots_by_cpn: BTreeMap<Cpn, BTreeSet<String>> = BTreeMap::new();
+    for (pkg, _) in solution {
+        if pkg.is_virtual() || !flags_by_cpn.contains_key(pkg.cpn()) {
+            continue;
+        }
+        let slot = pkg.slot().map_or_else(String::new, |s| s.as_str().into());
+        slots_by_cpn.entry(*pkg.cpn()).or_default().insert(slot);
+    }
+    slots_by_cpn
+        .into_iter()
+        .filter(|(_, slots)| slots.len() >= 2)
+        .map(|(cpn, slots)| {
+            let flags = flags_by_cpn.remove(&cpn).unwrap_or_default();
+            (
+                cpn,
+                slots.into_iter().collect(),
+                flags.into_iter().collect(),
+            )
+        })
+        .collect()
+}
+
+/// Advisory for [`shared_slot_decisions`]: the auto-solved values were applied
+/// to every listed slot; per-slot differences need explicit `package.use`.
+pub(super) fn report_shared_slot_use_decisions(shared: &[SharedSlotDecision]) {
+    let mut out = anstream::stderr();
+    writeln!(
+        out,
+        "\n{C_PKG}***{C_PKG:#} --autosolve-use note: USE decisions are shared across slots:\n"
+    )
+    .ok();
+    for (cpn, slots, flags) in shared {
+        let slots = slots
+            .iter()
+            .map(|s| format!(":{s}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            out,
+            "  {C_PKG}{cpn}{C_PKG:#}  slots {slots}  (flags: {})",
+            flags.join(", ")
+        )
+        .ok();
+        writeln!(
+            out,
+            "    {C_OFF}the same value was applied to every slot; use per-slot package.use entries if a slot needs a different value{C_OFF:#}"
+        )
+        .ok();
+    }
+}
+
 pub(super) fn report_dropped_deps(dropped: &[DroppedDep], data: &RepoData, arch: &str) {
     // These are || alternatives bypassed by resolution — not failures.
     // Deduplicate by package and merge their alternatives across all occurrences.
@@ -821,5 +897,62 @@ fn tree_node(
             false,
             visited,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ceded(cpn: &str, flag: &str) -> CededFlag {
+        CededFlag {
+            cpn: Cpn::parse(cpn).unwrap(),
+            flag: Interned::intern(flag),
+            value: true,
+            flipped: false,
+        }
+    }
+
+    fn slotted(cpn: &str, slot: &str) -> PortagePackage {
+        PortagePackage::slotted(Cpn::parse(cpn).unwrap(), Interned::intern(slot))
+    }
+
+    #[test]
+    fn shared_slot_decision_detected_for_multi_slot_cpn() {
+        let ceded = vec![
+            ceded("dev-qt/qtbase", "syslog"),
+            ceded("dev-qt/qtbase", "journald"),
+        ];
+        let v = Version::parse("1.0").unwrap();
+        let a = slotted("dev-qt/qtbase", "5");
+        let b = slotted("dev-qt/qtbase", "6");
+        let solution = [(&a, &v), (&b, &v)];
+        let got = shared_slot_decisions(&ceded, solution);
+        assert_eq!(got.len(), 1);
+        let (cpn, slots, flags) = &got[0];
+        assert_eq!(cpn.to_string(), "dev-qt/qtbase");
+        assert_eq!(slots, &["5", "6"]);
+        assert_eq!(flags, &["journald", "syslog"], "flags sorted");
+    }
+
+    #[test]
+    fn single_slot_cpn_not_reported() {
+        let ceded = vec![ceded("dev-qt/qtbase", "syslog")];
+        let v = Version::parse("1.0").unwrap();
+        let a = slotted("dev-qt/qtbase", "6");
+        let other = slotted("dev-libs/foo", "0");
+        let solution = [(&a, &v), (&other, &v)];
+        assert!(shared_slot_decisions(&ceded, solution).is_empty());
+    }
+
+    #[test]
+    fn multi_slot_cpn_without_decisions_not_reported() {
+        let ceded = vec![ceded("dev-libs/foo", "bar")];
+        let v = Version::parse("1.0").unwrap();
+        let a = slotted("dev-qt/qtbase", "5");
+        let b = slotted("dev-qt/qtbase", "6");
+        let foo = slotted("dev-libs/foo", "0");
+        let solution = [(&a, &v), (&b, &v), (&foo, &v)];
+        assert!(shared_slot_decisions(&ceded, solution).is_empty());
     }
 }

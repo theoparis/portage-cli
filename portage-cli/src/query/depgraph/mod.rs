@@ -491,6 +491,13 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<()> {
         if !flips.is_empty() {
             output::report_autosolved_use(&flips, solution.iter(), &data);
         }
+
+        // C5 advisory: a UseDecision is keyed per (cpn, flag), so when several
+        // slots of one package are in the plan the same value bound all of them.
+        let shared = output::shared_slot_decisions(&ceded, solution.iter());
+        if !shared.is_empty() {
+            output::report_shared_slot_use_decisions(&shared);
+        }
     }
 
     Ok(())
