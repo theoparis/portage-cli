@@ -100,9 +100,17 @@ package set and versions.
 
 | Target | Packages | `em -p` | `emerge -p` | Speedup |
 |---|---|---|---|---|
-| `www-client/firefox` | 78 | 0.97 s | 3.65 s | 3.8× |
-| `app-text/texlive-core` | 63 | 0.95 s | 2.16 s | 2.3× |
-| `dev-qt/qtbase` | 41 | 0.96 s | 3.13 s | 3.2× |
+| `www-client/firefox` | 78 | 1.60 s | 3.64 s | 2.3× |
+| `app-text/texlive-core` | 63 | 1.56 s | 2.16 s | 1.4× |
+| `dev-qt/qtbase` | 41 | 1.54 s | 3.13 s | 2.0× |
+| `app-office/libreoffice` | 140 | 2.08 s | 3.97 s | 1.9× |
+| all five large targets at once* | 186 | 2.13 s | 4.87 s | 2.3× |
+
+\* `em -p libreoffice qtwebengine thunderbird qemu firefox` — multiple
+targets cost almost nothing extra (the md5-cache parse dominates).
+Plans that require USE changes (all of the above) pay 1–2 extra
+solve iterations for the autounmask-preview fixpoint; a plan with no
+needed changes resolves in ~1.0 s.
 
 Wall-clock means from `hyperfine --warmup 2` (8 runs for `em`, 5 for `emerge`).
 Most of `em`'s time is ebuild-metadata (md5-cache) parsing and profile/USE
@@ -149,12 +157,26 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   is not pinned by `package.use` or any force/mask (`use.force`/`use.mask`,
   `package.use.force`/`mask`, and the `*.stable.*` variants) — so autosolve never
   re-decides settled USE_EXPAND flags or flips a profile-forced flag. Flips are
-  surfaced in a per-package report citing the driving clause. Cross-package
-  `[flag]` USE-deps are also **co-solved** under `--autosolve-use` (the consumer
-  forces the demanded flags on real-IUSE targets and re-solves to a fixpoint,
-  co-operating with Level-C; default stays advisory/autounmask). `UseDecision`
+  surfaced in a per-package report citing the driving clause, and flags are
+  only ceded for packages actually being built — a version staying installed
+  keeps its build-time USE. `UseDecision`
   nodes are per-`(cpn, flag)` — a decision spanning several in-plan slots of one
   package is surfaced as an advisory rather than solved per-slot.
+- **Cross-package `[flag]` USE-deps are co-solved by default** (emerge preview
+  parity): the consumer forces the demanded flags on real-IUSE, non-user-pinned
+  targets and re-solves to a fixpoint, so `em -p`'s displayed graph — like
+  `emerge -p`'s — is the one the *adjusted* configuration would produce. The
+  required changes are printed as a mandatory "USE changes are necessary to
+  proceed" block after the merge list and the run exits `1`, exactly as emerge
+  does. One deliberate divergence: the fixpoint follows the adjustment cascade
+  to completion (`gtk+[wayland]` → `mesa[wayland]` → `libglvnd[X]`), where
+  emerge's backtracking sometimes stops partway on multi-target invocations and
+  shows a graph missing the cascade's tail.
+- **Slot-operator (`:=`) rebuilds are planned.** The VDB-recorded
+  `:slot/subslot=` bindings of installed consumers are checked against the
+  plan; a dependency moving across a subslot boundary pulls the consumer in as
+  a same-version rebuild right after its trigger, with portage's lowercase `r`
+  marker on both ends (`[ebuild r U ]` provider / `[ebuild rR ]` consumer).
 - **Upgraded versions are re-solved.** When a forced rebuild is favoured up to a
   newer version (`upgrade_to`), `resolve_targets` pins that version and re-solves
   to a fixpoint (bounded), so the upgraded version's full dependency closure
