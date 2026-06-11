@@ -124,21 +124,23 @@ A flag the caller cedes to the solver is simply a flag whose `desired` value is
 flags as `UseDecision` virtual packages (v0=off / v1=on); PubGrub's
 one-version-per-package rule gives mutual exclusion for free.
 
-Today the cli never emits `SolverDecided` (it hands the solver a fully-fixed
-USE var), so by default the `UseDecision` path is inert. It is the
-crate's strategic lever to eventually beat portage on:
+With `--autosolve-use`, the cli emits `SolverDecided { prefer }` for flags
+whose `REQUIRED_USE` is violated and which are not pinned by `package.use` or
+any force/mask. Without the flag, it hands the solver a fully-fixed USE var and
+the `UseDecision` path is inert.
+
+The strategic levers this enables:
 
 - **REQUIRED_USE satisfaction** — `^^ () / ?? () / a? ( b )` encoded as
   relations between `UseDecision` packages and solved directly rather than
-  erroring. *(Not built: REQUIRED_USE is not parsed in `portage-atom` yet.)*
+  erroring (implemented behind `--autosolve-use`).
 - **minimal-USE-change conflict resolution** — co-solving flags + versions +
   slots instead of one-shot autounmask backtracking.
 
-Both require, before they are useful: (a) the fixed-USE mode matching portage
+Both require: (a) the fixed-USE mode matching portage
 well (the baseline / oracle), and (b) a preference model so solver-chosen USE
 stays minimal and predictable (bias `choose_version`/`prioritize` and the v0/v1
-ordering toward the configured value). Until then, keep the path intact and
-documented as experimental; do not activate it.
+ordering toward the configured value).
 
 The full Level-C plan (concern split, the `REQUIRED_USE`→`UseDecision`
 encoding, opt-in/parity, phasing) now lives in

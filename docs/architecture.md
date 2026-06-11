@@ -1,12 +1,8 @@
 # Architecture
 
-The main architecture reference for this workspace. It describes **how the
-pieces fit together and how `em` resolves a dependency plan**. For the
-per-crate public-API catalog and crates.io/publishing status, see the
-root [`ARCHITECTURE.md`](../ARCHITECTURE.md). For the deeper USE/solver
-contract, see [`portage-atom-pubgrub/docs/use-and-solver-boundary.md`](../portage-atom-pubgrub/docs/use-and-solver-boundary.md);
-for performance numbers and the running gap list, see the
-[`portage-atom-pubgrub` README](../portage-atom-pubgrub/README.md).
+The main architecture reference for this workspace. It describes the crate
+ecosystem, the `em -p` resolution pipeline, USE stacking, post-solve
+validation, and known divergences from emerge.
 
 > **Slop warning.** This codebase is largely AI-generated. Verify a claim
 > against the code before relying on it; update this file when it drifts.
@@ -18,28 +14,187 @@ Lower crates know nothing of higher ones. The edges below are the real
 
 ```
 gentoo-interner ─┐
-                 ├─ gentoo-core ─────────────┐
-portage-atom ────┤                           │
-   │             ├─ portage-metadata ─┐       │
-   │             │                    ├─ portage-repo ─┐
-   ├─ portage-atom-pubgrub ───────────┼───────────────┼─ portage-cli (em)
-   └─ portage-atom-resolvo ───────────┘  portage-distfiles, portage-vdb ┘
+                 ├─ gentoo-core ──────────── gentoo-stages
+portage-atom ────┤
+   │             ├─ portage-metadata ─┐
+   │             │                    ├─ portage-repo ───── portage-distfiles
+   ├─ portage-atom-pubgrub ──────────┼─────────────────────┐
+   └─ portage-atom-resolvo ──────────┘                      │
+                                        portage-vdb ────────┤
+                                                             portage-cli (em)
 ```
 
-- **portage-atom** — PMS atom parsing (`Cpn`, `Cpv`, `Dep`, `Version`,
-  `DepEntry`, USE-deps, slot operators). The vocabulary every other crate speaks.
-- **portage-metadata** — ebuild metadata: md5-cache `CacheEntry`/`EbuildMetadata`,
-  EAPI, keywords, `IUse`, and the `LicenseExpr` / `RequiredUseExpr` / `RestrictExpr`
-  sub-grammars. Pure parsing + evaluation; no I/O.
-- **portage-repo** — reads a repository from disk: ebuild discovery, profile
-  stack resolution, manifests, and an embedded `bash` (`EbuildShell`, via brush)
-  for sourcing `make.defaults`/`make.conf` and ebuilds.
-- **portage-atom-pubgrub** / **portage-atom-resolvo** — two interchangeable
-  solver bridges over the same facts. `em` uses the PubGrub bridge; resolvo is
-  kept for cross-checking. Both consume a `PackageRepository` of *facts* and
-  *resolved policy* and never resolve profile/`make.conf`/`package.use` themselves.
-- **portage-cli** — the `em` binary: wires repo + profile + VDB into a solver,
-  runs post-solve checks, and renders emerge-compatible output.
+`portage-bench` (in `benchmarks/`) depends on both solver bridges plus
+`portage-repo` for benchmarking.
+
+## Crate catalog
+
+### Published on crates.io
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `gentoo-interner` | 0.3.0 | String interning |
+| `gentoo-core` | 0.5.1 | Architecture types, variants |
+| `portage-atom` | 0.9.1 | PMS atom parsing |
+| `portage-metadata` | 0.7.1 | md5-cache entry parsing, EAPI, keywords |
+| `portage-atom-resolvo` | 0.7.0 | SAT dependency solver (resolvo bridge) |
+| `gentoo-stages` | 0.5.1 | Stage3 tarball fetch/cache |
+
+### Local only (not yet on crates.io)
+
+| Crate | Version | Purpose | Blocker |
+|-------|---------|---------|---------|
+| `portage-repo` | 0.1.0 | Repo layout, ebuilds, profiles, manifests | Depends on `brush-*` via local paths |
+| `portage-atom-pubgrub` | 0.4.1 | PubGrub solver bridge | Workspace path dep on `portage-atom` |
+| `portage-vdb` | 0.1.0 | Installed package database (`/var/db/pkg`) | Workspace path dep |
+| `portage-distfiles` | 0.1.0 | Source distfile fetching & resolution | Workspace path dep |
+| `portage-bench` | 0.1.0 | Benchmark harness | Dev tool, not a library |
+| `portage-cli` | 0.1.0 | The `em` binary | Depends on everything above |
+
+## Per-crate public API
+
+### `gentoo-interner` (v0.3.0)
+
+String interning foundation. Default backend is **papaya** (concurrent
+hash map); `lasso` and `symbol-table` backends available as feature flags.
+
+- `trait Interner` — `get_or_intern(&str) -> Key`, `resolve(&Key) -> &str`
+- `struct Interned<I>` — interned string key, `Deref<Target=str>`, `Display`
+- `struct NoInterner` — non-interning fallback (Key = `Box<str>`)
+- `struct GlobalInterner` *(feature: interner, default)* — process-global interner
+- `type DefaultInterner` — alias: `GlobalInterner`
+
+### `gentoo-core` (v0.5.1)
+
+Architecture and release-variant types.
+
+- `enum KnownArch` — 18 official Gentoo architectures: `as_keyword()`, `parse()`, `current()`
+- `struct Arch<I>` — known or exotic architecture: `from_chost()`, `as_str()`
+- `type ExoticKey<I>` — alias for `Interned<I>`
+- `struct Variant<I>` — release media variant (`arch-flavor`): `parse()`, `flavor()`
+
+### `portage-atom` (v0.9.1)
+
+PMS atom parser — the vocabulary every other crate speaks.
+
+- `struct Cpn` — Category/Package Name (`dev-lang/rust`)
+- `struct Cpv` — Category/Package/Version (`dev-lang/rust-1.75.0`)
+- `struct Pf` — Package-version string (`rust-1.75.0`)
+- `struct Dep` — Full dependency atom with blocker, operator, version, slot, USE, repo
+- `enum Blocker` — `Weak` (!) or `Strong` (!!)
+- `enum DepEntry` — Dependency tree node: `Atom`, `UseConditional`, `AllOf`, `AnyOf`, `ExactlyOneOf`, `AtMostOneOf`
+- `struct Version` — PMS version with suffixes and revision: `glob_matches()`, `base()`
+- `struct Revision(u64)` — Package revision (`-rN`)
+- `enum Operator` — `<`, `<=`, `=`, `~`, `>=`, `>`
+- `struct Suffix` / `enum SuffixKind` — Version suffix segment (`Alpha`, `Beta`, `Pre`, `Rc`, `Post`)
+- `struct Slot` — Slot + optional subslot
+- `enum SlotDep` / `enum SlotOperator` — `:=`, `:*`
+- `struct UseDep` — USE flag constraint
+- `enum UseDepKind` — `Enabled`, `Disabled`, `Conditional`, `Equal`, etc.
+- `enum UseDefault` — `None`, `Enabled`, `Disabled`
+- Builder types *(feature: `builder`)*: `CpnBuilder`, `CpvBuilder`, `DepBuilder`, `SlotBuilder`, `UseDepBuilder`, `SuffixBuilder`, `VersionBuilder`
+- Re-exports `gentoo_interner as interner`
+
+### `portage-metadata` (v0.7.1)
+
+Ebuild metadata cache parser.
+
+- `struct CacheEntry<I>` — Parsed md5-cache entry: `parse()`, `from_kv_pairs()`, `serialize()`
+- `struct RawCacheEntry<I>` — Unparsed raw cache entry
+- `struct EbuildMetadata<I>` — 21 metadata fields (eapi, description, slot, homepage, src_uri, license, keywords, iuse, required_use, restrict, properties, depend, rdepend, bdepend, pdepend, idepend, inherit, inherited, defined_phases)
+- `enum Eapi` — EAPI 0–9 with feature-query methods
+- `enum Phase` — 15 ebuild phase functions
+- `struct Keyword<I>` / `enum Stability` — `Stable`, `Testing`, `Disabled`, `DisabledAll`
+- `struct IUse<I>` / `enum IUseDefault` — USE flag with default (+/-)
+- `struct LicenseExpr`, `struct RequiredUseExpr`, `struct RestrictExpr`, `struct SrcUriEntry`
+- Re-exports `portage_atom::interner`
+
+### `portage-atom-resolvo` (v0.7.0)
+
+SAT-based dependency solver bridge using resolvo.
+
+- `struct PortageDependencyProvider` — Main solver bridge: `new()`, `with_installed()`, `dependency_graph()`, `install_order()`
+- `struct PortagePool` — Arena storage for solver IDs
+- `struct PackageMetadata` — Per-version metadata (cpv, slot, iuse, use_flags, repo, deps)
+- `struct PackageDeps` — 5 dep classes: depend, rdepend, bdepend, pdepend, idepend
+- `struct UseConfig` — USE flag evaluation: enabled, disabled, solver_decided
+- `enum DepClass`, `struct DepEdge` — Dependency classification and graph edges
+- `enum InstalledPolicy`, `struct InstalledSet` — Installed package handling
+- `trait PackageRepository` — `all_packages()`, `versions_for()`
+- `struct InMemoryRepository` — HashMap-backed test impl
+- `fn version_matches()` — PMS version matching
+
+### `portage-atom-pubgrub` (v0.4.1)
+
+PubGrub-based dependency solver bridge — the solver `em` uses by default.
+
+- `struct PortagePackage` — Solver package identity: `Unslotted`, `Slotted`
+- `struct PortageVersionSet` — Wraps `Ranges<Version>` for pubgrub's `VersionSet` trait
+- `struct PortageDependencyProvider` — Main solver bridge: `new_for_targets()`, `resolve_targets()`, `dependency_graph()`, `install_order()`
+- `enum InstalledPolicy`, `struct InstalledPackage`, `struct DroppedDep` — Installed package handling
+- `struct UseConfig`, `enum UseFlagState` — Per-package USE configuration
+- `struct CededFlag`, `struct UseFlagRequirement` — Level-C autosolve state
+- `struct PackageDeps`, `struct PackageVersions` — Per-version facts
+- `trait PackageRepository` — `all_packages()`, `versions_for()`, `desired_use()`
+- `struct InMemoryRepository` — HashMap-backed test impl
+- `enum RequiredUse` — REQUIRED_USE expression for solver encoding
+- `struct SlotOperatorBinding` — `:=` binding tracking for rebuild detection
+- `enum DepClass`, `struct DepEdge` — Dependency classification and graph edges
+- `fn apply_package_use()` — Per-package `package.use` application
+- Re-exports `DefaultInterner`, `Interned` from `portage_atom::interner`
+
+### `portage-repo` (v0.1.0)
+
+Repository layout reader — reads a Gentoo repository from disk. The most
+complex library crate. Depends on `brush-*` (embedded bash shell) via local
+paths for ebuild sourcing and `make.conf` parsing.
+
+- `struct Repository` — Main entry point: `open()`, `name()`, `layout()`, `categories()`, `ebuilds()`, `cache_entry()`, `profiles()`, `arch()`
+- `struct Category`, `struct Package`, `struct Ebuild` — Directory hierarchy
+- `struct Ebuilds` / `EbuildsIter` — Lazy ebuild discovery with filtering
+- `struct LayoutConf` — `metadata/layout.conf` parser
+- `struct Manifest` / `ManifestEntry` — `Manifest` file parser (BLAKE2/SHA256/MD5)
+- `struct PkgMetadata` — `metadata/pkg_desc_index` + `metadata.xml` parsing
+- `struct Profile` / `ProfileDesc` / `ProfileStack` / `ProfileStatus` — Profile resolution
+- `struct ProfileEnv` / `ProfileEnvLayer` — Per-layer profile variable tracking
+- `struct EbuildShell` — Embedded bash shell via brush for ebuild sourcing
+- `struct UseExpand` / `struct UseFlags` — USE_EXPAND handling, effective flag set
+- `struct MakeConf` — `make.conf` round-trip editing (byte-precise via comment spans)
+- `struct PackageConf` / `PackageToken` — `package.use`/`package.keywords`/etc. parsing
+- `struct ReposConf` / `RepoEntry` — `repos.conf` parsing
+- Cache module: `regen_cache()`, `cache_entries_parallel()`, `CacheReadOpts`, `RegenOpts`, `RegenStats`
+- Source module: `source_ebuild()`, `source_single()`, `source_parallel()`, `SourceContext`, `SourceOpts`
+- Re-exports from `gentoo_core`: `Arch`, `KnownArch`, `ExoticKey`
+
+### `portage-vdb` (v0.1.0)
+
+Installed package database reader/writer for `/var/db/pkg`.
+
+- `struct Vdb` — Main entry point: `open()`, `open_default()`, `owner()`, `find_collisions()`, `register()`, `unregister()`, `find_slot_occupant()`
+- `struct InstalledPackage` — Rich accessor: cpv, slot, eapi, USE flags, deps, contents, etc.
+- `struct ContentsEntry` / `enum ContentsKind` — Parsed CONTENTS entries (obj/dir/sym/fifo/dev)
+- `fn format_contents()` — Serialize contents back to VDB format
+- `struct Collision` — File collision between planned and installed packages
+- `struct MergeSpec` — Specification for registering a new installed package
+- Directory iterators: `AllPackages`, `Category`, `Categories`, `Packages`
+
+### `portage-distfiles` (v0.1.0)
+
+Source distfile fetching and resolution.
+
+- `struct DistfileResolver` — Resolves `SRC_URI` entries to `Distfile` structs with mirror expansion
+- `struct Distfile` — A single distfile: filename, URLs, fetch restriction
+- `fn collect_filenames()` — Extracts filenames from `SRC_URI` + USE flags
+- `struct Fetcher` — Downloads distfiles (builtin HTTP or external command)
+- `struct FetchConfig` / `enum FetchStrategy` / `enum FetchStatus` — Fetch configuration and result
+
+### `gentoo-stages` (v0.5.1)
+
+Stage3 tarball fetch and cache management.
+
+- `struct Stage3` — Stage3 image info: `is_cached()`, `file_path()`
+- `struct Client` / `ClientBuilder` — HTTP client for mirror listings
+- `struct Cache` — Local filesystem cache
 
 ## The `em -p` / `em query depgraph` pipeline
 
@@ -54,29 +209,32 @@ Stages, in order:
    `ACCEPT_LICENSE`.
 3. **Load installed set** (`installed.rs`) — the VDB, used for `InstalledPolicy`
    (`Favor`/`Lock`), action tags (`N`/`R`/`U`/`D`), and reverse-dep checks.
-4. **Build the provider** (`PortageDependencyProvider::new(adapter)`) — the cli
-   `Adapter` implements `PackageRepository`, handing the solver each version's
-   facts (`versions_for`) and its resolved **desired** USE (`desired_use`).
+4. **Build the provider** (`PortageDependencyProvider::new_for_targets(adapter, seeds)`)
+   — the cli `Adapter` implements `PackageRepository`, handing the solver each
+   version's facts (`versions_for`) and its resolved **desired** USE (`desired_use`).
 5. **Resolve** (`resolve_targets`) — PubGrub selects one version per package,
    modelling OR/`^^`/`??` groups, slots/subslots, USE-conditional deps, and
    USE-dep constraints (the latter via virtual `UseDecision` packages). When the
    post-solve pass decides to upgrade an installed package to a newer version
    (`upgrade_to`), `resolve_targets` pins that version and re-solves to a
-   (bounded) fixpoint, so the upgraded version's full dependency closure is part
-   of the plan — not an unsolved approximation; a re-solve that cannot be
-   satisfied falls back to the last good solution.
-6. **Post-solve checks** — see [Post-solve validation](#post-solve-validation).
-7. **Install order** (`install_order`) — SCC condensation (iterative Tarjan) +
+   (bounded) fixpoint.
+6. **Slot-operator rebuild detection** (`subslot.rs`) — VDB-recorded `:=` bindings
+   of installed consumers are checked against the plan; a dependency moving across
+   a subslot boundary pulls the consumer in as a same-version rebuild.
+7. **Post-solve checks** — see [Post-solve validation](#post-solve-validation).
+8. **Install order** (`install_order`) — SCC condensation (iterative Tarjan) +
    lexicographic Kahn; hard (DEPEND/BDEPEND) edges before soft (RDEPEND); cycles
    broken on soft edges. Explicitly-requested targets are listed last when
    nothing depends on them (emerge convention).
-8. **Render** (`output.rs`) — `pretty` (emerge `-p`/`-pv`), `json`, or `tree`.
+9. **Render** (`output.rs`) — `pretty` (emerge `-p`/`-pv`), `json`, or `tree`.
    Verbose `-pv` also shows per-package download size and a "Size of downloads"
    total (`download_size.rs`): distfiles from each package's `Manifest`,
    restricted to what `SRC_URI` needs for the effective USE, minus those already
-   in `DISTDIR`, deduplicated across the plan — matching `emerge -pv` exactly.
-9. **Advisory warnings** — emitted *after* the plan (emerge lists issues at the
-   bottom), see [Post-solve validation](#post-solve-validation).
+   in `DISTDIR`, deduplicated across the plan.
+10. **Advisory warnings** — emitted *after* the plan (emerge lists issues at the
+    bottom), see [Post-solve validation](#post-solve-validation).
+
+Stages 1–3 run concurrently via `tokio::join!`.
 
 ## USE stacking precedence
 
@@ -118,8 +276,7 @@ overriding `package.use` and the configured value, exactly as Portage does. The
 `*.stable.*` sets apply only when the version is "merged due to a stable keyword"
 (`force_mask::is_stable`, mirroring Portage's `KeywordsManager.isStable`: accepted
 *and* `ACCEPT_KEYWORDS` does not accept `~arch`), so they are inert on a `~arch`
-system. This is what makes crossdev's `cross-*` `multilib`/`cet`/`nopie` pins take
-effect. Force/mask are applied in **both** consumers: `desired_use` (the solver's
+system. Force/mask are applied in **both** consumers: `desired_use` (the solver's
 view, so conditional deps fire correctly) and the display fold in `mod.rs` (which
 appends synthetic `package.use` entries so output, the `REQUIRED_USE` check,
 download-size and autounmask all agree). The solver itself never recomputes any of
@@ -147,7 +304,7 @@ package's own facts):
 
 `REQUIRED_USE` (`^^`/`??`/`||`/`flag? ( … )`) is handled at two possible levels:
 
-- **Level A — validate & report (current).** `RequiredUseExpr::is_satisfied` /
+- **Level A — validate & report (default).** `RequiredUseExpr::is_satisfied` /
   `unsatisfied` (in `portage-metadata`) evaluate each planned package's
   constraint against its effective USE; violations are reported as an advisory
   warning, matching Portage's default "fix your USE flags" behaviour. This is a
@@ -193,7 +350,8 @@ PubGrub core" in *some* way:
 
 - **Tier 1 — solved (enforced).** The solution provably satisfies it: version
   ranges, slots/subslots, `||`/`^^`/`??` groups, USE-*conditional* deps
-  (`flag? ( dep )`), and Level-C `REQUIRED_USE` (opt-in, `--autosolve-use`).
+  (`flag? ( dep )`), slot-operator `:=` subslot-change rebuilds, and Level-C
+  `REQUIRED_USE` (opt-in, `--autosolve-use`).
 - **Tier 2 — advisory.** Checked post-solve; the plan is still emitted even when
   violated, and the caveat is printed after it (as emerge does):
   - blockers (`!foo`/`!!foo`) — reported, not used to exclude/replace;
@@ -206,7 +364,6 @@ PubGrub core" in *some* way:
     `--autosolve-use` by `package_use::cosolve_use_deps` (C7).
 - **Tier 3 — invisible.** Not detected; the plan can silently differ from emerge
   with no warning:
-  - slot-operator `:=` subslot-change rebuilds of installed dependents;
   - old-slot wrapper/shim packages (`autoconf-wrapper`, `gcc-config`).
 
 Plus two **intentional** cosmetic divergences: install-*order* positions (valid

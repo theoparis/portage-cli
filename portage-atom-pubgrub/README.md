@@ -172,7 +172,7 @@ hyperfine --warmup 2 'em -p www-client/firefox' 'emerge -p www-client/firefox'
   to completion (`gtk+[wayland]` → `mesa[wayland]` → `libglvnd[X]`), where
   emerge's backtracking sometimes stops partway on multi-target invocations and
   shows a graph missing the cascade's tail.
-- **Slot-operator (`:=`) rebuilds are planned.** The VDB-recorded
+- **Slot-operator (`:=`) rebuilds are implemented.** The VDB-recorded
   `:slot/subslot=` bindings of installed consumers are checked against the
   plan; a dependency moving across a subslot boundary pulls the consumer in as
   a same-version rebuild right after its trigger, with portage's lowercase `r`

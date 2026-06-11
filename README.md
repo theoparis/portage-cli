@@ -30,8 +30,8 @@ subcommands corresponding to the traditional tools.
 | `maint` | `emaint` | Partial — see below |
 | `regen` | `emerge --regen` | Working |
 | `search` | `emerge --search` | Working |
-| *(default)* | `emerge` | Stub |
-| `ebuild` | `ebuild` | Stub |
+| *(default)* | `emerge` | Working — resolve → build loop, `--prefix` support |
+| `ebuild` | `ebuild` | Working — fetch, unpack, phases, merge, VDB registration |
 | `depclean` | `emerge --depclean` | Stub |
 | `quickpkg` | `quickpkg` | Stub |
 | `mirror` | `emirrordist` | Stub |
@@ -142,8 +142,8 @@ Metadata cache entries are parsed in parallel (jwalk + chunked `spawn_blocking`)
 
 ## Architecture
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full crate dependency graph
-and API reference.
+See [`docs/architecture.md`](./docs/architecture.md) for the full crate
+dependency graph, per-crate API catalog, and design reference.
 
 ### Crate family
 

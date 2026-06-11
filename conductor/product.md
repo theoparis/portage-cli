@@ -23,5 +23,13 @@ backed by the portage-* crate ecosystem instead of the Python Portage tree.
 ## Current State
 
 - `em atom` — parse and print atoms ✓
+- `em query` — all 13 subcommands working (depgraph, belongs, check, depends, files, has, hasuse, keywords, list, meta, size, uses, which) ✓
 - `em query depgraph` — full dep resolution via portage-atom-pubgrub ✓
-- All other subcommands are stubs returning `NotImplemented`
+- `em search` — name/description search ✓
+- `em regen` — metadata cache regeneration ✓
+- `em use` — add/remove USE flags in make.conf ✓
+- `em pkg` — edit package.use/keywords/mask/env ✓
+- `em ebuild` — fetch, unpack, phases, merge, VDB registration ✓
+- `em maint` — world, revisions, moveinst, regen_use ✓
+- Default mode (`em <atoms>`) — resolve → build loop ✓
+- Remaining stubs: depclean, sync, news, glsa, log, clean, revdep, quickpkg, mirror, grep, select, dispatch, etc, env, portageq

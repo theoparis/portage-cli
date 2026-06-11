@@ -17,11 +17,9 @@ cargo fmt --check                  # Format check — must pass
 - Business logic is delegated to the library crates (`portage-atom`,
   `portage-metadata`, `portage-repo`, `portage-atom-pubgrub`, …).
 - **Read [`docs/architecture.md`](./docs/architecture.md) first** — it is the
-  main architecture reference (the `em -p` resolution pipeline, USE stacking
-  precedence, the USE/solver boundary, post-solve validation, and known
-  divergences from emerge). Keep it updated as the design changes.
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md) is the per-crate public-API catalog and
-  publishing status.
+  main architecture reference (crate catalog, the `em -p` resolution pipeline,
+  USE stacking precedence, the USE/solver boundary, post-solve validation, and
+  known divergences from emerge). Keep it updated as the design changes.
 
 ## Dependencies
 
