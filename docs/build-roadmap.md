@@ -31,11 +31,15 @@ Goal: a leaf-package build is trustworthy and debuggable.
 - [ ] `src_test`: skipped by default, run under `FEATURES=test`
 - [ ] FEATURES parsing from make.conf (minimal set: `test`, `keepwork`,
       `nostrip`, `collision-protect` toggles); ignore + warn on the rest
-- [ ] Per-package build log (`<workdir>/build.log`, tee'd; print path on
-      failure) and `-q` silencing of phase output
-- [ ] Profile build environment in the phase shell: `make.defaults` vars
+- [x] Per-package build log (`<workdir>/build.log`, tee'd via process
+      substitution; path attached to failures) and `-q` captured-silent mode.
+      Required teaching Rust-builtin children (econf/emake) to honour the
+      shell context's redirected fds (`context_stdio`)
+- [x] Profile build environment in the phase shell: `make.defaults` vars
       (CHOST, CFLAGS/LDFLAGS defaults, `MULTILIB_ABIS`, `ABI`, `LIBDIR_*`,
-      `USE_EXPAND` values) — fixes multilib's degraded `.default` ABI dir
+      `USE_EXPAND` values) via `ProfileStack::configure_shell`; the plan's
+      per-package USE overrides on top — file-5.47 now builds in
+      `file-5.47-.arm64` with libs in `/usr/lib64`
 - [ ] `pkg_pretend` + `pkg_setup` run with correct `EBUILD_PHASE`/`MERGE_TYPE`
 - [ ] die-in-subshell audit: `$(...)` contexts where `die` can only print
       (eautoreconf autoconf detection noise) — match portage's behaviour,
@@ -43,8 +47,11 @@ Goal: a leaf-package build is trustworthy and debuggable.
 - [ ] Leaf-basket hardening run: `file gzip bc zstd xz-utils sed` each into a
       fresh prefix; record a pass/fail matrix in this file
 
-**Gate:** `em --prefix /tmp/p app-arch/zstd` (cmake) and `sys-apps/file`
-(multilib) both merge with correct ABI libdirs and a saved build.log.
+**Gate:** `em --prefix /tmp/p app-arch/zstd` (meson, as it turns out) and
+`sys-apps/file` (multilib) both merge with correct ABI libdirs and a saved
+build.log — **passed 2026-06-11** (zstd binary + lib64 sonames run; one
+non-fatal wart logged: `command not found: -E` from a python wrapper during
+zstd's install, to chase with the python-any-r1 item in M4).
 
 ## M2 — Multi-package orchestration
 
@@ -87,7 +94,8 @@ in src_compile) is caught by both confinements.
 Goal: the eclass machinery firefox's stack needs works under our shell.
 Iterate target-by-target, hardest last:
 
-- [ ] meson package end-to-end (e.g. `dev-libs/libffi` or `x11-libs/pixman`)
+- [x] meson package end-to-end — `app-arch/zstd` (meson build system) merged
+      into a prefix with working binary and libraries
 - [ ] cmake package end-to-end (`app-arch/zstd` if not done in M1)
 - [ ] python-any-r1 BDEPEND package (host python detection, no target installs)
 - [ ] `check-reqs` (needs /proc memory introspection), `multiprocessing`,

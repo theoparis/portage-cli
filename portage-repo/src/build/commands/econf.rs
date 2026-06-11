@@ -20,6 +20,7 @@ impl builtins::Command for EconfCommand {
         &self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
+        let (stdout, stderr) = super::context_stdio(&context);
         let shell = context.shell;
 
         let get = |var: &str| {
@@ -144,6 +145,7 @@ impl builtins::Command for EconfCommand {
 
             let mut cmd = std::process::Command::new(&configure);
             cmd.current_dir(&cwd).args(&conf_args);
+            cmd.stdout(stdout).stderr(stderr);
             for (k, v) in &env_vars {
                 cmd.env(k, v);
             }

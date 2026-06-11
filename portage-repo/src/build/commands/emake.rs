@@ -21,6 +21,7 @@ impl builtins::Command for EmakeCommand {
         &self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
+        let (stdout, stderr) = super::context_stdio(&context);
         let shell = context.shell;
         let make = shell
             .env_str("MAKE")
@@ -48,6 +49,8 @@ impl builtins::Command for EmakeCommand {
                 .args(&makeopts)
                 .args(&extra)
                 .args(&args)
+                .stdout(stdout)
+                .stderr(stderr)
                 .status()
                 .map(|s| s.code().unwrap_or(1) as u8)
                 .unwrap_or(127)

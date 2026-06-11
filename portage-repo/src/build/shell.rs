@@ -529,6 +529,10 @@ pub struct EbuildShell {
     /// The auto-resolved primary joins the read-only fallbacks so shared
     /// caches keep being found.
     distdir_override: Option<Utf8PathBuf>,
+    /// Phase-output log. `Some((path, quiet))`: phase function output is
+    /// appended to `path` — tee'd to the console, or captured silently when
+    /// `quiet`.
+    phase_log: Option<(Utf8PathBuf, bool)>,
     /// Snapshot of the fully-configured shell, captured at the first sourcing
     /// and restored before every subsequent one, so that nothing a previously
     /// sourced ebuild defined — variables, eclass functions, aliases, shell
@@ -713,6 +717,7 @@ impl EbuildShell {
         let mut ebuild_shell = EbuildShell {
             shell,
             distdir_override: None,
+            phase_log: None,
             baseline: None,
             repo_path: repo.path().to_path_buf(),
             eclass_dirs,
@@ -721,6 +726,12 @@ impl EbuildShell {
         ebuild_shell.sync_eclass_dirs_var();
 
         Ok(ebuild_shell)
+    }
+
+    /// Log phase output to `path` (created on first write): tee'd to the
+    /// console, or captured silently when `quiet`.
+    pub fn set_phase_log(&mut self, path: Option<(Utf8PathBuf, bool)>) {
+        self.phase_log = path;
     }
 
     /// Use `dir` as the writable distfiles directory for this shell (the
@@ -1285,7 +1296,26 @@ impl EbuildShell {
         // __ebuild_phase_funcs as a fallback calling default()).
         let phase_defined = self.shell.funcs().get(func_name).is_some();
         if phase_defined {
-            self.run_string(func_name).await?;
+            let invocation = match &self.phase_log {
+                Some((log, quiet)) => {
+                    if let Some(parent) = log.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    let marker = format!(">>> {func_name}\n");
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(log)
+                        .and_then(|mut f| std::io::Write::write_all(&mut f, marker.as_bytes()));
+                    if *quiet {
+                        format!("{{ {func_name} ; }} >> {log} 2>&1")
+                    } else {
+                        format!("{{ {func_name} ; }} > >(tee -a {log}) 2>&1")
+                    }
+                }
+                None => func_name.to_string(),
+            };
+            self.run_string(&invocation).await?;
         } else {
             eprintln!("warning: {func_name} not defined, nothing to do");
         }

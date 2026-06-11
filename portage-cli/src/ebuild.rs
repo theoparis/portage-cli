@@ -30,6 +30,31 @@ pub fn default_work_base(prefix: Option<&Utf8Path>) -> Utf8PathBuf {
     Utf8PathBuf::from(home).join(".cache/em/build")
 }
 
+/// Source the host profile stack (`/etc/portage/make.profile` +
+/// `/etc/portage/profile`) and make.conf into the shell, and set its
+/// effective USE. Returns `false` when no profile is resolvable (the build
+/// proceeds with bare defaults).
+async fn apply_profile_env(shell: &mut portage_repo::EbuildShell) -> Result<bool> {
+    let Ok(profile_path) = std::fs::canonicalize("/etc/portage/make.profile") else {
+        return Ok(false);
+    };
+    let stack = portage_repo::ProfileStack::build(profile_path)
+        .context("building profile stack")?
+        .with_user_profile(std::path::PathBuf::from("/etc/portage/profile"))
+        .context("loading /etc/portage/profile")?;
+    let conf_candidates = ["/etc/portage/make.conf", "/etc/make.conf"];
+    let confs: Vec<&std::path::Path> = conf_candidates
+        .iter()
+        .map(std::path::Path::new)
+        .filter(|p| p.exists())
+        .collect();
+    stack
+        .configure_shell(shell, &confs)
+        .await
+        .context("sourcing profile environment")?;
+    Ok(true)
+}
+
 pub async fn run(
     ebuild_path: &str,
     phases: &[String],
@@ -43,6 +68,7 @@ pub async fn run(
         work_dir,
         repo_override,
         root,
+        None,
         None,
         None,
     )
@@ -60,6 +86,7 @@ pub async fn build_and_merge(
     work_base: &Utf8Path,
     root: &Utf8Path,
     distdir: Option<&Utf8Path>,
+    quiet: bool,
 ) -> Result<()> {
     let phases: Vec<String> = [
         "setup",
@@ -78,6 +105,7 @@ pub async fn build_and_merge(
         Ebuild::from_path(ebuild_path).with_context(|| format!("loading {ebuild_path}"))?;
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
     let work_dir = work_base.join(ebuild.category()).join(pf);
+    let log = work_dir.join("build.log");
     run_inner(
         ebuild_path.as_str(),
         &phases,
@@ -86,10 +114,13 @@ pub async fn build_and_merge(
         root,
         Some(use_flags),
         distdir,
+        Some((log.clone(), quiet)),
     )
     .await
+    .with_context(|| format!("build log: {log}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_inner(
     ebuild_path: &str,
     phases: &[String],
@@ -98,6 +129,7 @@ async fn run_inner(
     root: &Utf8Path,
     use_flags: Option<&[String]>,
     distdir: Option<&Utf8Path>,
+    phase_log: Option<(Utf8PathBuf, bool)>,
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
     let ebuild = Ebuild::from_path(path).with_context(|| format!("loading {ebuild_path}"))?;
@@ -125,19 +157,23 @@ async fn run_inner(
     if let Some(dir) = distdir {
         shell.set_distdir(dir.to_owned());
     }
+    shell.set_phase_log(phase_log);
 
-    match use_flags {
-        Some(flags) => {
-            // The resolved plan's effective USE for this package.
-            let refs: Vec<&str> = flags.iter().map(String::as_str).collect();
-            shell.set_use_flags(&refs).context("setting USE flags")?;
-        }
-        None => {
-            if let Some(use_val) = read_use_from_make_conf() {
-                let flags: Vec<&str> = use_val.split_whitespace().collect();
-                shell.set_use_flags(&flags).context("setting USE flags")?;
-            }
-        }
+    // Profile build environment: source the make.defaults chain and make.conf
+    // into the shell so phases see CHOST, CFLAGS/LDFLAGS, MULTILIB_ABIS/ABI/
+    // LIBDIR_*, and the USE_EXPAND variables (PYTHON_TARGETS, …) that eclasses
+    // read directly. This also resolves the profile's effective USE.
+    if !apply_profile_env(&mut shell).await? {
+        eprintln!(
+            "warning: no usable profile at /etc/portage/make.profile — building without profile defaults"
+        );
+    }
+
+    if let Some(flags) = use_flags {
+        // The resolved plan's effective USE for this package overrides the
+        // profile-resolved set (the sourced environment stays).
+        let refs: Vec<&str> = flags.iter().map(String::as_str).collect();
+        shell.set_use_flags(&refs).context("setting USE flags")?;
     }
 
     for phase in phases {
@@ -775,19 +811,6 @@ fn read_fetch_commands() -> (Option<String>, Option<String>) {
         }
     }
     (None, None)
-}
-
-fn read_use_from_make_conf() -> Option<String> {
-    for candidate in [DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF] {
-        let p = Utf8Path::new(candidate);
-        if p.exists()
-            && let Ok(mc) = MakeConf::load(p)
-            && let Some(val) = mc.get("USE")
-        {
-            return Some(val.to_owned());
-        }
-    }
-    None
 }
 
 #[cfg(test)]

@@ -126,6 +126,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
             &work_base,
             &merge_root,
             distdir.as_deref(),
+            cli.quiet,
         )
         .await
         .with_context(|| format!("emerging {}", planned.cpv))?;
