@@ -1084,7 +1084,7 @@ impl EbuildShell {
     /// triggers `inherit` and populates eclass functions), then calls the
     /// phase function if it is defined.
     ///
-    /// Unlike [`source_ebuild`], no metadata extraction is performed.  Output
+    /// Unlike `source_ebuild`, no metadata extraction is performed.  Output
     /// from the phase (stdout/stderr) is passed through to the caller's
     /// terminal.
     ///
@@ -1380,7 +1380,7 @@ impl EbuildShell {
         self.shell.env_str(name).map(|cow| cow.into_owned())
     }
 
-    /// Snapshot all ebuild metadata variables into an [`EbuildEnv`].
+    /// Snapshot all ebuild metadata variables into an `EbuildEnv`.
     ///
     /// Call this after [`source_ebuild`](Self::source_ebuild) to capture the
     /// stable per-package metadata before running any build phases.
@@ -1546,7 +1546,7 @@ impl EbuildShell {
     /// function runs, since `src_unpack` and `pkg_nofetch` iterate `${A}`.
     ///
     /// USE-conditional groups (`flag? ( ... )`) are evaluated against
-    /// [`Self::use_flags`]; unconditional files are always included.
+    /// `Self::use_flags`; unconditional files are always included.
     pub fn set_a_from_src_uri(&mut self) {
         let src_uri = self.get_var("SRC_URI").unwrap_or_default();
         if src_uri.is_empty() {

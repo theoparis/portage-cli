@@ -48,7 +48,7 @@ impl ProfileStack {
     ///
     /// Returns enabled-only flags as interned strings.  The shell's bash state is
     /// updated as a side-effect (necessary for bash evaluation); the Rust-side
-    /// `use_flags` HashSet is **not** set — call [`configure_shell`] for that.
+    /// `use_flags` HashSet is **not** set — call `configure_shell` for that.
     pub async fn use_flags(
         &self,
         shell: &mut EbuildShell,
@@ -171,7 +171,7 @@ impl ProfileStack {
 
     /// Configure a shell with this profile stack's effective USE flags.
     ///
-    /// See [`configure_shell`] for the full description.
+    /// See `configure_shell` for the full description.
     pub async fn configure_shell(
         &self,
         shell: &mut EbuildShell,

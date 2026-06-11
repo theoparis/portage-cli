@@ -14,7 +14,7 @@
 //! (`extend_past_comment`) and then to the next `\n` (`extend_to_newline`).
 //!
 //! Everything between statement spans (blank lines, leading whitespace) is
-//! [`Entry::Opaque`] and reproduced verbatim.
+//! `Entry::Opaque` and reproduced verbatim.
 
 use std::ops::Range;
 

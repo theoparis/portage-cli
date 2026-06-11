@@ -192,7 +192,7 @@ pub enum Applet {
         ebuild_path: String,
         #[arg(required = true)]
         phase: Vec<String>,
-        /// Override the build work directory (default: /var/tmp/portage/<cat>/<pf>)
+        /// Override the build work directory (default: `/var/tmp/portage/<cat>/<pf>`)
         #[arg(short = 'w', long, value_name = "DIR")]
         work_dir: Option<camino::Utf8PathBuf>,
         /// Installation root for merge (default: /)
@@ -419,7 +419,7 @@ pub enum PkgCommand {
         /// Drop flags entirely (removes both flag and -flag forms)
         #[arg(short = 'd', long = "drop", value_name = "FLAG")]
         drop: Vec<String>,
-        /// Target file inside package.use/ (default: <cat>-<pkg>)
+        /// Target file inside package.use/ (default: `<cat>-<pkg>`)
         #[arg(long, value_name = "FILE")]
         path: Option<camino::Utf8PathBuf>,
     },

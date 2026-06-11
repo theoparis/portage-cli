@@ -300,7 +300,7 @@ impl PortageDependencyProvider {
     /// Return all USE flag requirements collected by the post-solve validation pass.
     ///
     /// Includes both reinstall candidates (`R`) and informational annotations
-    /// for newly-installed packages.  Populated by [`resolve_targets`].
+    /// for newly-installed packages.  Populated by `resolve_targets`.
     pub fn use_flag_requirements(&self) -> &[UseFlagRequirement] {
         &self.use_flag_requirements
     }

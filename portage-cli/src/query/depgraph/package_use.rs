@@ -243,7 +243,7 @@ fn req_targets(
 }
 
 /// Adjacency map: CPN → Vec<(to_CPN, annotation)>.
-/// annotation = "from-cpv[flag]" when gated, "from-cpv" otherwise.
+/// annotation = "from-cpv\[flag\]" when gated, "from-cpv" otherwise.
 type Adjacency = HashMap<String, Vec<(String, String)>>;
 
 fn build_adjacency(edges: &[DepEdge]) -> Adjacency {

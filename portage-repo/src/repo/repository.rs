@@ -42,7 +42,7 @@ pub struct Ebuilds {
 
 /// Concrete iterator produced by [`Ebuilds::into_iter`].
 ///
-/// Holds the jwalk [`DirEntryIter`] and converts each entry
+/// Holds the jwalk `DirEntryIter` and converts each entry
 /// to an [`Ebuild`] on the fly, applying the optional filter.
 pub struct EbuildsIter {
     inner: jwalk::DirEntryIter<((), ())>,

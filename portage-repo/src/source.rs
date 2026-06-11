@@ -5,7 +5,7 @@
 //!
 //! Both share a [`SourceContext`] that holds the eclass AST cache. Pass the
 //! same instance across calls within a single run to maximise cache hits.
-//! No disk I/O is performed here; writing cache files is [`crate::regen`].
+//! No disk I/O is performed here; writing cache files is `crate::regen`.
 
 use std::sync::Arc;
 

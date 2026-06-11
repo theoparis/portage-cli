@@ -398,7 +398,7 @@ impl ProfileStack {
 /// `use.force` added, `use.mask` removed, environment layer applied.
 ///
 /// Produced by [`ProfileStack::use_flags`] (defined in
-/// `portage_repo::build::profile`, which has access to [`EbuildShell`]).
+/// `portage_repo::build::profile`, which has access to `EbuildShell`).
 #[derive(Debug, Clone, Default)]
 pub struct UseFlags(pub(crate) Vec<Interned<DefaultInterner>>);
 
@@ -439,7 +439,7 @@ impl IntoIterator for UseFlags {
 /// which profile introduced or removed a particular flag.
 ///
 /// Layers are produced by [`ProfileStack::profile_env`] (defined in
-/// `portage_repo::build::profile`, which has access to [`EbuildShell`]).
+/// `portage_repo::build::profile`, which has access to `EbuildShell`).
 #[derive(Debug, Clone)]
 pub struct ProfileEnvLayer {
     /// Absolute path to the `make.defaults` file this layer was read from.

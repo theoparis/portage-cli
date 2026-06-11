@@ -15,7 +15,7 @@ use crate::{Error, Result};
 /// `use.local.desc` acts as a pre-built index over all `metadata.xml` `<use>`
 /// sections, so loading it is O(file size) rather than O(number of packages).
 /// For packages not represented (e.g. in overlays that haven't been regen'd),
-/// callers can fall back to [`crate::PkgMetadata::load`] directly.
+/// callers can fall back to `crate::PkgMetadata::load` directly.
 #[derive(Default)]
 pub struct UseDb {
     /// Global flag descriptions from `profiles/use.desc`.
