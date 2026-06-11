@@ -113,6 +113,18 @@ impl UseConfig {
     }
 
     /// Returns all solver-decided flags.
+    /// Every flag this config explicitly enables (sorted, for stable output).
+    pub fn enabled_flags(&self) -> Vec<Interned<DefaultInterner>> {
+        let mut v: Vec<Interned<DefaultInterner>> = self
+            .flags
+            .iter()
+            .filter(|(_, s)| matches!(s, UseFlagState::Enabled))
+            .map(|(f, _)| *f)
+            .collect();
+        v.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        v
+    }
+
     pub fn solver_decided_flags(&self) -> Vec<Interned<DefaultInterner>> {
         self.flags
             .iter()

@@ -27,6 +27,29 @@ use portage_repo::Repository;
 
 use crate::cli::DepgraphFormat;
 
+/// One entry of the resolved merge list, in install order — everything the
+/// build loop needs to emerge it.
+pub struct PlannedMerge {
+    /// `category/name-version` (display + work-dir naming).
+    pub cpv: String,
+    /// Absolute path to the ebuild.
+    pub ebuild_path: camino::Utf8PathBuf,
+    /// Effective enabled USE flags for this build: the global config and
+    /// per-package overrides resolved per the displayed plan (including
+    /// profile-injected implicit flags like `elibc_glibc`/`kernel_linux`,
+    /// which USE conditionals test).
+    pub use_flags: Vec<String>,
+}
+
+/// What [`depgraph`] resolved.
+pub struct DepgraphOutcome {
+    /// Process exit code: `1` when configuration changes are required to
+    /// realise the displayed plan (matching `emerge -p`), `0` otherwise.
+    pub exit_code: i32,
+    /// The merge list in install order.
+    pub plan: Vec<PlannedMerge>,
+}
+
 pub struct DepgraphOpts<'a> {
     pub repo_path: &'a Utf8Path,
     pub atoms: &'a [String],
@@ -43,10 +66,7 @@ pub struct DepgraphOpts<'a> {
     pub root: Option<&'a Utf8Path>,
 }
 
-/// Returns the process exit code: `1` when configuration changes (USE
-/// adjustments) are required to realise the displayed plan — matching
-/// `emerge -p` — and `0` otherwise.
-pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<i32> {
+pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome> {
     let DepgraphOpts {
         repo_path,
         atoms,
@@ -618,5 +638,64 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<i32> {
         package_use::report(&use_change_entries);
     }
 
-    Ok(if use_change_entries.is_empty() { 0 } else { 1 })
+    // The merge plan for the build loop: ebuild paths come from the package's
+    // source repo (main or overlay), USE from the same effective fold the
+    // displayed plan used.
+    let repo_path_of = |cpv: &Cpv| -> camino::Utf8PathBuf {
+        let name = repo::repo_name_of(&data, cpv);
+        if name == data.repo_name {
+            repo_path.to_owned()
+        } else {
+            overlays
+                .iter()
+                .find(|(o, _)| o.name() == name)
+                .map(|(o, _)| o.path().to_owned())
+                .unwrap_or_else(|| repo_path.to_owned())
+        }
+    };
+    let plan: Vec<PlannedMerge> = order
+        .iter()
+        .filter(|(pkg, _)| !pkg.is_virtual())
+        .map(|(pkg, ver)| {
+            let cpn = pkg.cpn();
+            let cpv = Cpv::new(*cpn, ver.clone());
+            let effective = portage_atom_pubgrub::apply_package_use(
+                &use_config,
+                &cpv,
+                pkg.slot(),
+                &package_use,
+            );
+            let mut flags: Vec<String> = effective
+                .enabled_flags()
+                .iter()
+                .map(|f| f.as_str().to_string())
+                .collect();
+            // IUSE defaults the config leaves unset are enabled at build time.
+            if let Some(cache) = repo::find_cache(&data, pkg, ver) {
+                for iuse in &cache.metadata.iuse {
+                    if matches!(iuse.default, Some(portage_metadata::IUseDefault::Enabled))
+                        && effective.get_opt(&Interned::intern(iuse.name())).is_none()
+                    {
+                        flags.push(iuse.name().to_string());
+                    }
+                }
+            }
+            flags.sort();
+            flags.dedup();
+            let ebuild_path = repo_path_of(&cpv)
+                .join(cpn.category.as_str())
+                .join(cpn.package.as_str())
+                .join(format!("{}-{}.ebuild", cpn.package, ver));
+            PlannedMerge {
+                cpv: format!("{}/{}-{}", cpn.category, cpn.package, ver),
+                ebuild_path,
+                use_flags: flags,
+            }
+        })
+        .collect();
+
+    Ok(DepgraphOutcome {
+        exit_code: if use_change_entries.is_empty() { 0 } else { 1 },
+        plan,
+    })
 }

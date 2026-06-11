@@ -273,9 +273,17 @@ impl builtins::Command for EbuildPhaseFuncsCommand {
             }
 
             // Install fallback only when the ebuild did not define the phase.
+            // A phase with a PMS default implementation falls back to it; a
+            // phase without one (the pkg_* lifecycle hooks) is a silent no-op,
+            // as in portage — `default_<phase>` still dies if an ebuild calls
+            // `default` there explicitly (PMS §12.1).
             let phase_defined = shell.funcs().get(phase.as_str()).is_some();
             if !phase_defined {
-                script += &format!("{phase}() {{ default; }}\n");
+                if resolve_phase_default(eapi, phase).is_some() {
+                    script += &format!("{phase}() {{ default; }}\n");
+                } else {
+                    script += &format!("{phase}() {{ :; }}\n");
+                }
             }
         }
 

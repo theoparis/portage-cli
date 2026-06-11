@@ -525,6 +525,10 @@ einstalldocs() {
 /// for the metadata variables extracted after sourcing an ebuild.
 pub struct EbuildShell {
     shell: Shell,
+    /// Caller-chosen writable distfiles dir (e.g. `<prefix>/var/cache/distfiles`).
+    /// The auto-resolved primary joins the read-only fallbacks so shared
+    /// caches keep being found.
+    distdir_override: Option<Utf8PathBuf>,
     /// Snapshot of the fully-configured shell, captured at the first sourcing
     /// and restored before every subsequent one, so that nothing a previously
     /// sourced ebuild defined — variables, eclass functions, aliases, shell
@@ -708,6 +712,7 @@ impl EbuildShell {
 
         let mut ebuild_shell = EbuildShell {
             shell,
+            distdir_override: None,
             baseline: None,
             repo_path: repo.path().to_path_buf(),
             eclass_dirs,
@@ -716,6 +721,27 @@ impl EbuildShell {
         ebuild_shell.sync_eclass_dirs_var();
 
         Ok(ebuild_shell)
+    }
+
+    /// Use `dir` as the writable distfiles directory for this shell (the
+    /// auto-resolved location becomes a read-only fallback).
+    pub fn set_distdir(&mut self, dir: Utf8PathBuf) {
+        self.invalidate_baseline();
+        std::fs::create_dir_all(&dir).ok();
+        self.distdir_override = Some(dir);
+    }
+
+    /// The effective `(DISTDIR, PORTAGE_RO_DISTDIRS)` pair: the override when
+    /// set (auto-resolved primary demoted to read-only), else the resolved one.
+    fn effective_distdir(&self) -> (String, Vec<String>) {
+        let (resolved, mut ro) = Self::resolved_distdir();
+        match &self.distdir_override {
+            Some(dir) => {
+                ro.insert(0, resolved);
+                (dir.to_string(), ro)
+            }
+            None => (resolved, ro),
+        }
     }
 
     /// Restore the configured baseline, capturing it on first use. Makes each
@@ -827,7 +853,7 @@ impl EbuildShell {
         self.set_var("TMPDIR", &format!("{base}/temp"));
         self.set_var("HOME", &format!("{base}/homedir"));
         self.set_var("D", &format!("{base}/image/"));
-        let (distdir, ro) = Self::resolved_distdir();
+        let (distdir, ro) = self.effective_distdir();
         self.set_var("DISTDIR", &distdir);
         self.set_var("PORTAGE_RO_DISTDIRS", &ro.join(" "));
 
@@ -985,7 +1011,7 @@ impl EbuildShell {
             self.set_var("PATH", &format!("{}:{cur_path}", helpers.display()));
         }
 
-        let (distdir, ro) = Self::resolved_distdir();
+        let (distdir, ro) = self.effective_distdir();
         self.set_var("DISTDIR", &distdir);
         self.set_var("PORTAGE_RO_DISTDIRS", &ro.join(" "));
 

@@ -51,6 +51,12 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub repo: Option<String>,
 
+    /// Unprivileged offset: merge ROOT, the VDB, distfiles and build trees
+    /// all live under DIR. Configuration (profile, make.conf) still comes
+    /// from the host; use --root for a full config offset.
+    #[arg(long, value_name = "DIR")]
+    pub prefix: Option<String>,
+
     /// Search package names, like emerge --search (each argument is a pattern)
     #[arg(short = 's', long)]
     pub search: bool,

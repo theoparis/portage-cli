@@ -60,9 +60,6 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     if cli.search || cli.searchdesc {
         return search::run_emerge_style(&cli.search_repos(), &cli.atoms, cli.searchdesc).await;
     }
-    if !cli.pretend {
-        bail!("not implemented: emerge (use -p for pretend mode)");
-    }
     let resolved = cli.repo_path();
     let repo_path = camino::Utf8Path::new(&resolved);
     if !repo_path.is_dir() {
@@ -86,7 +83,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     } else {
         cli::DepgraphFormat::Pretty
     };
-    let code = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
+    let outcome = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
         repo_path,
         atoms: &atoms,
         arch: &cli.arch,
@@ -100,8 +97,41 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         root,
     })
     .await?;
-    if code != 0 {
-        std::process::exit(code);
+
+    if cli.pretend {
+        if outcome.exit_code != 0 {
+            std::process::exit(outcome.exit_code);
+        }
+        return Ok(());
+    }
+
+    // em <atoms>: build and merge the resolved plan, in order.
+    if outcome.exit_code != 0 {
+        bail!("configuration changes are required (see above) — refusing to merge");
+    }
+    let prefix = cli.prefix.as_deref().map(camino::Utf8Path::new);
+    let merge_root = prefix
+        .or(root)
+        .unwrap_or_else(|| camino::Utf8Path::new("/"))
+        .to_owned();
+    let distdir = prefix.map(|p| p.join("var/cache/distfiles"));
+    let work_base = ebuild::default_work_base(prefix);
+
+    let total = outcome.plan.len();
+    for (i, planned) in outcome.plan.iter().enumerate() {
+        println!("\n>>> Emerging ({} of {total}) {}", i + 1, planned.cpv);
+        ebuild::build_and_merge(
+            &planned.ebuild_path,
+            &planned.use_flags,
+            &work_base,
+            &merge_root,
+            distdir.as_deref(),
+        )
+        .await
+        .with_context(|| format!("emerging {}", planned.cpv))?;
+    }
+    if total > 0 {
+        println!("\n>>> Done ({total} package(s) merged into {merge_root})");
     }
     Ok(())
 }
@@ -291,7 +321,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 bail!("equery depgraph: no valid atoms");
             }
             let root = globals.root.as_deref().map(camino::Utf8Path::new);
-            let code = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
+            let outcome = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
                 repo_path,
                 atoms: &atoms,
                 arch: &globals.arch,
@@ -305,8 +335,8 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 root,
             })
             .await?;
-            if code != 0 {
-                std::process::exit(code);
+            if outcome.exit_code != 0 {
+                std::process::exit(outcome.exit_code);
             }
             Ok(())
         }

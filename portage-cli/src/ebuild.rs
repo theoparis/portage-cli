@@ -13,12 +13,91 @@ use portage_repo::{
 };
 use portage_vdb::{ContentsEntry, ContentsKind, InstalledPackage, MergeSpec, Vdb};
 
+/// The base directory for build work trees: `<prefix>/var/tmp/portage` under
+/// a prefix; otherwise the system `/var/tmp/portage` when writable, falling
+/// back to the user cache.
+pub fn default_work_base(prefix: Option<&Utf8Path>) -> Utf8PathBuf {
+    if let Some(p) = prefix {
+        return p.join("var/tmp/portage");
+    }
+    let system = Utf8Path::new("/var/tmp/portage");
+    let probe = system.join(format!(".em-write-probe-{}", std::process::id()));
+    if std::fs::create_dir_all(system).is_ok() && std::fs::write(&probe, b"").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        return system.to_owned();
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    Utf8PathBuf::from(home).join(".cache/em/build")
+}
+
 pub async fn run(
     ebuild_path: &str,
     phases: &[String],
     work_dir: Option<&Utf8Path>,
     repo_override: Option<&str>,
     root: &Utf8Path,
+) -> Result<()> {
+    run_inner(
+        ebuild_path,
+        phases,
+        work_dir,
+        repo_override,
+        root,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Build one resolved plan entry through the full phase chain and merge it
+/// into `root`: the per-package effective USE replaces the make.conf USE, the
+/// work tree lives under `work_base/<category>/<pf>`, and `distdir` (when
+/// set, e.g. `<prefix>/var/cache/distfiles`) overrides the writable distfiles
+/// location.
+pub async fn build_and_merge(
+    ebuild_path: &Utf8Path,
+    use_flags: &[String],
+    work_base: &Utf8Path,
+    root: &Utf8Path,
+    distdir: Option<&Utf8Path>,
+) -> Result<()> {
+    let phases: Vec<String> = [
+        "setup",
+        "fetch",
+        "unpack",
+        "prepare",
+        "configure",
+        "compile",
+        "install",
+        "qmerge",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let ebuild =
+        Ebuild::from_path(ebuild_path).with_context(|| format!("loading {ebuild_path}"))?;
+    let pf = format!("{}-{}", ebuild.name(), ebuild.version());
+    let work_dir = work_base.join(ebuild.category()).join(pf);
+    run_inner(
+        ebuild_path.as_str(),
+        &phases,
+        Some(&work_dir),
+        None,
+        root,
+        Some(use_flags),
+        distdir,
+    )
+    .await
+}
+
+async fn run_inner(
+    ebuild_path: &str,
+    phases: &[String],
+    work_dir: Option<&Utf8Path>,
+    repo_override: Option<&str>,
+    root: &Utf8Path,
+    use_flags: Option<&[String]>,
+    distdir: Option<&Utf8Path>,
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
     let ebuild = Ebuild::from_path(path).with_context(|| format!("loading {ebuild_path}"))?;
@@ -43,10 +122,22 @@ pub async fn run(
     };
 
     let mut shell = repo.shell().await.context("creating shell")?;
+    if let Some(dir) = distdir {
+        shell.set_distdir(dir.to_owned());
+    }
 
-    if let Some(use_val) = read_use_from_make_conf() {
-        let flags: Vec<&str> = use_val.split_whitespace().collect();
-        shell.set_use_flags(&flags).context("setting USE flags")?;
+    match use_flags {
+        Some(flags) => {
+            // The resolved plan's effective USE for this package.
+            let refs: Vec<&str> = flags.iter().map(String::as_str).collect();
+            shell.set_use_flags(&refs).context("setting USE flags")?;
+        }
+        None => {
+            if let Some(use_val) = read_use_from_make_conf() {
+                let flags: Vec<&str> = use_val.split_whitespace().collect();
+                shell.set_use_flags(&flags).context("setting USE flags")?;
+            }
+        }
     }
 
     for phase in phases {
