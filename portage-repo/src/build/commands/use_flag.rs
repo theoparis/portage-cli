@@ -38,6 +38,7 @@ impl builtins::Command for UseCommand {
 pub(crate) struct UsevCommand {
     #[arg(allow_hyphen_values = true)]
     flag: String,
+    #[arg(allow_hyphen_values = true)]
     true_val: Option<String>,
 }
 
@@ -72,9 +73,13 @@ impl builtins::Command for UsevCommand {
 pub(crate) struct UsexCommand {
     #[arg(allow_hyphen_values = true)]
     flag: String,
+    #[arg(allow_hyphen_values = true)]
     true_str: Option<String>,
+    #[arg(allow_hyphen_values = true)]
     false_str: Option<String>,
+    #[arg(allow_hyphen_values = true)]
     true_suffix: Option<String>,
+    #[arg(allow_hyphen_values = true)]
     false_suffix: Option<String>,
 }
 
@@ -111,7 +116,9 @@ impl builtins::Command for UsexCommand {
 pub(crate) struct UseEnableCommand {
     #[arg(allow_hyphen_values = true)]
     flag: String,
+    #[arg(allow_hyphen_values = true)]
     feature: Option<String>,
+    #[arg(allow_hyphen_values = true)]
     val: Option<String>,
 }
 
@@ -146,7 +153,9 @@ impl builtins::Command for UseEnableCommand {
 pub(crate) struct UseWithCommand {
     #[arg(allow_hyphen_values = true)]
     flag: String,
+    #[arg(allow_hyphen_values = true)]
     feature: Option<String>,
+    #[arg(allow_hyphen_values = true)]
     val: Option<String>,
 }
 

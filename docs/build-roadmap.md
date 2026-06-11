@@ -71,8 +71,15 @@ Goal: a leaf-package build is trustworthy and debuggable.
 **Gate:** `em --prefix /tmp/p app-arch/zstd` (meson, as it turns out) and
 `sys-apps/file` (multilib) both merge with correct ABI libdirs and a saved
 build.log — **passed 2026-06-11**, and **M1 is complete** (7/7 basket with
-die enforcement). One wart still parked: `command not found: -E` from a
-python wrapper during zstd's install (python-any-r1 item in M4).
+die enforcement). The parked `command not found: -E` wart turned out to be
+two real bugs, both fixed: `usex`'s value positionals rejected
+hyphen-leading arguments (meson.eclass's `meson_use`/`meson_feature` emit
+`-D...=true/false`), and brush's `export` silently dropped runtime
+assignments from expanded words (`export ${var}=value` —
+toolchain-funcs.eclass `_tc-getPROG`), so every `tc-getCC` lookup returned
+empty and `$($(tc-getCC) -E -P -)` ran `-E` as a command. Fixed in the
+brush fork (with bash-oracle compat cases) — builds now get the proper
+CHOST-prefixed compiler exported.
 
 ## M2 — Multi-package orchestration
 
