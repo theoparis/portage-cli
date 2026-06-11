@@ -100,17 +100,17 @@ package set and versions.
 
 | Target | Packages | `em -p` | `emerge -p` | Speedup |
 |---|---|---|---|---|
-| `www-client/firefox` | 78 | 1.60 s | 3.64 s | 2.3× |
-| `app-text/texlive-core` | 63 | 1.56 s | 2.16 s | 1.4× |
-| `dev-qt/qtbase` | 41 | 1.54 s | 3.13 s | 2.0× |
-| `app-office/libreoffice` | 140 | 2.08 s | 3.97 s | 1.9× |
-| all five large targets at once* | 186 | 2.13 s | 4.87 s | 2.3× |
+| `www-client/firefox` | 78 | 0.80 s | 3.63 s | 4.5× |
+| `app-office/libreoffice` | 140 | 0.91 s | 3.99 s | 4.4× |
+| all five large targets at once* | 186 | 0.98 s | 4.82 s | 4.9× |
+| `em -s gcc` (search) | — | 0.09 s | 0.82 s | 8.4× |
 
 \* `em -p libreoffice qtwebengine thunderbird qemu firefox` — multiple
 targets cost almost nothing extra (the md5-cache parse dominates).
-Plans that require USE changes (all of the above) pay 1–2 extra
-solve iterations for the autounmask-preview fixpoint; a plan with no
-needed changes resolves in ~1.0 s.
+Provider ingestion is closure-seeded: only packages reachable from the
+targets and the installed set are converted, so the autounmask-preview
+fixpoint's extra solve iterations cost milliseconds, not re-ingestions.
+Reproduce with `benchmarks/bench-em-vs-emerge.sh` from portage-cli.
 
 Wall-clock means from `hyperfine --warmup 2` (8 runs for `em`, 5 for `emerge`).
 Most of `em`'s time is ebuild-metadata (md5-cache) parsing and profile/USE

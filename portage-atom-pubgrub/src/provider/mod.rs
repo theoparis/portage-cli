@@ -217,6 +217,22 @@ impl PortageDependencyProvider {
     /// folds global USE, `package.use`, and IUSE defaults).  The solver never
     /// resolves policy itself.  See `docs/use-and-solver-boundary.md`.
     pub fn new<R: PackageRepository>(repo: R) -> Self {
+        let seeds = repo.all_packages();
+        Self::new_with_seeds(repo, seeds)
+    }
+
+    /// Like [`new`](Self::new), but converts only the packages *reachable*
+    /// from `seeds` (typically the resolve targets plus the installed set).
+    /// References are followed transitively, so after ingestion a referenced
+    /// package missing from `packages` is genuinely absent from the
+    /// repository — the dropped-dependency filtering stays sound. For a
+    /// targeted resolve this converts a few hundred packages instead of the
+    /// whole tree.
+    pub fn new_for_targets<R: PackageRepository>(repo: R, seeds: Vec<Cpn>) -> Self {
+        Self::new_with_seeds(repo, seeds)
+    }
+
+    fn new_with_seeds<R: PackageRepository>(repo: R, seeds: Vec<Cpn>) -> Self {
         let mut packages = HashMap::new();
         let mut use_decision_prefer: HashMap<PortagePackage, Version> = HashMap::new();
         let mut use_decision_meta: HashMap<PortagePackage, (Cpn, Interned<DefaultInterner>)> =
@@ -224,15 +240,13 @@ impl PortageDependencyProvider {
         let mut cpn_slots: HashMap<portage_atom::Cpn, Vec<Interned<DefaultInterner>>> =
             HashMap::new();
 
-        // First pass: collect slots per CPN directly from version metadata.
-        // This ensures slots are derived from the same filtered data that
-        // versions_for provides, avoiding phantom slots for live/9999 ebuilds.
+        // First pass: collect slots per CPN via the cheap `slots_for`
+        // projection (same version filters as `versions_for`, no dep
+        // conversion). The slot map must cover the whole repository so
+        // unslotted deps on multi-slot packages resolve no matter which
+        // package references them.
         for cpn in repo.all_packages() {
-            let versions = repo.versions_for(&cpn);
-            let mut slots: Vec<Interned<DefaultInterner>> =
-                versions.iter().filter_map(|(_, meta)| meta.slot).collect();
-            slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-            slots.dedup();
+            let slots = repo.slots_for(&cpn);
             if !slots.is_empty() {
                 cpn_slots.insert(cpn, slots);
             }
@@ -250,8 +264,12 @@ impl PortageDependencyProvider {
             })
             .collect();
 
-        // Second pass: register versions and convert deps.
-        for cpn in repo.all_packages() {
+        // Second pass: register versions and convert deps for the closure of
+        // `seeds` — every package referenced by a converted dependency (or a
+        // virtual choice branch) is queued in turn.
+        let mut queue: std::collections::VecDeque<Cpn> = seeds.into_iter().collect();
+        let mut seen: HashSet<Cpn> = queue.iter().copied().collect();
+        while let Some(cpn) = queue.pop_front() {
             let versions_data = repo.versions_for(&cpn);
 
             for (cpv, meta) in versions_data {
@@ -322,6 +340,31 @@ impl PortageDependencyProvider {
                     let enc = convert::encode_required_use(&cpn_str, ru, &cpv_use_cfg);
                     by_class[0].extend(enc.requirements);
                     all_virtual_choices.extend(enc.virtual_choices);
+                }
+
+                // Queue every real package this version references (direct
+                // requirements and virtual-choice branches) for ingestion.
+                for class in &by_class {
+                    for (target, _, _) in class {
+                        if !target.is_virtual() {
+                            let c = *target.cpn();
+                            if seen.insert(c) {
+                                queue.push_back(c);
+                            }
+                        }
+                    }
+                }
+                for vc in &all_virtual_choices {
+                    for (_, deps) in &vc.versions {
+                        for (target, _, _) in deps {
+                            if !target.is_virtual() {
+                                let c = *target.cpn();
+                                if seen.insert(c) {
+                                    queue.push_back(c);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 let mut version_data = VersionData::from_by_class(by_class);

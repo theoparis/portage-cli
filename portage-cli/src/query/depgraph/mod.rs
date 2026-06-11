@@ -183,7 +183,19 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<i32> {
             },
             autosolve_use,
         };
-        let mut provider = PortageDependencyProvider::new(adapter);
+        // Closure-seeded ingestion: only packages reachable from the targets
+        // and the installed set get converted (a few hundred for a typical
+        // resolve), instead of the whole tree — this is what makes the
+        // co-solve fixpoint's per-iteration provider rebuild affordable.
+        let mut seeds: Vec<Cpn> = root_deps
+            .iter()
+            .filter(|(pkg, _)| !pkg.is_virtual())
+            .map(|(pkg, _)| *pkg.cpn())
+            .collect();
+        if !empty {
+            seeds.extend(installed_entries.iter().map(|e| e.cpn));
+        }
+        let mut provider = PortageDependencyProvider::new_for_targets(adapter, seeds);
         if !empty {
             for e in &installed_entries {
                 let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {

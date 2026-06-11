@@ -259,6 +259,19 @@ fn apply_iuse_defaults(
 }
 
 impl Adapter<'_> {
+    /// The shared version filter: keywords, package.mask/unmask, license.
+    /// `versions_for` and `slots_for` must agree, or the slot map would carry
+    /// phantom slots for versions the solver can never select.
+    fn version_accepted(&self, cpv: &Cpv, cache: &portage_metadata::CacheEntry) -> bool {
+        let meta = &cache.metadata;
+        keyword_accepts(&meta.keywords, self.arch.as_str(), self.accept_keywords)
+            && !is_masked(self.package_mask, self.package_unmask, cpv, &meta.slot)
+            && meta
+                .license
+                .as_ref()
+                .is_none_or(|lic| license_accepted(lic, self.accept_license))
+    }
+
     /// Level-C cede: when `--autosolve-use` is on and the package's REQUIRED_USE
     /// is *violated* by the resolved config, hand its REQUIRED_USE flags to the
     /// solver as preferences (`solver_decide`) — a ceded flag keeps its resolved
@@ -368,6 +381,27 @@ impl PackageRepository for Adapter<'_> {
         cfg
     }
 
+    fn slots_for(&self, cpn: &Cpn) -> Vec<Interned<DefaultInterner>> {
+        let mut slots: Vec<Interned<DefaultInterner>> = self
+            .data
+            .versions
+            .get(cpn)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|(cpv, cache)| self.version_accepted(cpv, cache))
+                    .filter_map(|(_, cache)| {
+                        let s = cache.metadata.slot.slot;
+                        if s.as_str().is_empty() { None } else { Some(s) }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        slots.dedup();
+        slots
+    }
+
     fn versions_for(&self, cpn: &Cpn) -> Vec<(Cpv, PackageVersions)> {
         self.data
             .versions
@@ -375,33 +409,7 @@ impl PackageRepository for Adapter<'_> {
             .map(|entries| {
                 entries
                     .iter()
-                    .filter(|(cpv, cache)| {
-                        let meta = &cache.metadata;
-                        // Keyword check
-                        if !keyword_accepts(
-                            &meta.keywords,
-                            self.arch.as_str(),
-                            self.accept_keywords,
-                        ) {
-                            return false;
-                        }
-                        // Mask check
-                        if is_masked(
-                            self.package_mask,
-                            self.package_unmask,
-                            cpv,
-                            &cache.metadata.slot,
-                        ) {
-                            return false;
-                        }
-                        // License check
-                        if let Some(lic) = &meta.license
-                            && !license_accepted(lic, self.accept_license)
-                        {
-                            return false;
-                        }
-                        true
-                    })
+                    .filter(|(cpv, cache)| self.version_accepted(cpv, cache))
                     .map(|(cpv, cache)| {
                         let meta = &cache.metadata;
                         let slot = if meta.slot.slot.as_str().is_empty() {

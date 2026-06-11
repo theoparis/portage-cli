@@ -37,6 +37,9 @@ pub(super) async fn overlay_entries(
     let user_cache = user_cache_dir(repo.name());
     let mut out: Vec<(Cpv, CacheEntry)> = Vec::new();
     let mut shell = None;
+    // Eclass digests are shared across all entries of this overlay — without
+    // the memo every cached entry re-hashes its full eclass list.
+    let mut digests: std::collections::HashMap<String, Option<String>> = Default::default();
 
     for ebuild in ebuilds {
         let cpv = ebuild.cpv().clone();
@@ -44,17 +47,19 @@ pub(super) async fn overlay_entries(
             continue;
         };
         let digest = format!("{:x}", md5::compute(&bytes));
-        let valid = |entry: &CacheEntry| {
-            entry
-                .md5
-                .as_deref()
-                .is_some_and(|m| m.eq_ignore_ascii_case(&digest))
-                && repo.is_fresh(entry, masters)
-        };
+        let valid =
+            |entry: &CacheEntry,
+             digests: &mut std::collections::HashMap<String, Option<String>>| {
+                entry
+                    .md5
+                    .as_deref()
+                    .is_some_and(|m| m.eq_ignore_ascii_case(&digest))
+                    && repo.is_fresh_cached(entry, masters, digests)
+            };
 
         // The overlay's own md5-cache.
         if let Some(entry) = cached.remove(&cpv)
-            && valid(&entry)
+            && valid(&entry, &mut digests)
         {
             out.push((cpv, entry));
             continue;
@@ -70,7 +75,7 @@ pub(super) async fn overlay_entries(
             .join(format!("{}-{}", cpv.cpn.package, cpv.version));
         if let Ok(text) = std::fs::read_to_string(&cache_path)
             && let Ok(entry) = CacheEntry::parse(&text)
-            && valid(&entry)
+            && valid(&entry, &mut digests)
         {
             out.push((cpv, entry));
             continue;

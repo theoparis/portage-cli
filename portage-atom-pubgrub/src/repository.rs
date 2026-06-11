@@ -68,6 +68,22 @@ pub trait PackageRepository {
     /// Return all versions for a given CPN, with their metadata.
     fn versions_for(&self, cpn: &Cpn) -> Vec<(Cpv, PackageVersions)>;
 
+    /// The slots of `cpn`'s (filtered) versions — a cheap projection used to
+    /// build the unslotted-dep slot map for the *whole* repository without
+    /// converting dependencies. Implementations whose `versions_for` is
+    /// expensive (clones dep trees, resolves USE policy) should override this
+    /// with a direct metadata read applying the same version filters.
+    fn slots_for(&self, cpn: &Cpn) -> Vec<Interned<DefaultInterner>> {
+        let mut slots: Vec<Interned<DefaultInterner>> = self
+            .versions_for(cpn)
+            .iter()
+            .filter_map(|(_, meta)| meta.slot)
+            .collect();
+        slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        slots.dedup();
+        slots
+    }
+
     /// The resolved **desired** USE state for a specific version.
     ///
     /// This is the caller's policy fully resolved — global USE (profile +

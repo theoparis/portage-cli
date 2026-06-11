@@ -433,6 +433,18 @@ impl Repository {
     /// Returns `false` if any eclass cannot be located, cannot be read, or
     /// hashes to a different value than the cache entry records.
     pub fn is_fresh(&self, entry: &CacheEntry, masters: &[Repository]) -> bool {
+        self.is_fresh_cached(entry, masters, &mut std::collections::HashMap::new())
+    }
+
+    /// [`is_fresh`](Self::is_fresh) with a caller-held digest memo, for
+    /// validating many entries against the same (small) set of eclasses —
+    /// each eclass file is hashed once per memo instead of once per entry.
+    pub fn is_fresh_cached(
+        &self,
+        entry: &CacheEntry,
+        masters: &[Repository],
+        digests: &mut std::collections::HashMap<String, Option<String>>,
+    ) -> bool {
         if entry.eclasses.is_empty() {
             return true;
         }
@@ -440,15 +452,14 @@ impl Repository {
             .chain(masters.iter().map(|m| m.path.join("eclass")))
             .collect();
         for (name, recorded) in &entry.eclasses {
-            let Some(path) = find_eclass_in(&eclass_dirs, name) else {
-                return false;
-            };
-            let Ok(bytes) = std::fs::read(&path) else {
-                return false;
-            };
-            let actual = format!("{:x}", md5::compute(&bytes));
-            if !actual.eq_ignore_ascii_case(recorded) {
-                return false;
+            let actual = digests.entry(name.clone()).or_insert_with(|| {
+                let path = find_eclass_in(&eclass_dirs, name)?;
+                let bytes = std::fs::read(&path).ok()?;
+                Some(format!("{:x}", md5::compute(&bytes)))
+            });
+            match actual {
+                Some(d) if d.eq_ignore_ascii_case(recorded) => {}
+                _ => return false,
             }
         }
         true
