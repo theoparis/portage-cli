@@ -44,6 +44,26 @@ impl builtins::Command for EconfCommand {
             if s.is_empty() { "/".to_string() } else { s }
         };
         let extra_econf = get("EXTRA_ECONF");
+        // get_libdir: LIBDIR_${ABI} from the profile, CONF_LIBDIR fallback,
+        // else plain "lib" (PMS econf passes --libdir=${EPREFIX}/usr/$(get_libdir)).
+        let libdir = {
+            let abi = get("ABI");
+            let by_abi = if abi.is_empty() {
+                String::new()
+            } else {
+                get(&format!("LIBDIR_{abi}"))
+            };
+            if !by_abi.is_empty() {
+                by_abi
+            } else {
+                let conf = get("CONF_LIBDIR");
+                if conf.is_empty() {
+                    "lib".to_string()
+                } else {
+                    conf
+                }
+            }
+        };
 
         let mut env_vars: Vec<(String, String)> = Vec::new();
         for var in &[
@@ -107,6 +127,7 @@ impl builtins::Command for EconfCommand {
             conf_args.push(format!("--datadir={eprefix}/usr/share"));
             conf_args.push(format!("--sysconfdir={eprefix}/etc"));
             conf_args.push(format!("--localstatedir={eprefix}/var/lib"));
+            conf_args.push(format!("--libdir={eprefix}/usr/{libdir}"));
 
             if eapi >= 8 && help.contains("--datarootdir") {
                 conf_args.push(format!("--datarootdir={eprefix}/usr/share"));

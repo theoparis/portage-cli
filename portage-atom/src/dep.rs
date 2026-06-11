@@ -104,6 +104,51 @@ pub struct Dep {
 }
 
 impl Dep {
+    /// Whether an installed/available `cpv` (with optional main `slot`)
+    /// satisfies this atom's name, version operator, and named-slot
+    /// constraints.
+    ///
+    /// USE-dep brackets, blockers, and `::repo` are *not* evaluated here —
+    /// this answers the `has_version`-style question "does a matching
+    /// version exist", per [PMS 8.3.1]/[8.3.3].
+    ///
+    /// [PMS 8.3.1]: https://projects.gentoo.org/pms/9/pms.html#operators
+    /// [8.3.3]: https://projects.gentoo.org/pms/9/pms.html#slot-deps
+    pub fn matches_cpv(&self, cpv: &Cpv, slot: Option<&str>) -> bool {
+        if self.cpn != cpv.cpn {
+            return false;
+        }
+        if let Some(crate::SlotDep::Slot { slot: Some(s), .. }) = &self.slot_dep
+            && slot.is_some_and(|cand| s.slot.as_str() != cand)
+        {
+            return false;
+        }
+        let (Some(op), Some(want)) = (self.op, &self.version) else {
+            return self.version.is_none();
+        };
+        let cand = &cpv.version;
+        match op {
+            Operator::Equal => {
+                if self.glob {
+                    cand.glob_matches(want)
+                } else {
+                    cand == want
+                }
+            }
+            Operator::GreaterOrEqual => cand >= want,
+            Operator::Greater => cand > want,
+            Operator::LessOrEqual => cand <= want,
+            Operator::Less => cand < want,
+            Operator::Approximate => {
+                let mut base_want = want.clone();
+                base_want.revision = Default::default();
+                let mut base_cand = cand.clone();
+                base_cand.revision = Default::default();
+                base_cand == base_want
+            }
+        }
+    }
+
     /// Create a minimal dependency from a [`Cpn`].
     ///
     /// All optional fields default to `None`.

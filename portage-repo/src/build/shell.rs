@@ -533,6 +533,11 @@ pub struct EbuildShell {
     /// appended to `path` — tee'd to the console, or captured silently when
     /// `quiet`.
     phase_log: Option<(Utf8PathBuf, bool)>,
+    /// Cross-subshell `die` signal: `die` raises it even from `$(...)` or
+    /// helper pipelines where its exit status cannot abort the phase; the
+    /// phase driver checks it after the phase function returns. Shared (Arc)
+    /// with every clone of the inner shell, including the baseline.
+    die_flag: commands::die::DieFlag,
     /// Snapshot of the fully-configured shell, captured at the first sourcing
     /// and restored before every subsequent one, so that nothing a previously
     /// sourced ebuild defined — variables, eclass functions, aliases, shell
@@ -599,6 +604,14 @@ impl EbuildShell {
             (
                 "die",
                 brush_core::builtins::builtin::<commands::DieCommand, _>(),
+            ),
+            (
+                "has_version",
+                brush_core::builtins::builtin::<commands::version_query::HasVersionCommand, _>(),
+            ),
+            (
+                "best_version",
+                brush_core::builtins::builtin::<commands::version_query::BestVersionCommand, _>(),
             ),
             (
                 "EXPORT_FUNCTIONS",
@@ -714,10 +727,14 @@ impl EbuildShell {
             brush_core::builtins::builtin::<ver_funcs::VerReplacingCommand, _>(),
         );
 
+        let die_flag = commands::die::DieFlag::default();
+        shell.set_shared(die_flag.clone());
+
         let mut ebuild_shell = EbuildShell {
             shell,
             distdir_override: None,
             phase_log: None,
+            die_flag,
             baseline: None,
             repo_path: repo.path().to_path_buf(),
             eclass_dirs,
@@ -1059,7 +1076,7 @@ impl EbuildShell {
         // These stubs shadow the Rust builtins for econf, emake, einfo, etc.
         // Unsetting them lets the Rust builtin registry take over during build.
         self.run_string(
-            "unset -f econf emake unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal",
+            "unset -f econf emake unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal has_version best_version",
         )
         .await
         .ok();
@@ -1229,7 +1246,7 @@ impl EbuildShell {
         // portage ebuild-helpers like dodoc/doins) inherit them as environment variables.
         // Bash `export` on an unset/empty name is harmless — it just marks it for export.
         self.run_string(
-            "export CATEGORY PN PV PR PVR P PF FILESDIR WORKDIR S T D EAPI EBUILD \
+            "export CATEGORY PN PV PR PVR P PF FILESDIR WORKDIR S T D TMPDIR EAPI EBUILD \
              HOME ROOT DISTDIR PORTAGE_BIN_PATH PATH EBUILD_PHASE EBUILD_PHASE_FUNC \
              MERGE_TYPE EPREFIX ED EROOT SYSROOT ESYSROOT BROOT USE \
              MAKEOPTS CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CC CXX AR RANLIB NM STRIP",
@@ -1294,6 +1311,10 @@ impl EbuildShell {
 
         // Run the phase function (may have been defined by the ebuild or by
         // __ebuild_phase_funcs as a fallback calling default()).
+        // A fresh die slate for this phase (stale flags from metadata
+        // sourcing or a previous phase must not abort this one).
+        self.die_flag.take();
+
         let phase_defined = self.shell.funcs().get(func_name).is_some();
         if phase_defined {
             let invocation = match &self.phase_log {
@@ -1316,6 +1337,11 @@ impl EbuildShell {
                 None => func_name.to_string(),
             };
             self.run_string(&invocation).await?;
+            // `die` aborts the phase even when it ran in a subshell or a
+            // helper pipeline whose exit status the phase ignored.
+            if let Some(msg) = self.die_flag.take() {
+                return Err(Error::Shell(format!("{func_name}: die: {msg}")));
+            }
         } else {
             eprintln!("warning: {func_name} not defined, nothing to do");
         }
@@ -1827,5 +1853,43 @@ cache-formats = md5-dict
             "live ebuild must not inherit the previous sourcing's KEYWORDS: {:?}",
             second.metadata.keywords
         );
+    }
+    /// `has_version`/`best_version` builtins query the VDB under the root the
+    /// -b/-d/-r flag names; phase shells unset the metadata-sourcing stubs so
+    /// the builtins take over (the stub shadowed them and made
+    /// autotools.eclass's autoconf probe die in every build).
+    #[tokio::test]
+    async fn version_query_builtins_query_the_flagged_root() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+        std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+        std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+        std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+        // Synthetic BROOT with one installed package.
+        let broot = dir.path().join("broot");
+        let pkgdir = broot.join("var/db/pkg/dev-build/autoconf-2.73-r1");
+        std::fs::create_dir_all(&pkgdir).unwrap();
+        std::fs::write(pkgdir.join("SLOT"), "2.73\n").unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        shell
+            .run_string(&format!(
+                "unset -f has_version best_version; BROOT={}; \
+                 has_version -b '=dev-build/autoconf-2.73*' && HV=yes || HV=no; \
+                 BV=$(best_version -b '=dev-build/autoconf-2.73*'); \
+                 has_version -b 'dev-build/automake' && HV2=yes || HV2=no",
+                broot.display()
+            ))
+            .await
+            .unwrap();
+        assert_eq!(shell.get_var("HV").as_deref(), Some("yes"));
+        assert_eq!(
+            shell.get_var("BV").as_deref(),
+            Some("dev-build/autoconf-2.73-r1")
+        );
+        assert_eq!(shell.get_var("HV2").as_deref(), Some("no"));
     }
 }

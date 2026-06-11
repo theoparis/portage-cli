@@ -19,6 +19,7 @@ symbol-table = ["portage-atom/symbol-table", "portage-metadata/symbol-table"]
 [dependencies]
 portage-atom = { workspace = true }
 portage-metadata = { workspace = true }
+portage-vdb = { workspace = true }
 gentoo-core = { workspace = true }
 brush-core = { git = "https://github.com/lu-zero/brush.git", branch = "for-portage-repo", features = ["experimental-parser"] }
 brush-builtins = { git = "https://github.com/lu-zero/brush.git", branch = "for-portage-repo" }

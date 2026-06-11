@@ -28,9 +28,11 @@ park everything else here.
 
 Goal: a leaf-package build is trustworthy and debuggable.
 
-- [ ] `src_test`: skipped by default, run under `FEATURES=test`
-- [ ] FEATURES parsing from make.conf (minimal set: `test`, `keepwork`,
-      `nostrip`, `collision-protect` toggles); ignore + warn on the rest
+- [x] `src_test`: skipped by default in the merge chain, run under
+      `FEATURES=test` (explicit `em ebuild … test` always runs it)
+- [x] FEATURES parsing from the configured shell (profile + make.conf):
+      `test` and `keepwork` acted on, the rest accepted silently (`nostrip`
+      is a no-op until stripping exists; collision check is always-on)
 - [x] Per-package build log (`<workdir>/build.log`, tee'd via process
       substitution; path attached to failures) and `-q` captured-silent mode.
       Required teaching Rust-builtin children (econf/emake) to honour the
@@ -40,18 +42,37 @@ Goal: a leaf-package build is trustworthy and debuggable.
       `USE_EXPAND` values) via `ProfileStack::configure_shell`; the plan's
       per-package USE overrides on top — file-5.47 now builds in
       `file-5.47-.arm64` with libs in `/usr/lib64`
-- [ ] `pkg_pretend` + `pkg_setup` run with correct `EBUILD_PHASE`/`MERGE_TYPE`
-- [ ] die-in-subshell audit: `$(...)` contexts where `die` can only print
-      (eautoreconf autoconf detection noise) — match portage's behaviour,
-      silence false alarms
-- [ ] Leaf-basket hardening run: `file gzip bc zstd xz-utils sed` each into a
-      fresh prefix; record a pass/fail matrix in this file
+- [x] `pkg_pretend` + `pkg_setup` in the merge chain with correct
+      `EBUILD_PHASE`/`MERGE_TYPE` (both were already wired; chain extended)
+- [x] die-in-subshell: `die` now raises an Arc-shared `DieFlag` visible to
+      the phase driver after the phase returns, so a die inside `$(...)` or a
+      helper pipeline aborts the build (portage's marker+signal, in-process).
+      This flipped two silent corruptions into real failures and led to their
+      fixes: `has_version`/`best_version` were metadata stubs returning
+      false — they are real VDB-querying builtins now (`-b/-d/-r` against
+      BROOT/ESYSROOT/ROOT), un-stubbed for phases; and `econf` was missing
+      the PMS `--libdir=${EPREFIX}/usr/$(get_libdir)` argument, so xz-utils
+      installed its libraries to `usr/lib` and failed its own sanity check.
+      Also: `TMPDIR` joined the phase export list (eltpatch wrote to
+      `/libtool-elt.patch`).
+- [x] Leaf-basket hardening run (2026-06-11, all unprivileged into fresh
+      prefixes, die enforcement active):
+
+      | package | result |
+      |---|---|
+      | sys-apps/file (autotools+multilib) | PASS |
+      | app-arch/gzip (network fetch) | PASS |
+      | sys-devel/bc | PASS |
+      | app-arch/zstd (meson) | PASS |
+      | app-arch/xz-utils (autotools, libdir-sensitive) | PASS |
+      | sys-apps/sed | PASS |
+      | sys-apps/less (eautoreconf) | PASS |
 
 **Gate:** `em --prefix /tmp/p app-arch/zstd` (meson, as it turns out) and
 `sys-apps/file` (multilib) both merge with correct ABI libdirs and a saved
-build.log — **passed 2026-06-11** (zstd binary + lib64 sonames run; one
-non-fatal wart logged: `command not found: -E` from a python wrapper during
-zstd's install, to chase with the python-any-r1 item in M4).
+build.log — **passed 2026-06-11**, and **M1 is complete** (7/7 basket with
+die enforcement). One wart still parked: `command not found: -E` from a
+python wrapper during zstd's install (python-any-r1 item in M4).
 
 ## M2 — Multi-package orchestration
 

@@ -89,12 +89,14 @@ pub async fn build_and_merge(
     quiet: bool,
 ) -> Result<()> {
     let phases: Vec<String> = [
+        "pretend",
         "setup",
         "fetch",
         "unpack",
         "prepare",
         "configure",
         "compile",
+        "test",
         "install",
         "qmerge",
     ]
@@ -176,11 +178,38 @@ async fn run_inner(
         shell.set_use_flags(&refs).context("setting USE flags")?;
     }
 
+    // FEATURES from the configured environment (profile + make.conf). Only a
+    // small set is acted on; the rest are accepted silently.
+    let features: std::collections::HashSet<String> = shell
+        .get_var("FEATURES")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let merge_mode = use_flags.is_some();
+
     for phase in phases {
+        // In the merge chain, src_test only runs under FEATURES=test
+        // (an explicit `em ebuild … test` always runs it).
+        if merge_mode && phase == "test" && !features.contains("test") {
+            continue;
+        }
+
         run_one_phase(
             &mut shell, &ebuild, &repo, &repo_root, phase, &work_root, root,
         )
         .await?;
+    }
+
+    // Successful merge chain: drop the build tree, keeping build.log
+    // (FEATURES=keepwork keeps everything).
+    if merge_mode
+        && !features.contains("keepwork")
+        && let Some(wd) = work_dir
+    {
+        for sub in ["work", "image", "temp", "homedir"] {
+            let _ = std::fs::remove_dir_all(wd.join(sub));
+        }
     }
 
     Ok(())

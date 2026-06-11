@@ -18,6 +18,7 @@ pub(crate) mod output;
 pub(crate) mod phase_funcs;
 pub(crate) mod unpack;
 pub(crate) mod use_flag;
+pub(crate) mod version_query;
 
 pub(crate) use die::DieCommand;
 pub(crate) use econf::EconfCommand;
