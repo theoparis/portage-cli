@@ -178,6 +178,25 @@ async fn run_inner(
         shell.set_use_flags(&refs).context("setting USE flags")?;
     }
 
+    // PMS 11.1: REPLACING_VERSIONS — the installed versions this merge
+    // replaces (same slot), visible to pkg_pretend/setup/preinst/postinst.
+    // Computed up front from the target root's VDB and the ebuild's SLOT.
+    if use_flags.is_some() || phases.iter().any(|p| p == "merge" || p == "qmerge") {
+        let slot = repo
+            .cache_entry(ebuild.cpv())
+            .ok()
+            .flatten()
+            .map(|c| c.metadata.slot.slot.as_str().to_string())
+            .unwrap_or_else(|| "0".to_string());
+        let replacing = open_or_create_vdb(&vdb_root_for(root))
+            .ok()
+            .and_then(|vdb| vdb.find_slot_occupant(&ebuild.cpv().cpn, &slot).ok())
+            .flatten()
+            .map(|old| old.cpv().version.to_string())
+            .unwrap_or_default();
+        shell.preset_var("REPLACING_VERSIONS", &replacing);
+    }
+
     // FEATURES from the configured environment (profile + make.conf). Only a
     // small set is acted on; the rest are accepted silently.
     let features: std::collections::HashSet<String> = shell
@@ -395,7 +414,18 @@ async fn run_merge(
     }
 
     if let Some(ref old) = old_pkg {
-        unmerge_slot_occupant(shell, old, repo_root, work_root, root, &vdb, &contents).await?;
+        unmerge_slot_occupant(
+            shell,
+            old,
+            repo_root,
+            work_root,
+            root,
+            &vdb,
+            &contents,
+            &ebuild.cpv().version,
+        )
+        .await?;
+        shell.preset_var("REPLACED_BY_VERSION", "");
     }
 
     let build_time = SystemTime::now()
@@ -439,6 +469,7 @@ async fn run_merge(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn unmerge_slot_occupant(
     shell: &mut portage_repo::EbuildShell,
     old_pkg: &InstalledPackage,
@@ -447,7 +478,11 @@ async fn unmerge_slot_occupant(
     root: &Utf8Path,
     vdb: &Vdb,
     new_contents: &[ContentsEntry],
+    new_version: &portage_atom::Version,
 ) -> Result<()> {
+    // PMS 11.1: the old package's pkg_prerm/pkg_postrm see the version
+    // replacing it.
+    shell.preset_var("REPLACED_BY_VERSION", &new_version.to_string());
     let old_pn = old_pkg.cpv().cpn.package.as_ref();
     let old_pvr = old_pkg.cpv().version.to_string();
     let old_pf = format!("{old_pn}-{old_pvr}");
@@ -695,6 +730,15 @@ fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<Content
                     .with_context(|| format!("copy {src_path} → {dest_path}"))?;
                 std::fs::set_permissions(dest_path.as_std_path(), meta.permissions())
                     .with_context(|| format!("chmod {dest_path}"))?;
+                // Preserve the image file's mtime (portage does), so the
+                // on-disk time matches what CONTENTS records.
+                if let Ok(modified) = meta.modified()
+                    && let Ok(f) = std::fs::File::options()
+                        .write(true)
+                        .open(dest_path.as_std_path())
+                {
+                    let _ = f.set_modified(modified);
+                }
 
                 total_size += meta.len();
                 let data = std::fs::read(dest_path.as_std_path())

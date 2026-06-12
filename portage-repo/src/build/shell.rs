@@ -492,6 +492,66 @@ edo() {
     "$@" || die "edo: command failed: $*"
 }
 
+get_libdir() {
+    local v=lib
+    if [[ -n ${ABI} ]]; then
+        local var="LIBDIR_${ABI}"
+        [[ -n ${!var} ]] && v=${!var}
+    elif [[ -n ${CONF_LIBDIR} ]]; then
+        v=${CONF_LIBDIR}
+    fi
+    echo "${v}"
+}
+
+fperms() {
+    local mode=$1; shift
+    local f
+    for f in "$@"; do
+        chmod "${mode}" "${ED%/}/${f#/}" || die "fperms ${mode} ${f} failed"
+    done
+}
+
+fowners() {
+    local owner=$1; shift
+    local f
+    for f in "$@"; do
+        chown "${owner}" "${ED%/}/${f#/}" || die "fowners ${owner} ${f} failed"
+    done
+}
+
+doinfo() {
+    [[ $# -ge 1 ]] || die "doinfo: at least one argument needed"
+    local d="${ED%/}/usr/share/info"
+    install -d "${d}" || die "doinfo: mkdir failed"
+    install -m 0644 "$@" "${d}" || die "doinfo failed"
+}
+
+dolib.so() {
+    [[ $# -ge 1 ]] || die "dolib.so: at least one argument needed"
+    local d="${ED%/}/usr/$(get_libdir)"
+    install -d "${d}" || die "dolib.so: mkdir failed"
+    install -m 0755 "$@" "${d}" || die "dolib.so failed"
+}
+
+dolib.a() {
+    [[ $# -ge 1 ]] || die "dolib.a: at least one argument needed"
+    local d="${ED%/}/usr/$(get_libdir)"
+    install -d "${d}" || die "dolib.a: mkdir failed"
+    install -m 0644 "$@" "${d}" || die "dolib.a failed"
+}
+
+domo() {
+    [[ $# -ge 1 ]] || die "domo: at least one argument needed"
+    local f
+    for f in "$@"; do
+        local locale=${f##*/}
+        locale=${locale%.mo}
+        local d="${ED%/}/usr/share/locale/${locale}/LC_MESSAGES"
+        install -d "${d}" || die "domo: mkdir failed"
+        install -m 0644 "${f}" "${d}/${MOPREFIX:-${PN}}.mo" || die "domo ${f} failed"
+    done
+}
+
 einstalldocs() {
     local f
     if [[ -v DOCS ]]; then
@@ -743,6 +803,13 @@ impl EbuildShell {
         ebuild_shell.sync_eclass_dirs_var();
 
         Ok(ebuild_shell)
+    }
+
+    /// Set a variable that persists across subsequent phases (e.g.
+    /// `REPLACING_VERSIONS`, computed by the merge driver). Exported to
+    /// child processes by the per-phase export list.
+    pub fn preset_var(&mut self, name: &str, value: &str) {
+        self.set_var(name, value);
     }
 
     /// Log phase output to `path` (created on first write): tee'd to the
@@ -1249,6 +1316,7 @@ impl EbuildShell {
             "export CATEGORY PN PV PR PVR P PF FILESDIR WORKDIR S T D TMPDIR EAPI EBUILD \
              HOME ROOT DISTDIR PORTAGE_BIN_PATH PATH EBUILD_PHASE EBUILD_PHASE_FUNC \
              MERGE_TYPE EPREFIX ED EROOT SYSROOT ESYSROOT BROOT USE \
+             REPLACING_VERSIONS REPLACED_BY_VERSION \
              MAKEOPTS CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CC CXX AR RANLIB NM STRIP",
         )
         .await
