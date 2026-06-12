@@ -132,6 +132,11 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         .with_context(|| format!("emerging {}", planned.cpv))?;
     }
     if total > 0 {
+        // Refresh ${ROOT}/etc/profile.env and the linker cache from env.d,
+        // as emerge does after merging.
+        if let Err(e) = maint::env::env_update(&merge_root) {
+            eprintln!("warning: env-update failed: {e:#}");
+        }
         println!("\n>>> Done ({total} package(s) merged into {merge_root})");
     }
     Ok(())
@@ -242,8 +247,11 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             bail!("not implemented: etc-update")
         }
         Applet::Env => {
-            eprintln!("env-update");
-            bail!("not implemented: env-update")
+            let root = globals
+                .root
+                .as_deref()
+                .map_or_else(|| camino::Utf8PathBuf::from("/"), camino::Utf8PathBuf::from);
+            maint::env::env_update(&root)
         }
     }
 }
