@@ -149,10 +149,17 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             ebuild_path,
             phase,
             work_dir,
-            root,
         } => {
             let repo_override = globals.repo.as_deref();
-            ebuild::run(ebuild_path, phase, work_dir.as_deref(), repo_override, root).await
+            let root = globals.root.as_deref().unwrap_or("/");
+            ebuild::run(
+                ebuild_path,
+                phase,
+                work_dir.as_deref(),
+                repo_override,
+                camino::Utf8Path::new(root),
+            )
+            .await
         }
         Applet::Maint { command } => run_maint(command, globals),
         Applet::Portageq { command, args } => {

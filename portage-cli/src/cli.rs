@@ -137,7 +137,8 @@ pub struct Cli {
     #[arg(short = 'X', long, value_name = "ATOM")]
     pub exclude: Vec<String>,
 
-    #[arg(long, env = "ROOT", value_name = "PATH")]
+    /// Installation root (the offset all applets install into / query).
+    #[arg(long, env = "ROOT", value_name = "PATH", global = true)]
     pub root: Option<String>,
 
     #[arg(long, value_name = "PATH")]
@@ -195,9 +196,6 @@ pub enum Applet {
         /// Override the build work directory (default: `/var/tmp/portage/<cat>/<pf>`)
         #[arg(short = 'w', long, value_name = "DIR")]
         work_dir: Option<camino::Utf8PathBuf>,
-        /// Installation root for merge (default: /)
-        #[arg(long, value_name = "ROOT", default_value = "/")]
-        root: camino::Utf8PathBuf,
     },
 
     #[command(about = "System maintenance and health checks")]
