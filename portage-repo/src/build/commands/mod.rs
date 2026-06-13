@@ -10,6 +10,7 @@
 
 pub(crate) mod die;
 pub(crate) mod econf;
+pub(crate) mod einstall;
 pub(crate) mod emake;
 pub(crate) mod export_functions;
 pub(crate) mod has;
@@ -23,6 +24,7 @@ pub(crate) mod version_query;
 
 pub(crate) use die::DieCommand;
 pub(crate) use econf::EconfCommand;
+pub(crate) use einstall::EinstallCommand;
 pub(crate) use emake::EmakeCommand;
 pub(crate) use export_functions::ExportFunctionsCommand;
 pub(crate) use has::{HasCommand, HasvCommand, InIuseCommand};

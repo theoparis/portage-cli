@@ -108,6 +108,11 @@ in layout (not just "a working binary"). All done:
 - [x] missing install helpers: `fperms`, `fowners`, `doinfo`, `dolib.so`,
       `dolib.a`, `domo` (MOPREFIX-aware), `get_libdir` — real functions in
       `INSTALL_HELPERS`, overriding the metadata stubs
+- [x] `einstall` (pre-EAPI-6, banned in 6+): a Rust builtin mirroring portage's
+      phase-helper — `${MAKE} install` with GNU path overrides into `${ED}`,
+      libdir override from `LIBDIR_${ABI}`/`CONF_PREFIX`, EAPI-gated, dies on a
+      missing Makefile. For completeness with legacy ebuilds (M4 targets are
+      EAPI 7+)
 - [x] `env-update`: `${ROOT}/etc/profile.env` + `ld.so.conf` regenerated from
       `env.d` (COLON_/SPACE_SEPARATED/last-wins, LDPATH→linker only), `ldconfig`
       refreshed (`-r` for offset roots); run after the merge loop and as `em env`

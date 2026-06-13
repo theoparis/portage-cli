@@ -748,6 +748,12 @@ impl EbuildShell {
             "econf",
             brush_core::builtins::builtin::<commands::EconfCommand, _>(),
         );
+        // einstall: pre-EAPI-6 install helper (banned in 6+); kept for
+        // completeness with legacy ebuilds.
+        shell.register_builtin(
+            "einstall",
+            brush_core::builtins::builtin::<commands::EinstallCommand, _>(),
+        );
 
         // Register P4 unpack builtin.
         shell.register_builtin(
@@ -1162,7 +1168,7 @@ impl EbuildShell {
         // These stubs shadow the Rust builtins for econf, emake, einfo, etc.
         // Unsetting them lets the Rust builtin registry take over during build.
         self.run_string(
-            "unset -f econf emake unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal has_version best_version docompress dostrip",
+            "unset -f econf emake einstall unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal has_version best_version docompress dostrip",
         )
         .await
         .ok();
@@ -1982,6 +1988,33 @@ cache-formats = md5-dict
             Some("dev-build/autoconf-2.73-r1")
         );
         assert_eq!(shell.get_var("HV2").as_deref(), Some("no"));
+    }
+
+    #[tokio::test]
+    async fn einstall_enforces_eapi_ban_and_requires_a_makefile() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+        std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+        std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+        std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        shell
+            .run_string(&format!(
+                "unset -f einstall; cd {}; \
+                 EAPI=6; einstall 2>/dev/null && BAN=ok || BAN=died; \
+                 EAPI=5; einstall 2>/dev/null && NOMK=ok || NOMK=died",
+                empty.display()
+            ))
+            .await
+            .unwrap();
+        // Banned in EAPI 6+, and dies on a missing Makefile in EAPI 5.
+        assert_eq!(shell.get_var("BAN").as_deref(), Some("died"));
+        assert_eq!(shell.get_var("NOMK").as_deref(), Some("died"));
     }
 
     #[tokio::test]
