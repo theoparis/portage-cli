@@ -161,11 +161,18 @@ the items below are its Stage 1–2.
 - [ ] Pre-flight dependency check: each plan entry's DEPEND/BDEPEND must be
       satisfied by the planner's installed view `VDB(base) ∪ VDB(target)`; clear
       error naming the missing tool otherwise
-- [ ] Within-run visibility of earlier merges (root-model.md Stage 1–2):
-      separate `config_root` / `base_root` / `target`; planner config from
-      `config_root`, installed = `VDB(base) ∪ VDB(target)`, merge into `target`;
-      `SYSROOT=ESYSROOT=target` (eclasses do the build-system translation), and
-      for overlay (`target ≠ base`) augment the sysroot search with `base`
+- [x] Within-run visibility of earlier merges, planner + builder
+      (root-model.md Stage 1/1b): `Roots` = `config`/`base`/`target`; planner
+      config from `config_root`, installed = `VDB(base) ∪ VDB(target)`, merge
+      into `target`; phases get `PORTAGE_CONFIGROOT=config`, `ROOT=target`,
+      `SYSROOT=ESYSROOT=base` (eclasses do the build-system translation). Host,
+      full-offset/stage, and single-package `--prefix` builds are correct.
+- [x] Overlay (`--prefix`, target ≠ base) — config-driven via `bashrc`: `em`
+      sources profile `profile.bashrc` + `/etc/portage/bashrc` per phase
+      (portage's hook, not PMS) exposing the roots + `get_libdir`; the user
+      wires overlay search paths there, so our code carries no build-system
+      knowledge (root-model.md "Overlay support" / "bashrc support"). The
+      zero-config merged sysroot is deferred to M3 (namespaces).
 - [x] `--keep-going` + resume: resume needs no state file — the target VDB is
       the state, so an entry already recorded there (at the planned version) is
       skipped and a re-run continues from the first unmerged entry

@@ -589,6 +589,12 @@ pub struct EbuildShell {
     /// `DEPEND` against. `None` defaults to `ROOT` (the install target). For an
     /// overlay (`--prefix`) this is the base, with the target layered on top.
     build_sysroot: Option<Utf8PathBuf>,
+    /// Portage `bashrc` hooks sourced per phase after the environment is set up
+    /// (profile `profile.bashrc` files in stack order, then the user's
+    /// `${PORTAGE_CONFIGROOT}/etc/portage/bashrc`). Not PMS; matches portage's
+    /// `__source_all_bashrcs`. The user hook is where overlay search paths can
+    /// be wired without build-system knowledge in our code.
+    bashrc_files: Vec<Utf8PathBuf>,
     /// Snapshot of the fully-configured shell, captured at the first sourcing
     /// and restored before every subsequent one, so that nothing a previously
     /// sourced ebuild defined — variables, eclass functions, aliases, shell
@@ -806,6 +812,7 @@ impl EbuildShell {
             install_paths,
             build_config_root: None,
             build_sysroot: None,
+            bashrc_files: Vec::new(),
             baseline: None,
             repo_path: repo.path().to_path_buf(),
             eclass_dirs,
@@ -836,6 +843,12 @@ impl EbuildShell {
     pub fn set_build_roots(&mut self, config_root: Option<&Utf8Path>, sysroot: Option<&Utf8Path>) {
         self.build_config_root = config_root.map(Utf8Path::to_path_buf);
         self.build_sysroot = sysroot.map(Utf8Path::to_path_buf);
+    }
+
+    /// Set the `bashrc` hooks to source per phase (profile `profile.bashrc`
+    /// files then the user's `/etc/portage/bashrc`), in source order.
+    pub fn set_bashrc_files(&mut self, files: Vec<Utf8PathBuf>) {
+        self.bashrc_files = files;
     }
 
     /// Log phase output to `path` (created on first write): tee'd to the
@@ -1381,7 +1394,7 @@ impl EbuildShell {
         self.run_string(
             "export CATEGORY PN PV PR PVR P PF FILESDIR WORKDIR S T D TMPDIR EAPI EBUILD \
              HOME ROOT DISTDIR PORTAGE_BIN_PATH PATH EBUILD_PHASE EBUILD_PHASE_FUNC \
-             MERGE_TYPE EPREFIX ED EROOT SYSROOT ESYSROOT BROOT USE \
+             MERGE_TYPE EPREFIX ED EROOT SYSROOT ESYSROOT BROOT PORTAGE_CONFIGROOT USE \
              REPLACING_VERSIONS REPLACED_BY_VERSION \
              MAKEOPTS CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CC CXX AR RANLIB NM STRIP",
         )
@@ -1442,6 +1455,20 @@ impl EbuildShell {
         // in e.g. `dodoc CHANGES*` is the install helper's error to report,
         // not a shell abort).
         self.run_string("shopt -u failglob").await.ok();
+
+        // Source portage bashrc hooks (profile.bashrc files, then the user's
+        // /etc/portage/bashrc) with the full phase environment available — not
+        // PMS; matches portage's __source_all_bashrcs. A bashrc may define the
+        // phase function or tweak the env (e.g. overlay search paths), so it
+        // runs before the function is resolved below.
+        if !self.bashrc_files.is_empty() {
+            let mut script = String::new();
+            for f in &self.bashrc_files {
+                // __try_source: source if readable; bashrc is trusted code.
+                script.push_str(&format!("[[ -r '{0}' ]] && source '{0}'\n", f.as_str()));
+            }
+            self.run_string(&script).await.ok();
+        }
 
         // Run the phase function (may have been defined by the ebuild or by
         // __ebuild_phase_funcs as a fallback calling default()).
@@ -2029,6 +2056,45 @@ cache-formats = md5-dict
             Some("dev-build/autoconf-2.73-r1")
         );
         assert_eq!(shell.get_var("HV2").as_deref(), Some("no"));
+    }
+
+    #[tokio::test]
+    async fn bashrc_files_are_sourced_during_a_phase() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+        std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+        std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+        std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+        let ebdir = repo_path.join("cat/pkg");
+        std::fs::create_dir_all(&ebdir).unwrap();
+        std::fs::write(
+            ebdir.join("pkg-1.ebuild"),
+            "EAPI=8\nDESCRIPTION=\"t\"\nSLOT=\"0\"\nLICENSE=\"MIT\"\nS=\"${WORKDIR}\"\npkg_setup() { :; }\n",
+        )
+        .unwrap();
+
+        // A bashrc hook that records that it ran with the phase env available.
+        let bashrc = dir.path().join("bashrc");
+        std::fs::write(&bashrc, "export EM_BASHRC_MARKER=\"hit:${EBUILD_PHASE}\"\n").unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        shell.set_bashrc_files(vec![Utf8PathBuf::from_path_buf(bashrc).unwrap()]);
+
+        let ebuild =
+            Ebuild::from_path(camino::Utf8Path::from_path(&ebdir.join("pkg-1.ebuild")).unwrap())
+                .unwrap();
+        let work = dir.path().join("work");
+        shell
+            .run_phase(&ebuild, "setup", &work, std::path::Path::new("/"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            shell.get_var("EM_BASHRC_MARKER").as_deref(),
+            Some("hit:setup")
+        );
     }
 
     #[tokio::test]

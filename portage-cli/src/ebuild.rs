@@ -65,6 +65,26 @@ async fn apply_profile_env(
         .configure_shell(shell, &confs)
         .await
         .context("sourcing profile environment")?;
+
+    // Portage `bashrc` hooks (not PMS): each profile's `profile.bashrc` in stack
+    // order, then the user's `${config_root}/etc/portage/bashrc`. run_phase
+    // sources these per phase with the full env — the user hook is where overlay
+    // search paths can be wired without build-system knowledge in our code.
+    let mut bashrc: Vec<Utf8PathBuf> = Vec::new();
+    for profile in stack.profiles() {
+        let p = profile.path().join("profile.bashrc");
+        if p.is_file()
+            && let Ok(p) = Utf8PathBuf::from_path_buf(p)
+        {
+            bashrc.push(p);
+        }
+    }
+    let user = base.join("etc/portage/bashrc");
+    if user.is_file() {
+        bashrc.push(user);
+    }
+    shell.set_bashrc_files(bashrc);
+
     Ok(true)
 }
 
@@ -200,6 +220,10 @@ async fn run_inner(
     // Root model (docs/root-model.md): PORTAGE_CONFIGROOT = config_root, and
     // SYSROOT/ESYSROOT = the build-against base (only when it differs from the
     // install target, i.e. a --prefix overlay; otherwise SYSROOT = ROOT).
+    //
+    // NB: in overlay mode (target ≠ base) a package merged into the target is
+    // not yet visible to later builds in the run — that needs a merged sysroot,
+    // which is shelved (see docs/root-model.md "Overlay support — shelved").
     shell.set_build_roots(config_root, sysroot);
 
     if let Some(flags) = use_flags {

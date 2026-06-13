@@ -96,27 +96,73 @@ build-system specifics — chiefly `multilib_toolchain_setup` pointing
 `PKG_CONFIG_{LIBDIR,PATH,SYSTEM_*}` at `ESYSROOT`, plus `econf --with-sysroot`,
 `meson`/`cmake` cross-files, etc. **We never enumerate build systems.**
 
-### The overlay addition (`target ≠ base`, e.g. `--prefix`) — pending
+### Overlay support (`target ≠ base`, e.g. `--prefix`)
 
-With `SYSROOT = base`, a package just built into the **target** isn't yet
-visible to later builds (the toolchain/eclasses point at the base). The overlay
-needs the target layered on top of the base sysroot: append the target's
-`pkgconfig` dirs to `PKG_CONFIG_PATH` and its include/lib to the compiler
-search, plus runtime `rpath`/`LD_LIBRARY_PATH` so the target wins at run time.
-When `base = /` (the common overlay) this is cheap — the host toolchain already
-searches `/usr` natively, so we only add the target. **This is the remaining
-builder work; today single packages whose deps are all in the base build
-correctly into a target, but a chain whose later members depend on earlier
-ones merged into the same target does not yet resolve them.**
+With `SYSROOT = base`, a package merged into the **target** is not visible to
+later builds in the same run (the toolchain/eclasses point at the base). Making
+a chain resolve earlier members needs the target layered on top of the base
+sysroot. Two ways were considered; the choice is **config-driven now**, with a
+zero-config option deferred.
+
+**Rejected — env injection in our code.** Appending the target's `pkgconfig` to
+`PKG_CONFIG_PATH` and its include/lib to `CPPFLAGS`/`LDFLAGS` covers pkg-config +
+autotools/make (universal conventions), but some build systems locate deps
+through their **own** search root — cmake `find_package` config-mode
+(`CMAKE_PREFIX_PATH`/`CMAKE_FIND_ROOT_PATH`), some meson `dependency()`
+providers. Covering those means our code enumerating per-build-system knobs,
+which this design avoids (portage feeds them from eclasses keyed off a single
+`ESYSROOT`). So we do **not** do this in code.
+
+**Chosen — config-driven via `bashrc` (today).** We source portage's `bashrc`
+hooks per phase (see "bashrc support" below) with the full env available
+(`ROOT`, `SYSROOT`, `get_libdir`, …). The **user** wires the overlay there for
+whatever build systems they use — `em` ships no build-system knowledge, and the
+user completes it without touching our code. Verified: a `liba`→`usea` chain
+into one `--prefix` resolves (pkg-config + compile/link) with this `bashrc`:
+
+```bash
+# /etc/portage/bashrc — layer an em --prefix target over the base sysroot
+if [[ -n ${ROOT} && ${ROOT%/} != "" && ${ROOT%/} != "${SYSROOT%/}" ]]; then
+    _ov=${ROOT%/}; _ld=$(get_libdir)
+    export PKG_CONFIG_PATH="${_ov}/usr/${_ld}/pkgconfig:${_ov}/usr/share/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+    export CPPFLAGS="-I${_ov}/usr/include ${CPPFLAGS}"
+    export LDFLAGS="-L${_ov}/usr/${_ld} -Wl,-rpath,${_ov}/usr/${_ld} ${LDFLAGS}"
+    # add e.g. CMAKE_PREFIX_PATH=${_ov}/usr for cmake find_package, etc.
+fi
+```
+
+**Deferred — merged sysroot (zero-config).** Merge the target over the base into
+one filesystem view (`fuse-overlayfs` / `overlayfs` under a user namespace) and
+point **one `ESYSROOT`** at it; the existing eclass machinery then covers every
+build system with **zero enumeration and no user bashrc**. This belongs with
+**M3 (namespaces/sandbox)** and gives crossdev a real sysroot for free. (Shipping
+our own two-root-aware **eclass overlays** is a complementary lever, but the
+merged sysroot keeps the "one `ESYSROOT`, eclasses do the rest" invariant.)
+
+**Status:** overlay works today via a user `bashrc`; out of the box (no bashrc)
+`SYSROOT = base`, so single packages whose deps are all in the base build into a
+target correctly, but a chain needs the bashrc recipe (or the future merged
+sysroot). Full closure (`--root`, target == base) is unaffected.
+
+### bashrc support
+
+`em` sources portage's `bashrc` hooks per phase (not PMS; matches
+`__source_all_bashrcs`): each profile's `profile.bashrc` in stack order, then
+the user's `${PORTAGE_CONFIGROOT}/etc/portage/bashrc`, after the environment is
+set up and before the phase function. They see the full env (`ROOT`, `EROOT`,
+`SYSROOT`, `ESYSROOT`, `BROOT`, `PORTAGE_CONFIGROOT`, `get_libdir`, the flag
+vars). The per-package `/etc/portage/env/` mapping is not yet sourced. This is
+the general user hook for env tweaks; the overlay recipe above is one use.
 
 ### Known hard part
 
 Native (`CHOST == CBUILD`) discovery of **non-`.pc` headers/libs** under a
 `target ≠ /` is the genuine soft spot: a plain host `gcc` won't look in
 `target/usr/include` without `--sysroot`/`-I` injection. It is mostly papered
-over by pkg-config (`ESYSROOT`) + `econf --with-sysroot`, and disappears
-entirely for `R = /` overlays. True isolation across arches is crossdev's job
-(CHOST-prefixed toolchain with a baked sysroot).
+over by pkg-config (`ESYSROOT`) + `econf --with-sysroot`, and the `bashrc`
+recipe handles it for `--prefix`. The merged sysroot resolves it generally;
+true isolation across arches is crossdev's job (CHOST-prefixed toolchain with a
+baked sysroot).
 
 ## Orthogonal axis: package source (build vs binpkg)
 
@@ -140,10 +186,11 @@ never the root handling.
   `SYSROOT/ESYSROOT = base` (collapsing to `ROOT` when base == target), `BROOT
   = /`; `apply_profile_env` reads config from `config_root`. Makes host, full
   offset / stage, and single-package `--prefix` (deps in base) builds correct.
-- **Stage 2 — overlay addition (`--prefix`, target ≠ base) [pending]:** layer
-  the target on top of the base sysroot (`PKG_CONFIG_PATH`/include/lib add the
-  target) + runtime `rpath`/`LD_LIBRARY_PATH`, so a chain's later members see
-  earlier ones merged into the same target.
+- **Stage 2 — overlay (`--prefix`, target ≠ base) [config-driven, done]:** `em`
+  sources portage `bashrc` hooks per phase exposing the roots + `get_libdir`;
+  the user wires overlay search paths there (recipe in "Overlay support"). No
+  build-system knowledge in code. The zero-config **merged sysroot** (single
+  `ESYSROOT` over a `fuse-overlayfs`/`overlayfs` union) is deferred to M3.
 - **Stage 3 — crossdev:** `CBUILD`/`CHOST`/`CTARGET`, decoupled sysroot,
-  CHOST-prefixed toolchain, QEMU for tests.
+  CHOST-prefixed toolchain, QEMU for tests. Reuses the merged-sysroot work.
 - **Orthogonal — binpkg:** producer-only; plugs into the existing merge.
