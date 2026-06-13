@@ -4,6 +4,7 @@ mod error;
 mod maint;
 mod pkg;
 mod postprocess;
+mod preflight;
 mod query;
 mod regen;
 mod search;
@@ -14,11 +15,13 @@ mod vdb;
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::collections::VecDeque;
 use std::str::FromStr;
 
 use anyhow::{Context, bail};
 use clap::Parser;
 use error::Result;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use cli::{Applet, CleanTarget, GlsaCommand, LogCommand, MaintCommand, NewsCommand, QueryCommand};
 
@@ -123,6 +126,10 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         return Ok(());
     }
 
+    // Pre-flight: fail fast with a clear message if any plan entry's build
+    // dependencies won't be present when it builds, rather than mid-build.
+    preflight::check(&outcome.plan, &roots)?;
+
     if cli.ask && !confirm_merge(outcome.plan.len())? {
         println!(">>> Quitting.");
         return Ok(());
@@ -130,12 +137,14 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
 
     run_merge_plan(
         &outcome.plan,
+        &outcome.build_blockers,
         &roots,
         &work_base,
         distdir.as_deref(),
         cli.quiet,
         cli.keep_going,
         cli.emptytree,
+        cli.jobs.map(|j| j as usize).unwrap_or(1).max(1),
     )
     .await
 }
@@ -165,63 +174,32 @@ fn confirm_merge(count: usize) -> Result<bool> {
 /// there at the planned version is skipped (a previous run merged it), so
 /// re-running after an interruption continues from the first unmerged entry
 /// without a separate state file. `--emptytree` forces every entry to rebuild.
+#[allow(clippy::too_many_arguments)]
 async fn run_merge_plan(
     plan: &[query::depgraph::PlannedMerge],
+    blockers: &[Vec<usize>],
     roots: &cli::Roots,
     work_base: &camino::Utf8Path,
     distdir: Option<&camino::Utf8Path>,
     quiet: bool,
     keep_going: bool,
     emptytree: bool,
+    jobs: usize,
 ) -> Result<()> {
     let merge_root = roots.merge_root();
     let total = plan.len();
-    let mut merged = 0usize;
-    let mut skipped = 0usize;
-    let mut failures: Vec<MergeFailure> = Vec::new();
 
-    for (i, planned) in plan.iter().enumerate() {
-        // The VDB is the resume state: `var/db/pkg/<cat>/<pf>` exists iff this
-        // exact version is already installed in the target root.
-        let pkg_vdb = merge_root.join("var/db/pkg").join(&planned.cpv);
-        if !emptytree && pkg_vdb.exists() {
-            println!(
-                ">>> [{}/{total}] {} is already installed — skipping",
-                i + 1,
-                planned.cpv
-            );
-            skipped += 1;
-            continue;
-        }
-
-        println!("\n>>> Emerging ({} of {total}) {}", i + 1, planned.cpv);
-        match ebuild::build_and_merge(
-            &planned.ebuild_path,
-            &planned.use_flags,
-            work_base,
-            merge_root,
-            distdir,
-            quiet,
-            roots.config(),
-            roots.build_sysroot(),
+    let (merged, skipped, failures) = if jobs <= 1 {
+        merge_sequential(
+            plan, roots, work_base, distdir, quiet, keep_going, emptytree,
         )
         .await
-        {
-            Ok(()) => merged += 1,
-            Err(e) => {
-                eprintln!(">>> Failed to emerge {} — {e:#}", planned.cpv);
-                failures.push(MergeFailure {
-                    cpv: planned.cpv.clone(),
-                    log: work_base.join(&planned.cpv).join("build.log"),
-                    cause: format!("{e:#}"),
-                });
-                if !keep_going {
-                    eprintln!(">>> Stopping (pass --keep-going to continue past failures).");
-                    break;
-                }
-            }
-        }
-    }
+    } else {
+        merge_parallel(
+            plan, blockers, roots, work_base, distdir, quiet, keep_going, emptytree, jobs,
+        )
+        .await
+    };
 
     // Refresh ${ROOT}/etc/profile.env and the linker cache, as emerge does
     // after merging — only worthwhile if something was actually installed.
@@ -256,6 +234,215 @@ async fn run_merge_plan(
         );
     }
     bail!("{} of {total} package(s) failed to merge", failures.len());
+}
+
+/// Sequential build+merge in install order (the `--jobs 1` / default path).
+/// Returns `(merged, skipped, failures)`.
+async fn merge_sequential(
+    plan: &[query::depgraph::PlannedMerge],
+    roots: &cli::Roots,
+    work_base: &camino::Utf8Path,
+    distdir: Option<&camino::Utf8Path>,
+    quiet: bool,
+    keep_going: bool,
+    emptytree: bool,
+) -> (usize, usize, Vec<MergeFailure>) {
+    let merge_root = roots.merge_root();
+    let total = plan.len();
+    let mut merged = 0usize;
+    let mut skipped = 0usize;
+    let mut failures: Vec<MergeFailure> = Vec::new();
+
+    for (i, planned) in plan.iter().enumerate() {
+        // The VDB is the resume state: `var/db/pkg/<cat>/<pf>` exists iff this
+        // exact version is already installed in the target root.
+        let pkg_vdb = merge_root.join("var/db/pkg").join(&planned.cpv);
+        if !emptytree && pkg_vdb.exists() {
+            println!(
+                ">>> [{}/{total}] {} is already installed — skipping",
+                i + 1,
+                planned.cpv
+            );
+            skipped += 1;
+            continue;
+        }
+
+        println!("\n>>> Emerging ({} of {total}) {}", i + 1, planned.cpv);
+        match ebuild::build_and_merge(
+            &planned.ebuild_path,
+            &planned.use_flags,
+            work_base,
+            merge_root,
+            distdir,
+            quiet,
+            roots.config(),
+            roots.build_sysroot(),
+            None,
+        )
+        .await
+        {
+            Ok(()) => merged += 1,
+            Err(e) => {
+                eprintln!(">>> Failed to emerge {} — {e:#}", planned.cpv);
+                failures.push(MergeFailure {
+                    cpv: planned.cpv.clone(),
+                    log: work_base.join(&planned.cpv).join("build.log"),
+                    cause: format!("{e:#}"),
+                });
+                if !keep_going {
+                    eprintln!(">>> Stopping (pass --keep-going to continue past failures).");
+                    break;
+                }
+            }
+        }
+    }
+    (merged, skipped, failures)
+}
+
+/// Tracks which plan entries are ready to build given the build-dep `blockers`
+/// (each entry's in-plan predecessors). A node is ready once all its blockers
+/// have `complete`d; this is the topological bookkeeping behind `--jobs`,
+/// independent of how many run at once or in what real-time order they finish.
+struct Scheduler {
+    /// Remaining un-completed blockers per node.
+    outstanding: Vec<usize>,
+    /// Reverse adjacency: `dependents[j]` are nodes blocked on `j`.
+    dependents: Vec<Vec<usize>>,
+    /// Nodes with no outstanding blockers, awaiting a build slot.
+    ready: VecDeque<usize>,
+}
+
+impl Scheduler {
+    fn new(blockers: &[Vec<usize>]) -> Self {
+        let outstanding: Vec<usize> = blockers.iter().map(Vec::len).collect();
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); blockers.len()];
+        for (i, bs) in blockers.iter().enumerate() {
+            for &j in bs {
+                dependents[j].push(i);
+            }
+        }
+        let ready = (0..blockers.len())
+            .filter(|&i| outstanding[i] == 0)
+            .collect();
+        Scheduler {
+            outstanding,
+            dependents,
+            ready,
+        }
+    }
+
+    /// Pop the next node whose blockers are all satisfied, if any is waiting.
+    fn next_ready(&mut self) -> Option<usize> {
+        self.ready.pop_front()
+    }
+
+    /// Mark node `i` finished (built or skipped), unblocking its dependents.
+    fn complete(&mut self, i: usize) {
+        for d in std::mem::take(&mut self.dependents[i]) {
+            self.outstanding[d] -= 1;
+            if self.outstanding[d] == 0 {
+                self.ready.push_back(d);
+            }
+        }
+    }
+}
+
+/// Parallel build+merge for `--jobs N > 1`. Up to `jobs` packages *build*
+/// concurrently; each only starts once its in-plan build dependencies
+/// (`blockers`) have completed, so build order is respected. The compile phases
+/// run in parallel (the heavy work is in child processes we await), while the
+/// merge critical section is serialised by a shared async lock — so the live
+/// root, VDB counter, and world/profile files are only mutated by one package
+/// at a time. Returns `(merged, skipped, failures)`.
+///
+/// Concurrency is single-threaded (`FuturesUnordered`, not spawned tasks): the
+/// `EbuildShell` need not be `Send`, and parallelism still comes from the
+/// concurrently-running build subprocesses.
+#[allow(clippy::too_many_arguments)]
+async fn merge_parallel(
+    plan: &[query::depgraph::PlannedMerge],
+    blockers: &[Vec<usize>],
+    roots: &cli::Roots,
+    work_base: &camino::Utf8Path,
+    distdir: Option<&camino::Utf8Path>,
+    quiet: bool,
+    keep_going: bool,
+    emptytree: bool,
+    jobs: usize,
+) -> (usize, usize, Vec<MergeFailure>) {
+    let merge_root = roots.merge_root();
+    let total = plan.len();
+    let merge_gate = tokio::sync::Mutex::new(());
+
+    let mut sched = Scheduler::new(blockers);
+    let mut merged = 0usize;
+    let mut skipped = 0usize;
+    let mut failures: Vec<MergeFailure> = Vec::new();
+    let mut started = 0usize;
+    let mut stop_new = false;
+    let mut inflight = FuturesUnordered::new();
+
+    loop {
+        while !stop_new && inflight.len() < jobs {
+            let Some(i) = sched.next_ready() else { break };
+            let planned = &plan[i];
+            if !emptytree && merge_root.join("var/db/pkg").join(&planned.cpv).exists() {
+                println!(">>> {} is already installed — skipping", planned.cpv);
+                skipped += 1;
+                sched.complete(i);
+                continue;
+            }
+            started += 1;
+            println!(
+                ">>> Emerging ({started} of {total}) {} [+{} building]",
+                planned.cpv,
+                inflight.len()
+            );
+            let gate = &merge_gate;
+            inflight.push(async move {
+                let res = ebuild::build_and_merge(
+                    &planned.ebuild_path,
+                    &planned.use_flags,
+                    work_base,
+                    merge_root,
+                    distdir,
+                    quiet,
+                    roots.config(),
+                    roots.build_sysroot(),
+                    Some(gate),
+                )
+                .await;
+                (i, res)
+            });
+        }
+
+        let Some((i, res)) = inflight.next().await else {
+            break;
+        };
+        match res {
+            Ok(()) => {
+                merged += 1;
+                sched.complete(i);
+            }
+            Err(e) => {
+                eprintln!(">>> Failed to emerge {} — {e:#}", plan[i].cpv);
+                failures.push(MergeFailure {
+                    cpv: plan[i].cpv.clone(),
+                    log: work_base.join(&plan[i].cpv).join("build.log"),
+                    cause: format!("{e:#}"),
+                });
+                // Dependents stay blocked (their count never reaches 0), so a
+                // package whose build dep failed is never started.
+                if !keep_going {
+                    stop_new = true;
+                    eprintln!(
+                        ">>> Stopping new builds (pass --keep-going to continue past failures)."
+                    );
+                }
+            }
+        }
+    }
+    (merged, skipped, failures)
 }
 
 async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
@@ -604,4 +791,89 @@ fn run_atom(atoms: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod scheduler_tests {
+    use super::Scheduler;
+
+    /// Drain the scheduler completing nodes in FIFO order, recording the order
+    /// in which they were released for building. Mirrors what `merge_parallel`
+    /// does, minus the actual builds.
+    fn drain(blockers: &[Vec<usize>]) -> Vec<usize> {
+        let mut sched = Scheduler::new(blockers);
+        let mut order = Vec::new();
+        while let Some(i) = sched.next_ready() {
+            order.push(i);
+            sched.complete(i);
+        }
+        order
+    }
+
+    /// Every node must appear after all of its blockers.
+    fn assert_respects(blockers: &[Vec<usize>], order: &[usize]) {
+        assert_eq!(
+            order.len(),
+            blockers.len(),
+            "every node scheduled exactly once"
+        );
+        let pos: std::collections::HashMap<usize, usize> =
+            order.iter().enumerate().map(|(p, &n)| (n, p)).collect();
+        for (node, bs) in blockers.iter().enumerate() {
+            for &b in bs {
+                assert!(pos[&b] < pos[&node], "blocker {b} must precede {node}");
+            }
+        }
+    }
+
+    #[test]
+    fn independent_nodes_are_all_ready_immediately() {
+        let blockers = vec![vec![], vec![], vec![]];
+        let order = drain(&blockers);
+        assert_eq!(order, [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_chain_serialises() {
+        // 0 <- 1 <- 2 (2 depends on 1 depends on 0).
+        let blockers = vec![vec![], vec![0], vec![1]];
+        let order = drain(&blockers);
+        assert_eq!(order, [0, 1, 2]);
+        assert_respects(&blockers, &order);
+    }
+
+    #[test]
+    fn a_diamond_respects_both_paths() {
+        // 0 <- {1,2} <- 3.
+        let blockers = vec![vec![], vec![0], vec![0], vec![1, 2]];
+        let order = drain(&blockers);
+        assert_respects(&blockers, &order);
+        assert_eq!(*order.last().unwrap(), 3, "the join builds last");
+    }
+
+    #[test]
+    fn a_node_with_two_blockers_waits_for_the_later_one() {
+        // 2 depends on both 0 and 1; it must not be ready until both complete.
+        let blockers = vec![vec![], vec![], vec![0, 1]];
+        let mut sched = Scheduler::new(&blockers);
+        assert_eq!(sched.next_ready(), Some(0));
+        assert_eq!(sched.next_ready(), Some(1));
+        assert_eq!(sched.next_ready(), None, "2 blocked until both deps done");
+        sched.complete(0);
+        assert_eq!(sched.next_ready(), None, "still blocked on 1");
+        sched.complete(1);
+        assert_eq!(sched.next_ready(), Some(2));
+    }
+
+    #[test]
+    fn a_failed_blocker_strands_its_dependents() {
+        // If 0 fails (never `complete`d), 1 and the transitively-blocked 2 are
+        // never released — matching merge_parallel skipping a failed dep's tree.
+        let blockers = vec![vec![], vec![0], vec![1]];
+        let mut sched = Scheduler::new(&blockers);
+        assert_eq!(sched.next_ready(), Some(0));
+        // 0 "fails": we do not call complete(0).
+        assert_eq!(sched.next_ready(), None);
+        assert_eq!(sched.next_ready(), None);
+    }
 }

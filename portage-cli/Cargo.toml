@@ -44,7 +44,8 @@ portage-repo = { workspace = true }
 portage-distfiles = { workspace = true }
 portage-vdb = { workspace = true }
 clap = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+futures-util = "0.3"
 thiserror = { workspace = true }
 mimalloc = { workspace = true, optional = true }
 md5 = { workspace = true }

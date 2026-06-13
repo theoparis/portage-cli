@@ -20,8 +20,8 @@ use gentoo_core::Arch;
 use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Dep, Operator, Version};
 use portage_atom_pubgrub::{
-    InstalledPackage as SolverInstalledPackage, InstalledPolicy, PortageDependencyProvider,
-    PortagePackage, PortageVersionSet, UseFlagRequirement,
+    DepClass, InstalledPackage as SolverInstalledPackage, InstalledPolicy,
+    PortageDependencyProvider, PortagePackage, PortageVersionSet, UseFlagRequirement,
 };
 use portage_repo::Repository;
 
@@ -39,6 +39,12 @@ pub struct PlannedMerge {
     /// profile-injected implicit flags like `elibc_glibc`/`kernel_linux`,
     /// which USE conditionals test).
     pub use_flags: Vec<String>,
+    /// `DEPEND` (build-against-sysroot), pre-USE-evaluation, for the pre-flight
+    /// build-dependency check (see `preflight`). Empty when no cache entry.
+    pub depend: Vec<portage_atom::DepEntry>,
+    /// `BDEPEND` (build-host tools), pre-USE-evaluation, for the pre-flight
+    /// build-dependency check.
+    pub bdepend: Vec<portage_atom::DepEntry>,
 }
 
 /// What [`depgraph`] resolved.
@@ -48,6 +54,12 @@ pub struct DepgraphOutcome {
     pub exit_code: i32,
     /// The merge list in install order.
     pub plan: Vec<PlannedMerge>,
+    /// For each `plan` entry, the indices of earlier entries that must finish
+    /// building before it can build — its in-plan build-time dependencies
+    /// (`DEPEND`/`BDEPEND` edges). Restricted to earlier indices, so it is
+    /// always acyclic; the `--jobs` scheduler uses it to parallelise builds
+    /// while respecting build order. Empty entry ⇒ no in-plan build deps.
+    pub build_blockers: Vec<Vec<usize>>,
 }
 
 pub struct DepgraphOpts<'a> {
@@ -674,7 +686,10 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 .iter()
                 .map(|f| f.as_str().to_string())
                 .collect();
-            // IUSE defaults the config leaves unset are enabled at build time.
+            // IUSE defaults the config leaves unset are enabled at build time;
+            // capture DEPEND/BDEPEND for the pre-flight check while we have the
+            // cache entry in hand.
+            let (mut depend, mut bdepend) = (Vec::new(), Vec::new());
             if let Some(cache) = repo::find_cache(&data, pkg, ver) {
                 for iuse in &cache.metadata.iuse {
                     if matches!(iuse.default, Some(portage_metadata::IUseDefault::Enabled))
@@ -683,6 +698,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                         flags.push(iuse.name().to_string());
                     }
                 }
+                depend = cache.metadata.depend.clone();
+                bdepend = cache.metadata.bdepend.clone();
             }
             flags.sort();
             flags.dedup();
@@ -694,12 +711,41 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 cpv: format!("{}/{}-{}", cpn.category, cpn.package, ver),
                 ebuild_path,
                 use_flags: flags,
+                depend,
+                bdepend,
             }
         })
         .collect();
 
+    // Build-order adjacency for `--jobs`: for each plan entry, the indices of
+    // *earlier* entries it depends on at build time (DEPEND/BDEPEND). Matching
+    // is by CPN (an upgrade may remap the version), restricted to earlier
+    // indices so the relation is acyclic — `install_order` already linearised
+    // any cycle. A spurious blocker only costs parallelism; a missing one would
+    // risk building before a dep is merged, so CPN matching errs on the safe
+    // (more-blocking) side.
+    let index_of: HashMap<Cpn, usize> = plan
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| Cpv::parse(&p.cpv).ok().map(|cpv| (cpv.cpn, i)))
+        .collect();
+    let mut build_blockers: Vec<Vec<usize>> = vec![Vec::new(); plan.len()];
+    for e in &edges {
+        if !matches!(e.class, DepClass::Depend | DepClass::Bdepend) {
+            continue;
+        }
+        let (Some(&from), Some(&to)) = (index_of.get(e.from.0.cpn()), index_of.get(e.to.0.cpn()))
+        else {
+            continue;
+        };
+        if to < from && !build_blockers[from].contains(&to) {
+            build_blockers[from].push(to);
+        }
+    }
+
     Ok(DepgraphOutcome {
         exit_code: if use_change_entries.is_empty() { 0 } else { 1 },
         plan,
+        build_blockers,
     })
 }

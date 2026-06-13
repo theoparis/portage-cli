@@ -111,6 +111,8 @@ pub struct Cli {
     #[arg(short = 'n', long)]
     pub noreplace: bool,
 
+    /// Build up to N packages in parallel, respecting build-dependency order
+    /// (merges are still serialised). Default 1 (sequential).
     #[arg(short = 'j', long, value_name = "N")]
     pub jobs: Option<u32>,
 

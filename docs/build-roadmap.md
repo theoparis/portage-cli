@@ -159,9 +159,15 @@ The root model (`--root` base vs `--prefix` install target, the three location
 roots, and the scenario matrix) is specified in [root-model.md](root-model.md);
 the items below are its Stage 1–2.
 
-- [ ] Pre-flight dependency check: each plan entry's DEPEND/BDEPEND must be
-      satisfied by the planner's installed view `VDB(base) ∪ VDB(target)`; clear
-      error naming the missing tool otherwise
+- [x] Pre-flight dependency check (`preflight.rs`): before the build loop, each
+      plan entry's `DEPEND` (checked against `VDB(base) ∪ VDB(target)`) and
+      `BDEPEND` (against the host `BROOT=/`) must be satisfied by that view plus
+      the earlier plan entries (within-run visibility); otherwise it bails with
+      a clear message naming each package and its unsatisfied atoms. USE
+      conditionals are folded with the entry's effective flags; `|| ( )` groups
+      pass if any member is present; blockers and `^^`/`??` are not presence
+      requirements. The solver already builds a complete closure, so this is a
+      fast guard rail that turns a mid-build failure into an early, named error.
 - [x] Within-run visibility of earlier merges, planner + builder
       (root-model.md Stage 1/1b): `Roots` = `config`/`base`/`target`; planner
       config from `config_root`, installed = `VDB(base) ∪ VDB(target)`, merge
@@ -184,8 +190,21 @@ the items below are its Stage 1–2.
 - [x] `--ask` prompt before the loop (defaults to no on empty/EOF)
 - [x] Failure report: per-package cause (error chain) + build-log path, plus a
       merged/skipped/failed tally
-- [ ] `--jobs N`: parallel builds respecting the dependency order (use the
-      solver's edges, not just list order)
+- [x] `--jobs N`: parallel builds respecting build order. The depgraph exposes
+      `build_blockers` (per plan entry, the *earlier* entries it needs at build
+      time — DEPEND/BDEPEND edges, CPN-matched and index-restricted so it's
+      acyclic); `merge_parallel` runs up to N package builds concurrently via a
+      `FuturesUnordered` (single-threaded — the `EbuildShell` isn't `Send`;
+      parallelism comes from the build subprocesses we await), gated by a
+      `Scheduler` that releases a node once its blockers complete. The compile
+      phases overlap, but the qmerge critical section (collision check, VDB
+      counter, world/profile) is serialised by a shared async `Mutex` so only
+      one package mutates the live root at a time. A failed build (without
+      `--keep-going`) stops new launches and drains in-flight; a failed build
+      dep strands its dependents (never started). `Scheduler` is unit-tested
+      (chain/diamond/multi-blocker/failed-blocker). *Known gap: the unguarded
+      fetch phase can race on a shared distfile (rare); per-distfile locking is
+      a later refinement.*
 
 **Gate:** a 2–3 package uninstalled chain (e.g. `app-text/tree` style leaf +
 a lib dep) merges into a fresh prefix in one `em --prefix` invocation;

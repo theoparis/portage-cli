@@ -109,6 +109,7 @@ pub async fn run(
         None,
         config_root,
         sysroot,
+        None,
     )
     .await
 }
@@ -128,6 +129,7 @@ pub async fn build_and_merge(
     quiet: bool,
     config_root: Option<&Utf8Path>,
     sysroot: Option<&Utf8Path>,
+    merge_gate: Option<&tokio::sync::Mutex<()>>,
 ) -> Result<()> {
     let phases: Vec<String> = [
         "pretend",
@@ -160,6 +162,7 @@ pub async fn build_and_merge(
         Some((log.clone(), quiet)),
         config_root,
         sysroot,
+        merge_gate,
     )
     .await
     .with_context(|| format!("build log: {log}"))
@@ -177,6 +180,7 @@ async fn run_inner(
     phase_log: Option<(Utf8PathBuf, bool)>,
     config_root: Option<&Utf8Path>,
     sysroot: Option<&Utf8Path>,
+    merge_gate: Option<&tokio::sync::Mutex<()>>,
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
     let ebuild = Ebuild::from_path(path).with_context(|| format!("loading {ebuild_path}"))?;
@@ -269,10 +273,19 @@ async fn run_inner(
             continue;
         }
 
+        // Serialise the merge critical section under `--jobs`: builds (compile
+        // phases) run concurrently, but the qmerge — collision check, VDB
+        // counter, world/profile updates — must not interleave across packages.
+        // The guard is held only for this phase; non-merge phases stay parallel.
+        let _merge_guard = match (merge_gate, phase.as_str()) {
+            (Some(gate), "merge" | "qmerge") => Some(gate.lock().await),
+            _ => None,
+        };
         run_one_phase(
             &mut shell, &ebuild, &repo, &repo_root, phase, &work_root, root,
         )
         .await?;
+        drop(_merge_guard);
 
         // Portage runs ecompress/estrip at the tail of __dyn_install: the
         // shell still holds the docompress/dostrip lists src_install built
