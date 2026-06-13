@@ -21,9 +21,12 @@ portage-atom = { workspace = true }
 portage-metadata = { workspace = true }
 portage-vdb = { workspace = true }
 gentoo-core = { workspace = true }
-brush-core = { git = "https://github.com/lu-zero/brush.git", branch = "for-portage-repo", features = ["experimental-parser"] }
-brush-builtins = { git = "https://github.com/lu-zero/brush.git", branch = "for-portage-repo" }
-brush-parser = { git = "https://github.com/lu-zero/brush.git", branch = "for-portage-repo" }
+# Pinned to a fork commit for reproducible CI (we don't commit Cargo.lock);
+# bump when intentionally updating brush. Local dev overrides to a worktree
+# via .cargo/config.toml.
+brush-core = { git = "https://github.com/lu-zero/brush.git", rev = "c76d13eef40d1ce36d1ee6b5556d3af3ebc0be25", features = ["experimental-parser"] }
+brush-builtins = { git = "https://github.com/lu-zero/brush.git", rev = "c76d13eef40d1ce36d1ee6b5556d3af3ebc0be25" }
+brush-parser = { git = "https://github.com/lu-zero/brush.git", rev = "c76d13eef40d1ce36d1ee6b5556d3af3ebc0be25" }
 clap = { workspace = true }
 tokio = { version = "1", features = ["rt"] }
 regex = "1"

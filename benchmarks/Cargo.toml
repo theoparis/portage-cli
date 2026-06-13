@@ -30,7 +30,9 @@ portage-atom-resolvo = { workspace = true }
 
 pubgrub = { workspace = true }
 resolvo = { workspace = true }
-pkgcraft = { path = "../../pkgcraft/crates/pkgcraft" }
+# Pinned so CI (no sibling pkgcraft worktree) can resolve it; local
+# benchmarking overrides this to the worktree via .cargo/config.toml.
+pkgcraft = { git = "https://github.com/pkgcraft/pkgcraft.git", rev = "b9fb45eb1995a6b9750f21312cda5e95bfbbe1bb" }
 clap = { workspace = true }
 camino = { workspace = true }
 mimalloc = { workspace = true, optional = true }
