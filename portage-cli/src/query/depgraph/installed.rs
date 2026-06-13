@@ -16,8 +16,36 @@ pub(super) struct VdbEntry {
     pub(super) deps: Vec<DepEntry>,
 }
 
-pub(super) fn load_installed() -> Vec<VdbEntry> {
-    let Ok(vdb) = Vdb::open_default() else {
+/// The planner's "installed" view: `VDB(base) ∪ VDB(target)`, target shadowing
+/// base on a duplicate cpv (see docs/root-model.md). Target is loaded first so
+/// it wins; when `base == target` (full-offset / host) this collapses to one
+/// VDB. `None` means the host `/var/db/pkg`.
+pub(super) fn load_installed(
+    base: Option<&camino::Utf8Path>,
+    target: Option<&camino::Utf8Path>,
+) -> Vec<VdbEntry> {
+    let mut roots = vec![target];
+    if target != base {
+        roots.push(base);
+    }
+    let mut seen: std::collections::HashSet<(Cpn, String)> = std::collections::HashSet::new();
+    let mut out: Vec<VdbEntry> = Vec::new();
+    for root in roots {
+        for entry in load_one(root) {
+            if seen.insert((entry.cpn, entry.version.to_string())) {
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
+fn load_one(root: Option<&camino::Utf8Path>) -> Vec<VdbEntry> {
+    let vdb = match root {
+        Some(r) => Vdb::open(r.join("var/db/pkg")),
+        None => Vdb::open_default(),
+    };
+    let Ok(vdb) = vdb else {
         return Vec::new();
     };
     vdb.packages()

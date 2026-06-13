@@ -63,7 +63,8 @@ pub struct DepgraphOpts<'a> {
     /// Load every repo from `repos.conf` (overlays sourced as needed). Off
     /// when the user pinned a repo with `--repo`.
     pub multi_repo: bool,
-    pub root: Option<&'a Utf8Path>,
+    /// The resolved root set (config / base / target). See docs/root-model.md.
+    pub roots: &'a crate::cli::Roots,
 }
 
 pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome> {
@@ -78,8 +79,11 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         autounmask_write,
         autosolve_use,
         multi_repo,
-        root,
+        roots,
     } = opts;
+    let config_root = roots.config();
+    let base_root = roots.base();
+    let target_root = roots.target();
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
 
@@ -119,8 +123,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
 
     let (data, installed_entries, use_env_result) = tokio::join!(
         repo::load_repos(&repo, &overlays),
-        async { installed::load_installed() },
-        use_env::build_use_env(&repo, root),
+        async { installed::load_installed(base_root, target_root) },
+        use_env::build_use_env(&repo, config_root),
     );
     let use_env = use_env_result?;
     let use_env::UseEnv {
@@ -484,7 +488,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         .map(|r| (&r.package, r))
         .collect();
 
-    let portage_dir = root
+    let portage_dir = config_root
         .unwrap_or(camino::Utf8Path::new("/"))
         .join("etc/portage");
 

@@ -54,7 +54,7 @@ pub struct Cli {
     /// Unprivileged offset: merge ROOT, the VDB, distfiles and build trees
     /// all live under DIR. Configuration (profile, make.conf) still comes
     /// from the host; use --root for a full config offset.
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", global = true)]
     pub prefix: Option<String>,
 
     /// Search package names, like emerge --search (each argument is a pattern)
@@ -141,11 +141,12 @@ pub struct Cli {
     #[arg(long, env = "ROOT", value_name = "PATH", global = true)]
     pub root: Option<String>,
 
-    #[arg(long, value_name = "PATH")]
+    /// Read config (profile, make.conf) from this root instead of `--root`.
+    #[arg(long, value_name = "PATH", global = true)]
     pub config_root: Option<String>,
 
     /// Override VDB path (default: $ROOT/var/db/pkg)
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     pub vdb: Option<String>,
 
     #[command(subcommand)]
@@ -155,7 +156,61 @@ pub struct Cli {
     pub atoms: Vec<String>,
 }
 
+/// The resolved set of roots for a command (see docs/root-model.md): config
+/// source, the planner's installed base, and the install target. Built once
+/// from the global flags via [`Cli::roots`] and passed around as a unit.
+#[derive(Debug, Clone, Default)]
+pub struct Roots {
+    config: Option<camino::Utf8PathBuf>,
+    base: Option<camino::Utf8PathBuf>,
+    target: Option<camino::Utf8PathBuf>,
+    relocate: bool,
+}
+
+impl Roots {
+    /// `PORTAGE_CONFIGROOT`: where profile and make.conf are read.
+    pub fn config(&self) -> Option<&camino::Utf8Path> {
+        self.config.as_deref()
+    }
+
+    /// The base root whose VDB seeds the planner's "installed" view.
+    pub fn base(&self) -> Option<&camino::Utf8Path> {
+        self.base.as_deref()
+    }
+
+    /// The install target: where new packages land and the delta VDB lives.
+    pub fn target(&self) -> Option<&camino::Utf8Path> {
+        self.target.as_deref()
+    }
+
+    /// The install/merge root, defaulting to `/`.
+    pub fn merge_root(&self) -> &camino::Utf8Path {
+        self.target.as_deref().unwrap_or(camino::Utf8Path::new("/"))
+    }
+
+    /// Whether `--prefix` relocates distfiles and the build trees under the
+    /// target (a self-contained tree).
+    pub fn relocate(&self) -> bool {
+        self.relocate
+    }
+}
+
 impl Cli {
+    /// Resolve the root model (docs/root-model.md) from the global flags.
+    pub fn roots(&self) -> Roots {
+        let path = |s: &Option<String>| s.as_deref().map(camino::Utf8PathBuf::from);
+        Roots {
+            // config: --config-root, else --root; host otherwise.
+            config: path(&self.config_root).or_else(|| path(&self.root)),
+            // base: --root; host otherwise. --prefix never changes it.
+            base: path(&self.root),
+            // target: --prefix (install destination), else --root.
+            target: path(&self.prefix).or_else(|| path(&self.root)),
+            // --prefix also relocates distfiles/build trees under the target.
+            relocate: self.prefix.is_some(),
+        }
+    }
+
     /// Path used by single-repo applets. Falls back to `/var/db/repos/gentoo`
     /// when neither `--repo` nor `repos.conf` is available.
     pub fn repo_path(&self) -> String {

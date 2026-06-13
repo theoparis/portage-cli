@@ -78,7 +78,10 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     if atoms.is_empty() {
         bail!("em: no valid atoms");
     }
-    let root = cli.root.as_deref().map(camino::Utf8Path::new);
+    // Root model (docs/root-model.md): config from roots.config (host for a
+    // --prefix overlay), installed view = VDB(base) ∪ VDB(target), and the
+    // plan installs into target.
+    let roots = cli.roots();
     let format = if cli.tree {
         cli::DepgraphFormat::Tree
     } else {
@@ -95,7 +98,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         autounmask_write: cli.autounmask_write,
         autosolve_use: cli.autosolve_use,
         multi_repo: cli.repo.is_none(),
-        root,
+        roots: &roots,
     })
     .await?;
 
@@ -110,13 +113,13 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     if outcome.exit_code != 0 {
         bail!("configuration changes are required (see above) — refusing to merge");
     }
-    let prefix = cli.prefix.as_deref().map(camino::Utf8Path::new);
-    let merge_root = prefix
-        .or(root)
-        .unwrap_or_else(|| camino::Utf8Path::new("/"))
-        .to_owned();
-    let distdir = prefix.map(|p| p.join("var/cache/distfiles"));
-    let work_base = ebuild::default_work_base(prefix);
+    // The merge root is the install target the planner resolved against.
+    let merge_root = roots.merge_root().to_owned();
+    // --prefix additionally relocates distfiles and the build trees under the
+    // target (a self-contained tree); --root leaves them at the host defaults.
+    let relocate = roots.relocate().then(|| roots.merge_root());
+    let distdir = relocate.map(|p| p.join("var/cache/distfiles"));
+    let work_base = ebuild::default_work_base(relocate);
 
     if outcome.plan.is_empty() {
         return Ok(());
@@ -262,13 +265,13 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             work_dir,
         } => {
             let repo_override = globals.repo.as_deref();
-            let root = globals.root.as_deref().unwrap_or("/");
+            let roots = globals.roots();
             ebuild::run(
                 ebuild_path,
                 phase,
                 work_dir.as_deref(),
                 repo_override,
-                camino::Utf8Path::new(root),
+                roots.merge_root(),
             )
             .await
         }
@@ -365,13 +368,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             eprintln!("etc-update");
             bail!("not implemented: etc-update")
         }
-        Applet::Env => {
-            let root = globals
-                .root
-                .as_deref()
-                .map_or_else(|| camino::Utf8PathBuf::from("/"), camino::Utf8PathBuf::from);
-            maint::env::env_update(&root)
-        }
+        Applet::Env => maint::env::env_update(globals.roots().merge_root()),
     }
 }
 
@@ -397,8 +394,8 @@ fn run_maint(command: &Option<MaintCommand>, globals: &cli::Cli) -> Result<()> {
             maint::regen_use::run(repo_path, output.as_deref())
         }
         Some(MaintCommand::Revisions { repos }) => {
-            let root = globals.root.as_deref().map(camino::Utf8Path::new);
-            maint::revisions::run(repos, root)
+            let roots = globals.roots();
+            maint::revisions::run(repos, roots.target())
         }
         Some(MaintCommand::Sync { repos }) => {
             eprintln!("emaint: sync repos={:?}", repos);
@@ -406,8 +403,8 @@ fn run_maint(command: &Option<MaintCommand>, globals: &cli::Cli) -> Result<()> {
         }
         Some(MaintCommand::World { fix }) => {
             let vdb = open_vdb(globals)?;
-            let root = globals.root.as_deref().map(camino::Utf8Path::new);
-            maint::world::run(&vdb, *fix, root)
+            let roots = globals.roots();
+            maint::world::run(&vdb, *fix, roots.target())
         }
     }
 }
@@ -448,7 +445,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             if atoms.is_empty() {
                 bail!("equery depgraph: no valid atoms");
             }
-            let root = globals.root.as_deref().map(camino::Utf8Path::new);
+            let roots = globals.roots();
             let outcome = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
                 repo_path,
                 atoms: &atoms,
@@ -460,7 +457,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 autounmask_write: globals.autounmask_write,
                 autosolve_use: *autosolve_use || globals.autosolve_use,
                 multi_repo: globals.repo.is_none(),
-                root,
+                roots: &roots,
             })
             .await?;
             if outcome.exit_code != 0 {
@@ -582,17 +579,12 @@ fn run_log(command: &Option<LogCommand>) -> Result<()> {
 }
 
 fn open_vdb(globals: &cli::Cli) -> Result<portage_vdb::Vdb> {
-    let vdb_path = globals
-        .vdb
-        .as_deref()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            globals
-                .root
-                .as_deref()
-                .map(|r| format!("{}/var/db/pkg", r.trim_end_matches('/')))
-                .unwrap_or_else(|| "/var/db/pkg".to_string())
-        });
+    let vdb_path = globals.vdb.as_deref().map(|s| s.to_string()).unwrap_or_else(|| {
+        format!(
+            "{}/var/db/pkg",
+            globals.roots().merge_root().as_str().trim_end_matches('/')
+        )
+    });
     portage_vdb::Vdb::open(vdb_path.as_str())
         .with_context(|| format!("failed to open VDB at {vdb_path}"))
 }

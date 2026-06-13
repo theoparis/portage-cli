@@ -1293,8 +1293,10 @@ impl EbuildShell {
             self.set_var("EROOT", &root_str);
         }
         if eapi >= Eapi::Seven {
-            // SYSROOT = ROOT for native builds; BROOT is always the build host root.
-            self.set_var("SYSROOT", &root_str);
+            // SYSROOT = ROOT for native builds; BROOT is always the build host
+            // root. Portage strips SYSROOT's trailing slash (so "/" becomes "")
+            // to avoid autotools.eclass bug 654600; ESYSROOT keeps it.
+            self.set_var("SYSROOT", root_str.trim_end_matches('/'));
             self.set_var("ESYSROOT", &root_str);
             self.set_var("BROOT", "/");
         }
