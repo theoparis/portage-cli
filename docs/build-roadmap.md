@@ -31,8 +31,8 @@ Goal: a leaf-package build is trustworthy and debuggable.
 - [x] `src_test`: skipped by default in the merge chain, run under
       `FEATURES=test` (explicit `em ebuild … test` always runs it)
 - [x] FEATURES parsing from the configured shell (profile + make.conf):
-      `test` and `keepwork` acted on, the rest accepted silently (`nostrip`
-      is a no-op until stripping exists; collision check is always-on)
+      `test`, `keepwork`, and `nostrip` acted on (the last via the M1.5
+      estrip pass), the rest accepted silently; collision check is always-on
 - [x] Per-package build log (`<workdir>/build.log`, tee'd via process
       substitution; path attached to failures) and `-q` captured-silent mode.
       Required teaching Rust-builtin children (econf/emake) to honour the
@@ -80,6 +80,57 @@ toolchain-funcs.eclass `_tc-getPROG`), so every `tc-getCC` lookup returned
 empty and `$($(tc-getCC) -E -P -)` ran `-E` as a command. Fixed in the
 brush fork (with bash-oracle compat cases) — builds now get the proper
 CHOST-prefixed compiler exported.
+
+### M1.5 — merge/install parity with portage
+
+Post-M1 follow-on so installed images match what portage produces byte-for-byte
+in layout (not just "a working binary"). All done:
+
+- [x] `REPLACING_VERSIONS` / `REPLACED_BY_VERSION` (PMS 11.1): computed from the
+      target root's VDB + the ebuild's SLOT, visible to
+      pkg_pretend/setup/preinst/postinst (and prerm/postrm of the replaced one)
+- [x] mtime preservation when copying the image into ROOT (regular files via
+      `File::set_modified`; symlink mtimes left as-is — std can't set them
+      portably)
+- [x] missing install helpers: `fperms`, `fowners`, `doinfo`, `dolib.so`,
+      `dolib.a`, `domo` (MOPREFIX-aware), `get_libdir` — real functions in
+      `INSTALL_HELPERS`, overriding the metadata stubs
+- [x] `env-update`: `${ROOT}/etc/profile.env` + `ld.so.conf` regenerated from
+      `env.d` (COLON_/SPACE_SEPARATED/last-wins, LDPATH→linker only), `ldconfig`
+      refreshed (`-r` for offset roots); run after the merge loop and as `em env`
+- [x] **ecompress + estrip** (PMS 12.3.9/12.3.10): post-`src_install` Rust pass
+      (`postprocess.rs`) compresses `/usr/share/{doc,info,man}` (plus ebuild
+      `docompress` opt-ins, minus `docompress -x` and already-compressed/binary
+      suffixes) with `${PORTAGE_COMPRESS}` (default bzip2 → `.bz2`, matching the
+      host), retargets symlinks to the compressed names, and strips ELF
+      `ET_EXEC`/`ET_DYN` objects with `${STRIP} --strip-unneeded`, honouring
+      `FEATURES=nostrip`, `RESTRICT=strip` (+ `dostrip` opt-back-in), and
+      `dostrip -x`. Verified against host portage: `sys-apps/less` into a fresh
+      prefix yields identical `less.1.bz2`/`lesskey.1.bz2`/`lessecho.1.bz2`,
+      stripped `/usr/bin/less`, compressed `README.bz2`/`NEWS.bz2`, and CONTENTS
+      recording the `.bz2` names.
+
+      `docompress`/`dostrip` are Rust builtins (`commands/install_paths.rs`)
+      that push include/exclude paths into an `Arc`-shared `InstallPaths` state
+      (the `DieFlag` pattern), which the merge driver snapshots after
+      `src_install` via `EbuildShell::install_paths()` — no shell-variable
+      round-trip. `tee` in the build-log process-sub now `cd /`s first so its
+      lazy spawn doesn't fault on the just-cleaned `${S}`.
+
+      **Future Rust builtins** (drop the external `bzip2`/`strip` shell-outs):
+      - *ecompress*: swap `Command::new(PORTAGE_COMPRESS)` for pure-Rust codecs
+        (`bzip2`/`flate2`/`xz2`/`zstd` crates, already in the tree for distfiles
+        and `environment.bz2`), keyed off the `PORTAGE_COMPRESS` basename →
+        suffix map that `compress_suffix` already encodes. Keep the shell-out as
+        a fallback when a user sets an exotic `PORTAGE_COMPRESS`. Wins: no
+        per-file fork, streaming straight into the renamed target.
+      - *estrip*: replace `strip --strip-unneeded` with an `object`/`goblin`
+        ELF rewriter dropping `.symtab`/`.comment`/`.note.*`/debug sections,
+        which removes the binutils runtime dependency entirely and lets us split
+        debug info (`FEATURES=splitdebug` → `.debug` files) in-process. Higher
+        effort than ecompress; `is_strippable_elf` (ET_EXEC/ET_DYN gate) and the
+        scope/exclude plumbing are already builtin-ready, so only the rewrite
+        core is new.
 
 ## M2 — Multi-package orchestration
 

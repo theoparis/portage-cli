@@ -1,0 +1,379 @@
+//! Post-`src_install` image processing, mirroring portage's ecompress and
+//! estrip steps: documentation under the `docompress` inclusion list is
+//! compressed (PMS 12.3.9) and ELF objects are stripped unless excluded via
+//! `dostrip`/`RESTRICT=strip`/`FEATURES=nostrip` (PMS 12.3.10).
+//!
+//! Both passes shell out (to `${PORTAGE_COMPRESS}` and `${STRIP}`); see
+//! docs/build-roadmap.md for the plan to grow Rust builtins for them.
+
+use anyhow::{Context, Result};
+use camino::{Utf8Path, Utf8PathBuf};
+
+/// What estrip should do, decided from FEATURES/RESTRICT/dostrip.
+pub enum StripMode {
+    /// FEATURES=nostrip, or RESTRICT=strip with no `dostrip` opt-ins.
+    Disabled,
+    /// Default: every ELF object in the image (minus excludes).
+    All,
+    /// RESTRICT=strip with explicit `dostrip <path>` opt-ins.
+    Only(Vec<Utf8PathBuf>),
+}
+
+pub struct PostProcess {
+    pub compress_include: Vec<Utf8PathBuf>,
+    pub compress_exclude: Vec<Utf8PathBuf>,
+    /// e.g. `bzip2`; the on-disk suffix is derived from it.
+    pub compress_cmd: String,
+    pub compress_flags: Vec<String>,
+    pub strip: StripMode,
+    pub strip_exclude: Vec<Utf8PathBuf>,
+    pub strip_cmd: String,
+}
+
+#[derive(Default)]
+pub struct PostStats {
+    pub compressed: usize,
+    pub relinked: usize,
+    pub stripped: usize,
+}
+
+/// Suffixes ecompress must never touch: already-compressed data plus web/doc
+/// formats that compress poorly or break in place (portage's
+/// PORTAGE_COMPRESS_EXCLUDE_SUFFIXES).
+const SKIP_SUFFIXES: &[&str] = &[
+    "gz", "bz2", "xz", "lzma", "lz", "lz4", "zst", "Z", "css", "gif", "htm", "html", "jpeg",
+    "jpg", "js", "pdf", "png", "svg",
+];
+
+/// ecompress skips tiny files where the container overhead wins.
+const MIN_COMPRESS_SIZE: u64 = 128;
+
+fn compress_suffix(cmd: &str) -> &'static str {
+    let prog = cmd.split('/').next_back().unwrap_or(cmd);
+    match prog {
+        "gzip" | "pigz" => ".gz",
+        "xz" => ".xz",
+        "zstd" => ".zst",
+        "lz4" => ".lz4",
+        _ => ".bz2",
+    }
+}
+
+fn has_skip_suffix(path: &Utf8Path) -> bool {
+    path.extension().is_some_and(|e| SKIP_SUFFIXES.contains(&e))
+}
+
+/// Whether `rel` (an absolute installed path like `/usr/share/man/...`) sits
+/// under one of `prefixes`, matching on whole components.
+fn under_any(rel: &Utf8Path, prefixes: &[Utf8PathBuf]) -> bool {
+    prefixes.iter().any(|p| rel.starts_with(p))
+}
+
+/// All entries below `image_dir` as (absolute installed path, on-disk path).
+fn walk(image_dir: &Utf8Path) -> Result<Vec<(Utf8PathBuf, Utf8PathBuf)>> {
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(image_dir.to_path_buf());
+    while let Some(dir) = queue.pop_front() {
+        let read_dir = std::fs::read_dir(dir.as_std_path())
+            .with_context(|| format!("reading image dir {dir}"))?;
+        for entry in read_dir {
+            let entry = entry.context("reading dir entry")?;
+            let path: Utf8PathBuf = entry
+                .path()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("non-UTF-8 path in image"))?;
+            let rel = path
+                .strip_prefix(image_dir)
+                .map_err(|_| anyhow::anyhow!("path escape: {path}"))?;
+            let installed = Utf8PathBuf::from("/").join(rel);
+            let meta = std::fs::symlink_metadata(path.as_std_path())?;
+            if meta.is_dir() {
+                queue.push_back(path);
+            } else {
+                out.push((installed, path));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Normalize `.`/`..` in an absolute installed path (no filesystem access).
+fn normalize(path: &Utf8Path) -> Utf8PathBuf {
+    let mut parts: Vec<&str> = Vec::new();
+    for c in path.components() {
+        match c.as_str() {
+            "/" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    let mut out = Utf8PathBuf::from("/");
+    for p in parts {
+        out.push(p);
+    }
+    out
+}
+
+/// Run both passes over the image; returns counts for the caller to report.
+pub fn post_process_image(image_dir: &Utf8Path, cfg: &PostProcess) -> Result<PostStats> {
+    let mut stats = PostStats::default();
+    if !image_dir.exists() {
+        return Ok(stats);
+    }
+    let entries = walk(image_dir)?;
+
+    // -- ecompress -----------------------------------------------------
+    let suffix = compress_suffix(&cfg.compress_cmd);
+    let in_compress_scope = |installed: &Utf8Path| {
+        under_any(installed, &cfg.compress_include) && !under_any(installed, &cfg.compress_exclude)
+    };
+    // Installed paths that end up compressed, for the symlink fixup below.
+    let mut compressed: std::collections::HashSet<Utf8PathBuf> = std::collections::HashSet::new();
+    for (installed, on_disk) in &entries {
+        if !in_compress_scope(installed) || has_skip_suffix(installed) {
+            continue;
+        }
+        let meta = std::fs::symlink_metadata(on_disk.as_std_path())?;
+        if !meta.is_file() || meta.len() < MIN_COMPRESS_SIZE {
+            continue;
+        }
+        let status = std::process::Command::new(&cfg.compress_cmd)
+            .args(&cfg.compress_flags)
+            .arg("-f")
+            .arg("--")
+            .arg(on_disk.as_std_path())
+            .status()
+            .with_context(|| format!("running {}", cfg.compress_cmd))?;
+        if status.success() {
+            compressed.insert(installed.clone());
+            stats.compressed += 1;
+        } else {
+            eprintln!("ecompress: {} failed on {installed}", cfg.compress_cmd);
+        }
+    }
+
+    // Symlinks pointing at a file we just compressed must be renamed and
+    // retargeted (man-page cross references: `foo.1 -> bar.1` becomes
+    // `foo.1.bz2 -> bar.1.bz2`).
+    for (installed, on_disk) in &entries {
+        if !in_compress_scope(installed) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(on_disk.as_std_path()) else {
+            continue; // already renamed
+        };
+        if !meta.is_symlink() {
+            continue;
+        }
+        let Ok(target) = std::fs::read_link(on_disk.as_std_path()) else {
+            continue;
+        };
+        let Some(target) = camino::Utf8Path::from_path(&target) else {
+            continue;
+        };
+        let resolved = if target.is_absolute() {
+            normalize(target)
+        } else {
+            let dir = installed.parent().unwrap_or(Utf8Path::new("/"));
+            normalize(&dir.join(target))
+        };
+        if !compressed.contains(&resolved) {
+            continue;
+        }
+        let new_link = Utf8PathBuf::from(format!("{on_disk}{suffix}"));
+        let new_target = format!("{target}{suffix}");
+        std::os::unix::fs::symlink(&new_target, new_link.as_std_path())
+            .with_context(|| format!("relinking {installed}"))?;
+        std::fs::remove_file(on_disk.as_std_path())?;
+        stats.relinked += 1;
+    }
+
+    // -- estrip --------------------------------------------------------
+    let strip_scope: Option<&[Utf8PathBuf]> = match &cfg.strip {
+        StripMode::Disabled => return Ok(stats),
+        StripMode::All => None,
+        StripMode::Only(paths) if paths.is_empty() => return Ok(stats),
+        StripMode::Only(paths) => Some(paths),
+    };
+    for (installed, on_disk) in &entries {
+        if let Some(includes) = strip_scope
+            && !under_any(installed, includes)
+        {
+            continue;
+        }
+        if under_any(installed, &cfg.strip_exclude) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(on_disk.as_std_path()) else {
+            continue;
+        };
+        if !meta.is_file() || !is_strippable_elf(on_disk) {
+            continue;
+        }
+
+        // Image files may be installed read-only; strip needs to rewrite in
+        // place (portage chmods and restores the same way).
+        use std::os::unix::fs::PermissionsExt;
+        let perms = meta.permissions();
+        let writable = perms.mode() & 0o200 != 0;
+        if !writable {
+            let mut p = perms.clone();
+            p.set_mode(perms.mode() | 0o200);
+            let _ = std::fs::set_permissions(on_disk.as_std_path(), p);
+        }
+        let status = std::process::Command::new(&cfg.strip_cmd)
+            .args([
+                "--strip-unneeded",
+                "-N",
+                "__gentoo_check_ldflags__",
+                "-R",
+                ".comment",
+                "-R",
+                ".GCC.command.line",
+                "-R",
+                ".note.gnu.gold-version",
+            ])
+            .arg(on_disk.as_std_path())
+            .status()
+            .with_context(|| format!("running {}", cfg.strip_cmd))?;
+        if !writable {
+            let _ = std::fs::set_permissions(on_disk.as_std_path(), perms);
+        }
+        if status.success() {
+            stats.stripped += 1;
+        } else {
+            eprintln!("estrip: {} failed on {installed}", cfg.strip_cmd);
+        }
+    }
+
+    Ok(stats)
+}
+
+/// True for ET_EXEC/ET_DYN ELF objects (shared libraries and executables).
+/// Relocatable objects (.o, .ko) are left alone: `--strip-unneeded` on those
+/// can drop relocation symbols they still need.
+fn is_strippable_elf(path: &Utf8Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path.as_std_path()) else {
+        return false;
+    };
+    let mut head = [0u8; 18];
+    if f.read_exact(&mut head).is_err() {
+        return false;
+    }
+    if &head[..4] != b"\x7fELF" {
+        return false;
+    }
+    let e_type = match head[5] {
+        1 => u16::from_le_bytes([head[16], head[17]]), // ELFDATA2LSB
+        2 => u16::from_be_bytes([head[16], head[17]]), // ELFDATA2MSB
+        _ => return false,
+    };
+    matches!(e_type, 2 | 3) // ET_EXEC | ET_DYN
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(path: &Utf8Path, data: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path.as_std_path(), data).unwrap();
+    }
+
+    fn default_cfg() -> PostProcess {
+        PostProcess {
+            compress_include: vec![
+                Utf8PathBuf::from("/usr/share/doc"),
+                Utf8PathBuf::from("/usr/share/info"),
+                Utf8PathBuf::from("/usr/share/man"),
+            ],
+            compress_exclude: vec![],
+            compress_cmd: "bzip2".into(),
+            compress_flags: vec!["-9".into()],
+            strip: StripMode::All,
+            strip_exclude: vec![],
+            strip_cmd: "strip".into(),
+        }
+    }
+
+    #[test]
+    fn compresses_man_pages_and_retargets_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let man = image.join("usr/share/man/man1");
+        write(&man.join("foo.1"), &[b'x'; 4096]);
+        std::os::unix::fs::symlink("foo.1", man.join("bar.1").as_std_path()).unwrap();
+        // Outside the inclusion list: untouched.
+        write(&image.join("usr/bin/tool"), &[b'y'; 4096]);
+        // Too small to be worth compressing.
+        write(&man.join("tiny.1"), b"x");
+
+        let stats = post_process_image(&image, &default_cfg()).unwrap();
+
+        assert_eq!(stats.compressed, 1);
+        assert_eq!(stats.relinked, 1);
+        assert!(man.join("foo.1.bz2").exists());
+        assert!(!man.join("foo.1").exists());
+        assert_eq!(
+            std::fs::read_link(man.join("bar.1.bz2").as_std_path())
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "foo.1.bz2"
+        );
+        assert!(!man.join("bar.1").as_std_path().symlink_metadata().is_ok());
+        assert!(image.join("usr/bin/tool").exists());
+        assert!(man.join("tiny.1").exists());
+    }
+
+    #[test]
+    fn docompress_exclude_is_honored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        write(&image.join("usr/share/doc/pkg-1/html/index.txt"), &[b'x'; 4096]);
+        write(&image.join("usr/share/doc/pkg-1/README"), &[b'x'; 4096]);
+
+        let mut cfg = default_cfg();
+        cfg.compress_exclude
+            .push(Utf8PathBuf::from("/usr/share/doc/pkg-1/html"));
+        let stats = post_process_image(&image, &cfg).unwrap();
+
+        assert_eq!(stats.compressed, 1);
+        assert!(image.join("usr/share/doc/pkg-1/html/index.txt").exists());
+        assert!(image.join("usr/share/doc/pkg-1/README.bz2").exists());
+    }
+
+    #[test]
+    fn strips_only_in_dostrip_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        // Not ELF: never touched, even in scope.
+        write(&image.join("usr/bin/script"), b"#!/bin/sh\n");
+
+        let mut cfg = default_cfg();
+        cfg.strip = StripMode::Only(vec![Utf8PathBuf::from("/usr/bin")]);
+        let stats = post_process_image(&image, &cfg).unwrap();
+        assert_eq!(stats.stripped, 0);
+    }
+
+    #[test]
+    fn elf_detection_wants_exec_or_dyn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let mut elf = vec![0u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[5] = 1; // little-endian
+        elf[16] = 3; // ET_DYN
+        write(&dir.join("lib.so"), &elf);
+        assert!(is_strippable_elf(&dir.join("lib.so")));
+        elf[16] = 1; // ET_REL
+        write(&dir.join("obj.o"), &elf);
+        assert!(!is_strippable_elf(&dir.join("obj.o")));
+        write(&dir.join("plain"), b"not elf");
+        assert!(!is_strippable_elf(&dir.join("plain")));
+    }
+}

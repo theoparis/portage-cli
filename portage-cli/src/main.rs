@@ -3,6 +3,7 @@ mod ebuild;
 mod error;
 mod maint;
 mod pkg;
+mod postprocess;
 mod query;
 mod regen;
 mod search;

@@ -202,10 +202,6 @@ EXEDESTTREE=
 DOCDESTTREE=
 _insopts="-m0644"
 _exeopts="-m0755"
-_docompress_includes=()
-_docompress_excludes=()
-_dostrip_includes=()
-_dostrip_excludes=()
 
 into()    { _into_dir="$1"; }
 insinto() { INSDESTTREE="$1"; }
@@ -439,22 +435,6 @@ dosym() {
     fi
 }
 
-docompress() {
-    if [[ $1 == - ]]; then
-        shift; _docompress_excludes+=("$@")
-    else
-        _docompress_includes+=("$@")
-    fi
-}
-
-dostrip() {
-    if [[ $1 == - ]]; then
-        shift; _dostrip_excludes+=("$@")
-    else
-        _dostrip_includes+=("$@")
-    fi
-}
-
 doinitd() {
     [[ $# -gt 0 ]] || die "doinitd: at least one argument required"
     insinto /etc/init.d
@@ -598,6 +578,10 @@ pub struct EbuildShell {
     /// phase driver checks it after the phase function returns. Shared (Arc)
     /// with every clone of the inner shell, including the baseline.
     die_flag: commands::die::DieFlag,
+    /// Cross-subshell accumulator for the `docompress`/`dostrip` path lists
+    /// (PMS 12.3.9/12.3.10), populated during `src_install` and read by the
+    /// merge driver's post-install pass. Shared (Arc) like `die_flag`.
+    install_paths: commands::install_paths::InstallPaths,
     /// Snapshot of the fully-configured shell, captured at the first sourcing
     /// and restored before every subsequent one, so that nothing a previously
     /// sourced ebuild defined — variables, eclass functions, aliases, shell
@@ -713,6 +697,14 @@ impl EbuildShell {
                 "in_iuse",
                 brush_core::builtins::builtin::<commands::InIuseCommand, _>(),
             ),
+            (
+                "docompress",
+                brush_core::builtins::builtin::<commands::DocompressCommand, _>(),
+            ),
+            (
+                "dostrip",
+                brush_core::builtins::builtin::<commands::DostripCommand, _>(),
+            ),
         ] {
             shell.register_builtin(name, builtin);
         }
@@ -790,11 +782,15 @@ impl EbuildShell {
         let die_flag = commands::die::DieFlag::default();
         shell.set_shared(die_flag.clone());
 
+        let install_paths = commands::install_paths::InstallPaths::default();
+        shell.set_shared(install_paths.clone());
+
         let mut ebuild_shell = EbuildShell {
             shell,
             distdir_override: None,
             phase_log: None,
             die_flag,
+            install_paths,
             baseline: None,
             repo_path: repo.path().to_path_buf(),
             eclass_dirs,
@@ -810,6 +806,12 @@ impl EbuildShell {
     /// child processes by the per-phase export list.
     pub fn preset_var(&mut self, name: &str, value: &str) {
         self.set_var(name, value);
+    }
+
+    /// Snapshot the `docompress`/`dostrip` path lists accumulated during the
+    /// install phase (PMS 12.3.9/12.3.10), for the post-install pass.
+    pub fn install_paths(&self) -> commands::install_paths::InstallPathLists {
+        self.install_paths.snapshot()
     }
 
     /// Log phase output to `path` (created on first write): tee'd to the
@@ -1143,7 +1145,7 @@ impl EbuildShell {
         // These stubs shadow the Rust builtins for econf, emake, einfo, etc.
         // Unsetting them lets the Rust builtin registry take over during build.
         self.run_string(
-            "unset -f econf emake unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal has_version best_version",
+            "unset -f econf emake unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal has_version best_version docompress dostrip",
         )
         .await
         .ok();
@@ -1399,7 +1401,11 @@ impl EbuildShell {
                     if *quiet {
                         format!("{{ {func_name} ; }} >> {log} 2>&1")
                     } else {
-                        format!("{{ {func_name} ; }} > >(tee -a {log}) 2>&1")
+                        // The process-sub body may be polled after the phase
+                        // (and even after the build tree is cleaned up); cd
+                        // out of the cwd it cloned so the lazy `tee` spawn
+                        // never starts from a deleted ${S}.
+                        format!("{{ {func_name} ; }} > >(cd / && tee -a {log}) 2>&1")
                     }
                 }
                 None => func_name.to_string(),
@@ -1959,5 +1965,36 @@ cache-formats = md5-dict
             Some("dev-build/autoconf-2.73-r1")
         );
         assert_eq!(shell.get_var("HV2").as_deref(), Some("no"));
+    }
+
+    #[tokio::test]
+    async fn docompress_dostrip_builtins_accumulate_shared_lists() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+        std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+        std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+        std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        // The metadata stubs shadow the Rust builtins until init_build_env
+        // unsets them; do the same here so the builtins run.
+        shell
+            .run_string(
+                "unset -f docompress dostrip; \
+                 docompress /opt/data /usr/share/extra; \
+                 docompress -x /usr/share/doc/foo/html; \
+                 dostrip /usr/lib/debug-me; \
+                 dostrip -x /usr/lib/keep.so",
+            )
+            .await
+            .unwrap();
+
+        let paths = shell.install_paths();
+        assert_eq!(paths.compress, ["/opt/data", "/usr/share/extra"]);
+        assert_eq!(paths.compress_exclude, ["/usr/share/doc/foo/html"]);
+        assert_eq!(paths.strip, ["/usr/lib/debug-me"]);
+        assert_eq!(paths.strip_exclude, ["/usr/lib/keep.so"]);
     }
 }

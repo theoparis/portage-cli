@@ -13,6 +13,8 @@ use portage_repo::{
 };
 use portage_vdb::{ContentsEntry, ContentsKind, InstalledPackage, MergeSpec, Vdb};
 
+use crate::postprocess;
+
 /// The base directory for build work trees: `<prefix>/var/tmp/portage` under
 /// a prefix; otherwise the system `/var/tmp/portage` when writable, falling
 /// back to the user cache.
@@ -218,6 +220,14 @@ async fn run_inner(
             &mut shell, &ebuild, &repo, &repo_root, phase, &work_root, root,
         )
         .await?;
+
+        // Portage runs ecompress/estrip at the tail of __dyn_install: the
+        // shell still holds the docompress/dostrip lists src_install built
+        // up, and everything downstream (preinst, CONTENTS, qmerge) sees
+        // the final image.
+        if phase == "install" {
+            post_process_after_install(&shell, &work_root, &features)?;
+        }
     }
 
     // Successful merge chain: drop the build tree, keeping build.log
@@ -231,6 +241,89 @@ async fn run_inner(
         }
     }
 
+    Ok(())
+}
+
+/// Build the ecompress/estrip configuration from the post-`src_install`
+/// shell state (docompress/dostrip accumulators, FEATURES, RESTRICT,
+/// PORTAGE_COMPRESS) and run the image post-processing pass.
+fn post_process_after_install(
+    shell: &portage_repo::EbuildShell,
+    work_root: &Utf8Path,
+    features: &std::collections::HashSet<String>,
+) -> Result<()> {
+    let image_dir = work_root.join("image");
+    if !image_dir.exists() {
+        return Ok(());
+    }
+
+    // docompress/dostrip path lists the install phase accumulated (PMS
+    // 12.3.9/12.3.10), pushed into shared state by the Rust builtins.
+    let paths = shell.install_paths();
+    let to_paths = |v: Vec<String>| -> Vec<Utf8PathBuf> {
+        v.into_iter().map(Utf8PathBuf::from).collect()
+    };
+
+    // PMS 12.3.9 defaults, then whatever the ebuild added via docompress.
+    let mut compress_include = vec![
+        Utf8PathBuf::from("/usr/share/doc"),
+        Utf8PathBuf::from("/usr/share/info"),
+        Utf8PathBuf::from("/usr/share/man"),
+    ];
+    compress_include.extend(to_paths(paths.compress));
+    let mut compress_exclude = to_paths(paths.compress_exclude);
+    if let Some(pf) = shell.get_var("PF") {
+        compress_exclude.push(Utf8PathBuf::from(format!("/usr/share/doc/{pf}/html")));
+    }
+
+    let compress_cmd = shell
+        .get_var("PORTAGE_COMPRESS")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "bzip2".to_string());
+    let compress_flags: Vec<String> = shell
+        .get_var("PORTAGE_COMPRESS_FLAGS")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "-9".to_string())
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+
+    // Conservative RESTRICT check: a conditional `use? ( strip )` counts as
+    // restricted; the cost is only an unstripped binary.
+    let restrict_strip = shell
+        .get_var("RESTRICT")
+        .unwrap_or_default()
+        .split_whitespace()
+        .any(|t| t == "strip");
+    let strip = if features.contains("nostrip") {
+        postprocess::StripMode::Disabled
+    } else if restrict_strip {
+        // dostrip <path> opts paths back in under RESTRICT=strip.
+        postprocess::StripMode::Only(to_paths(paths.strip))
+    } else {
+        postprocess::StripMode::All
+    };
+
+    let cfg = postprocess::PostProcess {
+        compress_include,
+        compress_exclude,
+        compress_cmd,
+        compress_flags,
+        strip,
+        strip_exclude: to_paths(paths.strip_exclude),
+        strip_cmd: shell
+            .get_var("STRIP")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "strip".to_string()),
+    };
+
+    let stats = postprocess::post_process_image(&image_dir, &cfg)?;
+    if stats.compressed + stats.relinked + stats.stripped > 0 {
+        println!(
+            ">>> post-install: {} file(s) compressed, {} symlink(s) retargeted, {} object(s) stripped",
+            stats.compressed, stats.relinked, stats.stripped
+        );
+    }
     Ok(())
 }
 
