@@ -188,6 +188,19 @@ impl Roots {
         self.target.as_deref().unwrap_or(camino::Utf8Path::new("/"))
     }
 
+    /// The build-against sysroot (`SYSROOT`/`ESYSROOT`) to hand the shell:
+    /// `None` means "same as the install target" (full offset / host), so the
+    /// shell defaults `SYSROOT = ROOT`. `Some` only for an overlay where the
+    /// base differs from the target (`--prefix`), where the base is the system
+    /// to build against and the target is layered on top.
+    pub fn build_sysroot(&self) -> Option<&camino::Utf8Path> {
+        if self.base.as_deref() != self.target.as_deref() {
+            Some(self.base.as_deref().unwrap_or(camino::Utf8Path::new("/")))
+        } else {
+            None
+        }
+    }
+
     /// Whether `--prefix` relocates distfiles and the build trees under the
     /// target (a self-contained tree).
     pub fn relocate(&self) -> bool {

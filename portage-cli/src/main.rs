@@ -113,8 +113,6 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     if outcome.exit_code != 0 {
         bail!("configuration changes are required (see above) — refusing to merge");
     }
-    // The merge root is the install target the planner resolved against.
-    let merge_root = roots.merge_root().to_owned();
     // --prefix additionally relocates distfiles and the build trees under the
     // target (a self-contained tree); --root leaves them at the host defaults.
     let relocate = roots.relocate().then(|| roots.merge_root());
@@ -132,7 +130,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
 
     run_merge_plan(
         &outcome.plan,
-        &merge_root,
+        &roots,
         &work_base,
         distdir.as_deref(),
         cli.quiet,
@@ -169,13 +167,14 @@ fn confirm_merge(count: usize) -> Result<bool> {
 /// without a separate state file. `--emptytree` forces every entry to rebuild.
 async fn run_merge_plan(
     plan: &[query::depgraph::PlannedMerge],
-    merge_root: &camino::Utf8Path,
+    roots: &cli::Roots,
     work_base: &camino::Utf8Path,
     distdir: Option<&camino::Utf8Path>,
     quiet: bool,
     keep_going: bool,
     emptytree: bool,
 ) -> Result<()> {
+    let merge_root = roots.merge_root();
     let total = plan.len();
     let mut merged = 0usize;
     let mut skipped = 0usize;
@@ -203,6 +202,8 @@ async fn run_merge_plan(
             merge_root,
             distdir,
             quiet,
+            roots.config(),
+            roots.build_sysroot(),
         )
         .await
         {
@@ -272,6 +273,8 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
                 work_dir.as_deref(),
                 repo_override,
                 roots.merge_root(),
+                roots.config(),
+                roots.build_sysroot(),
             )
             .await
         }

@@ -36,18 +36,29 @@ pub fn default_work_base(prefix: Option<&Utf8Path>) -> Utf8PathBuf {
 /// `/etc/portage/profile`) and make.conf into the shell, and set its
 /// effective USE. Returns `false` when no profile is resolvable (the build
 /// proceeds with bare defaults).
-async fn apply_profile_env(shell: &mut portage_repo::EbuildShell) -> Result<bool> {
-    let Ok(profile_path) = std::fs::canonicalize("/etc/portage/make.profile") else {
+async fn apply_profile_env(
+    shell: &mut portage_repo::EbuildShell,
+    config_root: Option<&Utf8Path>,
+) -> Result<bool> {
+    // PORTAGE_CONFIGROOT: profile/make.conf come from here (host unless --root
+    // / --config-root offsets it). See docs/root-model.md.
+    let base = config_root.unwrap_or_else(|| Utf8Path::new("/"));
+    let Ok(profile_path) =
+        std::fs::canonicalize(base.join("etc/portage/make.profile").as_std_path())
+    else {
         return Ok(false);
     };
     let stack = portage_repo::ProfileStack::build(profile_path)
         .context("building profile stack")?
-        .with_user_profile(std::path::PathBuf::from("/etc/portage/profile"))
-        .context("loading /etc/portage/profile")?;
-    let conf_candidates = ["/etc/portage/make.conf", "/etc/make.conf"];
+        .with_user_profile(base.join("etc/portage/profile").into_std_path_buf())
+        .context("loading the user profile")?;
+    let conf_candidates = [
+        base.join("etc/portage/make.conf"),
+        base.join("etc/make.conf"),
+    ];
     let confs: Vec<&std::path::Path> = conf_candidates
         .iter()
-        .map(std::path::Path::new)
+        .map(|p| p.as_std_path())
         .filter(|p| p.exists())
         .collect();
     stack
@@ -57,12 +68,15 @@ async fn apply_profile_env(shell: &mut portage_repo::EbuildShell) -> Result<bool
     Ok(true)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     ebuild_path: &str,
     phases: &[String],
     work_dir: Option<&Utf8Path>,
     repo_override: Option<&str>,
     root: &Utf8Path,
+    config_root: Option<&Utf8Path>,
+    sysroot: Option<&Utf8Path>,
 ) -> Result<()> {
     run_inner(
         ebuild_path,
@@ -73,6 +87,8 @@ pub async fn run(
         None,
         None,
         None,
+        config_root,
+        sysroot,
     )
     .await
 }
@@ -82,6 +98,7 @@ pub async fn run(
 /// work tree lives under `work_base/<category>/<pf>`, and `distdir` (when
 /// set, e.g. `<prefix>/var/cache/distfiles`) overrides the writable distfiles
 /// location.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_and_merge(
     ebuild_path: &Utf8Path,
     use_flags: &[String],
@@ -89,6 +106,8 @@ pub async fn build_and_merge(
     root: &Utf8Path,
     distdir: Option<&Utf8Path>,
     quiet: bool,
+    config_root: Option<&Utf8Path>,
+    sysroot: Option<&Utf8Path>,
 ) -> Result<()> {
     let phases: Vec<String> = [
         "pretend",
@@ -119,6 +138,8 @@ pub async fn build_and_merge(
         Some(use_flags),
         distdir,
         Some((log.clone(), quiet)),
+        config_root,
+        sysroot,
     )
     .await
     .with_context(|| format!("build log: {log}"))
@@ -134,6 +155,8 @@ async fn run_inner(
     use_flags: Option<&[String]>,
     distdir: Option<&Utf8Path>,
     phase_log: Option<(Utf8PathBuf, bool)>,
+    config_root: Option<&Utf8Path>,
+    sysroot: Option<&Utf8Path>,
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
     let ebuild = Ebuild::from_path(path).with_context(|| format!("loading {ebuild_path}"))?;
@@ -167,11 +190,17 @@ async fn run_inner(
     // into the shell so phases see CHOST, CFLAGS/LDFLAGS, MULTILIB_ABIS/ABI/
     // LIBDIR_*, and the USE_EXPAND variables (PYTHON_TARGETS, …) that eclasses
     // read directly. This also resolves the profile's effective USE.
-    if !apply_profile_env(&mut shell).await? {
+    if !apply_profile_env(&mut shell, config_root).await? {
+        let cr = config_root.unwrap_or_else(|| Utf8Path::new("/"));
         eprintln!(
-            "warning: no usable profile at /etc/portage/make.profile — building without profile defaults"
+            "warning: no usable profile at {cr}/etc/portage/make.profile — building without profile defaults"
         );
     }
+
+    // Root model (docs/root-model.md): PORTAGE_CONFIGROOT = config_root, and
+    // SYSROOT/ESYSROOT = the build-against base (only when it differs from the
+    // install target, i.e. a --prefix overlay; otherwise SYSROOT = ROOT).
+    shell.set_build_roots(config_root, sysroot);
 
     if let Some(flags) = use_flags {
         // The resolved plan's effective USE for this package overrides the

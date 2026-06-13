@@ -76,28 +76,38 @@ host counts as already installed. `--root` ignores it (full closure rebuilt into
 Per phase (`run_phase`) we set:
 
 ```
-PORTAGE_CONFIGROOT = config_root
-ROOT = EROOT       = target
-SYSROOT = ESYSROOT = target            # primary; trailing slash stripped, "/"→""
+PORTAGE_CONFIGROOT = config_root                 # host unless --root/--config-root
+ROOT = EROOT       = target                       # install destination
+SYSROOT = ESYSROOT = base                          # build-against system; SYSROOT
+                                                   #   trailing slash stripped, "/"→""
 BROOT              = /
 EPREFIX            = ""
 ```
+
+`SYSROOT`/`ESYSROOT` is the **base**, not the target: the build resolves
+`DEPEND` against the base system (host for `--prefix`, the offset for `--root`),
+with the target layered on top for overlays. When `base == target`
+(host, `--root`) `SYSROOT` collapses to `ROOT`. The shell stores config + the
+sysroot (when it differs from `ROOT`) via `set_build_roots`; `run_phase`
+defaults `SYSROOT = ROOT` when no separate base is given.
 
 The eclasses (already sourced from the host repo) translate these into
 build-system specifics — chiefly `multilib_toolchain_setup` pointing
 `PKG_CONFIG_{LIBDIR,PATH,SYSTEM_*}` at `ESYSROOT`, plus `econf --with-sysroot`,
 `meson`/`cmake` cross-files, etc. **We never enumerate build systems.**
 
-### The ordered-sysroot subtlety (`P ≠ R`, overlay)
+### The overlay addition (`target ≠ base`, e.g. `--prefix`) — pending
 
-PMS `SYSROOT` is a *single* path, but overlay needs `[P, R]`. We handle it by:
-- setting `ESYSROOT = P` (eclasses point pkg-config at the prefix), and
-- **augmenting** the search with `R`: append `R`'s `pkgconfig` dirs to
-  `PKG_CONFIG_PATH`, and `R`'s include/lib to the compiler search.
-
-When `R = /` (the common overlay) this is cheap: the host toolchain already
-searches `/usr/include` and `/usr/lib*` natively, so we only need to *add* `P`.
-When `R ≠ /` (`--prefix a/ --root b/`) we must inject both — the advanced case.
+With `SYSROOT = base`, a package just built into the **target** isn't yet
+visible to later builds (the toolchain/eclasses point at the base). The overlay
+needs the target layered on top of the base sysroot: append the target's
+`pkgconfig` dirs to `PKG_CONFIG_PATH` and its include/lib to the compiler
+search, plus runtime `rpath`/`LD_LIBRARY_PATH` so the target wins at run time.
+When `base = /` (the common overlay) this is cheap — the host toolchain already
+searches `/usr` natively, so we only add the target. **This is the remaining
+builder work; today single packages whose deps are all in the base build
+correctly into a target, but a chain whose later members depend on earlier
+ones merged into the same target does not yet resolve them.**
 
 ### Known hard part
 
@@ -120,17 +130,20 @@ never the root handling.
 
 ## Implementation staging
 
-- **Stage 1 — the three-root split (foundation, all scenarios need it):**
-  `config_root()` / `base_root()` / `target()` accessors; planner config from
-  `config_root`, planner installed = `VDB(R) ∪ VDB(P)`, merge into `target`;
-  applets (`env`, `world`, `query`, …) read the right root; `SYSROOT` trailing
-  slash. Makes host (1), full offset / stage (2,3) correct.
-- **Stage 2 — overlay (`--prefix`, `P ≠ R`):** union planner view (done in
-  Stage 1) + ordered sysroot augmentation (`PKG_CONFIG_PATH`/include/lib add
-  `R`) + runtime `rpath`/`LD_LIBRARY_PATH` so `.local` wins at run time.
-- **Stage 3 — builder config offset:** `apply_profile_env(config_root)` +
-  `PORTAGE_CONFIGROOT`, so `--root` *builds* (not just plans) against the
-  offset's config. Needed for true stage/chroot-less offset builds.
-- **Stage 4 — crossdev:** `CBUILD`/`CHOST`/`CTARGET`, decoupled sysroot,
+- **Stage 1 — the three-root split (planner side) [done]:** `Roots`
+  (`config`/`base`/`target`); planner config from `config_root`, installed =
+  `VDB(R) ∪ VDB(P)`, merge into `target`; applets (`env`, `world`, `query`, …)
+  read the right root; `SYSROOT` trailing slash.
+- **Stage 1b — the builder side [done]:** thread the roots through
+  `build_and_merge`/`run`/`run_inner` to `EbuildShell::set_build_roots`;
+  `run_phase` sets `PORTAGE_CONFIGROOT = config`, `ROOT/EROOT = target`,
+  `SYSROOT/ESYSROOT = base` (collapsing to `ROOT` when base == target), `BROOT
+  = /`; `apply_profile_env` reads config from `config_root`. Makes host, full
+  offset / stage, and single-package `--prefix` (deps in base) builds correct.
+- **Stage 2 — overlay addition (`--prefix`, target ≠ base) [pending]:** layer
+  the target on top of the base sysroot (`PKG_CONFIG_PATH`/include/lib add the
+  target) + runtime `rpath`/`LD_LIBRARY_PATH`, so a chain's later members see
+  earlier ones merged into the same target.
+- **Stage 3 — crossdev:** `CBUILD`/`CHOST`/`CTARGET`, decoupled sysroot,
   CHOST-prefixed toolchain, QEMU for tests.
 - **Orthogonal — binpkg:** producer-only; plugs into the existing merge.

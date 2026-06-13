@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
 use brush_builtins::ShellExt;
 use brush_core::parser::ParserImpl;
@@ -582,6 +582,13 @@ pub struct EbuildShell {
     /// (PMS 12.3.9/12.3.10), populated during `src_install` and read by the
     /// merge driver's post-install pass. Shared (Arc) like `die_flag`.
     install_paths: commands::install_paths::InstallPaths,
+    /// `PORTAGE_CONFIGROOT` for phases — where profile/make.conf live. `None`
+    /// keeps the host. Set by the merge driver from the root model.
+    build_config_root: Option<Utf8PathBuf>,
+    /// `SYSROOT`/`ESYSROOT` for phases — the base system the build resolves
+    /// `DEPEND` against. `None` defaults to `ROOT` (the install target). For an
+    /// overlay (`--prefix`) this is the base, with the target layered on top.
+    build_sysroot: Option<Utf8PathBuf>,
     /// Snapshot of the fully-configured shell, captured at the first sourcing
     /// and restored before every subsequent one, so that nothing a previously
     /// sourced ebuild defined — variables, eclass functions, aliases, shell
@@ -797,6 +804,8 @@ impl EbuildShell {
             phase_log: None,
             die_flag,
             install_paths,
+            build_config_root: None,
+            build_sysroot: None,
             baseline: None,
             repo_path: repo.path().to_path_buf(),
             eclass_dirs,
@@ -818,6 +827,15 @@ impl EbuildShell {
     /// install phase (PMS 12.3.9/12.3.10), for the post-install pass.
     pub fn install_paths(&self) -> commands::install_paths::InstallPathLists {
         self.install_paths.snapshot()
+    }
+
+    /// Set `PORTAGE_CONFIGROOT` (config source) and `SYSROOT`/`ESYSROOT` (the
+    /// base the build resolves `DEPEND` against) for subsequent phases. `None`
+    /// keeps the defaults: host config, and `SYSROOT = ROOT` (the install
+    /// target). See docs/root-model.md.
+    pub fn set_build_roots(&mut self, config_root: Option<&Utf8Path>, sysroot: Option<&Utf8Path>) {
+        self.build_config_root = config_root.map(Utf8Path::to_path_buf);
+        self.build_sysroot = sysroot.map(Utf8Path::to_path_buf);
     }
 
     /// Log phase output to `path` (created on first write): tee'd to the
@@ -1285,6 +1303,13 @@ impl EbuildShell {
         };
         self.set_var("ROOT", &root_str);
         self.set_var("MERGE_TYPE", "source");
+        // PORTAGE_CONFIGROOT: where profile/make.conf live (host unless offset).
+        let configroot = self
+            .build_config_root
+            .as_deref()
+            .map_or("/", Utf8Path::as_str)
+            .to_string();
+        self.set_var("PORTAGE_CONFIGROOT", &configroot);
 
         if eapi >= Eapi::Three {
             self.set_var("EPREFIX", "");
@@ -1293,11 +1318,25 @@ impl EbuildShell {
             self.set_var("EROOT", &root_str);
         }
         if eapi >= Eapi::Seven {
-            // SYSROOT = ROOT for native builds; BROOT is always the build host
-            // root. Portage strips SYSROOT's trailing slash (so "/" becomes "")
-            // to avoid autotools.eclass bug 654600; ESYSROOT keeps it.
-            self.set_var("SYSROOT", root_str.trim_end_matches('/'));
-            self.set_var("ESYSROOT", &root_str);
+            // SYSROOT/ESYSROOT = the base the build resolves DEPEND against,
+            // defaulting to ROOT (the install target) when no separate base is
+            // set; for a --prefix overlay it is the base (host), with the
+            // target layered on top by the merge driver. BROOT is always the
+            // build host. SYSROOT's trailing slash is stripped ("/"→"") to
+            // avoid autotools.eclass bug 654600; ESYSROOT keeps it.
+            let sysroot = match self.build_sysroot.as_deref() {
+                Some(p) => {
+                    let s = p.as_str();
+                    if s.ends_with('/') {
+                        s.to_string()
+                    } else {
+                        format!("{s}/")
+                    }
+                }
+                None => root_str.clone(),
+            };
+            self.set_var("SYSROOT", sysroot.trim_end_matches('/'));
+            self.set_var("ESYSROOT", &sysroot);
             self.set_var("BROOT", "/");
         }
 
