@@ -843,6 +843,12 @@ impl EbuildShell {
 
     /// Restore the configured baseline, capturing it on first use. Makes each
     /// sourcing hermetic without curated reset lists; see the `baseline` field.
+    ///
+    /// Interacts with [`init_build_env`](Self::init_build_env), which
+    /// invalidates the baseline at the start of every phase: the baseline is
+    /// then re-captured from the *live* shell at the next `run_phase`, so
+    /// state set in one phase carries into the next. See the comment on that
+    /// invalidation for why this is intentional.
     fn restore_baseline(&mut self) {
         match &self.baseline {
             Some(b) => self.shell = (**b).clone(),
@@ -1099,6 +1105,17 @@ impl EbuildShell {
     /// `emake`, `econf`, and `__ebuild_phase_funcs` are registered as Rust
     /// builtins in `new_with_cache` and therefore never sourced from portage.
     pub async fn init_build_env(&mut self) -> Result<()> {
+        // Invalidate at the start of every phase. With restore_baseline()'s
+        // capture-on-first-use, this is what yields phase-to-phase state
+        // persistence within a package: once this phase mutates the shell the
+        // baseline stays None, so the *next* run_phase's restore_baseline()
+        // re-captures the then-current shell — exported vars and other state
+        // set in one phase are visible in the next (portage gets the same
+        // effect by saving/restoring the ebuild environment between phases,
+        // and REPLACING_VERSIONS / USE rely on it here). Package isolation
+        // comes from a fresh EbuildShell per package in the merge driver, NOT
+        // from the baseline; do not hoist this invalidation out expecting
+        // stricter hermeticity — it would drop inter-phase state.
         self.invalidate_baseline();
         // Prepend portage's ebuild-helpers to PATH for do*/new* install helpers.
         if let Some(bin_path) = Self::find_portage_bin_path() {
