@@ -154,13 +154,18 @@ in layout (not just "a working binary"). All done:
 
 Goal: dependency chains build in order and failures are resumable.
 
+The root model (`--root` base vs `--prefix` install target, the three location
+roots, and the scenario matrix) is specified in [root-model.md](root-model.md);
+the items below are its Stage 1–2.
+
 - [ ] Pre-flight dependency check: each plan entry's DEPEND/BDEPEND must be
-      satisfied by host VDB ∪ already-merged-this-run (prefix VDB); clear
+      satisfied by the planner's installed view `VDB(base) ∪ VDB(target)`; clear
       error naming the missing tool otherwise
-- [ ] Within-run visibility of earlier merges: later builds see
-      `<prefix>`-installed deps (PATH, PKG_CONFIG_PATH, CMAKE_PREFIX_PATH /
-      or document host-BROOT semantics — decide ROOT-vs-BROOT story for
-      prefix builds)
+- [ ] Within-run visibility of earlier merges (root-model.md Stage 1–2):
+      separate `config_root` / `base_root` / `target`; planner config from
+      `config_root`, installed = `VDB(base) ∪ VDB(target)`, merge into `target`;
+      `SYSROOT=ESYSROOT=target` (eclasses do the build-system translation), and
+      for overlay (`target ≠ base`) augment the sysroot search with `base`
 - [x] `--keep-going` + resume: resume needs no state file — the target VDB is
       the state, so an entry already recorded there (at the planned version) is
       skipped and a re-run continues from the first unmerged entry
