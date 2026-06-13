@@ -41,8 +41,8 @@ pub struct PostStats {
 /// formats that compress poorly or break in place (portage's
 /// PORTAGE_COMPRESS_EXCLUDE_SUFFIXES).
 const SKIP_SUFFIXES: &[&str] = &[
-    "gz", "bz2", "xz", "lzma", "lz", "lz4", "zst", "Z", "css", "gif", "htm", "html", "jpeg",
-    "jpg", "js", "pdf", "png", "svg",
+    "gz", "bz2", "xz", "lzma", "lz", "lz4", "zst", "Z", "css", "gif", "htm", "html", "jpeg", "jpg",
+    "js", "pdf", "png", "svg",
 ];
 
 /// ecompress skips tiny files where the container overhead wins.
@@ -334,7 +334,10 @@ mod tests {
     fn docompress_exclude_is_honored() {
         let tmp = tempfile::tempdir().unwrap();
         let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
-        write(&image.join("usr/share/doc/pkg-1/html/index.txt"), &[b'x'; 4096]);
+        write(
+            &image.join("usr/share/doc/pkg-1/html/index.txt"),
+            &[b'x'; 4096],
+        );
         write(&image.join("usr/share/doc/pkg-1/README"), &[b'x'; 4096]);
 
         let mut cfg = default_cfg();

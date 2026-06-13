@@ -76,9 +76,8 @@ impl builtins::Command for EinstallCommand {
             let m = getv("MAKE");
             if m.is_empty() { "make".to_string() } else { m }
         };
-        let split = |v: String| -> Vec<String> {
-            v.split_whitespace().map(str::to_owned).collect()
-        };
+        let split =
+            |v: String| -> Vec<String> { v.split_whitespace().map(str::to_owned).collect() };
         let makeopts = split(getv("MAKEOPTS"));
         let extra_emake = split(getv("EXTRA_EMAKE"));
 
@@ -93,8 +92,11 @@ impl builtins::Command for EinstallCommand {
         };
         if !libdir.is_empty() && shell.env_is_set("CONF_PREFIX") {
             let d = getv("D");
-            let mut destlibdir =
-                format!("{}/{}/{libdir}", d.trim_end_matches('/'), getv("CONF_PREFIX"));
+            let mut destlibdir = format!(
+                "{}/{}/{libdir}",
+                d.trim_end_matches('/'),
+                getv("CONF_PREFIX")
+            );
             while destlibdir.contains("//") {
                 destlibdir = destlibdir.replace("//", "/");
             }

@@ -260,9 +260,8 @@ fn post_process_after_install(
     // docompress/dostrip path lists the install phase accumulated (PMS
     // 12.3.9/12.3.10), pushed into shared state by the Rust builtins.
     let paths = shell.install_paths();
-    let to_paths = |v: Vec<String>| -> Vec<Utf8PathBuf> {
-        v.into_iter().map(Utf8PathBuf::from).collect()
-    };
+    let to_paths =
+        |v: Vec<String>| -> Vec<Utf8PathBuf> { v.into_iter().map(Utf8PathBuf::from).collect() };
 
     // PMS 12.3.9 defaults, then whatever the ebuild added via docompress.
     let mut compress_include = vec![
@@ -841,13 +840,14 @@ fn scan_cfg(dest: &Utf8Path) -> (Utf8PathBuf, Option<Utf8PathBuf>) {
             let Some(rest) = f.strip_prefix("._cfg") else {
                 continue;
             };
-            if rest.len() > 5 && rest.as_bytes()[4] == b'_' && &rest[5..] == name {
-                if let Ok(n) = rest[..4].parse::<i32>()
-                    && n > highest
-                {
-                    highest = n;
-                    latest = Some(dir.join(&f));
-                }
+            if rest.len() > 5
+                && rest.as_bytes()[4] == b'_'
+                && &rest[5..] == name
+                && let Ok(n) = rest[..4].parse::<i32>()
+                && n > highest
+            {
+                highest = n;
+                latest = Some(dir.join(&f));
             }
         }
     }
@@ -1311,20 +1311,31 @@ mod tests {
             mask: vec!["/etc/env.d".into()],
         };
         let WalkResult {
-            contents, protected, ..
+            contents,
+            protected,
+            ..
         } = walk_image(&image, &root, &cp).unwrap();
 
         // Differing protected file diverted; original untouched.
-        assert_eq!(fs::read(root.join("etc/foo.conf").as_std_path()).unwrap(), b"old\n");
+        assert_eq!(
+            fs::read(root.join("etc/foo.conf").as_std_path()).unwrap(),
+            b"old\n"
+        );
         assert_eq!(
             fs::read(root.join("etc/._cfg0000_foo.conf").as_std_path()).unwrap(),
             b"new\n"
         );
         // Masked path overwritten in place (no divert).
-        assert_eq!(fs::read(root.join("etc/env.d/99x").as_std_path()).unwrap(), b"new\n");
+        assert_eq!(
+            fs::read(root.join("etc/env.d/99x").as_std_path()).unwrap(),
+            b"new\n"
+        );
         assert!(!root.join("etc/._cfg0000_99x").exists());
         // New protected file merged directly.
-        assert_eq!(fs::read(root.join("etc/new.conf").as_std_path()).unwrap(), b"fresh\n");
+        assert_eq!(
+            fs::read(root.join("etc/new.conf").as_std_path()).unwrap(),
+            b"fresh\n"
+        );
 
         assert_eq!(protected, [Utf8PathBuf::from("/etc/foo.conf")]);
         // CONTENTS records the real path with the new md5, never the ._cfg.
@@ -1332,7 +1343,10 @@ mod tests {
             .iter()
             .find(|e| e.path == Utf8Path::new("/etc/foo.conf"))
             .unwrap();
-        assert_eq!(foo.md5.as_deref(), Some(&*format!("{:x}", md5::compute(b"new\n"))));
+        assert_eq!(
+            foo.md5.as_deref(),
+            Some(&*format!("{:x}", md5::compute(b"new\n")))
+        );
         assert!(!contents.iter().any(|e| e.path.as_str().contains("._cfg")));
     }
 
@@ -1355,7 +1369,12 @@ mod tests {
         let times = [want, want];
         let c = std::ffi::CString::new(image.join("usr/bin/tp").as_str()).unwrap();
         unsafe {
-            libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW);
+            libc::utimensat(
+                libc::AT_FDCWD,
+                c.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            );
         }
 
         walk_image(&image, &root, &ConfigProtect::none()).unwrap();
@@ -1372,7 +1391,11 @@ mod tests {
         let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
 
         fs::create_dir_all(image.join("usr/bin").as_std_path()).unwrap();
-        fs::write(image.join("usr/bin/tool").as_std_path(), b"#!/bin/sh\necho hi\n").unwrap();
+        fs::write(
+            image.join("usr/bin/tool").as_std_path(),
+            b"#!/bin/sh\necho hi\n",
+        )
+        .unwrap();
         // Two hardlinks to the same inode in the image.
         fs::hard_link(
             image.join("usr/bin/tool").as_std_path(),
@@ -1380,7 +1403,11 @@ mod tests {
         )
         .unwrap();
         // A separate, identical-content file that is NOT a hardlink.
-        fs::write(image.join("usr/bin/copy").as_std_path(), b"#!/bin/sh\necho hi\n").unwrap();
+        fs::write(
+            image.join("usr/bin/copy").as_std_path(),
+            b"#!/bin/sh\necho hi\n",
+        )
+        .unwrap();
         fs::create_dir_all(root.as_std_path()).unwrap();
 
         walk_image(&image, &root, &ConfigProtect::none()).unwrap();

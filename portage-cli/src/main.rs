@@ -579,12 +579,16 @@ fn run_log(command: &Option<LogCommand>) -> Result<()> {
 }
 
 fn open_vdb(globals: &cli::Cli) -> Result<portage_vdb::Vdb> {
-    let vdb_path = globals.vdb.as_deref().map(|s| s.to_string()).unwrap_or_else(|| {
-        format!(
-            "{}/var/db/pkg",
-            globals.roots().merge_root().as_str().trim_end_matches('/')
-        )
-    });
+    let vdb_path = globals
+        .vdb
+        .as_deref()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "{}/var/db/pkg",
+                globals.roots().merge_root().as_str().trim_end_matches('/')
+            )
+        });
     portage_vdb::Vdb::open(vdb_path.as_str())
         .with_context(|| format!("failed to open VDB at {vdb_path}"))
 }
