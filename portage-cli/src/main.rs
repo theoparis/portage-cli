@@ -118,29 +118,140 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     let distdir = prefix.map(|p| p.join("var/cache/distfiles"));
     let work_base = ebuild::default_work_base(prefix);
 
-    let total = outcome.plan.len();
-    for (i, planned) in outcome.plan.iter().enumerate() {
+    if outcome.plan.is_empty() {
+        return Ok(());
+    }
+
+    if cli.ask && !confirm_merge(outcome.plan.len())? {
+        println!(">>> Quitting.");
+        return Ok(());
+    }
+
+    run_merge_plan(
+        &outcome.plan,
+        &merge_root,
+        &work_base,
+        distdir.as_deref(),
+        cli.quiet,
+        cli.keep_going,
+        cli.emptytree,
+    )
+    .await
+}
+
+/// One package's merge failure, for the end-of-run report.
+struct MergeFailure {
+    cpv: String,
+    log: camino::Utf8PathBuf,
+    cause: String,
+}
+
+/// Prompt before merging (`--ask`). Defaults to no on empty input or EOF.
+fn confirm_merge(count: usize) -> Result<bool> {
+    use std::io::Write;
+    print!("\n>>> Would you like to merge these {count} package(s)? [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line)? == 0 {
+        return Ok(false);
+    }
+    Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
+}
+
+/// Build and merge a resolved plan in install order.
+///
+/// Resume comes for free from the target VDB: a package already recorded
+/// there at the planned version is skipped (a previous run merged it), so
+/// re-running after an interruption continues from the first unmerged entry
+/// without a separate state file. `--emptytree` forces every entry to rebuild.
+async fn run_merge_plan(
+    plan: &[query::depgraph::PlannedMerge],
+    merge_root: &camino::Utf8Path,
+    work_base: &camino::Utf8Path,
+    distdir: Option<&camino::Utf8Path>,
+    quiet: bool,
+    keep_going: bool,
+    emptytree: bool,
+) -> Result<()> {
+    let total = plan.len();
+    let mut merged = 0usize;
+    let mut skipped = 0usize;
+    let mut failures: Vec<MergeFailure> = Vec::new();
+
+    for (i, planned) in plan.iter().enumerate() {
+        // The VDB is the resume state: `var/db/pkg/<cat>/<pf>` exists iff this
+        // exact version is already installed in the target root.
+        let pkg_vdb = merge_root.join("var/db/pkg").join(&planned.cpv);
+        if !emptytree && pkg_vdb.exists() {
+            println!(
+                ">>> [{}/{total}] {} is already installed — skipping",
+                i + 1,
+                planned.cpv
+            );
+            skipped += 1;
+            continue;
+        }
+
         println!("\n>>> Emerging ({} of {total}) {}", i + 1, planned.cpv);
-        ebuild::build_and_merge(
+        match ebuild::build_and_merge(
             &planned.ebuild_path,
             &planned.use_flags,
-            &work_base,
-            &merge_root,
-            distdir.as_deref(),
-            cli.quiet,
+            work_base,
+            merge_root,
+            distdir,
+            quiet,
         )
         .await
-        .with_context(|| format!("emerging {}", planned.cpv))?;
-    }
-    if total > 0 {
-        // Refresh ${ROOT}/etc/profile.env and the linker cache from env.d,
-        // as emerge does after merging.
-        if let Err(e) = maint::env::env_update(&merge_root) {
-            eprintln!("warning: env-update failed: {e:#}");
+        {
+            Ok(()) => merged += 1,
+            Err(e) => {
+                eprintln!(">>> Failed to emerge {} — {e:#}", planned.cpv);
+                failures.push(MergeFailure {
+                    cpv: planned.cpv.clone(),
+                    log: work_base.join(&planned.cpv).join("build.log"),
+                    cause: format!("{e:#}"),
+                });
+                if !keep_going {
+                    eprintln!(">>> Stopping (pass --keep-going to continue past failures).");
+                    break;
+                }
+            }
         }
-        println!("\n>>> Done ({total} package(s) merged into {merge_root})");
     }
-    Ok(())
+
+    // Refresh ${ROOT}/etc/profile.env and the linker cache, as emerge does
+    // after merging — only worthwhile if something was actually installed.
+    if merged > 0
+        && let Err(e) = maint::env::env_update(merge_root)
+    {
+        eprintln!("warning: env-update failed: {e:#}");
+    }
+
+    if failures.is_empty() {
+        let extra = if skipped > 0 {
+            format!(" ({skipped} already installed)")
+        } else {
+            String::new()
+        };
+        println!("\n>>> Done — {merged} package(s) merged into {merge_root}{extra}");
+        return Ok(());
+    }
+
+    eprintln!("\n>>> {} package(s) failed to merge:", failures.len());
+    for f in &failures {
+        eprintln!("  * {}", f.cpv);
+        eprintln!("      {}", f.cause);
+        if f.log.exists() {
+            eprintln!("      log: {}", f.log);
+        }
+    }
+    if merged > 0 || skipped > 0 {
+        eprintln!(
+            "    ({merged} merged, {skipped} already installed, {} failed of {total})",
+            failures.len()
+        );
+    }
+    bail!("{} of {total} package(s) failed to merge", failures.len());
 }
 
 async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {

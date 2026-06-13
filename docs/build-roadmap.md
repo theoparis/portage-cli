@@ -161,10 +161,16 @@ Goal: dependency chains build in order and failures are resumable.
       `<prefix>`-installed deps (PATH, PKG_CONFIG_PATH, CMAKE_PREFIX_PATH /
       or document host-BROOT semantics — decide ROOT-vs-BROOT story for
       prefix builds)
-- [ ] `--keep-going` + resume: record per-entry state; rerun continues from
-      the first unmerged entry
-- [ ] `--ask` prompt before the loop
-- [ ] Failure report: package, phase, log path, one-line cause
+- [x] `--keep-going` + resume: resume needs no state file — the target VDB is
+      the state, so an entry already recorded there (at the planned version) is
+      skipped and a re-run continues from the first unmerged entry
+      (`--emptytree` forces a rebuild). `--keep-going` continues past a failed
+      package and reports all failures at the end. *Follow-up: dependency-aware
+      skipping of a failed package's dependents (needs solver edges, shared
+      with `--jobs`).*
+- [x] `--ask` prompt before the loop (defaults to no on empty/EOF)
+- [x] Failure report: per-package cause (error chain) + build-log path, plus a
+      merged/skipped/failed tally
 - [ ] `--jobs N`: parallel builds respecting the dependency order (use the
       solver's edges, not just list order)
 
