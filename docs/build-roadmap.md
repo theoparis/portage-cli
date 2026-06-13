@@ -106,7 +106,8 @@ in layout (not just "a working binary"). All done:
       `(dev, ino)` → first-dest map (portage's `_hardlink_merge_map`), instead
       of copied independently
 - [x] missing install helpers: `fperms`, `fowners`, `doinfo`, `dolib.so`,
-      `dolib.a`, `domo` (MOPREFIX-aware), `get_libdir` — real functions in
+      `dolib.a`, `domo` (MOPREFIX-aware), `get_libdir`, plus
+      `doenvd`/`newenvd`/`newconfd`/`newinitd` — real functions in
       `INSTALL_HELPERS`, overriding the metadata stubs
 - [x] `einstall` (pre-EAPI-6, banned in 6+): a Rust builtin mirroring portage's
       phase-helper — `${MAKE} install` with GNU path overrides into `${ED}`,
@@ -218,9 +219,14 @@ Iterate target-by-target, hardest last:
 - [ ] llvm-r1 slot detection against host LLVM
 - [ ] cargo eclass: vendored-crates SRC_URI unpack (`cargo_src_unpack`),
       offline `cargo build`; small rust package end-to-end first
-- [ ] ebuild-helpers coverage audit: we reuse the host portage's
-      PORTAGE_BIN_PATH helpers — list what firefox's install phase calls
-      (dostrip/ecompress/...) and verify each
+- [x] self-contained install helpers: the `do*`/`new*` family lives in
+      `INSTALL_HELPERS` as in-shell bash functions, so **portage need not be
+      installed**. `init_build_env` no longer prepends `PORTAGE_BIN_PATH`'s
+      `ebuild-helpers/` to `PATH` (it still exports `PORTAGE_BIN_PATH` for the
+      eclasses that reference it). Added `doenvd`/`newenvd`/`newconfd`/`newinitd`
+      and fixed `into` to mirror `DESTTREE`
+- [ ] ebuild-helpers coverage audit: list what firefox's install phase calls
+      and confirm each has a self-contained equivalent in `INSTALL_HELPERS`
 - [ ] firefox dry-run ladder: `setup → unpack → configure` first, catalog
       failures here, fix, extend to compile
 

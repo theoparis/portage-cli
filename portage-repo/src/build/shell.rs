@@ -196,14 +196,16 @@ get_libdir() {
 /// utility and track destination-directory state in shell variables.
 const INSTALL_HELPERS: &str = r#"
 # Destination-directory state — reset to defaults by this sourcing.
+# _into_dir mirrors portage's DESTTREE (set both so eclasses reading either win).
 _into_dir=/usr
+DESTTREE=/usr
 INSDESTTREE=
 EXEDESTTREE=
 DOCDESTTREE=
 _insopts="-m0644"
 _exeopts="-m0755"
 
-into()    { _into_dir="$1"; }
+into()    { _into_dir="$1"; DESTTREE="$1"; }
 insinto() { INSDESTTREE="$1"; }
 exeinto() { EXEDESTTREE="$1"; }
 docinto() { DOCDESTTREE="$1"; }
@@ -447,6 +449,32 @@ doconfd() {
     [[ $# -gt 0 ]] || die "doconfd: at least one argument required"
     insinto /etc/conf.d
     doins "$@"
+}
+
+doenvd() {
+    [[ $# -gt 0 ]] || die "doenvd: at least one argument required"
+    insinto /etc/env.d
+    doins "$@"
+}
+
+# new* variants: stage the source under ${T} as the requested name, then defer
+# to the matching do* helper (portage does the same via __helpers_die wrappers).
+newinitd() {
+    [[ $# -eq 2 ]] || die "newinitd: exactly two arguments required"
+    cp "$1" "${T}/$2" || die "newinitd: failed to stage $1"
+    doinitd "${T}/$2"
+}
+
+newconfd() {
+    [[ $# -eq 2 ]] || die "newconfd: exactly two arguments required"
+    cp "$1" "${T}/$2" || die "newconfd: failed to stage $1"
+    doconfd "${T}/$2"
+}
+
+newenvd() {
+    [[ $# -eq 2 ]] || die "newenvd: exactly two arguments required"
+    cp "$1" "${T}/$2" || die "newenvd: failed to stage $1"
+    doenvd "${T}/$2"
 }
 
 fperms() {
@@ -1131,7 +1159,9 @@ impl EbuildShell {
 
     /// Set up the build environment.
     ///
-    /// Prepends portage's `ebuild-helpers/` to `PATH` (for `doins`, `dosbin`, …),
+    /// Exports `PORTAGE_BIN_PATH` (when portage is installed; some eclasses
+    /// reference it) but relies on our own self-contained `do*`/`new*` install
+    /// helpers rather than portage's `ebuild-helpers/`,
     /// configures a writable `DISTDIR`, passes through build-tool variables
     /// (`CFLAGS`, `MAKEOPTS`, …) from the caller's environment, and defines
     /// the per-EAPI default phase implementation bash functions
@@ -1154,12 +1184,14 @@ impl EbuildShell {
         // from the baseline; do not hoist this invalidation out expecting
         // stricter hermeticity — it would drop inter-phase state.
         self.invalidate_baseline();
-        // Prepend portage's ebuild-helpers to PATH for do*/new* install helpers.
+        // Our do*/new* install helpers are self-contained bash functions
+        // (INSTALL_HELPERS below), so portage need not be installed. We still
+        // export PORTAGE_BIN_PATH when available because some eclasses reference
+        // it (e.g. for misc data files), but we do NOT prepend its
+        // ebuild-helpers/ to PATH: the in-shell functions are authoritative and
+        // would only be shadowed by the forked scripts there.
         if let Some(bin_path) = Self::find_portage_bin_path() {
             self.set_var("PORTAGE_BIN_PATH", &bin_path.to_string_lossy());
-            let helpers = bin_path.join("ebuild-helpers");
-            let cur_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
-            self.set_var("PATH", &format!("{}:{cur_path}", helpers.display()));
         }
 
         let (distdir, ro) = self.effective_distdir();
@@ -1388,8 +1420,9 @@ impl EbuildShell {
             self.run_string("shopt -u failglob").await?;
         }
 
-        // Export all PM-provided variables so external processes (make, ./configure,
-        // portage ebuild-helpers like dodoc/doins) inherit them as environment variables.
+        // Export all PM-provided variables so external processes (make,
+        // ./configure, …) inherit them as environment variables. Our do*/new*
+        // install helpers run in-shell and read these directly.
         // Bash `export` on an unset/empty name is harmless — it just marks it for export.
         self.run_string(
             "export CATEGORY PN PV PR PVR P PF FILESDIR WORKDIR S T D TMPDIR EAPI EBUILD \
@@ -2122,6 +2155,58 @@ cache-formats = md5-dict
         // Banned in EAPI 6+, and dies on a missing Makefile in EAPI 5.
         assert_eq!(shell.get_var("BAN").as_deref(), Some("died"));
         assert_eq!(shell.get_var("NOMK").as_deref(), Some("died"));
+    }
+
+    #[tokio::test]
+    async fn install_helpers_are_self_contained() {
+        // The do*/new* helpers must place files purely from INSTALL_HELPERS,
+        // with no portage ebuild-helpers on PATH. Verifies the into->DESTTREE
+        // mirror and the env.d/conf.d/init.d (do*/new*) helpers.
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+        std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+        std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+        std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+        let d = dir.path().join("image");
+        let t = dir.path().join("temp");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::create_dir_all(&t).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("myprog"), "#!/bin/sh\n:\n").unwrap();
+        std::fs::write(src.join("foo.conf"), "X=1\n").unwrap();
+        std::fs::write(src.join("foo.envd"), "PATH=/opt/foo/bin\n").unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        // init_build_env no longer prepends portage's ebuild-helpers to PATH,
+        // so these helpers must resolve entirely from INSTALL_HELPERS (they
+        // still use coreutils like install/cp, which stay on the system PATH).
+        shell
+            .run_string(&format!(
+                "{INSTALL_HELPERS}\n\
+                 export D={d} T={t} CATEGORY=cat PN=pkg SLOT=0 PF=pkg-1; \
+                 into /usr/local; dobin {src}/myprog; \
+                 [[ ${{DESTTREE}} == /usr/local ]] || die 'into did not set DESTTREE'; \
+                 newconfd {src}/foo.conf renamed.conf; \
+                 doenvd {src}/foo.envd; \
+                 newinitd {src}/myprog svc",
+                d = d.display(),
+                t = t.display(),
+                src = src.display(),
+            ))
+            .await
+            .unwrap();
+
+        assert!(
+            d.join("usr/local/bin/myprog").exists(),
+            "dobin into /usr/local"
+        );
+        assert!(d.join("etc/conf.d/renamed.conf").exists(), "newconfd");
+        assert!(d.join("etc/env.d/foo.envd").exists(), "doenvd");
+        assert!(d.join("etc/init.d/svc").exists(), "newinitd");
     }
 
     #[tokio::test]
