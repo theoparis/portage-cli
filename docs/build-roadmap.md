@@ -89,9 +89,9 @@ in layout (not just "a working binary"). All done:
 - [x] `REPLACING_VERSIONS` / `REPLACED_BY_VERSION` (PMS 11.1): computed from the
       target root's VDB + the ebuild's SLOT, visible to
       pkg_pretend/setup/preinst/postinst (and prerm/postrm of the replaced one)
-- [x] mtime preservation when copying the image into ROOT (regular files via
-      `File::set_modified`; symlink mtimes left as-is — std can't set them
-      portably)
+- [x] mtime preservation when copying the image into ROOT — regular files via
+      `File::set_modified`, symlinks via `utimensat(AT_SYMLINK_NOFOLLOW)`
+      (std always follows links)
 - [x] **CONFIG_PROTECT / CONFIG_PROTECT_MASK** (portage's `ConfigProtect` +
       `new_protect_filename`): an existing, differing file under a protected
       path (longest-prefix wins over the mask; `/etc` always protected) is

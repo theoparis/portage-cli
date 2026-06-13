@@ -854,6 +854,36 @@ fn scan_cfg(dest: &Utf8Path) -> (Utf8PathBuf, Option<Utf8PathBuf>) {
     (dir.join(format!("._cfg{:04}_{name}", highest + 1)), latest)
 }
 
+/// Set a symlink's own atime/mtime. `std::fs` always follows symlinks, so we
+/// go through `utimensat(AT_SYMLINK_NOFOLLOW)`. Best-effort: failures are
+/// ignored, matching the regular-file mtime path.
+fn set_symlink_times(path: &Utf8Path, meta: &std::fs::Metadata) {
+    let to_ts = |t: std::io::Result<std::time::SystemTime>| -> libc::timespec {
+        let d = t
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .unwrap_or_default();
+        libc::timespec {
+            tv_sec: d.as_secs() as libc::time_t,
+            tv_nsec: libc::c_long::from(d.subsec_nanos() as i32),
+        }
+    };
+    let times = [to_ts(meta.accessed()), to_ts(meta.modified())];
+    let Ok(c_path) = std::ffi::CString::new(path.as_str()) else {
+        return;
+    };
+    // SAFETY: c_path is a valid NUL-terminated string and `times` is a
+    // two-element array, as utimensat requires.
+    unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        );
+    }
+}
+
 /// Result of merging the image into ROOT.
 struct WalkResult {
     contents: Vec<ContentsEntry>,
@@ -936,6 +966,9 @@ fn walk_image(
                 }
                 std::os::unix::fs::symlink(target.as_std_path(), write_path.as_std_path())
                     .with_context(|| format!("symlink {write_path}"))?;
+                // Preserve the link's own mtime (std follows symlinks; this
+                // does not), so the on-disk time matches CONTENTS.
+                set_symlink_times(&write_path, &meta);
                 let mtime = meta
                     .modified()
                     .ok()
@@ -1301,6 +1334,34 @@ mod tests {
             .unwrap();
         assert_eq!(foo.md5.as_deref(), Some(&*format!("{:x}", md5::compute(b"new\n"))));
         assert!(!contents.iter().any(|e| e.path.as_str().contains("._cfg")));
+    }
+
+    #[test]
+    fn walk_image_preserves_symlink_mtime() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+        fs::create_dir_all(image.join("usr/bin").as_std_path()).unwrap();
+        fs::write(image.join("usr/bin/tool").as_std_path(), b"x").unwrap();
+        symlink("tool", image.join("usr/bin/tp").as_std_path()).unwrap();
+        fs::create_dir_all(root.as_std_path()).unwrap();
+
+        // Backdate the image symlink's own mtime.
+        let want = libc::timespec {
+            tv_sec: 1_000_000_000,
+            tv_nsec: 0,
+        };
+        let times = [want, want];
+        let c = std::ffi::CString::new(image.join("usr/bin/tp").as_str()).unwrap();
+        unsafe {
+            libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW);
+        }
+
+        walk_image(&image, &root, &ConfigProtect::none()).unwrap();
+
+        let merged = fs::symlink_metadata(root.join("usr/bin/tp").as_std_path()).unwrap();
+        assert_eq!(merged.mtime(), 1_000_000_000);
     }
 
     #[test]

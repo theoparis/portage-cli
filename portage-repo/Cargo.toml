@@ -43,6 +43,6 @@ md5 = "0.7"
 winnow = { version = "1", features = ["parser"] }
 
 [dev-dependencies]
-libc = "0.2"
+libc = { workspace = true }
 tempfile = { workspace = true }
 tokio = { version = "1", features = ["macros"] }
