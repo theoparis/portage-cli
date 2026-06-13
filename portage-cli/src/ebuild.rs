@@ -878,6 +878,10 @@ fn walk_image(
     let mut contents: Vec<ContentsEntry> = Vec::new();
     let mut total_size: u64 = 0;
     let mut protected: Vec<Utf8PathBuf> = Vec::new();
+    // Source (dev, ino) -> first merged dest, for re-creating intra-image
+    // hardlinks as shared inodes in ROOT.
+    let mut hardlinks: std::collections::HashMap<(u64, u64), Utf8PathBuf> =
+        std::collections::HashMap::new();
     let mut queue: std::collections::VecDeque<Utf8PathBuf> = std::collections::VecDeque::new();
     queue.push_back(image_dir.to_path_buf());
 
@@ -993,18 +997,39 @@ fn walk_image(
                     dest_path.clone()
                 };
 
-                std::fs::copy(src_path.as_std_path(), write_path.as_std_path())
-                    .with_context(|| format!("copy {src_path} → {write_path}"))?;
-                std::fs::set_permissions(write_path.as_std_path(), meta.permissions())
-                    .with_context(|| format!("chmod {write_path}"))?;
-                // Preserve the image file's mtime (portage does), so the
-                // on-disk time matches what CONTENTS records.
-                if let Ok(modified) = meta.modified()
-                    && let Ok(f) = std::fs::File::options()
-                        .write(true)
-                        .open(write_path.as_std_path())
+                // Hardlink preservation: a file already hardlinked inside the
+                // image (nlink > 1) is recreated as a hardlink in ROOT,
+                // sharing one inode, rather than copied independently (matches
+                // portage's source-inode `_hardlink_merge_map`).
+                use std::os::unix::fs::MetadataExt;
+                let inode = (meta.dev(), meta.ino());
+                let mut linked = false;
+                if meta.nlink() > 1
+                    && let Some(first) = hardlinks.get(&inode)
                 {
-                    let _ = f.set_modified(modified);
+                    let _ = std::fs::remove_file(write_path.as_std_path());
+                    if std::fs::hard_link(first.as_std_path(), write_path.as_std_path()).is_ok() {
+                        linked = true;
+                    }
+                }
+
+                if !linked {
+                    std::fs::copy(src_path.as_std_path(), write_path.as_std_path())
+                        .with_context(|| format!("copy {src_path} → {write_path}"))?;
+                    std::fs::set_permissions(write_path.as_std_path(), meta.permissions())
+                        .with_context(|| format!("chmod {write_path}"))?;
+                    // Preserve the image file's mtime (portage does), so the
+                    // on-disk time matches what CONTENTS records.
+                    if let Ok(modified) = meta.modified()
+                        && let Ok(f) = std::fs::File::options()
+                            .write(true)
+                            .open(write_path.as_std_path())
+                    {
+                        let _ = f.set_modified(modified);
+                    }
+                    if meta.nlink() > 1 {
+                        hardlinks.insert(inode, write_path.clone());
+                    }
                 }
 
                 total_size += meta.len();
@@ -1276,6 +1301,36 @@ mod tests {
             .unwrap();
         assert_eq!(foo.md5.as_deref(), Some(&*format!("{:x}", md5::compute(b"new\n"))));
         assert!(!contents.iter().any(|e| e.path.as_str().contains("._cfg")));
+    }
+
+    #[test]
+    fn walk_image_preserves_intra_image_hardlinks() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+
+        fs::create_dir_all(image.join("usr/bin").as_std_path()).unwrap();
+        fs::write(image.join("usr/bin/tool").as_std_path(), b"#!/bin/sh\necho hi\n").unwrap();
+        // Two hardlinks to the same inode in the image.
+        fs::hard_link(
+            image.join("usr/bin/tool").as_std_path(),
+            image.join("usr/bin/tool-alias").as_std_path(),
+        )
+        .unwrap();
+        // A separate, identical-content file that is NOT a hardlink.
+        fs::write(image.join("usr/bin/copy").as_std_path(), b"#!/bin/sh\necho hi\n").unwrap();
+        fs::create_dir_all(root.as_std_path()).unwrap();
+
+        walk_image(&image, &root, &ConfigProtect::none()).unwrap();
+
+        let a = fs::metadata(root.join("usr/bin/tool").as_std_path()).unwrap();
+        let b = fs::metadata(root.join("usr/bin/tool-alias").as_std_path()).unwrap();
+        let c = fs::metadata(root.join("usr/bin/copy").as_std_path()).unwrap();
+        // The two image-hardlinks share one inode in ROOT.
+        assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+        // The non-hardlinked file stays independent.
+        assert_ne!((a.dev(), a.ino()), (c.dev(), c.ino()));
     }
 
     #[test]

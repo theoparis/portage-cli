@@ -101,6 +101,10 @@ in layout (not just "a working binary"). All done:
       protected by target. CONTENTS records the real path with the new md5
       (the `._cfg` is the pending delivery for `em dispatch`/`em etc`), exactly
       as portage does.
+- [x] hardlink preservation: files already hardlinked inside the image
+      (`nlink > 1`) are re-created as shared inodes in ROOT via a source
+      `(dev, ino)` → first-dest map (portage's `_hardlink_merge_map`), instead
+      of copied independently
 - [x] missing install helpers: `fperms`, `fowners`, `doinfo`, `dolib.so`,
       `dolib.a`, `domo` (MOPREFIX-aware), `get_libdir` — real functions in
       `INSTALL_HELPERS`, overriding the metadata stubs
