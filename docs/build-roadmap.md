@@ -92,6 +92,15 @@ in layout (not just "a working binary"). All done:
 - [x] mtime preservation when copying the image into ROOT (regular files via
       `File::set_modified`; symlink mtimes left as-is — std can't set them
       portably)
+- [x] **CONFIG_PROTECT / CONFIG_PROTECT_MASK** (portage's `ConfigProtect` +
+      `new_protect_filename`): an existing, differing file under a protected
+      path (longest-prefix wins over the mask; `/etc` always protected) is
+      written to `._cfgNNNN_<name>` (next index, reusing the latest when its
+      md5 already matches) instead of overwritten; new files and unchanged
+      content merge directly, zero-size `.keep*` are exempt, symlinks are
+      protected by target. CONTENTS records the real path with the new md5
+      (the `._cfg` is the pending delivery for `em dispatch`/`em etc`), exactly
+      as portage does.
 - [x] missing install helpers: `fperms`, `fowners`, `doinfo`, `dolib.so`,
       `dolib.a`, `domo` (MOPREFIX-aware), `get_libdir` — real functions in
       `INSTALL_HELPERS`, overriding the metadata stubs

@@ -490,7 +490,12 @@ async fn run_merge(
         .context("pkg_preinst failed")?;
 
     let image_dir = work_root.join("image");
-    let (contents, size) = walk_image(&image_dir, root)?;
+    let cp = ConfigProtect::from_shell(shell);
+    let WalkResult {
+        contents,
+        size,
+        protected,
+    } = walk_image(&image_dir, root, &cp)?;
 
     let exclude_cpv = old_pkg.as_ref().map(|p| p.cpv().clone());
     let collisions = vdb
@@ -548,6 +553,17 @@ async fn run_merge(
         ebuild.name(),
         ebuild.version()
     );
+
+    if !protected.is_empty() {
+        println!(
+            "\n * {} protected config file(s) were installed with a ._cfg name.\n \
+             * Run `em dispatch` (dispatch-conf) or `em etc` to merge them:",
+            protected.len()
+        );
+        for p in &protected {
+            println!(" *   {p}");
+        }
+    }
 
     shell
         .run_phase(
@@ -748,13 +764,120 @@ fn run_clean(work_root: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<ContentsEntry>, u64)> {
+/// CONFIG_PROTECT / CONFIG_PROTECT_MASK resolution (portage's `ConfigProtect`).
+///
+/// A path is protected when the longest matching `CONFIG_PROTECT` prefix is
+/// longer than the longest matching `CONFIG_PROTECT_MASK` prefix. Protected
+/// files that already exist and differ are diverted to `._cfgNNNN_<name>`
+/// for `dispatch-conf`/`etc-update` instead of being overwritten.
+struct ConfigProtect {
+    protect: Vec<String>,
+    mask: Vec<String>,
+}
+
+impl ConfigProtect {
+    /// Read the lists from the configured shell. `/etc` is always protected
+    /// (portage's make.globals guarantees it).
+    fn from_shell(shell: &portage_repo::EbuildShell) -> Self {
+        let read = |name: &str| -> Vec<String> {
+            shell
+                .get_var(name)
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(|s| s.trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let mut protect = read("CONFIG_PROTECT");
+        if !protect.iter().any(|p| p == "/etc") {
+            protect.push("/etc".to_string());
+        }
+        Self {
+            protect,
+            mask: read("CONFIG_PROTECT_MASK"),
+        }
+    }
+
+    /// Length of the longest entry in `list` that prefix-matches `obj` on
+    /// whole components (`obj == p` or `obj` under `p/`); 0 if none.
+    fn longest_match(list: &[String], obj: &str) -> usize {
+        list.iter()
+            .filter(|p| obj == p.as_str() || obj.starts_with(&format!("{p}/")))
+            .map(String::len)
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn is_protected(&self, obj: &Utf8Path) -> bool {
+        let obj = obj.as_str();
+        Self::longest_match(&self.protect, obj) > Self::longest_match(&self.mask, obj)
+    }
+
+    /// A config-protection set that protects nothing (for tests / contexts
+    /// where protection does not apply).
+    #[cfg(test)]
+    fn none() -> Self {
+        Self {
+            protect: vec![],
+            mask: vec![],
+        }
+    }
+}
+
+/// portage's `new_protect_filename`: the next `._cfgNNNN_<name>` beside
+/// `dest` (highest existing index + 1), plus the most recent existing one
+/// so the caller can reuse it when the content already matches.
+fn scan_cfg(dest: &Utf8Path) -> (Utf8PathBuf, Option<Utf8PathBuf>) {
+    let dir = dest.parent().unwrap_or_else(|| Utf8Path::new("/"));
+    let name = dest.file_name().unwrap_or_default();
+    let mut highest: i32 = -1;
+    let mut latest: Option<Utf8PathBuf> = None;
+    if let Ok(rd) = std::fs::read_dir(dir.as_std_path()) {
+        for entry in rd.flatten() {
+            let Ok(f) = entry.file_name().into_string() else {
+                continue;
+            };
+            // ._cfg<4 digits>_<name>
+            let Some(rest) = f.strip_prefix("._cfg") else {
+                continue;
+            };
+            if rest.len() > 5 && rest.as_bytes()[4] == b'_' && &rest[5..] == name {
+                if let Ok(n) = rest[..4].parse::<i32>()
+                    && n > highest
+                {
+                    highest = n;
+                    latest = Some(dir.join(&f));
+                }
+            }
+        }
+    }
+    (dir.join(format!("._cfg{:04}_{name}", highest + 1)), latest)
+}
+
+/// Result of merging the image into ROOT.
+struct WalkResult {
+    contents: Vec<ContentsEntry>,
+    size: u64,
+    /// Installed paths whose update was diverted to a `._cfg` file.
+    protected: Vec<Utf8PathBuf>,
+}
+
+fn walk_image(
+    image_dir: &Utf8Path,
+    dest_root: &Utf8Path,
+    cp: &ConfigProtect,
+) -> Result<WalkResult> {
     if !image_dir.exists() {
-        return Ok((vec![], 0));
+        return Ok(WalkResult {
+            contents: vec![],
+            size: 0,
+            protected: vec![],
+        });
     }
 
     let mut contents: Vec<ContentsEntry> = Vec::new();
     let mut total_size: u64 = 0;
+    let mut protected: Vec<Utf8PathBuf> = Vec::new();
     let mut queue: std::collections::VecDeque<Utf8PathBuf> = std::collections::VecDeque::new();
     queue.push_back(image_dir.to_path_buf());
 
@@ -784,13 +907,31 @@ fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<Content
                 let target: Utf8PathBuf = raw_target
                     .try_into()
                     .map_err(|_| anyhow::anyhow!("non-UTF-8 symlink target"))?;
-                if dest_path.exists() || std::fs::symlink_metadata(dest_path.as_std_path()).is_ok()
-                {
-                    std::fs::remove_file(dest_path.as_std_path())
-                        .with_context(|| format!("removing {dest_path}"))?;
+                // Symlinks are config-protectable too (portage bug #485598):
+                // divert when an existing link points somewhere different.
+                let write_path = if cp.is_protected(&installed) {
+                    match std::fs::read_link(dest_path.as_std_path()) {
+                        Ok(existing) if existing == target.as_std_path() => dest_path.clone(),
+                        Ok(_) => {
+                            let (next, latest) = scan_cfg(&dest_path);
+                            let reuse = latest.filter(|p| {
+                                std::fs::read_link(p.as_std_path())
+                                    .is_ok_and(|t| t == target.as_std_path())
+                            });
+                            protected.push(installed.clone());
+                            reuse.unwrap_or(next)
+                        }
+                        Err(_) => dest_path.clone(),
+                    }
+                } else {
+                    dest_path.clone()
+                };
+                if std::fs::symlink_metadata(write_path.as_std_path()).is_ok() {
+                    std::fs::remove_file(write_path.as_std_path())
+                        .with_context(|| format!("removing {write_path}"))?;
                 }
-                std::os::unix::fs::symlink(target.as_std_path(), dest_path.as_std_path())
-                    .with_context(|| format!("symlink {dest_path}"))?;
+                std::os::unix::fs::symlink(target.as_std_path(), write_path.as_std_path())
+                    .with_context(|| format!("symlink {write_path}"))?;
                 let mtime = meta
                     .modified()
                     .ok()
@@ -819,24 +960,54 @@ fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<Content
                     std::fs::create_dir_all(parent.as_std_path())
                         .with_context(|| format!("mkdir {parent}"))?;
                 }
-                std::fs::copy(src_path.as_std_path(), dest_path.as_std_path())
-                    .with_context(|| format!("copy {src_path} → {dest_path}"))?;
-                std::fs::set_permissions(dest_path.as_std_path(), meta.permissions())
-                    .with_context(|| format!("chmod {dest_path}"))?;
+                let src_data = std::fs::read(src_path.as_std_path())
+                    .with_context(|| format!("reading {src_path}"))?;
+                let md5_str = format!("{:x}", md5::compute(&src_data));
+
+                // Config protection: an existing, differing file in a
+                // protected path is written to a `._cfg` sidecar (.keep
+                // placeholders are never protected). CONTENTS still records
+                // the real path with the new md5, matching portage.
+                let is_keep = meta.len() == 0
+                    && installed
+                        .file_name()
+                        .is_some_and(|n| n.starts_with(".keep"));
+                let write_path = if !is_keep
+                    && cp.is_protected(&installed)
+                    && std::fs::symlink_metadata(dest_path.as_std_path()).is_ok()
+                {
+                    let same = std::fs::read(dest_path.as_std_path())
+                        .is_ok_and(|d| format!("{:x}", md5::compute(&d)) == md5_str);
+                    if same {
+                        dest_path.clone()
+                    } else {
+                        let (next, latest) = scan_cfg(&dest_path);
+                        let reuse = latest.filter(|p| {
+                            std::fs::read(p.as_std_path())
+                                .is_ok_and(|d| format!("{:x}", md5::compute(&d)) == md5_str)
+                        });
+                        protected.push(installed.clone());
+                        reuse.unwrap_or(next)
+                    }
+                } else {
+                    dest_path.clone()
+                };
+
+                std::fs::copy(src_path.as_std_path(), write_path.as_std_path())
+                    .with_context(|| format!("copy {src_path} → {write_path}"))?;
+                std::fs::set_permissions(write_path.as_std_path(), meta.permissions())
+                    .with_context(|| format!("chmod {write_path}"))?;
                 // Preserve the image file's mtime (portage does), so the
                 // on-disk time matches what CONTENTS records.
                 if let Ok(modified) = meta.modified()
                     && let Ok(f) = std::fs::File::options()
                         .write(true)
-                        .open(dest_path.as_std_path())
+                        .open(write_path.as_std_path())
                 {
                     let _ = f.set_modified(modified);
                 }
 
                 total_size += meta.len();
-                let data = std::fs::read(dest_path.as_std_path())
-                    .with_context(|| format!("reading {dest_path}"))?;
-                let md5_str = format!("{:x}", md5::compute(&data));
                 let mtime = meta
                     .modified()
                     .ok()
@@ -853,7 +1024,11 @@ fn walk_image(image_dir: &Utf8Path, dest_root: &Utf8Path) -> Result<(Vec<Content
         }
     }
 
-    Ok((contents, total_size))
+    Ok(WalkResult {
+        contents,
+        size: total_size,
+        protected,
+    })
 }
 
 async fn capture_environment(
@@ -997,7 +1172,8 @@ mod tests {
         symlink("testprog", image.join("usr/bin/tp").as_std_path()).unwrap();
         fs::create_dir_all(root.as_std_path()).unwrap();
 
-        let (contents, size) = walk_image(&image, &root).unwrap();
+        let WalkResult { contents, size, .. } =
+            walk_image(&image, &root, &ConfigProtect::none()).unwrap();
 
         assert!(root.join("usr/bin/testprog").exists());
         assert!(
@@ -1037,7 +1213,8 @@ mod tests {
         fs::create_dir_all(image.as_std_path()).unwrap();
         fs::create_dir_all(root.as_std_path()).unwrap();
 
-        let (contents, size) = walk_image(&image, &root).unwrap();
+        let WalkResult { contents, size, .. } =
+            walk_image(&image, &root, &ConfigProtect::none()).unwrap();
         assert!(contents.is_empty());
         assert_eq!(size, 0);
     }
@@ -1047,9 +1224,83 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let image = Utf8PathBuf::try_from(tmp.path().join("no-such-image")).unwrap();
         let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
-        let (contents, size) = walk_image(&image, &root).unwrap();
+        let WalkResult { contents, size, .. } =
+            walk_image(&image, &root, &ConfigProtect::none()).unwrap();
         assert!(contents.is_empty());
         assert_eq!(size, 0);
+    }
+
+    #[test]
+    fn config_protect_diverts_existing_differing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+
+        // An existing, differing config file under a protected path.
+        fs::create_dir_all(root.join("etc").as_std_path()).unwrap();
+        fs::write(root.join("etc/foo.conf").as_std_path(), b"old\n").unwrap();
+        // A masked subpath that auto-updates, and a brand-new protected file.
+        fs::create_dir_all(root.join("etc/env.d").as_std_path()).unwrap();
+        fs::write(root.join("etc/env.d/99x").as_std_path(), b"old\n").unwrap();
+
+        fs::create_dir_all(image.join("etc/env.d").as_std_path()).unwrap();
+        fs::write(image.join("etc/foo.conf").as_std_path(), b"new\n").unwrap();
+        fs::write(image.join("etc/env.d/99x").as_std_path(), b"new\n").unwrap();
+        fs::write(image.join("etc/new.conf").as_std_path(), b"fresh\n").unwrap();
+
+        let cp = ConfigProtect {
+            protect: vec!["/etc".into()],
+            mask: vec!["/etc/env.d".into()],
+        };
+        let WalkResult {
+            contents, protected, ..
+        } = walk_image(&image, &root, &cp).unwrap();
+
+        // Differing protected file diverted; original untouched.
+        assert_eq!(fs::read(root.join("etc/foo.conf").as_std_path()).unwrap(), b"old\n");
+        assert_eq!(
+            fs::read(root.join("etc/._cfg0000_foo.conf").as_std_path()).unwrap(),
+            b"new\n"
+        );
+        // Masked path overwritten in place (no divert).
+        assert_eq!(fs::read(root.join("etc/env.d/99x").as_std_path()).unwrap(), b"new\n");
+        assert!(!root.join("etc/._cfg0000_99x").exists());
+        // New protected file merged directly.
+        assert_eq!(fs::read(root.join("etc/new.conf").as_std_path()).unwrap(), b"fresh\n");
+
+        assert_eq!(protected, [Utf8PathBuf::from("/etc/foo.conf")]);
+        // CONTENTS records the real path with the new md5, never the ._cfg.
+        let foo = contents
+            .iter()
+            .find(|e| e.path == Utf8Path::new("/etc/foo.conf"))
+            .unwrap();
+        assert_eq!(foo.md5.as_deref(), Some(&*format!("{:x}", md5::compute(b"new\n"))));
+        assert!(!contents.iter().any(|e| e.path.as_str().contains("._cfg")));
+    }
+
+    #[test]
+    fn config_protect_reuses_matching_cfg_and_increments_otherwise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+        fs::create_dir_all(root.join("etc").as_std_path()).unwrap();
+        fs::write(root.join("etc/foo.conf").as_std_path(), b"old\n").unwrap();
+        // A pending ._cfg already holding the exact content we're about to install.
+        fs::write(root.join("etc/._cfg0000_foo.conf").as_std_path(), b"new\n").unwrap();
+        fs::create_dir_all(image.join("etc").as_std_path()).unwrap();
+        fs::write(image.join("etc/foo.conf").as_std_path(), b"new\n").unwrap();
+
+        let cp = ConfigProtect {
+            protect: vec!["/etc".into()],
+            mask: vec![],
+        };
+        walk_image(&image, &root, &cp).unwrap();
+        // Reused the existing ._cfg0000 rather than creating ._cfg0001.
+        assert!(!root.join("etc/._cfg0001_foo.conf").exists());
+        assert_eq!(
+            fs::read(root.join("etc/._cfg0000_foo.conf").as_std_path()).unwrap(),
+            b"new\n"
+        );
     }
 
     #[test]
