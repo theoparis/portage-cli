@@ -36,6 +36,14 @@ pub fn check(plan: &[PlannedMerge], roots: &Roots) -> Result<()> {
         depend_avail.extend(vdb_cpvs(roots.target()));
     }
     let mut bdepend_avail = vdb_cpvs(None);
+    // For an in-place `--local` prefix (native, same arch as the host), build
+    // tools the run installs into the prefix are runnable as build-host deps,
+    // so they satisfy later entries' BDEPEND — e.g. x11-base/xcb-proto built
+    // into the prefix satisfies x11-libs/libxcb's BDEPEND. (A cross `--prefix`
+    // stays host-only: target binaries can't run on the build host.)
+    if roots.eprefix().is_some() {
+        bdepend_avail.extend(vdb_cpvs(roots.target()));
+    }
 
     let mut problems: Vec<String> = Vec::new();
     for planned in plan {

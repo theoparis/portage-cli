@@ -27,7 +27,14 @@ if [[ -n ${EPREFIX} ]]; then
 	_libdir="$(get_libdir 2>/dev/null || echo lib)"
 	export PKG_CONFIG_PATH="${_ov}/usr/${_libdir}/pkgconfig:${_ov}/usr/share/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
 	export CMAKE_PREFIX_PATH="${_ov}/usr${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
-	unset _ov _libdir
+	# Build tools merged into the prefix (vala, cbindgen, …) must be on PATH,
+	# and their python modules (xcb-proto's xcbgen, gobject-introspection, …)
+	# on PYTHONPATH, so dependent builds find them.
+	export PATH="${_ov}/usr/bin${PATH:+:${PATH}}"
+	for _pd in "${_ov}"/usr/lib*/python*/site-packages; do
+		[[ -d ${_pd} ]] && export PYTHONPATH="${_pd}${PYTHONPATH:+:${PYTHONPATH}}"
+	done
+	unset _ov _libdir _pd
 fi
 "#;
 

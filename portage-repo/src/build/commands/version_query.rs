@@ -11,11 +11,17 @@ use std::io::Write;
 use brush_core::builtins;
 use clap::Parser;
 
-fn vdb_root_for<SE: brush_core::ShellExtensions>(
+fn vdb_roots_for<SE: brush_core::ShellExtensions>(
     shell: &brush_core::Shell<SE>,
     broot: bool,
     sysroot: bool,
-) -> std::path::PathBuf {
+) -> Vec<std::path::PathBuf> {
+    let get = |var: &str| {
+        shell
+            .env_str(var)
+            .map(|s| s.into_owned())
+            .filter(|s| !s.is_empty())
+    };
     let var = if broot {
         "BROOT"
     } else if sysroot {
@@ -23,12 +29,32 @@ fn vdb_root_for<SE: brush_core::ShellExtensions>(
     } else {
         "ROOT"
     };
-    let root = shell
-        .env_str(var)
-        .map(|s| s.into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/".to_string());
-    std::path::Path::new(&root).join("var/db/pkg")
+    let root = get(var).unwrap_or_else(|| "/".to_string());
+    let mut roots = vec![root.clone()];
+    // In-place `--local` (EPREFIX set): the run installs every package — build
+    // tools and libraries alike — into the prefix EROOT, which is layered on
+    // the host. So `-b`/`-d`/`-r` queries must also see the prefix, e.g.
+    // python-any-r1's `has_version -b xcb-proto` where xcb-proto was just built
+    // into the prefix, not the host. (Non-prefix builds have EROOT == ROOT, so
+    // this adds nothing.)
+    if get("EPREFIX").is_some()
+        && let Some(eroot) = get("EROOT")
+        && eroot != root
+    {
+        roots.push(eroot);
+    }
+    roots
+        .into_iter()
+        .map(|r| std::path::Path::new(&r).join("var/db/pkg"))
+        .collect()
+}
+
+/// Best installed cpv matching `atom` across any of `vdb_paths`.
+fn best_match_any(vdb_paths: &[std::path::PathBuf], atom: &str) -> Option<portage_atom::Cpv> {
+    vdb_paths
+        .iter()
+        .filter_map(|p| best_match(p, atom))
+        .max_by(|a, b| a.version.cmp(&b.version))
 }
 
 /// Best installed cpv matching `atom` in the VDB at `vdb_path`, if any.
@@ -78,8 +104,8 @@ impl builtins::Command for HasVersionCommand {
         &self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        let vdb = vdb_root_for(context.shell, self.broot, self.sysroot);
-        let found = best_match(&vdb, &self.atom).is_some();
+        let vdbs = vdb_roots_for(context.shell, self.broot, self.sysroot);
+        let found = best_match_any(&vdbs, &self.atom).is_some();
         Ok(brush_core::ExecutionResult::new(u8::from(!found)))
     }
 }
@@ -108,8 +134,8 @@ impl builtins::Command for BestVersionCommand {
         &self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        let vdb = vdb_root_for(context.shell, self.broot, self.sysroot);
-        match best_match(&vdb, &self.atom) {
+        let vdbs = vdb_roots_for(context.shell, self.broot, self.sysroot);
+        match best_match_any(&vdbs, &self.atom) {
             Some(cpv) => {
                 let shell = context.shell;
                 let _ = writeln!(context.params.stdout(shell), "{cpv}");
