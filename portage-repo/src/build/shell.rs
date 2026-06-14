@@ -255,7 +255,7 @@ adddeny()    { :; }
 /// P3 install helpers loaded by `init_build_env` (PMS §12.3.x).
 ///
 /// These bash functions replace the no-op stubs from `builtins.rs` during
-/// build phases.  They install files into `${D}` using the standard `install`
+/// build phases.  They install files into `${ED}` (= `${D}${EPREFIX}`) using the standard `install`
 /// utility and track destination-directory state in shell variables.
 const INSTALL_HELPERS: &str = r#"
 # Destination-directory state — reset to defaults by this sourcing.
@@ -278,7 +278,7 @@ exeopts() { _exeopts="$*"; }
 dodir() {
     local d
     for d in "$@"; do
-        install -d "${D%/}/${d#/}" || die "dodir: failed to create ${d}"
+        install -d "${ED%/}/${d#/}" || die "dodir: failed to create ${d}"
     done
 }
 
@@ -286,7 +286,7 @@ keepdir() {
     dodir "$@"
     local d
     for d in "$@"; do
-        : > "${D%/}/${d#/}/.keep_${CATEGORY}_${PN}-${SLOT//\//_}"
+        : > "${ED%/}/${d#/}/.keep_${CATEGORY}_${PN}-${SLOT//\//_}"
     done
 }
 
@@ -295,7 +295,7 @@ dobin() {
     dodir "${_into_dir}/bin"
     local f
     for f in "$@"; do
-        install -m0755 "${f}" "${D%/}/${_into_dir#/}/bin/${f##*/}" \
+        install -m0755 "${f}" "${ED%/}/${_into_dir#/}/bin/${f##*/}" \
             || die "dobin: failed to install ${f}"
     done
 }
@@ -303,7 +303,7 @@ dobin() {
 newbin() {
     [[ $# -eq 2 ]] || die "newbin: exactly two arguments required"
     dodir "${_into_dir}/bin"
-    install -m0755 "$1" "${D%/}/${_into_dir#/}/bin/$2" \
+    install -m0755 "$1" "${ED%/}/${_into_dir#/}/bin/$2" \
         || die "newbin: failed to install $1 as $2"
 }
 
@@ -312,7 +312,7 @@ dosbin() {
     dodir "${_into_dir}/sbin"
     local f
     for f in "$@"; do
-        install -m0755 "${f}" "${D%/}/${_into_dir#/}/sbin/${f##*/}" \
+        install -m0755 "${f}" "${ED%/}/${_into_dir#/}/sbin/${f##*/}" \
             || die "dosbin: failed to install ${f}"
     done
 }
@@ -320,7 +320,7 @@ dosbin() {
 newsbin() {
     [[ $# -eq 2 ]] || die "newsbin: exactly two arguments required"
     dodir "${_into_dir}/sbin"
-    install -m0755 "$1" "${D%/}/${_into_dir#/}/sbin/$2" \
+    install -m0755 "$1" "${ED%/}/${_into_dir#/}/sbin/$2" \
         || die "newsbin: failed to install $1 as $2"
 }
 
@@ -329,7 +329,7 @@ doins() {
     [[ $1 == -r ]] && { recursive=1; shift; }
     [[ $# -gt 0 ]] || die "doins: at least one argument required"
     dodir "${INSDESTTREE:-/}"
-    local dest="${D%/}/${INSDESTTREE#/}"
+    local dest="${ED%/}/${INSDESTTREE#/}"
     local f
     for f in "$@"; do
         if [[ $recursive -eq 1 && -d ${f} ]]; then
@@ -344,14 +344,14 @@ doins() {
 newins() {
     [[ $# -eq 2 ]] || die "newins: exactly two arguments required"
     dodir "${INSDESTTREE:-/}"
-    install ${_insopts} "$1" "${D%/}/${INSDESTTREE#/}/$2" \
+    install ${_insopts} "$1" "${ED%/}/${INSDESTTREE#/}/$2" \
         || die "newins: failed to install $1 as $2"
 }
 
 doexe() {
     [[ $# -gt 0 ]] || die "doexe: at least one argument required"
     dodir "${EXEDESTTREE:-/}"
-    local dest="${D%/}/${EXEDESTTREE#/}"
+    local dest="${ED%/}/${EXEDESTTREE#/}"
     local f
     for f in "$@"; do
         install ${_exeopts} "${f}" "${dest}/${f##*/}" \
@@ -362,7 +362,7 @@ doexe() {
 newexe() {
     [[ $# -eq 2 ]] || die "newexe: exactly two arguments required"
     dodir "${EXEDESTTREE:-/}"
-    install ${_exeopts} "$1" "${D%/}/${EXEDESTTREE#/}/$2" \
+    install ${_exeopts} "$1" "${ED%/}/${EXEDESTTREE#/}/$2" \
         || die "newexe: failed to install $1 as $2"
 }
 
@@ -372,7 +372,7 @@ dolib.a() {
     dodir "${_into_dir}/${libdir}"
     local f
     for f in "$@"; do
-        install -m0644 "${f}" "${D%/}/${_into_dir#/}/${libdir}/${f##*/}" \
+        install -m0644 "${f}" "${ED%/}/${_into_dir#/}/${libdir}/${f##*/}" \
             || die "dolib.a: failed to install ${f}"
     done
 }
@@ -383,7 +383,7 @@ dolib.so() {
     dodir "${_into_dir}/${libdir}"
     local f
     for f in "$@"; do
-        install -m0755 "${f}" "${D%/}/${_into_dir#/}/${libdir}/${f##*/}" \
+        install -m0755 "${f}" "${ED%/}/${_into_dir#/}/${libdir}/${f##*/}" \
             || die "dolib.so: failed to install ${f}"
     done
 }
@@ -403,7 +403,7 @@ newlib.a() {
     [[ $# -eq 2 ]] || die "newlib.a: exactly two arguments required"
     local libdir; libdir=$(get_libdir)
     dodir "${_into_dir}/${libdir}"
-    install -m0644 "$1" "${D%/}/${_into_dir#/}/${libdir}/$2" \
+    install -m0644 "$1" "${ED%/}/${_into_dir#/}/${libdir}/$2" \
         || die "newlib.a: failed to install $1 as $2"
 }
 
@@ -411,7 +411,7 @@ newlib.so() {
     [[ $# -eq 2 ]] || die "newlib.so: exactly two arguments required"
     local libdir; libdir=$(get_libdir)
     dodir "${_into_dir}/${libdir}"
-    install -m0755 "$1" "${D%/}/${_into_dir#/}/${libdir}/$2" \
+    install -m0755 "$1" "${ED%/}/${_into_dir#/}/${libdir}/$2" \
         || die "newlib.so: failed to install $1 as $2"
 }
 
@@ -419,7 +419,7 @@ dodoc() {
     local recursive=0
     [[ $1 == -r ]] && { recursive=1; shift; }
     [[ $# -gt 0 ]] || die "dodoc: at least one argument required"
-    local docdir="${D%/}/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
+    local docdir="${ED%/}/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
     dodir "/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
     local f
     for f in "$@"; do
@@ -434,7 +434,7 @@ dodoc() {
 
 newdoc() {
     [[ $# -eq 2 ]] || die "newdoc: exactly two arguments required"
-    local docdir="${D%/}/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
+    local docdir="${ED%/}/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
     dodir "/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
     install -m0644 "$1" "${docdir}/$2" || die "newdoc: failed to install $1 as $2"
 }
@@ -446,7 +446,7 @@ doman() {
         ext="${f##*.}"
         [[ -n ${ext} ]] || die "doman: cannot determine man section for ${f}"
         dodir "/usr/share/man/man${ext}"
-        install -m0644 "${f}" "${D%/}/usr/share/man/man${ext}/${f##*/}" \
+        install -m0644 "${f}" "${ED%/}/usr/share/man/man${ext}/${f##*/}" \
             || die "doman: failed to install ${f}"
     done
 }
@@ -456,7 +456,7 @@ newman() {
     local ext="${2##*.}"
     [[ -n ${ext} ]] || die "newman: cannot determine man section for $2"
     dodir "/usr/share/man/man${ext}"
-    install -m0644 "$1" "${D%/}/usr/share/man/man${ext}/$2" \
+    install -m0644 "$1" "${ED%/}/usr/share/man/man${ext}/$2" \
         || die "newman: failed to install $1 as $2"
 }
 
@@ -468,9 +468,9 @@ doheader() {
     local f
     for f in "$@"; do
         if [[ $recursive -eq 1 && -d ${f} ]]; then
-            cp -pPR "${f}" "${D%/}/usr/include/" || die "doheader: failed to copy ${f}"
+            cp -pPR "${f}" "${ED%/}/usr/include/" || die "doheader: failed to copy ${f}"
         else
-            install -m0644 "${f}" "${D%/}/usr/include/${f##*/}" \
+            install -m0644 "${f}" "${ED%/}/usr/include/${f##*/}" \
                 || die "doheader: failed to install ${f}"
         fi
     done
@@ -479,7 +479,7 @@ doheader() {
 newheader() {
     [[ $# -eq 2 ]] || die "newheader: exactly two arguments required"
     dodir "/usr/include"
-    install -m0644 "$1" "${D%/}/usr/include/$2" \
+    install -m0644 "$1" "${ED%/}/usr/include/$2" \
         || die "newheader: failed to install $1 as $2"
 }
 
@@ -494,9 +494,9 @@ dosym() {
         rel_target=$(python3 -c \
             "import os,sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))" \
             "$target" "$link") || die "dosym: failed to compute relative path"
-        ln -snf "$rel_target" "${D%/}/${link#/}" || die "dosym: failed to create symlink"
+        ln -snf "$rel_target" "${ED%/}/${link#/}" || die "dosym: failed to create symlink"
     else
-        ln -snf "$target" "${D%/}/${link#/}" || die "dosym: failed to create symlink"
+        ln -snf "$target" "${ED%/}/${link#/}" || die "dosym: failed to create symlink"
     fi
 }
 
@@ -545,7 +545,7 @@ fperms() {
     local mode="$1"; shift
     local f
     for f in "$@"; do
-        chmod "$mode" "${D%/}/${f#/}" || die "fperms: failed to chmod ${f}"
+        chmod "$mode" "${ED%/}/${f#/}" || die "fperms: failed to chmod ${f}"
     done
 }
 
@@ -554,7 +554,7 @@ fowners() {
     local owner="$1"; shift
     local f
     for f in "$@"; do
-        chown "$owner" "${D%/}/${f#/}" || die "fowners: failed to chown ${f}"
+        chown "$owner" "${ED%/}/${f#/}" || die "fowners: failed to chown ${f}"
     done
 }
 
@@ -680,6 +680,11 @@ pub struct EbuildShell {
     /// `DEPEND` against. `None` defaults to `ROOT` (the install target). For an
     /// overlay (`--prefix`) this is the base, with the target layered on top.
     build_sysroot: Option<Utf8PathBuf>,
+    /// `EPREFIX` for an in-place prefix build (`--local`): packages are
+    /// configured for and installed at this offset, so `ROOT=/`, `EROOT=ROOT+
+    /// EPREFIX` (== the merge root), and `ED=D+EPREFIX`. `None` ⇒ `EPREFIX=""`
+    /// (host / ROOT-offset `--prefix`).
+    build_eprefix: Option<Utf8PathBuf>,
     /// Portage `bashrc` hooks sourced per phase after the environment is set up
     /// (profile `profile.bashrc` files in stack order, then the user's
     /// `${PORTAGE_CONFIGROOT}/etc/portage/bashrc`). Not PMS; matches portage's
@@ -903,6 +908,7 @@ impl EbuildShell {
             install_paths,
             build_config_root: None,
             build_sysroot: None,
+            build_eprefix: None,
             bashrc_files: Vec::new(),
             baseline: None,
             repo_path: repo.path().to_path_buf(),
@@ -931,9 +937,15 @@ impl EbuildShell {
     /// base the build resolves `DEPEND` against) for subsequent phases. `None`
     /// keeps the defaults: host config, and `SYSROOT = ROOT` (the install
     /// target). See docs/root-model.md.
-    pub fn set_build_roots(&mut self, config_root: Option<&Utf8Path>, sysroot: Option<&Utf8Path>) {
+    pub fn set_build_roots(
+        &mut self,
+        config_root: Option<&Utf8Path>,
+        sysroot: Option<&Utf8Path>,
+        eprefix: Option<&Utf8Path>,
+    ) {
         self.build_config_root = config_root.map(Utf8Path::to_path_buf);
         self.build_sysroot = sysroot.map(Utf8Path::to_path_buf);
+        self.build_eprefix = eprefix.map(Utf8Path::to_path_buf);
     }
 
     /// Set the `bashrc` hooks to source per phase (profile `profile.bashrc`
@@ -1456,7 +1468,22 @@ impl EbuildShell {
                 format!("{s}/")
             }
         };
-        self.set_var("ROOT", &root_str);
+        // In-place prefix (`--local`): `root` (the merge root) is EROOT; the
+        // package is configured for EPREFIX, so the live ROOT is `/` and files
+        // stage under `ED = D + EPREFIX`. Without an eprefix this is a no-op
+        // (ROOT = EROOT = root, EPREFIX = "", ED = D) — host/`--prefix` paths
+        // are unchanged.
+        let eprefix = self
+            .build_eprefix
+            .as_deref()
+            .map(|p| p.as_str().trim_end_matches('/').to_string())
+            .unwrap_or_default();
+        let root_var = if eprefix.is_empty() {
+            root_str.clone()
+        } else {
+            "/".to_string()
+        };
+        self.set_var("ROOT", &root_var);
         self.set_var("MERGE_TYPE", "source");
         // PORTAGE_CONFIGROOT: where profile/make.conf live (host unless offset).
         let configroot = self
@@ -1466,12 +1493,20 @@ impl EbuildShell {
             .to_string();
         self.set_var("PORTAGE_CONFIGROOT", &configroot);
 
-        if eapi >= Eapi::Three {
-            self.set_var("EPREFIX", "");
-            self.set_var("ED", &format!("{}/", d.display()));
-            // EROOT = ROOT + EPREFIX; EPREFIX is always empty in Gentoo.
-            self.set_var("EROOT", &root_str);
-        }
+        // EPREFIX/ED/EROOT are PMS EAPI-3+ vars, but the install helpers use
+        // `${ED}` unconditionally, so always set them (ED == D when EPREFIX is
+        // empty, matching portage's EAPI 0-2 behaviour).
+        self.set_var("EPREFIX", &eprefix);
+        // ED = D + EPREFIX (the prefix subtree within the image); == D when
+        // EPREFIX is empty.
+        let ed = if eprefix.is_empty() {
+            format!("{}/", d.display())
+        } else {
+            format!("{}/{}/", d.display(), eprefix.trim_start_matches('/'))
+        };
+        self.set_var("ED", &ed);
+        // EROOT = ROOT + EPREFIX, i.e. the merge root.
+        self.set_var("EROOT", &root_str);
         if eapi >= Eapi::Seven {
             // SYSROOT/ESYSROOT = the base the build resolves DEPEND against,
             // defaulting to ROOT (the install target) when no separate base is
@@ -2297,7 +2332,7 @@ cache-formats = md5-dict
         shell
             .run_string(&format!(
                 "{INSTALL_HELPERS}\n\
-                 export D={d} T={t} CATEGORY=cat PN=pkg SLOT=0 PF=pkg-1; \
+                 export D={d} ED={d} T={t} CATEGORY=cat PN=pkg SLOT=0 PF=pkg-1; \
                  into /usr/local; dobin {src}/myprog; \
                  [[ ${{DESTTREE}} == /usr/local ]] || die 'into did not set DESTTREE'; \
                  newconfd {src}/foo.conf renamed.conf; \

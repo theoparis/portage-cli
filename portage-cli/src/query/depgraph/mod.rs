@@ -11,7 +11,7 @@ mod package_use;
 mod repo;
 mod required_use;
 mod subslot;
-pub(crate) mod use_env;
+mod use_env;
 
 use std::collections::HashMap;
 
@@ -140,7 +140,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     let (data, installed_entries, use_env_result) = tokio::join!(
         repo::load_repos(&repo, &overlays),
         async { installed::load_installed(base_root, target_root) },
-        use_env::build_use_env(&repo, config_root),
+        use_env::build_use_env(&repo, config_root, roots.config_overlay()),
     );
     let use_env = use_env_result?;
     let use_env::UseEnv {

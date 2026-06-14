@@ -39,6 +39,7 @@ pub fn default_work_base(prefix: Option<&Utf8Path>) -> Utf8PathBuf {
 async fn apply_profile_env(
     shell: &mut portage_repo::EbuildShell,
     config_root: Option<&Utf8Path>,
+    config_overlay: Option<&Utf8Path>,
 ) -> Result<bool> {
     // PORTAGE_CONFIGROOT: profile/make.conf come from here (host unless --root
     // / --config-root offsets it). See docs/root-model.md.
@@ -83,13 +84,13 @@ async fn apply_profile_env(
     if user.is_file() {
         bashrc.push(user);
     }
-    // User XDG overlay (~/.config/portage/bashrc), sourced last so it wins —
-    // the natural home for an unprivileged --prefix overlay search-path recipe
-    // (see docs/root-model.md), no --config-root needed.
-    if let Some(xdg) = crate::query::depgraph::use_env::xdg_portage_dir() {
-        let xdg_bashrc = xdg.join("bashrc");
-        if xdg_bashrc.is_file() {
-            bashrc.push(xdg_bashrc);
+    // User config overlay bashrc (e.g. `--local`'s ~/.gentoo/etc/portage/bashrc),
+    // sourced last so it wins — the natural home for the overlay search-path
+    // recipe, without writing the host /etc/portage.
+    if let Some(overlay) = config_overlay {
+        let ob = overlay.join("bashrc");
+        if ob.is_file() {
+            bashrc.push(ob);
         }
     }
     shell.set_bashrc_files(bashrc);
@@ -106,6 +107,7 @@ pub async fn run(
     root: &Utf8Path,
     config_root: Option<&Utf8Path>,
     sysroot: Option<&Utf8Path>,
+    eprefix: Option<&Utf8Path>,
 ) -> Result<()> {
     run_inner(
         ebuild_path,
@@ -118,6 +120,7 @@ pub async fn run(
         None,
         config_root,
         sysroot,
+        eprefix,
         None,
     )
     .await
@@ -138,6 +141,7 @@ pub async fn build_and_merge(
     quiet: bool,
     config_root: Option<&Utf8Path>,
     sysroot: Option<&Utf8Path>,
+    eprefix: Option<&Utf8Path>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
 ) -> Result<()> {
     let phases: Vec<String> = [
@@ -171,6 +175,7 @@ pub async fn build_and_merge(
         Some((log.clone(), quiet)),
         config_root,
         sysroot,
+        eprefix,
         merge_gate,
     )
     .await
@@ -189,6 +194,7 @@ async fn run_inner(
     phase_log: Option<(Utf8PathBuf, bool)>,
     config_root: Option<&Utf8Path>,
     sysroot: Option<&Utf8Path>,
+    eprefix: Option<&Utf8Path>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
@@ -223,7 +229,10 @@ async fn run_inner(
     // into the shell so phases see CHOST, CFLAGS/LDFLAGS, MULTILIB_ABIS/ABI/
     // LIBDIR_*, and the USE_EXPAND variables (PYTHON_TARGETS, …) that eclasses
     // read directly. This also resolves the profile's effective USE.
-    if !apply_profile_env(&mut shell, config_root).await? {
+    // The config overlay (`package.use`/`bashrc` over host config) is the
+    // prefix's `etc/portage` in an in-place `--local` build (`EPREFIX/etc/portage`).
+    let config_overlay = eprefix.map(|e| e.join("etc/portage"));
+    if !apply_profile_env(&mut shell, config_root, config_overlay.as_deref()).await? {
         let cr = config_root.unwrap_or_else(|| Utf8Path::new("/"));
         eprintln!(
             "warning: no usable profile at {cr}/etc/portage/make.profile — building without profile defaults"
@@ -237,7 +246,7 @@ async fn run_inner(
     // NB: in overlay mode (target ≠ base) a package merged into the target is
     // not yet visible to later builds in the run — that needs a merged sysroot,
     // which is shelved (see docs/root-model.md "Overlay support — shelved").
-    shell.set_build_roots(config_root, sysroot);
+    shell.set_build_roots(config_root, sysroot, eprefix);
 
     if let Some(flags) = use_flags {
         // The resolved plan's effective USE for this package overrides the
@@ -349,12 +358,27 @@ async fn run_inner(
 /// Build the ecompress/estrip configuration from the post-`src_install`
 /// shell state (docompress/dostrip accumulators, FEATURES, RESTRICT,
 /// PORTAGE_COMPRESS) and run the image post-processing pass.
+/// The image subtree that gets post-processed and merged: the shell's `ED`
+/// (`image/${EPREFIX}`, set by `init_build_env`), falling back to
+/// `work_root/image` when `ED` is unset or empty. With `EPREFIX=""` this is the
+/// plain image dir, so host / `--prefix` builds are unchanged.
+fn ed_image_dir(shell: &portage_repo::EbuildShell, work_root: &Utf8Path) -> Utf8PathBuf {
+    shell
+        .get_var("ED")
+        .map(|s| s.trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .map(Utf8PathBuf::from)
+        .unwrap_or_else(|| work_root.join("image"))
+}
+
 fn post_process_after_install(
     shell: &portage_repo::EbuildShell,
     work_root: &Utf8Path,
     features: &std::collections::HashSet<String>,
 ) -> Result<()> {
-    let image_dir = work_root.join("image");
+    // `ED` is the prefix subtree of the image (`image/${EPREFIX}`); == the image
+    // dir when EPREFIX is empty. Post-process exactly what will be merged.
+    let image_dir = ed_image_dir(shell, work_root);
     if !image_dir.exists() {
         return Ok(());
     }
@@ -590,7 +614,9 @@ async fn run_merge(
         .await
         .context("pkg_preinst failed")?;
 
-    let image_dir = work_root.join("image");
+    // Merge the prefix subtree of the image (`ED = image/${EPREFIX}`) into the
+    // merge root (`EROOT`); identity when EPREFIX is empty.
+    let image_dir = ed_image_dir(shell, work_root);
     let cp = ConfigProtect::from_shell(shell);
     let WalkResult {
         contents,

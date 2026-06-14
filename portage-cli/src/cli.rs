@@ -57,6 +57,14 @@ pub struct Cli {
     #[arg(long, value_name = "DIR", global = true)]
     pub prefix: Option<String>,
 
+    /// Unprivileged in-place install into a Gentoo-Prefix at `~/.gentoo`
+    /// (`EPREFIX=~/.gentoo`): packages are configured for and installed to
+    /// `~/.gentoo/usr/...`, usable in place (add `~/.gentoo/usr/bin` to PATH).
+    /// Profile/make.conf come from the host; `~/.gentoo/etc/portage` overlays
+    /// `package.use`/`bashrc` (see `--setup`). Full XDG layout is issue #2.
+    #[arg(long, global = true)]
+    pub local: bool,
+
     /// Search package names, like emerge --search (each argument is a pattern)
     #[arg(short = 's', long)]
     pub search: bool,
@@ -166,6 +174,14 @@ pub struct Roots {
     config: Option<camino::Utf8PathBuf>,
     base: Option<camino::Utf8PathBuf>,
     target: Option<camino::Utf8PathBuf>,
+    /// `EPREFIX`: when set (`--local`), packages are configured for and
+    /// installed in place at this offset (`target == eprefix`, so `EROOT ==
+    /// target` and `ROOT == /`). `None` for ROOT-offset / host builds.
+    eprefix: Option<camino::Utf8PathBuf>,
+    /// A user-writable config dir overlaid on the host config for
+    /// `package.use`/`bashrc` (the `~/.gentoo/etc/portage` of `--local`),
+    /// so an unprivileged user can override without touching `/etc/portage`.
+    config_overlay: Option<camino::Utf8PathBuf>,
     relocate: bool,
 }
 
@@ -185,9 +201,20 @@ impl Roots {
         self.target.as_deref()
     }
 
-    /// The install/merge root, defaulting to `/`.
+    /// The install/merge root (`EROOT`), defaulting to `/`. With `--local`
+    /// this is the prefix (`target == eprefix`); files and the VDB land here.
     pub fn merge_root(&self) -> &camino::Utf8Path {
         self.target.as_deref().unwrap_or(camino::Utf8Path::new("/"))
+    }
+
+    /// `EPREFIX` for an in-place prefix build (`--local`), else `None`.
+    pub fn eprefix(&self) -> Option<&camino::Utf8Path> {
+        self.eprefix.as_deref()
+    }
+
+    /// User config overlay dir (`package.use`/`bashrc` layered on host config).
+    pub fn config_overlay(&self) -> Option<&camino::Utf8Path> {
+        self.config_overlay.as_deref()
     }
 
     /// The build-against sysroot (`SYSROOT`/`ESYSROOT`) to hand the shell:
@@ -210,10 +237,34 @@ impl Roots {
     }
 }
 
+/// The user's home directory from `$HOME`, falling back to `/root` only if
+/// unset (matching how unprivileged tools resolve `~`).
+fn home_dir() -> camino::Utf8PathBuf {
+    std::env::var("HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(camino::Utf8PathBuf::from)
+        .unwrap_or_else(|| camino::Utf8PathBuf::from("/root"))
+}
+
 impl Cli {
     /// Resolve the root model (docs/root-model.md) from the global flags.
     pub fn roots(&self) -> Roots {
         let path = |s: &Option<String>| s.as_deref().map(camino::Utf8PathBuf::from);
+        // `--local`: in-place Gentoo-Prefix at ~/.gentoo. Profile/make.conf come
+        // from the host; ~/.gentoo/etc/portage overlays package.use/bashrc.
+        // EPREFIX == target == ~/.gentoo, so EROOT == target and ROOT == /.
+        if self.local {
+            let prefix = home_dir().join(".gentoo");
+            return Roots {
+                config: None,
+                base: None,
+                target: Some(prefix.clone()),
+                eprefix: Some(prefix.clone()),
+                config_overlay: Some(prefix.join("etc/portage")),
+                relocate: true,
+            };
+        }
         Roots {
             // config: --config-root, else --root; host otherwise.
             config: path(&self.config_root).or_else(|| path(&self.root)),
@@ -221,6 +272,8 @@ impl Cli {
             base: path(&self.root),
             // target: --prefix (install destination), else --root.
             target: path(&self.prefix).or_else(|| path(&self.root)),
+            eprefix: None,
+            config_overlay: None,
             // --prefix also relocates distfiles/build trees under the target.
             relocate: self.prefix.is_some(),
         }

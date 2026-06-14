@@ -278,6 +278,7 @@ async fn merge_sequential(
             quiet,
             roots.config(),
             roots.build_sysroot(),
+            roots.eprefix(),
             None,
         )
         .await
@@ -410,6 +411,7 @@ async fn merge_parallel(
                     quiet,
                     roots.config(),
                     roots.build_sysroot(),
+                    roots.eprefix(),
                     Some(gate),
                 )
                 .await;
@@ -463,6 +465,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
                 roots.merge_root(),
                 roots.config(),
                 roots.build_sysroot(),
+                roots.eprefix(),
             )
             .await
         }
