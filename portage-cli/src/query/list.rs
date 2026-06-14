@@ -1,8 +1,14 @@
+use std::io::Write as _;
 use std::path::Path;
 
+use anstyle::{AnsiColor, Style};
 use anyhow::Result;
 use portage_repo::Repository;
 use portage_vdb::Vdb;
+
+// Green package/cpv style for listings (consistent with `em search` name-only
+// and emerge -p / tree output). anstream ensures proper color handling.
+const C_PKG: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
 
 pub fn run(repo_path: &Path, patterns: &[String]) -> Result<()> {
     let repo = Repository::open(repo_path)?;
@@ -15,8 +21,9 @@ pub fn run(repo_path: &Path, patterns: &[String]) -> Result<()> {
         .collect();
 
     cpvs.sort();
+    let mut out = anstream::stdout();
     for cpv in &cpvs {
-        println!("{cpv}");
+        writeln!(out, "{C_PKG}{cpv}{C_PKG:#}").ok();
     }
     Ok(())
 }
@@ -30,8 +37,9 @@ pub fn run_installed(vdb: &Vdb, patterns: &[String]) -> Result<()> {
         .collect();
 
     cpvs.sort();
+    let mut out = anstream::stdout();
     for cpv in &cpvs {
-        println!("{cpv}");
+        writeln!(out, "{C_PKG}{cpv}{C_PKG:#}").ok();
     }
     Ok(())
 }
