@@ -10,6 +10,8 @@
 # tools print the autounmask-adjusted preview graph, so counts should be
 # identical (multi-target is the known exception: emerge's backtracking can
 # stop partway through a USE-adjustment cascade that em completes).
+#
+# Output: parity section is now a valid markdown table. Timing from hyperfine.
 
 set -u
 EM=${1:-${EM:-target/release/em}}
@@ -43,6 +45,8 @@ trap 'rm -rf "$tmp"' EXIT
 fail=0
 
 echo "== package-set parity (em -p vs emerge -p)"
+echo '| package | emerge | em | diffs |'
+echo '|---------|--------|----|-------|'
 for pkg in "${SINGLE_TARGETS[@]}" "${OVERLAY_TARGETS[@]}"; do
     emerge -p "$pkg" 2>/dev/null | extract > "$tmp/emerge.txt"
     if [ ! -s "$tmp/emerge.txt" ]; then
@@ -51,16 +55,23 @@ for pkg in "${SINGLE_TARGETS[@]}" "${OVERLAY_TARGETS[@]}"; do
     fi
     "$EM" -p "$pkg" 2>/dev/null | extract > "$tmp/em.txt"
     diffs=$(diff "$tmp/emerge.txt" "$tmp/em.txt" | grep -c '^[<>]')
-    printf '   %-40s emerge=%-4s em=%-4s diffs=%s\n' \
-        "$pkg" "$(wc -l < "$tmp/emerge.txt")" "$(wc -l < "$tmp/em.txt")" "$diffs"
+    emerge_n=$(wc -l < "$tmp/emerge.txt")
+    em_n=$(wc -l < "$tmp/em.txt")
+    printf '| %-40s | %4s | %4s | %5s |\n' \
+        "$pkg" "$emerge_n" "$em_n" "$diffs"
     [ "$diffs" -ne 0 ] && fail=1
 done
 
 echo "== multi-target set (informational: cascade-tail divergence expected)"
 emerge -p $MULTI 2>/dev/null | extract > "$tmp/emerge.txt"
 "$EM" -p $MULTI 2>/dev/null | extract > "$tmp/em.txt"
-echo "   emerge=$(wc -l < "$tmp/emerge.txt") em=$(wc -l < "$tmp/em.txt")"
+emerge_n=$(wc -l < "$tmp/emerge.txt")
+em_n=$(wc -l < "$tmp/em.txt")
+echo "   emerge=$emerge_n em=$em_n"
+echo
+echo '```'
 diff "$tmp/emerge.txt" "$tmp/em.txt" | grep '^[<>]' | sed 's/^/   /'
+echo '```'
 
 if [ "${SKIP_TIMING:-0}" != 1 ]; then
     echo "== timing (hyperfine, $RUNS runs)"

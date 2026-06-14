@@ -251,21 +251,16 @@ j=20: real 0m10.289s user 2m35.449s sys 0m17.388s peak 809 MB
 
 == package-set parity (em -p vs emerge -p)
 
-   dev-qt/qtbase                            emerge=42   em=42   diffs=0
-
-   app-text/texlive-core                    emerge=64   em=63   diffs=3
-
-   www-client/firefox                       emerge=79   em=79   diffs=0
-
-   dev-qt/qtwebengine                       emerge=82   em=82   diffs=0
-
-   mail-client/thunderbird                  emerge=82   em=82   diffs=0
-
-   app-office/libreoffice                   emerge=141  em=141  diffs=0
-
-   app-emulation/qemu                       emerge=2    em=2    diffs=0
-
-   cross-riscv64-unknown-elf/gcc            emerge=1    em=1    diffs=0
+| package | emerge | em | diffs |
+|---------|--------|----|-------|
+| dev-qt/qtbase                            |   42 |   42 |     0 |
+| app-text/texlive-core                    |   64 |   63 |     3 |
+| www-client/firefox                       |   79 |   79 |     0 |
+| dev-qt/qtwebengine                       |   82 |   82 |     0 |
+| mail-client/thunderbird                  |   82 |   82 |     0 |
+| app-office/libreoffice                   |  141 |  141 |     0 |
+| app-emulation/qemu                       |    2 |    2 |     0 |
+| cross-riscv64-unknown-elf/gcc            |    1 |    1 |     0 |
 
 == multi-target set (informational: cascade-tail divergence expected)
 
