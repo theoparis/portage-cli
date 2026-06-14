@@ -1550,12 +1550,9 @@ impl EbuildShell {
         // EROOT = ROOT + EPREFIX, i.e. the merge root.
         self.set_var("EROOT", &root_str);
         if eapi >= Eapi::Seven {
-            // SYSROOT/ESYSROOT = the base the build resolves DEPEND against,
-            // defaulting to ROOT (the install target) when no separate base is
-            // set; for a --prefix overlay it is the base (host), with the
-            // target layered on top by the merge driver. BROOT is always the
-            // build host. SYSROOT's trailing slash is stripped ("/"→"") to
-            // avoid autotools.eclass bug 654600; ESYSROOT keeps it.
+            // SYSROOT = the base the build resolves DEPEND against (the host for
+            // a --prefix overlay; ROOT otherwise). SYSROOT's trailing slash is
+            // stripped ("/"→"") to avoid autotools.eclass bug 654600.
             let sysroot = match self.build_sysroot.as_deref() {
                 Some(p) => {
                     let s = p.as_str();
@@ -1567,8 +1564,21 @@ impl EbuildShell {
                 }
                 None => root_str.clone(),
             };
-            self.set_var("SYSROOT", sysroot.trim_end_matches('/'));
-            self.set_var("ESYSROOT", &sysroot);
+            let sysroot_trimmed = sysroot.trim_end_matches('/');
+            self.set_var("SYSROOT", sysroot_trimmed);
+            // ESYSROOT = SYSROOT + EPREFIX (PMS 11.1): the location of DEPEND
+            // headers/libs/data. For `--local` this is the prefix (SYSROOT=/ +
+            // EPREFIX=~/.gentoo), so ebuilds that reference `${ESYSROOT}/usr`
+            // (e.g. spirv-tools' `-DSPIRV-Headers_SOURCE_DIR`) find prefix-built
+            // deps — while SYSROOT stays `/`, so cmake/autotools do NOT pass
+            // `--sysroot` and the compiler keeps host glibc (features.h). They
+            // are equal (no EPREFIX) for host / ROOT-offset `--prefix` builds.
+            let esysroot = if eprefix.is_empty() {
+                sysroot.clone()
+            } else {
+                format!("{}/{}/", sysroot_trimmed, eprefix.trim_start_matches('/'))
+            };
+            self.set_var("ESYSROOT", &esysroot);
             self.set_var("BROOT", "/");
         }
 

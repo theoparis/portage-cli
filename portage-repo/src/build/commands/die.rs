@@ -40,6 +40,10 @@ impl DieFlag {
 /// `inherit` error paths to distinguish portage die output from other stderr.
 #[derive(Parser)]
 pub(crate) struct DieCommand {
+    /// Honour `nonfatal` (PMS 12.3.1): in a `nonfatal` context return non-zero
+    /// instead of aborting the build. Used e.g. by ninja-utils' `eninja`.
+    #[arg(short = 'n')]
+    nonfatal: bool,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     message: Vec<String>,
 }
@@ -54,6 +58,19 @@ impl builtins::Command for DieCommand {
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         let msg = self.message.join(" ");
+        // PMS 12.3.1: `die -n` honours `nonfatal` — when called in a `nonfatal`
+        // context, return non-zero instead of aborting (e.g. ninja-utils'
+        // `eninja` does `die -n "… failed"`).
+        if self.nonfatal
+            && context
+                .shell
+                .env_str("PORTAGE_NONFATAL")
+                .is_some_and(|v| v == "1")
+        {
+            let shell = context.shell;
+            let _ = writeln!(context.params.stderr(shell), "die (nonfatal): {msg}");
+            return Ok(brush_core::ExecutionResult::new(1));
+        }
         if let Ok(flag) = context.shared::<DieFlag>() {
             flag.raise(&msg);
         }
