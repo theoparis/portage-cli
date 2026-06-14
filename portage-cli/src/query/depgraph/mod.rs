@@ -77,6 +77,9 @@ pub struct DepgraphOpts<'a> {
     pub multi_repo: bool,
     /// The resolved root set (config / base / target). See docs/root-model.md.
     pub roots: &'a crate::cli::Roots,
+    /// `--onlydeps`: drop the explicitly-requested targets from the plan,
+    /// keeping only their dependencies (emerge's `--onlydeps`).
+    pub onlydeps: bool,
 }
 
 pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome> {
@@ -92,6 +95,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         autosolve_use,
         multi_repo,
         roots,
+        onlydeps,
     } = opts;
     let config_root = roots.config();
     let base_root = roots.base();
@@ -459,6 +463,14 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         });
         order = rest;
         order.extend(targets);
+    }
+
+    // `--onlydeps`: build only the dependencies of the requested targets, not
+    // the targets themselves. Drop them from the install order before the plan
+    // is displayed and built, so the table, merge list, and `build_blockers`
+    // indices all agree (emerge's `--onlydeps`).
+    if onlydeps {
+        order.retain(|(pkg, _)| !root_cpns.contains(pkg.cpn()));
     }
 
     // Slot-operator (`:=`) rebuilds: installed consumers whose VDB-recorded

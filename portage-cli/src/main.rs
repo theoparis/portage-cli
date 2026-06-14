@@ -102,6 +102,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         autosolve_use: cli.autosolve_use,
         multi_repo: cli.repo.is_none(),
         roots: &roots,
+        onlydeps: cli.onlydeps,
     })
     .await?;
 
@@ -648,6 +649,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 autosolve_use: *autosolve_use || globals.autosolve_use,
                 multi_repo: globals.repo.is_none(),
                 roots: &roots,
+                onlydeps: globals.onlydeps,
             })
             .await?;
             if outcome.exit_code != 0 {
