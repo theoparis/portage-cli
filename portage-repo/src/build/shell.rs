@@ -189,6 +189,16 @@ get_libdir() {
 }
 "#;
 
+/// Sandbox path-registration functions as no-ops (real enforcement is M3).
+/// Defined so eclasses/ebuilds that call them don't abort with "command not
+/// found"; each portage equivalent only appends to a `SANDBOX_*` colon list.
+const SANDBOX_STUBS: &str = r#"
+addread()    { :; }
+addwrite()   { :; }
+addpredict() { :; }
+adddeny()    { :; }
+"#;
+
 /// P3 install helpers loaded by `init_build_env` (PMS §12.3.x).
 ///
 /// These bash functions replace the no-op stubs from `builtins.rs` during
@@ -1184,6 +1194,12 @@ impl EbuildShell {
         // from the baseline; do not hoist this invalidation out expecting
         // stricter hermeticity — it would drop inter-phase state.
         self.invalidate_baseline();
+        // Establish PATH as a real shell variable (not just the inherited
+        // process env) so eclasses that do `export PATH="...:${PATH}"` — e.g.
+        // python-any-r1's wrapper setup — keep the system bin dirs instead of
+        // expanding ${PATH} to empty and stranding mkdir/cp/ln/chmod.
+        let base_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+        self.set_var("PATH", &base_path);
         // Our do*/new* install helpers are self-contained bash functions
         // (INSTALL_HELPERS below), so portage need not be installed. We still
         // export PORTAGE_BIN_PATH when available because some eclasses reference
@@ -1246,7 +1262,48 @@ impl EbuildShell {
         // for metadata extraction.
         self.run_string(INSTALL_HELPERS).await?;
 
+        // Sandbox control functions as no-ops. Portage provides these to
+        // register paths with its LD_PRELOAD sandbox; with no sandbox active
+        // they only need to exist so eclasses calling them (e.g. python-any-r1,
+        // kernel/linux-info via addpredict) don't abort with "command not
+        // found". Real write-confinement is M3.
+        self.run_string(SANDBOX_STUBS).await?;
+
+        // Reconstruct USE_EXPAND group variables from the final USE set. Some
+        // groups (e.g. llvm-r1's LLVM_SLOT) are populated only by an IUSE
+        // default (`+llvm_slot_21`) with no make.conf value, so without this
+        // reverse mapping the eclass reads an empty LLVM_SLOT and dies.
+        self.populate_use_expand_vars();
+
         Ok(())
+    }
+
+    /// Set each prefixed `USE_EXPAND` group variable to the values of its
+    /// enabled flags (the reverse of profile expansion): for group `FOO`, every
+    /// enabled `foo_<value>` flag contributes `<value>` to `FOO`. Eclasses read
+    /// these variables directly (`LLVM_SLOT`, `PYTHON_TARGETS`, …). Only groups
+    /// with at least one enabled flag are written, so a group set by other means
+    /// is never blanked. `USE_EXPAND_UNPREFIXED` groups are left alone (their
+    /// flags are indistinguishable from plain USE without the value list).
+    fn populate_use_expand_vars(&mut self) {
+        let use_str = self.get_var("USE").unwrap_or_default();
+        let use_expand = self.get_var("USE_EXPAND").unwrap_or_default();
+        if use_expand.is_empty() {
+            return;
+        }
+        let enabled: Vec<&str> = use_str.split_whitespace().collect();
+        for key in use_expand.split_whitespace() {
+            let prefix = format!("{}_", key.to_ascii_lowercase());
+            let mut values: Vec<&str> = enabled
+                .iter()
+                .filter_map(|f| f.strip_prefix(prefix.as_str()))
+                .collect();
+            if values.is_empty() {
+                continue;
+            }
+            values.sort_unstable();
+            self.set_var(key, &values.join(" "));
+        }
     }
 
     /// Source an ebuild and run a single phase function.
