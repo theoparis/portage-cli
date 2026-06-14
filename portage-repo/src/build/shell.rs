@@ -338,22 +338,7 @@ newsbin() {
         || die "newsbin: failed to install $1 as $2"
 }
 
-doins() {
-    local recursive=0
-    [[ $1 == -r ]] && { recursive=1; shift; }
-    [[ $# -gt 0 ]] || die "doins: at least one argument required"
-    dodir "${INSDESTTREE:-/}"
-    local dest="${ED%/}/${INSDESTTREE#/}"
-    local f
-    for f in "$@"; do
-        if [[ $recursive -eq 1 && -d ${f} ]]; then
-            cp -pPR "${f}" "${dest}/" || die "doins: failed to copy ${f}"
-        else
-            install ${_insopts} "${f}" "${dest}/${f##*/}" \
-                || die "doins: failed to install ${f}"
-        fi
-    done
-}
+# doins is a Rust builtin (commands::DoinsCommand) — registered in shell setup.
 
 newins() {
     [[ $# -eq 2 ]] || die "newins: exactly two arguments required"
@@ -886,6 +871,14 @@ impl EbuildShell {
             brush_core::builtins::builtin::<commands::EinstallCommand, _>(),
         );
 
+        // Install helpers being migrated from bash (INSTALL_HELPERS) to Rust
+        // builtins (clap arg parsing, ${ED}/dest-tree aware). The bash version
+        // of each is removed from INSTALL_HELPERS as it lands here.
+        shell.register_builtin(
+            "doins",
+            brush_core::builtins::builtin::<commands::DoinsCommand, _>(),
+        );
+
         // Register P4 unpack builtin.
         shell.register_builtin(
             "unpack",
@@ -1355,7 +1348,7 @@ impl EbuildShell {
         // These stubs shadow the Rust builtins for econf, emake, einfo, etc.
         // Unsetting them lets the Rust builtin registry take over during build.
         self.run_string(
-            "unset -f econf emake einstall unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal has_version best_version docompress dostrip",
+            "unset -f econf emake einstall unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal has_version best_version docompress dostrip doins",
         )
         .await
         .ok();
@@ -2385,6 +2378,7 @@ cache-formats = md5-dict
         shell
             .run_string(&format!(
                 "{INSTALL_HELPERS}\n\
+                 unset -f doins; \
                  export D={d} ED={d} T={t} CATEGORY=cat PN=pkg SLOT=0 PF=pkg-1; \
                  into /usr/local; dobin {src}/myprog; \
                  [[ ${{DESTTREE}} == /usr/local ]] || die 'into did not set DESTTREE'; \
