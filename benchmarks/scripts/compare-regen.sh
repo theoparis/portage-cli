@@ -33,6 +33,21 @@ ITERATIONS="${ITERATIONS:-1}"
 SKIP="${SKIP:-}"
 INCLUDE_EGENCACHE="${INCLUDE_EGENCACHE:-0}"
 
+# For reproducible single-NUMA-node runs on large multisocket/NUMA machines
+# (e.g. thalia 4-node Ampere), bind to node 0. This avoids cross-NUMA latency
+# in eclass sourcing / metadata phases. Set NUMACTL="" to disable.
+if [[ -z "${NUMACTL:-}" ]]; then
+    if command -v numactl >/dev/null 2>&1; then
+        if numactl --cpunodebind=0 --membind=0 true 2>/dev/null; then
+            NUMACTL="numactl --cpunodebind=0 --membind=0"
+        else
+            NUMACTL=""
+        fi
+    else
+        NUMACTL=""
+    fi
+fi
+
 if [[ $# -gt 0 ]]; then JOBS=("$@"); else JOBS=(24); fi
 
 # Locate binaries. Fallbacks are relative to this script's location so it
@@ -117,28 +132,52 @@ run_one() {
     case "$tool" in
         em)
             # Current CLI syntax: positional repo path (not --repo).
-            { time "$EM" regen "$REPO" -o "$out_dir" -j "$jobs" \
+            { time $NUMACTL "$EM" regen "$REPO" -o "$out_dir" -j "$jobs" \
                 >"$log" 2>&1; } 2>"$tf"
             ;;
         egencache)
             # Use patched egencache --cache-dir + --external-cache-only to write
-            # a full scan directly into isolated $out_dir (flat cpv files).
-            # To get apples-to-apples with em/pk (exhaustive full tree, no
-            # KEYWORDS/profile filtering), we create a temp --config-root that
-            # forces ACCEPT_KEYWORDS="**" and (if available) a broad amd64
-            # profile from the tree. This makes egencache consider every ebuild.
+            # a full scan directly into isolated $out_dir (flat cpv files, no
+            # metadata/ subdir). To get apples-to-apples with em/pk (exhaustive
+            # full tree, *all* ebuilds regardless of KEYWORDS/profile/visibility),
+            # we:
+            #  - use --repositories-configuration to point the repo *name* at
+            #    exactly $REPO (so --repo works and tree is the intended one)
+            #  - create a temp --config-root with ACCEPT_KEYWORDS="**" in
+            #    make.conf and a *synthetic* profile that parents a real one
+            #    (e.g. amd64) *and* ships a categories file listing every cat
+            #    dir present in the tree. Combined with the egencache patch
+            #    that augments categories on external_cache_only, this ensures
+            #    cp_list iterates every package (no "invalid category" discard,
+            #    no visibility pruning).
             mkdir -p "$out_dir"
             eg_config_root=$(mktemp -d)
             mkdir -p "$eg_config_root"/portage
             echo 'ACCEPT_KEYWORDS="**"' > "$eg_config_root"/portage/make.conf
-            # Try to use a broad profile from the tree (amd64 one typically has
-            # wide support); ** should make all visible anyway.
+            # Build a synthetic profile that declares *all* categories from the
+            # tree (so settings.categories is exhaustive) while still using a
+            # real profile for other settings (parents, eapi, etc).
             profile_dir=$(find "$REPO/profiles" -path '*default/linux/amd64*' -type d 2>/dev/null | head -1 || true)
+            syn_profile="$eg_config_root/portage/fullprofile"
+            mkdir -p "$syn_profile"
             if [[ -n "$profile_dir" ]]; then
-                ln -s "$profile_dir" "$eg_config_root"/portage/make.profile 2>/dev/null || echo "profile = $profile_dir" > "$eg_config_root"/portage/make.profile
+                echo "$profile_dir" > "$syn_profile/parent"
             fi
-            egencache_cmd=("$EGENCACHE" --config-root "$eg_config_root")
-            egencache_cmd=(env ACCEPT_KEYWORDS="**" "PORTAGE_REPOSITORIES=gentoo=$REPO" "${egencache_cmd[@]}")
+            # List every potential category dir (top level non-special dirs).
+            # This populates the categories file in our synthetic profile.
+            (cd "$REPO" && find . -mindepth 1 -maxdepth 1 -type d \
+                ! -name '.*' ! -name 'metadata' ! -name 'profiles' ! -name 'eclass' \
+                | sed 's,^\./,,' | sort > "$syn_profile/categories") || true
+            ln -s "$syn_profile" "$eg_config_root"/portage/make.profile 2>/dev/null || echo "profile = $syn_profile" > "$eg_config_root"/portage/make.profile
+            # Provide the repo location via the supported --repositories-configuration
+            # (ini format) so that --repo "$REPO_NAME" resolves to our $REPO even
+            # under the custom config_root. This avoids relying on system repos.conf.
+            repos_conf="[DEFAULT]
+main-repo = ${REPO_NAME}
+[${REPO_NAME}]
+location = ${REPO}
+"
+            egencache_cmd=($NUMACTL "$EGENCACHE" --config-root "$eg_config_root" --repositories-configuration "$repos_conf")
             { time "${egencache_cmd[@]}" --update --repo "$REPO_NAME" \
                 --jobs="$jobs" \
                 --cache-dir "$out_dir" --external-cache-only \
@@ -146,7 +185,7 @@ run_one() {
             rm -rf "$eg_config_root"
             ;;
         pk)
-            { time "$PK" repo metadata regen -j "$jobs" -p "$out_dir" -f -n "$REPO" \
+            { time $NUMACTL "$PK" repo metadata regen -j "$jobs" -p "$out_dir" -f -n "$REPO" \
                 >"$log" 2>&1; } 2>"$tf"
             ;;
         *)
