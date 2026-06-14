@@ -146,13 +146,17 @@ run_one() {
             # Side effect: it repopulates the live $REPO/metadata/md5-cache.
             # We still create $out_dir and drop a marker file so the files= report
             # works (count taken from the live cache after the run).
+            #
+            # We also pass PORTAGE_REPOSITORIES under sudo so that the repo *name*
+            # resolves to exactly $REPO (makes it work even if the test tree is not
+            # the system "gentoo" location, or for consistency with GENTOO_REPO=).
             sudo rm -rf "$REPO/metadata/md5-cache" || true
-            local eg_cmd
+            local -a base_eg=( "$EGENCACHE" --repo "$REPO_NAME" --jobs="$jobs" --update )
+            local -a numa_prefix=()
             if [[ -n "$NUMACTL" ]]; then
-                eg_cmd=(sudo $NUMACTL "$EGENCACHE" --repo "$REPO_NAME" --jobs="$jobs" --update)
-            else
-                eg_cmd=(sudo "$EGENCACHE" --repo "$REPO_NAME" --jobs="$jobs" --update)
+                numa_prefix=( $NUMACTL )
             fi
+            local eg_cmd=( sudo env "PORTAGE_REPOSITORIES=${REPO_NAME}=$REPO" "${numa_prefix[@]}" "${base_eg[@]}" )
             { time "${eg_cmd[@]}" >"$log" 2>&1 ; } 2>"$tf" || true
             mkdir -p "$out_dir"
             local live_cnt
