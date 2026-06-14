@@ -57,6 +57,13 @@ pub struct Cli {
     #[arg(long, value_name = "DIR", global = true)]
     pub prefix: Option<String>,
 
+    /// Bootstrap the prefix layout before building: skeleton directories, a
+    /// `bashrc` overlay search-path recipe, and a commented `make.conf`. Use
+    /// with `--local` (`~/.gentoo`) or `--prefix DIR`. Safe to re-run (never
+    /// clobbers existing files). With no atoms it just sets up and exits.
+    #[arg(long, global = true)]
+    pub setup: bool,
+
     /// Unprivileged in-place install into a Gentoo-Prefix at `~/.gentoo`
     /// (`EPREFIX=~/.gentoo`): packages are configured for and installed to
     /// `~/.gentoo/usr/...`, usable in place (add `~/.gentoo/usr/bin` to PATH).
@@ -273,7 +280,10 @@ impl Cli {
             // target: --prefix (install destination), else --root.
             target: path(&self.prefix).or_else(|| path(&self.root)),
             eprefix: None,
-            config_overlay: None,
+            // A --prefix overlay reads prefix-local package.use/bashrc from
+            // DIR/etc/portage (created by --setup); host config provides the
+            // profile. None for host / --root (config is already offset).
+            config_overlay: path(&self.prefix).map(|p| p.join("etc/portage")),
             // --prefix also relocates distfiles/build trees under the target.
             relocate: self.prefix.is_some(),
         }

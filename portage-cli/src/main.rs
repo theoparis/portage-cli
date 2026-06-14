@@ -8,6 +8,7 @@ mod preflight;
 mod query;
 mod regen;
 mod search;
+mod setup;
 mod use_flags;
 mod vdb;
 
@@ -41,6 +42,18 @@ fn parse_atoms(raw: &[String]) -> Vec<portage_atom::Dep> {
 async fn main() {
     let cli = cli::Cli::parse();
     cli.color.write_global();
+
+    // --setup bootstraps the prefix layout before anything else. With no atoms
+    // or applet it's a standalone "prepare this prefix" command.
+    if cli.setup {
+        if let Err(e) = setup::bootstrap(&cli.roots()) {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+        if cli.applet.is_none() && cli.atoms.is_empty() {
+            return;
+        }
+    }
 
     let result = match &cli.applet {
         Some(applet) => run_applet(applet, &cli).await,

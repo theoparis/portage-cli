@@ -1,0 +1,145 @@
+//! `--setup`: bootstrap an unprivileged prefix layout so a subsequent build
+//! (or the next `em --local` / `em --prefix DIR` run) has the directories,
+//! the overlay search-path `bashrc`, and a `make.conf` placeholder it needs.
+//!
+//! Two modes, distinguished by [`Roots::eprefix`]:
+//! - `--local` (`EPREFIX` set): in-place Gentoo-Prefix. The `.pc` files record
+//!   correct `${EPREFIX}/usr` paths, so the recipe is just an additive
+//!   `PKG_CONFIG_PATH` (+ `CMAKE_PREFIX_PATH`).
+//! - `--prefix DIR` (ROOT-offset): staged tree whose `.pc` record `/usr`, so the
+//!   recipe also exports `CPPFLAGS`/`LDFLAGS` pointing into the prefix.
+//!
+//! Idempotent: directories are created if missing; files are written only when
+//! absent, so re-running never clobbers a user's edits.
+
+use anyhow::{Context, Result};
+use camino::Utf8Path;
+
+use crate::cli::Roots;
+
+/// The `bashrc` recipe for an in-place (`--local`) prefix: paths are already
+/// correct in the installed `.pc`, so only the search path is added.
+const BASHRC_LOCAL: &str = r#"# Overlay search paths for `em --local` (created by `em --setup`).
+# EPREFIX makes the installed .pc record correct ${EPREFIX}/usr paths, so the
+# build only needs them on the search path — no sysroot/CPPFLAGS rewriting.
+if [[ -n ${EPREFIX} ]]; then
+	_ov="${EPREFIX%/}"
+	_libdir="$(get_libdir 2>/dev/null || echo lib)"
+	export PKG_CONFIG_PATH="${_ov}/usr/${_libdir}/pkgconfig:${_ov}/usr/share/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+	export CMAKE_PREFIX_PATH="${_ov}/usr${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
+	unset _ov _libdir
+fi
+"#;
+
+/// The `bashrc` recipe for a ROOT-offset (`--prefix DIR`) prefix: the staged
+/// `.pc` record host-absolute `/usr` paths, so the real headers/libs are found
+/// via the compiler/linker search while pkg-config just confirms presence.
+const BASHRC_PREFIX: &str = r#"# Overlay search paths for `em --prefix DIR` (created by `em --setup`).
+# Host (/) is the build sysroot; the prefix is layered on top. Do NOT set
+# PKG_CONFIG_SYSROOT_DIR (host .pc must keep their real paths); the prefix .pc
+# emit harmless host-absolute -I/-L while the real files are found via the flags.
+if [[ -n ${ROOT} && ${ROOT%/} != "" && ${ROOT%/} != "/" ]]; then
+	_ov="${ROOT%/}"
+	_libdir="$(get_libdir 2>/dev/null || echo lib)"
+	export PKG_CONFIG_PATH="${_ov}/usr/${_libdir}/pkgconfig:${_ov}/usr/share/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+	export CPPFLAGS="-I${_ov}/usr/include${CPPFLAGS:+ ${CPPFLAGS}}"
+	export LDFLAGS="-L${_ov}/usr/${_libdir} -Wl,-rpath-link,${_ov}/usr/${_libdir}${LDFLAGS:+ ${LDFLAGS}}"
+	export CMAKE_PREFIX_PATH="${_ov}/usr${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
+	unset _ov _libdir
+fi
+"#;
+
+/// Directories laid out under the prefix's install root (`EROOT`).
+const SKELETON: &[&str] = &[
+    "etc/portage",
+    "var/db/pkg",
+    "var/cache/distfiles",
+    "var/tmp/portage",
+    "var/lib",
+    "usr/bin",
+    "usr/include",
+    "usr/share",
+];
+
+/// Bootstrap the prefix described by `roots`. Requires `--local` or `--prefix`
+/// (a target other than the host `/`).
+pub fn bootstrap(roots: &Roots) -> Result<()> {
+    let eroot = roots.merge_root();
+    if eroot.as_str() == "/" {
+        anyhow::bail!("--setup needs a prefix: use it with --local or --prefix DIR");
+    }
+    let is_local = roots.eprefix().is_some();
+
+    for dir in SKELETON {
+        let p = eroot.join(dir);
+        std::fs::create_dir_all(p.as_std_path()).with_context(|| format!("creating {p}"))?;
+    }
+    // The libdir name is host-dependent; create both common ones so installs
+    // into either land in an existing tree.
+    for libdir in ["usr/lib", "usr/lib64"] {
+        let _ = std::fs::create_dir_all(eroot.join(libdir).as_std_path());
+    }
+
+    let portage = roots
+        .config_overlay()
+        .map(Utf8Path::to_path_buf)
+        .unwrap_or_else(|| eroot.join("etc/portage"));
+    std::fs::create_dir_all(portage.as_std_path())
+        .with_context(|| format!("creating {portage}"))?;
+
+    let bashrc_body = if is_local {
+        BASHRC_LOCAL
+    } else {
+        BASHRC_PREFIX
+    };
+    write_if_absent(&portage.join("bashrc"), bashrc_body)?;
+    write_if_absent(
+        &portage.join("make.conf"),
+        &make_conf_template(is_local, eroot),
+    )?;
+
+    let mode = if is_local {
+        format!("em --local            (in-place Gentoo-Prefix at {eroot})")
+    } else {
+        format!("em --prefix {eroot}   (ROOT-offset staging)")
+    };
+    println!(">>> Prefix ready at {eroot}");
+    println!("    config overlay: {portage}");
+    println!("    use it with:    {mode}");
+    if is_local {
+        println!("    add to PATH:    {eroot}/usr/bin");
+    }
+    Ok(())
+}
+
+/// A commented `make.conf` placeholder documenting how the prefix is used.
+fn make_conf_template(is_local: bool, eroot: &Utf8Path) -> String {
+    let how = if is_local {
+        format!(
+            "#   em --local <pkg>        # builds in place into {eroot}\n\
+             #   (add {eroot}/usr/bin to PATH to run what you install)\n"
+        )
+    } else {
+        format!("#   em --prefix {eroot} <pkg>   # builds a ROOT-offset tree here\n")
+    };
+    format!(
+        "# Portage config overlay for this em prefix (created by `em --setup`).\n\
+         #\n\
+         # Use this prefix with:\n\
+         {how}\
+         #\n\
+         # Profile and base make.conf come from the host (/etc/portage). The\n\
+         # `package.use` and `bashrc` files in this directory overlay the host\n\
+         # config so you can tune the prefix without root. Put per-package USE\n\
+         # in `package.use`, e.g.:\n\
+         #   media-libs/freetype harfbuzz\n"
+    )
+}
+
+fn write_if_absent(path: &Utf8Path, contents: &str) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::write(path.as_std_path(), contents).with_context(|| format!("writing {path}"))?;
+    Ok(())
+}
