@@ -1,5 +1,6 @@
 //! `em query meta` — display package metadata from repo + VDB.
 
+use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -11,6 +12,7 @@ use portage_vdb::Vdb;
 use super::ResolveMode;
 use super::resolve_atom;
 use super::which::dep_matches_cpv;
+use crate::cli::{C_LABEL, C_PKG};
 use crate::vdb::find_packages;
 
 pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[String]) -> Result<()> {
@@ -49,70 +51,101 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[Stri
             })
             .and_then(|p| p.metadata_xml().ok().flatten());
 
-        println!(" * {cpv}");
+        let mut out = anstream::stdout();
+        writeln!(out, " {C_PKG}*{C_PKG:#} {C_PKG}{cpv}{C_PKG:#}").ok();
 
         if let Some(ref pm) = pkg_meta {
             for maint in &pm.maintainers {
-                println!("   Maintainer:  {}", maint.display());
+                writeln!(
+                    out,
+                    "   {C_LABEL}Maintainer:{C_LABEL:#}  {}",
+                    maint.display()
+                )
+                .ok();
             }
         }
 
         if !m.homepage.is_empty() {
-            println!("   Homepage:    {}", m.homepage.join(" "));
+            writeln!(
+                out,
+                "   {C_LABEL}Homepage:{C_LABEL:#}    {}",
+                m.homepage.join(" ")
+            )
+            .ok();
         }
 
-        println!("   Description: {}", m.description);
+        writeln!(out, "   {C_LABEL}Description:{C_LABEL:#} {}", m.description).ok();
 
         if let Some(ref pm) = pkg_meta
             && let Some(ref ld) = pm.longdescription
         {
             for line in wrap(ld, 72) {
-                println!("                {line}");
+                writeln!(out, "                {line}").ok();
             }
         }
 
         if let Some(ref lic) = m.license {
-            println!("   License:     {lic}");
+            writeln!(out, "   {C_LABEL}License:{C_LABEL:#}     {lic}").ok();
         }
 
-        println!("   Slot:        {}", m.slot);
+        writeln!(out, "   {C_LABEL}Slot:{C_LABEL:#}        {}", m.slot).ok();
 
         if !m.keywords.is_empty() {
             let kws: Vec<String> = m.keywords.iter().map(|k| k.to_string()).collect();
-            println!("   Keywords:    {}", kws.join(" "));
+            writeln!(out, "   {C_LABEL}Keywords:{C_LABEL:#}    {}", kws.join(" ")).ok();
         }
 
         if let Some(vdb) = vdb {
             let installed = find_packages(vdb, &cpv.cpn.to_string());
             if !installed.is_empty() {
-                println!("   Installed:");
+                writeln!(out, "   {C_LABEL}Installed:{C_LABEL:#}").ok();
                 for pkg in &installed {
-                    println!("     Version:   {}", pkg.cpv().version);
+                    writeln!(
+                        out,
+                        "     {C_LABEL}Version:{C_LABEL:#}   {}",
+                        pkg.cpv().version
+                    )
+                    .ok();
                     if let Ok(slot) = pkg.slot() {
-                        println!("     Slot:      {slot}");
+                        writeln!(out, "     {C_LABEL}Slot:{C_LABEL:#}      {slot}").ok();
                     }
                     if let Ok(repo_name) = pkg.repository()
                         && let Some(r) = repo_name
                     {
-                        println!("     Repo:      {r}");
+                        writeln!(out, "     {C_LABEL}Repo:{C_LABEL:#}      {r}").ok();
                     }
                     if let Ok(Some(ts)) = pkg.build_time() {
                         let t = UNIX_EPOCH + Duration::from_secs(ts);
-                        println!("     Built:     {}", humantime::format_rfc3339_seconds(t));
+                        writeln!(
+                            out,
+                            "     {C_LABEL}Built:{C_LABEL:#}     {}",
+                            humantime::format_rfc3339_seconds(t)
+                        )
+                        .ok();
                     }
                     if let Ok(Some(bytes)) = pkg.size() {
-                        println!("     Size:      {}", format_size(bytes, BINARY));
+                        writeln!(
+                            out,
+                            "     {C_LABEL}Size:{C_LABEL:#}      {}",
+                            format_size(bytes, BINARY)
+                        )
+                        .ok();
                     }
                     if let Ok(flags) = pkg.use_flags()
                         && !flags.is_empty()
                     {
-                        println!("     USE:       {}", flags.join(" "));
+                        writeln!(
+                            out,
+                            "     {C_LABEL}USE:{C_LABEL:#}       {}",
+                            flags.join(" ")
+                        )
+                        .ok();
                     }
                 }
             }
         }
 
-        println!();
+        writeln!(out).ok();
     }
     Ok(())
 }

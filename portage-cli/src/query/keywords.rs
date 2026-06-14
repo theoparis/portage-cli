@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::Path;
 
+use anstyle::{AnsiColor, Effects, Style};
 use anyhow::Result;
 use portage_metadata::Stability;
 use portage_repo::Repository;
@@ -9,6 +11,18 @@ use portage_vdb::Vdb;
 use super::ResolveMode;
 use super::resolve_atom;
 use super::which::dep_matches_cpv;
+
+use crate::cli::C_PKG;
+
+const C_STABLE: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)))
+    .effects(Effects::BOLD);
+const C_TESTING: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Yellow)))
+    .effects(Effects::BOLD);
+const C_DISABLED: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)))
+    .effects(Effects::BOLD);
 
 pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[String]) -> Result<()> {
     let repo = Repository::open(repo_path)?;
@@ -57,31 +71,32 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[Stri
             .unwrap_or(7)
             .max(7);
 
-        print!("{:<ver_w$}", "version");
+        let mut out = anstream::stdout();
+        writeln!(out, "{C_PKG}{:<ver_w$}{C_PKG:#}", "version").ok();
         for arch in &arches {
-            print!("  {:>col_w$}", arch);
+            write!(out, "  {:>col_w$}", arch).ok();
         }
-        println!();
+        writeln!(out).ok();
 
-        print!("{}", "-".repeat(ver_w));
+        write!(out, "{}", "-".repeat(ver_w)).ok();
         for _ in &arches {
-            print!("  {}", "-".repeat(col_w));
+            write!(out, "  {}", "-".repeat(col_w)).ok();
         }
-        println!();
+        writeln!(out).ok();
 
         for (version, kw_map) in &version_keywords {
-            print!("{:<ver_w$}", version);
+            writeln!(out, "{C_PKG}{:<ver_w$}{C_PKG:#}", version).ok();
             for arch in &arches {
-                let sym = match kw_map.get(arch) {
-                    Some(Stability::Stable) => "+",
-                    Some(Stability::Testing) => "~",
-                    Some(Stability::Disabled) => "-",
-                    Some(Stability::DisabledAll) => "*",
-                    None => " ",
+                let (sym, style) = match kw_map.get(arch) {
+                    Some(Stability::Stable) => ("+", C_STABLE),
+                    Some(Stability::Testing) => ("~", C_TESTING),
+                    Some(Stability::Disabled) => ("-", C_DISABLED),
+                    Some(Stability::DisabledAll) => ("*", C_DISABLED),
+                    None => (" ", Style::new()),
                 };
-                print!("  {:>col_w$}", sym);
+                write!(out, "  {style}{:>col_w$}{style:#}", sym).ok();
             }
-            println!();
+            writeln!(out).ok();
         }
     }
     Ok(())

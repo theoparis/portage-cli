@@ -1,25 +1,12 @@
 use std::collections::BTreeMap;
 use std::io::Write as _;
 
-use anstyle::{AnsiColor, Effects, Style};
 use anyhow::{Result, bail};
 use portage_atom::{Cpn, Cpv};
 use portage_metadata::RawCacheEntry;
 use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
 
-// Color styles for `em search` (compact listing) and emerge-style `em -s` / `-S`
-// output. Uses anstream + anstyle so colors are stripped automatically for
-// --color=never, pipes, NO_COLOR, etc. C_PKG matches the green package style
-// used elsewhere in em (e.g. emerge -p output).
-const C_PKG: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
-const C_LABEL: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
-const C_BOLD: Style = Style::new().effects(Effects::BOLD);
-const C_STAR: Style = Style::new()
-    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)))
-    .effects(Effects::BOLD);
-const C_MASKED: Style = Style::new()
-    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)))
-    .effects(Effects::BOLD);
+use crate::cli::{C_BOLD, C_LABEL, C_MASKED, C_PKG, C_STAR};
 
 pub async fn run(
     repo_paths: &[std::path::PathBuf],

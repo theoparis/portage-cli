@@ -1,45 +1,63 @@
 use std::io::Write as _;
 use std::path::Path;
 
-use anstyle::{AnsiColor, Style};
 use anyhow::Result;
+use portage_atom::Cpv;
 use portage_repo::Repository;
 use portage_vdb::Vdb;
 
-// Green package/cpv style for listings (consistent with `em search` name-only
-// and emerge -p / tree output). anstream ensures proper color handling.
-const C_PKG: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
+use crate::cli::{C_CAT, C_PKGNAME, C_VERSION};
 
 pub fn run(repo_path: &Path, patterns: &[String]) -> Result<()> {
     let repo = Repository::open(repo_path)?;
 
-    let mut cpvs: Vec<String> = repo
+    let mut cpvs: Vec<Cpv> = repo
         .ebuilds()?
         .into_iter()
-        .map(|ebuild| ebuild.cpv().to_string())
-        .filter(|cpv| patterns.is_empty() || patterns.iter().any(|p| matches_pattern(cpv, p)))
+        .map(|ebuild| ebuild.cpv().clone())
+        .filter(|cpv| {
+            patterns.is_empty()
+                || patterns
+                    .iter()
+                    .any(|p| matches_pattern(&cpv.to_string(), p))
+        })
         .collect();
 
     cpvs.sort();
     let mut out = anstream::stdout();
     for cpv in &cpvs {
-        writeln!(out, "{C_PKG}{cpv}{C_PKG:#}").ok();
+        writeln!(
+            out,
+            "{C_CAT}{}{C_CAT:#}/{C_PKGNAME}{}{C_PKGNAME:#}-{C_VERSION}{}{C_VERSION:#}",
+            cpv.cpn.category, cpv.cpn.package, cpv.version
+        )
+        .ok();
     }
     Ok(())
 }
 
 pub fn run_installed(vdb: &Vdb, patterns: &[String]) -> Result<()> {
-    let mut cpvs: Vec<String> = vdb
+    let mut cpvs: Vec<Cpv> = vdb
         .packages()
         .into_iter()
-        .map(|pkg| pkg.to_string())
-        .filter(|cpv| patterns.is_empty() || patterns.iter().any(|p| matches_pattern(cpv, p)))
+        .map(|pkg| pkg.cpv().clone())
+        .filter(|cpv| {
+            patterns.is_empty()
+                || patterns
+                    .iter()
+                    .any(|p| matches_pattern(&cpv.to_string(), p))
+        })
         .collect();
 
     cpvs.sort();
     let mut out = anstream::stdout();
     for cpv in &cpvs {
-        writeln!(out, "{C_PKG}{cpv}{C_PKG:#}").ok();
+        writeln!(
+            out,
+            "{C_CAT}{}{C_CAT:#}/{C_PKGNAME}{}{C_PKGNAME:#}-{C_VERSION}{}{C_VERSION:#}",
+            cpv.cpn.category, cpv.cpn.package, cpv.version
+        )
+        .ok();
     }
     Ok(())
 }

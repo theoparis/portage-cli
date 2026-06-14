@@ -10,9 +10,11 @@ use portage_atom_pubgrub::{
 };
 use portage_metadata::CacheEntry;
 
+pub(super) use crate::cli::C_PKG;
+
 // emerge color scheme: bold green for keywords/atoms/tags, bold red/blue for flags
 // Package names use plain green (not bold) to match portage's PKG_MERGE style
-pub(super) const C_PKG: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
+// (C_PKG now centralized in cli.rs to prevent duplication/stomping between agents).
 pub(super) const C_ON: Style = Style::new()
     .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)))
     .effects(Effects::BOLD);
