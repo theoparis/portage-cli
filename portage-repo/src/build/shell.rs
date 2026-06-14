@@ -892,11 +892,12 @@ impl EbuildShell {
             brush_core::builtins::builtin::<commands::UnpackCommand, _>(),
         );
 
-        // Register PMS 12.3.14 version manipulation builtins.
-        // ver_cut and ver_test are Rust builtins to avoid bash arithmetic
-        // issues in array slice expressions (brush limitation).
-        // ver_rs is kept as a bash function because brush silently drops
-        // empty-string args when calling Rust builtins.
+        // Register PMS 12.3.14 version manipulation builtins (ver_cut/ver_rs/
+        // ver_test) as Rust builtins — avoids bash arithmetic issues in array
+        // slice expressions. (An earlier note claimed ver_rs had to stay bash
+        // because brush dropped empty-string args to Rust builtins; that's no
+        // longer true — verified `has "" "" foo` reaches the builtin with the
+        // empties intact, so the do*/new* helpers can move to Rust too.)
         shell.register_builtin(
             "ver_cut",
             brush_core::builtins::builtin::<ver_funcs::VerCutCommand, _>(),
