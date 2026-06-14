@@ -58,24 +58,25 @@ See `machines/thalia.md` (the "Full Blown Scans Re-run" section) for full hardwa
 
 All comparisons executed via the bash scripts that live in the crates (`portage-repo/bench-*.sh`, top-level `bench-regen.sh`, `benchmarks/scripts/compare-regen.sh`, `benchmarks/bench-em-vs-emerge.sh`) after fixing CLI syntax, SCRIPT_DIR setup, and PK discovery paths.
 
-### Cache Regen Comparative on thalia (32k ebuilds test tree, j=8, via compare-regen.sh — em vs pk only)
+### Cache Regen Comparative on thalia (32k ebuilds test tree, j=8, via compare-regen.sh — em / pk / egencache stock cold path)
 
 | tool | j | run | real      | user      | sys      | Notes |
 |------|---|-----|-----------|-----------|----------|-------|
 | em   | 8 | 1   | 0m18.120s | 2m11.310s | 0m12.394s | Current em CLI (NUMA0); full cold exhaustive |
 | pk   | 8 | 1   | 0m48.263s | 5m25.512s | 1m7.887s  | pkgcraft (NUMA0); full cold exhaustive |
 
-(egencache row removed; we stopped hacking/maintaining portage patches and eg support in the script. Reference stock cold egencache at j=20 after source rm: real 4m37.251s per direct measurement.)
+(egencache uses the stock binary + the sudo rm + sudo --update path inside the script when INCLUDE_EGENCACHE=1. The 4m37.251s j=20 figure is the reference slow full cold point.)
 
-We stopped hacking portage (the reference) entirely per request. The compare script and docs no longer include egencache at all (no --cache-dir support, no source hide logic, no patches to ../portage-3.0.79).
+The compare script now includes egencache (via INCLUDE_EGENCACHE=1) using the *stock* (unhacked) egencache driven exactly as the user specified for correct results:
 
-Only em vs pk are automated now (both perform true full cold exhaustive sourcing into isolated output dirs).
+    sudo rm -rf "$REPO/metadata/md5-cache"
+    sudo egencache -j $jobs --repo gentoo --update
 
-The correct full cold egencache reference (stock, after source cache clear) is the user's datapoint: ~4m37s real at j=20 (user/sys ~0). See thalia.md for details and why earlier "fast eg ~8s full" numbers were not comparable (they were warm-cache copies under custom patches).
+This collects the slow but accurate full-cold exhaustive data points (the ~4m37s real at j=20 reference). It does repopulate the live $REPO metadata as a side-effect. em and pk continue to use isolated output dirs and never touch the input cache.
 
-The table below is historical.
+No portage source tree is hacked. Earlier "fast" eg numbers in tables were from warm-cache + previous patches and are not the real full work. See thalia.md for the script's eg handling and the correct datapoint.
 
-Repro (em + pk only): `GENTOO_REPO=/var/db/repos/gentoo EM=target/release/em PK=../pkgcraft/target/release/pk ITERATIONS=1 ./benchmarks/scripts/compare-regen.sh 8 16 20 24 32`
+Repro (with egencache stock cold points): `GENTOO_REPO=/var/db/repos/gentoo EM=target/release/em PK=../pkgcraft/target/release/pk INCLUDE_EGENCACHE=1 ITERATIONS=1 ./benchmarks/scripts/compare-regen.sh 8 16 20 24 32`
 
 See `machines/thalia.md` for the complete j=8/j=20 tables, per-crate RSS/hyperfine data, dep numbers, and verification that the main test cache was never modified.
 

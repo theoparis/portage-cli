@@ -110,7 +110,7 @@ Re-executed everything with the fixed scripts after identifying fishy issues (ou
 - `portage-repo/bench-pk.sh` (pk + RSS)
 - `portage-repo/bench.sh` (hyperfine timing + RSS for regen_only vs pk)
 - `./bench-regen.sh` (top-level, for full em CLI binary + RSS; fixed positional `em regen "$REPO" ...`)
-- `benchmarks/scripts/compare-regen.sh` (unified em / pk wall time table only; egencache support dropped entirely — we stopped hacking portage per request)
+- `benchmarks/scripts/compare-regen.sh` (unified em / pk / egencache; eg uses stock egencache + `sudo rm -rf $REPO/metadata/md5-cache && sudo egencache -j N --repo $REPO_NAME --update` for the correct slow full-cold data points)
 - `benchmarks/bench-em-vs-emerge.sh` (package set parity from -p output + hyperfine timings for em -p / emerge -p and em -s / emerge -s)
 
 Repro commands (run from portage-cli/ root, after `cargo build --release --bin em`):
@@ -124,34 +124,33 @@ PK=../pkgcraft/target/release/pk GENTOO_REPO=portage-repo/gentoo ./portage-repo/
 # top level em CLI + RSS (fixed)
 GENTOO_REPO=portage-repo/gentoo ./bench-regen.sh 8 20
 
-# two-way em CLI vs pk only — full blown isolated
-# (egencache dropped from automated compares; we stopped hacking portage)
-GENTOO_REPO=/var/db/repos/gentoo EM=target/release/em PK=../pkgcraft/target/release/pk ITERATIONS=1 ./benchmarks/scripts/compare-regen.sh 8 16 20 24 32
+# full compare including egencache (stock via the correct slow full-cold path)
+GENTOO_REPO=/var/db/repos/gentoo EM=target/release/em PK=../pkgcraft/target/release/pk INCLUDE_EGENCACHE=1 ITERATIONS=1 ./benchmarks/scripts/compare-regen.sh 8 16 20 24 32
 
 # dep resolution parity + timing (uses default/system repo discovery for both em and emerge)
 RUNS=3 EM=target/release/em ./benchmarks/bench-em-vs-emerge.sh
 ```
 
-Manual verify (em/pk only; egencache is no longer part of the automated compare script):
+Manual verify (the script now automates the egencache "correct" path too):
 
 ```sh
 REPO=/var/db/repos/gentoo
-rm -rf /tmp/regen-verify-{em,pk}-j8; mkdir -p /tmp/regen-verify-{em,pk}-j8
+rm -rf /tmp/regen-verify-{em,eg,pk}-j8; mkdir -p /tmp/regen-verify-{em,eg,pk}-j8
 target/release/em regen "$REPO" -o /tmp/regen-verify-em-j8 -j 8
+# egencache via the stock full-cold path the script uses (requires sudo):
+sudo rm -rf "$REPO/metadata/md5-cache"
+sudo egencache --update --repo gentoo --jobs=8
 ../pkgcraft/target/release/pk repo metadata regen -j 8 -p /tmp/regen-verify-pk-j8 -f -n "$REPO"
 for d in /tmp/regen-verify-*-j8; do echo "$d: $(find "$d" -type f | wc -l) files"; done
+# (eg writes to live $REPO/metadata; the script counts from there after the sudo run)
 ```
 (See also `benchmarks/results/em-regen-help.txt` — captured from the built binary used for these runs.)
 
-Main test tree `portage-repo/gentoo/metadata/md5-cache` remained untouched throughout. For reference egencache timings use the stock binary + manual `sudo rm -fR .../md5-cache && time sudo egencache -j20 --repo gentoo --update` (correct full cold datapoint: real 4m37.251s). We stopped maintaining patches/hacks against portage for this.
+Main test tree `portage-repo/gentoo/metadata/md5-cache` remained untouched when running without egencache. When INCLUDE_EGENCACHE=1 the script performs the sudo rm + sudo egencache on the target GENTOO_REPO (for full thalia runs this is the live system gentoo repo) to capture the correct slow full cold data points. The user-provided 4m37.251s real (j=20) is the reference. No modifications were made to portage source.
 
-### Cache Regen Comparative (historical; from before we stopped hacking portage)
+### Cache Regen Comparative (includes egencache via stock "correct" slow path)
 
-**All egencache rows and "patched --cache-dir" discussion below are historical only and superseded.**
-
-We no longer run or maintain any egencache support in the compare script or patches against the portage tree.
-
-See the notes immediately above for the correct stock egencache full-cold datapoint (4m37s at j=20) and why we dropped it.
+The script now supports egencache (INCLUDE_EGENCACHE=1) using the exact method the user identified for expected results: `sudo rm -rf $REPO/metadata/md5-cache && sudo egencache -j $jobs --repo gentoo --update`. This gives the real (slow) full cold data points alongside em and pk. The tables below mix some historical patched/warm numbers with the intent; future runs will have the proper stock eg numbers. See the "correct datapoint" note and script comments.
 
 The numbers here (including the eg ~8s "full file count" ones) came from warm-cache + custom-patched egencache runs. They are not comparable to the true cold work.
 
