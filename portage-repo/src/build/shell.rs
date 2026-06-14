@@ -300,10 +300,23 @@ dobin() {
     done
 }
 
+# Resolve a new*-helper source ($1) for target name ($2): a literal `-` means
+# read the content from stdin (PMS 12.3.x), staged at ${T}/$2. Result in REPLY.
+# Used so e.g. acct-group.eclass's `newins - foo.conf < <(...)` works.
+__new_src() {
+    if [[ $1 == - ]]; then
+        cat > "${T}/$2" || die "${FUNCNAME[1]:-new}: failed to read stdin for $2"
+        REPLY="${T}/$2"
+    else
+        REPLY=$1
+    fi
+}
+
 newbin() {
     [[ $# -eq 2 ]] || die "newbin: exactly two arguments required"
+    __new_src "$1" "$2"
     dodir "${_into_dir}/bin"
-    install -m0755 "$1" "${ED%/}/${_into_dir#/}/bin/$2" \
+    install -m0755 "${REPLY}" "${ED%/}/${_into_dir#/}/bin/$2" \
         || die "newbin: failed to install $1 as $2"
 }
 
@@ -319,8 +332,9 @@ dosbin() {
 
 newsbin() {
     [[ $# -eq 2 ]] || die "newsbin: exactly two arguments required"
+    __new_src "$1" "$2"
     dodir "${_into_dir}/sbin"
-    install -m0755 "$1" "${ED%/}/${_into_dir#/}/sbin/$2" \
+    install -m0755 "${REPLY}" "${ED%/}/${_into_dir#/}/sbin/$2" \
         || die "newsbin: failed to install $1 as $2"
 }
 
@@ -343,8 +357,9 @@ doins() {
 
 newins() {
     [[ $# -eq 2 ]] || die "newins: exactly two arguments required"
+    __new_src "$1" "$2"
     dodir "${INSDESTTREE:-/}"
-    install ${_insopts} "$1" "${ED%/}/${INSDESTTREE#/}/$2" \
+    install ${_insopts} "${REPLY}" "${ED%/}/${INSDESTTREE#/}/$2" \
         || die "newins: failed to install $1 as $2"
 }
 
@@ -361,8 +376,9 @@ doexe() {
 
 newexe() {
     [[ $# -eq 2 ]] || die "newexe: exactly two arguments required"
+    __new_src "$1" "$2"
     dodir "${EXEDESTTREE:-/}"
-    install ${_exeopts} "$1" "${ED%/}/${EXEDESTTREE#/}/$2" \
+    install ${_exeopts} "${REPLY}" "${ED%/}/${EXEDESTTREE#/}/$2" \
         || die "newexe: failed to install $1 as $2"
 }
 
@@ -434,9 +450,10 @@ dodoc() {
 
 newdoc() {
     [[ $# -eq 2 ]] || die "newdoc: exactly two arguments required"
+    __new_src "$1" "$2"
     local docdir="${ED%/}/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
     dodir "/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
-    install -m0644 "$1" "${docdir}/$2" || die "newdoc: failed to install $1 as $2"
+    install -m0644 "${REPLY}" "${docdir}/$2" || die "newdoc: failed to install $1 as $2"
 }
 
 doman() {
@@ -453,10 +470,11 @@ doman() {
 
 newman() {
     [[ $# -eq 2 ]] || die "newman: exactly two arguments required"
+    __new_src "$1" "$2"
     local ext="${2##*.}"
     [[ -n ${ext} ]] || die "newman: cannot determine man section for $2"
     dodir "/usr/share/man/man${ext}"
-    install -m0644 "$1" "${ED%/}/usr/share/man/man${ext}/$2" \
+    install -m0644 "${REPLY}" "${ED%/}/usr/share/man/man${ext}/$2" \
         || die "newman: failed to install $1 as $2"
 }
 
@@ -478,8 +496,9 @@ doheader() {
 
 newheader() {
     [[ $# -eq 2 ]] || die "newheader: exactly two arguments required"
+    __new_src "$1" "$2"
     dodir "/usr/include"
-    install -m0644 "$1" "${ED%/}/usr/include/$2" \
+    install -m0644 "${REPLY}" "${ED%/}/usr/include/$2" \
         || die "newheader: failed to install $1 as $2"
 }
 
@@ -524,19 +543,22 @@ doenvd() {
 # to the matching do* helper (portage does the same via __helpers_die wrappers).
 newinitd() {
     [[ $# -eq 2 ]] || die "newinitd: exactly two arguments required"
-    cp "$1" "${T}/$2" || die "newinitd: failed to stage $1"
+    __new_src "$1" "$2"
+    [[ ${REPLY} == "${T}/$2" ]] || cp "${REPLY}" "${T}/$2" || die "newinitd: failed to stage $1"
     doinitd "${T}/$2"
 }
 
 newconfd() {
     [[ $# -eq 2 ]] || die "newconfd: exactly two arguments required"
-    cp "$1" "${T}/$2" || die "newconfd: failed to stage $1"
+    __new_src "$1" "$2"
+    [[ ${REPLY} == "${T}/$2" ]] || cp "${REPLY}" "${T}/$2" || die "newconfd: failed to stage $1"
     doconfd "${T}/$2"
 }
 
 newenvd() {
     [[ $# -eq 2 ]] || die "newenvd: exactly two arguments required"
-    cp "$1" "${T}/$2" || die "newenvd: failed to stage $1"
+    __new_src "$1" "$2"
+    [[ ${REPLY} == "${T}/$2" ]] || cp "${REPLY}" "${T}/$2" || die "newenvd: failed to stage $1"
     doenvd "${T}/$2"
 }
 
