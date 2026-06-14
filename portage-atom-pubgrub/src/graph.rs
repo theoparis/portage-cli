@@ -4,6 +4,7 @@ use portage_atom::{Cpn, Version};
 
 use crate::package::PortagePackage;
 use crate::provider::PortageDependencyProvider;
+use crate::version_set::PortageVersionSet;
 
 /// Dependency class label for an edge in the dependency graph.
 ///
@@ -79,12 +80,39 @@ impl PortageDependencyProvider {
 
             for (class_idx, &class) in classes.iter().enumerate() {
                 for (dep_pkg, dep_vs, gating_flag) in &vd.by_class[class_idx] {
-                    if dep_pkg.is_virtual() {
-                        continue;
-                    }
-                    if let Some(candidates) = by_cpn.get(dep_pkg.cpn()) {
+                    // A dep may point at a virtual choice/slot/use-decision node.
+                    // Those are stripped from the solution but remain in
+                    // `self.packages`, so expand them transitively to the real
+                    // packages they select (filtered to the solution by the
+                    // inner version-sets). Without this, deps reachable only
+                    // through a USE-conditional / `||` group / multi-slot choice
+                    // produce no ordering edge — e.g. `vala? ( || ( dev-lang/vala:0.56 ) )`
+                    // left librsvg unordered w.r.t. vala.
+                    let mut seen: std::collections::HashSet<&PortagePackage> =
+                        std::collections::HashSet::new();
+                    let mut emitted: std::collections::HashSet<(&PortagePackage, &Version)> =
+                        std::collections::HashSet::new();
+                    let mut work: Vec<(&PortagePackage, &PortageVersionSet)> =
+                        vec![(dep_pkg, dep_vs)];
+                    while let Some((dp, dvs)) = work.pop() {
+                        if dp.is_virtual() {
+                            if !seen.insert(dp) {
+                                continue;
+                            }
+                            if let Some(vdata) = self.packages.get(dp) {
+                                for vver in vdata.versions.values() {
+                                    for (idp, idvs, _) in vver.by_class.iter().flatten() {
+                                        work.push((idp, idvs));
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        let Some(candidates) = by_cpn.get(dp.cpn()) else {
+                            continue;
+                        };
                         for &(sol_pkg, sol_ver) in candidates {
-                            if dep_vs.contains(sol_ver) {
+                            if dvs.contains(sol_ver) && emitted.insert((sol_pkg, sol_ver)) {
                                 edges.push(DepEdge {
                                     from: (pkg.clone(), version.clone()),
                                     to: (sol_pkg.clone(), sol_ver.clone()),
