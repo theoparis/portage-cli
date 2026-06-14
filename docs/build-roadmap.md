@@ -250,9 +250,22 @@ Iterate target-by-target, hardest last:
       and fixed `into` to mirror `DESTTREE`
 - [ ] ebuild-helpers coverage audit: list what firefox's install phase calls
       and confirm each has a self-contained equivalent in `INSTALL_HELPERS`
-- [x] firefox dry-run ladder — `setup` is **green** (`em ebuild firefox setup`):
-      check-reqs → llvm-r1 → rust → python-any-r1 → linux-info all complete
-      with no "command not found". Survey fixes that got it there:
+- [x] firefox dry-run ladder — `setup → unpack → prepare` are **green** and
+      `configure` runs deep into mach (`em ebuild firefox setup unpack prepare
+      configure`):
+      * **setup**: check-reqs → llvm-r1 → rust → python-any-r1 → linux-info all
+        complete, no "command not found"
+      * **unpack**: both distfiles fetched via the RO-fallback distdir, the
+        748 MB `.tar.xz` + patches tarball unpacked, `src_unpack`'s
+        language_packs logic ran
+      * **prepare**: all 24 firefox-patches applied via the rewritten `eapply`
+      * **configure**: mach configure detects clang-22 C/C++, lld,
+        llvm-profdata/readelf/objcopy, runs the full compiler/linker flag
+        probe matrix, then stops at the first **missing build dep**
+        (`pkg-config: Package 'alsa' not found` — media-libs/alsa-lib isn't
+        installed on the host). That's environmental, not an em/shell defect:
+        the full gate provisions the dep closure first.
+      Survey fixes that got it there:
       * PATH established as a shell var (eclasses doing `export PATH=…:${PATH}`
         no longer strand the system bin dirs)
       * USE_EXPAND groups reverse-mapped from final USE (`LLVM_SLOT` et al)
@@ -261,9 +274,14 @@ Iterate target-by-target, hardest last:
       * **brush fix**: `$*`/`${a[*]}` now join via the IFS first char in scalar
         contexts, so llvm-utils' `local IFS=:; …; export PATH=${sp[*]}` keeps
         its `:` separators instead of mangling them to spaces
+      * **eapply** rewritten for PMS: directory operands (apply a dir's
+        `*.diff`/`*.patch` children in C order), the `--` option-parsing rule,
+        and a `return 0` so the `|| return` loop doesn't abort after one patch
+        (firefox was silently applying only 1 of 24)
       Remaining (cosmetic): linux-info prints `//usr/src/linux` (double-slash
       ROOT join) and falls back to the running kernel — check still `[ ok ]`.
-      Next: extend to `unpack → configure`.
+      Next: provision firefox's build-dep closure so `configure` completes the
+      gate (this is the M2-orchestration test for real).
 
 **Gate:** `em --prefix /tmp/p www-client/firefox` completes
 setup→configure. (Full compile is hours of CPU — gate on configure, run
