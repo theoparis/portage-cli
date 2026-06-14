@@ -150,10 +150,13 @@ run_one() {
             # even if GENTOO_REPO is a different tree for em/pk comparison).
             # No extra PORTAGE_REPOSITORIES or config-root etc. (stock plain).
             # The NUMACTL is prepended if active for consistency (numactl sudo egencache...).
+            # Note: this always collects eg data on the live system gentoo repo
+            # using the plain way that produces full results. For em/pk use the
+            # GENTOO_REPO (set it to /var/db/repos/gentoo for full apples-to-apples).
             local EG_LIVE="/var/db/repos/gentoo"
             local EG_RNAME="gentoo"
             sudo rm -rf "$EG_LIVE/metadata/md5-cache" || true
-            local -a base_eg=( "$EGENCACHE" --repo "$EG_RNAME" --jobs="$jobs" --update )
+            local -a base_eg=( "$EGENCACHE" --repo "$EG_RNAME" -j "$jobs" --update )
             local -a numa_prefix=()
             if [[ -n "$NUMACTL" ]]; then
                 numa_prefix=( $NUMACTL )
