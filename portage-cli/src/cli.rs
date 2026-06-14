@@ -189,10 +189,12 @@ pub const C_MASKED: Style = Style::new()
     .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)))
     .effects(Effects::BOLD);
 
-// For `em query list`: 3-part coloring of cat/pkg-ver
+// For `em query list`:
+// - w/out -I (available packages from tree): outputs CPNs (cat/pkgname), no version
+// - with -I (installed): outputs CPVs (cat/pkgname-version)
 // cat: most subdued (dimmed)
-// pkgname: bright/light green (BrightGreen, no dim) -- to make it visibly brighter than version
-// version: plain green
+// pkgname: bright/light green (BrightGreen)
+// version: plain green (only shown for -I)
 pub const C_CAT: Style = Style::new().effects(Effects::DIMMED);
 pub const C_PKGNAME: Style =
     Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::BrightGreen)));

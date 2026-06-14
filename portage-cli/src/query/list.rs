@@ -11,25 +11,20 @@ use crate::cli::{C_CAT, C_PKGNAME, C_VERSION};
 pub fn run(repo_path: &Path, patterns: &[String]) -> Result<()> {
     let repo = Repository::open(repo_path)?;
 
-    let mut cpvs: Vec<Cpv> = repo
-        .ebuilds()?
-        .into_iter()
-        .map(|ebuild| ebuild.cpv().clone())
-        .filter(|cpv| {
-            patterns.is_empty()
-                || patterns
-                    .iter()
-                    .any(|p| matches_pattern(&cpv.to_string(), p))
-        })
-        .collect();
-
-    cpvs.sort();
+    let mut cpns: std::collections::BTreeSet<portage_atom::Cpn> = Default::default();
+    for ebuild in repo.ebuilds()? {
+        let cpv = ebuild.cpv();
+        let s = cpv.to_string();
+        if patterns.is_empty() || patterns.iter().any(|p| matches_pattern(&s, p)) {
+            cpns.insert(cpv.cpn);
+        }
+    }
     let mut out = anstream::stdout();
-    for cpv in &cpvs {
+    for cpn in &cpns {
         writeln!(
             out,
-            "{C_CAT}{}{C_CAT:#}/{C_PKGNAME}{}{C_PKGNAME:#}-{C_VERSION}{}{C_VERSION:#}",
-            cpv.cpn.category, cpv.cpn.package, cpv.version
+            "{C_CAT}{}{C_CAT:#}/{C_PKGNAME}{}{C_PKGNAME:#}",
+            cpn.category, cpn.package
         )
         .ok();
     }
