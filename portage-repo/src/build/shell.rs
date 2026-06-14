@@ -1263,7 +1263,27 @@ impl EbuildShell {
         // process env) so eclasses that do `export PATH="...:${PATH}"` — e.g.
         // python-any-r1's wrapper setup — keep the system bin dirs instead of
         // expanding ${PATH} to empty and stranding mkdir/cp/ln/chmod.
-        let base_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+        //
+        // Sanitise it: expunge non-system install dirs that would shadow the
+        // Gentoo toolchain — everything under $HOME (uv/cargo/pip user installs,
+        // e.g. ~/.local/bin/python3.13, a uv python without gpep517 that broke
+        // distutils-r1 wheel builds) and /usr/local (locally-installed tools).
+        // System dirs including /usr/lib/llvm/*/bin (clang) are kept; a --local
+        // prefix's own bin is re-added deliberately by its bashrc hook.
+        let raw_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+        let home = std::env::var("HOME").unwrap_or_default();
+        let home_prefix = (!home.is_empty()).then(|| format!("{}/", home.trim_end_matches('/')));
+        let base_path = raw_path
+            .split(':')
+            .filter(|p| {
+                let under_home = home_prefix
+                    .as_deref()
+                    .is_some_and(|hp| *p == home || p.starts_with(hp));
+                let under_local = *p == "/usr/local" || p.starts_with("/usr/local/");
+                !under_home && !under_local
+            })
+            .collect::<Vec<_>>()
+            .join(":");
         self.set_var("PATH", &base_path);
         // Our do*/new* install helpers are self-contained bash functions
         // (INSTALL_HELPERS below), so portage need not be installed. We still
