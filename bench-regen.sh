@@ -61,7 +61,7 @@ peak_rss() {
 printf "%-4s  %-10s  %-10s  %-10s  %s\n" "j" "real" "user" "sys" "peak RSS"
 for J in "${JOBS[@]}"; do
     OUT=$(mktemp -d)
-    { time "$EM" --repo "$REPO" regen -o "$OUT" -j "$J" $DEDUP_FLAG >/dev/null 2>&1; } 2>/tmp/bench_time &
+    { time "$EM" regen "$REPO" -o "$OUT" -j "$J" $DEDUP_FLAG >/dev/null 2>&1; } 2>/tmp/bench_time &
     BGPID=$!
     RSS=$(peak_rss "$BGPID")
     wait "$BGPID"

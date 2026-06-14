@@ -69,7 +69,7 @@ bench-results/<timestamp>/
 These use a pre-built `em` binary (not a sweep). Useful for quick single-config
 comparisons on Gentoo.
 
-(*) egencache is opt-in via `INCLUDE_EGENCACHE=1`
+(*) egencache is opt-in via `INCLUDE_EGENCACHE=1` and (when using the patched portage source) is invoked with --cache-dir + --external-cache-only for isolated full scans (no live cache overwrite)
 (†) qsearch is auto-detected, silently skipped if absent
 
 ## Workspace maintenance

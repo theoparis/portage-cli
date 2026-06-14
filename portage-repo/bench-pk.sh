@@ -7,11 +7,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PK="${PK:-$SCRIPT_DIR/../pkgcraft/target/release/pk}"
 REPO="${GENTOO_REPO:-/var/db/repos/gentoo}"
 
+# Find pk robustly: honor PK=, or look relative to common layouts
+# (pkgcraft sibling to portage-cli/, or to portage-repo/)
+if [[ -z "${PK:-}" ]]; then
+    for cand in \
+        "$SCRIPT_DIR/../../pkgcraft/target/release/pk" \
+        "$SCRIPT_DIR/../pkgcraft/target/release/pk" \
+        "$SCRIPT_DIR/../../../pkgcraft/target/release/pk" \
+        ; do
+        if [[ -x "$cand" ]]; then PK="$cand"; break; fi
+    done
+fi
+PK="${PK:-}"
+
 if [[ ! -x "$PK" ]]; then
-    echo "pk binary not found: $PK" >&2
+    echo "pk binary not found: $PK (set PK=... or place in ../pkgcraft etc)" >&2
     exit 1
 fi
 

@@ -9,22 +9,24 @@
 #                             [opt-in via INCLUDE_EGENCACHE=1]
 #
 # em and pk both accept a custom output directory (-o / -p) so they
-# write into isolated tempdirs.  egencache only writes into the repo
-# itself (metadata/md5-cache), which means running it overwrites the
-# real cache for the duration of the test — so it's opt-in via
-# INCLUDE_EGENCACHE=1 and the script will save+restore the existing
-# cache around it.
+# write into isolated tempdirs.  egencache is invoked via the patched
+# portage-3.0.79 source (if present) using --cache-dir + --external-cache-only
+# so it also writes to an isolated flat dir (no live repo pollution).
+# INCLUDE_EGENCACHE=1 to include it.
 #
 # Usage: compare-regen.sh [jobs...]   (default: 24)
 #   GENTOO_REPO=<path>     repo to regen (default: /var/db/repos/gentoo)
-#   EM=<path>              em binary (default: search PATH then portage-bench tree)
-#   EGENCACHE=<path>       egencache (default: PATH)
-#   PK=<path>              pkgcraft pk binary (default: PATH then in-tree build)
+#   EM=<path>              em binary (default: search PATH then <ws>/target/release/em)
+#   EGENCACHE=<path>       egencache (default: PATH or /home/lu_zero/Sources/portage-3.0.79/bin/egencache)
+#   PK=<path>              pkgcraft pk binary (default: PATH then sibling ../pkgcraft/...)
 #   ITERATIONS=N           runs per tool (default: 1)
 #   SKIP=tool,tool         comma-separated list of tools to skip
 #                          (em | egencache | pk)
+#   INCLUDE_EGENCACHE=1    include egencache in the comparison (uses --cache-dir for isolation)
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 REPO="${GENTOO_REPO:-/var/db/repos/gentoo}"
 ITERATIONS="${ITERATIONS:-1}"
@@ -33,7 +35,8 @@ INCLUDE_EGENCACHE="${INCLUDE_EGENCACHE:-0}"
 
 if [[ $# -gt 0 ]]; then JOBS=("$@"); else JOBS=(24); fi
 
-# Locate binaries.
+# Locate binaries. Fallbacks are relative to this script's location so it
+# works when invoked from any cwd (e.g. as benchmarks/scripts/compare-regen.sh).
 EM="${EM:-}"
 if [[ -z "$EM" ]]; then
     if command -v em >/dev/null 2>&1; then
@@ -47,12 +50,27 @@ PK="${PK:-}"
 if [[ -z "$PK" ]]; then
     if command -v pk >/dev/null 2>&1; then
         PK=$(command -v pk)
-    elif [[ -x ../pkgcraft/target/release/pk ]]; then
-        PK=$(realpath ../pkgcraft/target/release/pk)
+    else
+        for cand in \
+            "$SCRIPT_DIR/../../../pkgcraft/target/release/pk" \
+            "$SCRIPT_DIR/../../pkgcraft/target/release/pk" \
+            "$SCRIPT_DIR/../pkgcraft/target/release/pk" \
+            ; do
+            if [[ -x "$cand" ]]; then PK=$(realpath "$cand"); break; fi
+        done
     fi
 fi
 
-EGENCACHE="${EGENCACHE:-$(command -v egencache 2>/dev/null || true)}"
+# Prefer the patched source egencache from the portage-3.0.79 tree if present
+# (for the --cache-dir direct output support added for benchmark isolation).
+EGENCACHE="${EGENCACHE:-}"
+if [[ -z "$EGENCACHE" ]]; then
+    if [[ -x "/home/lu_zero/Sources/portage-3.0.79/bin/egencache" ]]; then
+        EGENCACHE="/home/lu_zero/Sources/portage-3.0.79/bin/egencache"
+    else
+        EGENCACHE=$(command -v egencache 2>/dev/null || true)
+    fi
+fi
 
 # egencache wants the repo *name*, plus a config snippet pointing at the path.
 REPO_NAME=""
@@ -69,7 +87,7 @@ if [[ -n "$EM" && -x "$EM" ]] && ! skip_tool em; then
 fi
 if [[ "$INCLUDE_EGENCACHE" == "1" && -n "$EGENCACHE" && -n "$REPO_NAME" ]] \
         && ! skip_tool egencache; then
-    TOOLS+=(egencache); TOOL_DESC[egencache]="$EGENCACHE (repo=$REPO_NAME, writes to $REPO)"
+    TOOLS+=(egencache); TOOL_DESC[egencache]="$EGENCACHE (using --cache-dir + --external-cache-only for full-blown isolated flat cache)"
 fi
 if [[ -n "$PK" && -x "$PK" ]] && ! skip_tool pk; then
     TOOLS+=(pk); TOOL_DESC[pk]="$PK"
@@ -98,29 +116,34 @@ run_one() {
 
     case "$tool" in
         em)
-            { time "$EM" --repo "$REPO" regen -o "$out_dir" -j "$jobs" \
+            # Current CLI syntax: positional repo path (not --repo).
+            { time "$EM" regen "$REPO" -o "$out_dir" -j "$jobs" \
                 >"$log" 2>&1; } 2>"$tf"
             ;;
         egencache)
-            # egencache writes to $REPO/metadata/md5-cache.  We save the
-            # existing cache to a sibling directory, let egencache rebuild,
-            # then restore.  Requires write access to $REPO.
-            local cache="$REPO/metadata/md5-cache"
-            local backup="$REPO/metadata/md5-cache.backup-$$"
-            local existed=0
-            if [[ -d "$cache" ]]; then
-                mv "$cache" "$backup"
-                existed=1
+            # Use patched egencache --cache-dir + --external-cache-only to write
+            # a full scan directly into isolated $out_dir (flat cpv files).
+            # To get apples-to-apples with em/pk (exhaustive full tree, no
+            # KEYWORDS/profile filtering), we create a temp --config-root that
+            # forces ACCEPT_KEYWORDS="**" and (if available) a broad amd64
+            # profile from the tree. This makes egencache consider every ebuild.
+            mkdir -p "$out_dir"
+            eg_config_root=$(mktemp -d)
+            mkdir -p "$eg_config_root"/portage
+            echo 'ACCEPT_KEYWORDS="**"' > "$eg_config_root"/portage/make.conf
+            # Try to use a broad profile from the tree (amd64 one typically has
+            # wide support); ** should make all visible anyway.
+            profile_dir=$(find "$REPO/profiles" -path '*default/linux/amd64*' -type d 2>/dev/null | head -1 || true)
+            if [[ -n "$profile_dir" ]]; then
+                ln -s "$profile_dir" "$eg_config_root"/portage/make.profile 2>/dev/null || echo "profile = $profile_dir" > "$eg_config_root"/portage/make.profile
             fi
-            mkdir -p "$cache"
-            { time "$EGENCACHE" --update --repo "$REPO_NAME" \
+            egencache_cmd=("$EGENCACHE" --config-root "$eg_config_root")
+            egencache_cmd=(env ACCEPT_KEYWORDS="**" "PORTAGE_REPOSITORIES=gentoo=$REPO" "${egencache_cmd[@]}")
+            { time "${egencache_cmd[@]}" --update --repo "$REPO_NAME" \
                 --jobs="$jobs" \
+                --cache-dir "$out_dir" --external-cache-only \
                 >"$log" 2>&1; } 2>"$tf" || true
-            # Restore.
-            rm -rf "$cache"
-            if [[ "$existed" == "1" ]]; then
-                mv "$backup" "$cache"
-            fi
+            rm -rf "$eg_config_root"
             ;;
         pk)
             { time "$PK" repo metadata regen -j "$jobs" -p "$out_dir" -f -n "$REPO" \
@@ -147,6 +170,8 @@ for J in "${JOBS[@]}"; do
             read -r real user sys < <(run_one "$tool" "$J" "$out_dir" "$log")
             printf "%-12s  %-4s  %-4s  %-12s  %-12s  %-12s\n" \
                 "$tool" "$J" "$i" "$real" "$user" "$sys"
+            cnt=$(find "$out_dir" -type f | wc -l)
+            echo "    files=$cnt"
         done
     done
 done
