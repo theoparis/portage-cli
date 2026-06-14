@@ -325,7 +325,7 @@ mod tests {
                 .unwrap(),
             "foo.1.bz2"
         );
-        assert!(!man.join("bar.1").as_std_path().symlink_metadata().is_ok());
+        assert!(man.join("bar.1").as_std_path().symlink_metadata().is_err());
         assert!(image.join("usr/bin/tool").exists());
         assert!(man.join("tiny.1").exists());
     }
