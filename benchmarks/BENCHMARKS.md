@@ -58,23 +58,23 @@ See `machines/thalia.md` (the "Full Blown Scans Re-run" section) for full hardwa
 
 All comparisons executed via the bash scripts that live in the crates (`portage-repo/bench-*.sh`, top-level `bench-regen.sh`, `benchmarks/scripts/compare-regen.sh`, `benchmarks/bench-em-vs-emerge.sh`) after fixing CLI syntax, SCRIPT_DIR setup, and PK discovery paths.
 
-### Cache Regen Comparative on thalia (32k ebuilds test tree, j=8, via compare-regen.sh — em / pk + egencache plain correct on live)
+### Cache Regen Comparative on thalia (32k ebuilds test tree, j=8, via compare-regen.sh — em / pk + egencache (opt-in))
 
 | tool | j | run | real      | user      | sys      | Notes |
 |------|---|-----|-----------|-----------|----------|-------|
 | em   | 8 | 1   | 0m18.120s | 2m11.310s | 0m12.394s | Current em CLI (NUMA0); full cold exhaustive |
 | pk   | 8 | 1   | 0m48.263s | 5m25.512s | 1m7.887s  | pkgcraft (NUMA0); full cold exhaustive |
 
-(egencache uses the stock binary + the sudo rm + sudo --update path inside the script when INCLUDE_EGENCACHE=1. The 4m37.251s j=20 figure is the reference slow full cold point.)
+(egencache opt-in with INCLUDE_EGENCACHE=1; uses stock plain sudo rm + sudo egencache -j N --repo gentoo --update on live (repo name defaults to gentoo). 4m37.251s j=20 is the reference. Output is markdown table.)
 
-The compare script now includes egencache by default (no INCLUDE needed) using the *exact plain stock* command the user specified for correct full results:
+The compare script includes egencache only with INCLUDE_EGENCACHE=1 (default off) using the *exact plain stock* command:
 
     sudo rm -rf /var/db/repos/gentoo/metadata/md5-cache
     sudo egencache -j $jobs --repo gentoo --update
 
-(hardcoded to live gentoo, no extra args/env). This collects the slow accurate full-cold datapoints (4m37s reference). em/pk use your GENTOO_REPO (set to live for same tree). Set INCLUDE_EGENCACHE=0 or SKIP=egencache to disable. No portage source hacked. Earlier "fast" numbers were artifacts. See thalia.md.
+(hardcoded live; repo name defaults to gentoo). Output is valid markdown table. This collects the slow full-cold datapoints (4m37s reference). em/pk use your GENTOO_REPO (set to live for same tree). Set SKIP=egencache to disable. No portage source hacked. Earlier "fast" numbers were artifacts. See thalia.md.
 
-Repro (with egencache stock cold points): `GENTOO_REPO=/var/db/repos/gentoo EM=target/release/em PK=../pkgcraft/target/release/pk INCLUDE_EGENCACHE=1 ITERATIONS=1 ./benchmarks/scripts/compare-regen.sh 8 16 20 24 32`
+Repro (egencache opt-in): `GENTOO_REPO=/var/db/repos/gentoo EM=target/release/em PK=../pkgcraft/target/release/pk INCLUDE_EGENCACHE=1 ./benchmarks/scripts/compare-regen.sh 8 16 20 24 32`
 
 See `machines/thalia.md` for the complete j=8/j=20 tables, per-crate RSS/hyperfine data, dep numbers, and verification that the main test cache was never modified.
 

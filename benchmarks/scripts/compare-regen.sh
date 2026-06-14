@@ -6,15 +6,17 @@
 #   em regen -j N           — our Rust implementation (portage-cli)
 #   pk repo metadata regen  — pkgcraft's implementation (Rust)
 #
-# egencache support (default INCLUDE_EGENCACHE=1 if binary found) uses stock
-# egencache (no portage source hacks). It always runs the *exact* plain command
-# the user specified for the "correct" full cold results (no NUMACTL, no extra):
+# egencache support (opt-in via INCLUDE_EGENCACHE=1; default off) uses stock
+# egencache (no portage source hacks). When enabled, runs the *exact* plain
+# command the user specified for the "correct" full cold results (no NUMACTL,
+# no extra):
 #   sudo rm -rf /var/db/repos/gentoo/metadata/md5-cache
 #   sudo egencache -j $jobs --repo gentoo --update
-# (hardcoded live; guarantees the slow full datapoints like 4m37s at j=20).
-# em/pk use GENTOO_REPO (set to live for same tree compare).
-# Set INCLUDE_EGENCACHE=0 or SKIP=egencache to disable. No extra setup needed
-# (EGENCACHE= only if not in PATH).
+# (hardcoded live gentoo; guarantees the slow full datapoints like 4m37s at j=20).
+# em/pk use GENTOO_REPO (set to /var/db/repos/gentoo for same-tree compare).
+# Repo name defaults to "gentoo" (won't silently skip).
+# Output is a valid markdown table.
+# Set INCLUDE_EGENCACHE=1 to include; EGENCACHE=... if not in PATH.
 #
 # Usage: compare-regen.sh [jobs...]   (default: 24)
 #   GENTOO_REPO=<path>     repo to regen (default: /var/db/repos/gentoo)
@@ -24,7 +26,7 @@
 #   ITERATIONS=N           runs per tool (default: 1)
 #   SKIP=tool,tool         comma-separated list of tools to skip
 #                          (em | egencache | pk)
-#   INCLUDE_EGENCACHE=0    set to 0 to disable (defaults to on; runs the plain
+#   INCLUDE_EGENCACHE=1    set to 1 to include egencache (default off; runs the plain
 #                          sudo rm + sudo egencache -j N --repo gentoo --update on live)
 
 set -euo pipefail
@@ -34,7 +36,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${GENTOO_REPO:-/var/db/repos/gentoo}"
 ITERATIONS="${ITERATIONS:-1}"
 SKIP="${SKIP:-}"
-INCLUDE_EGENCACHE="${INCLUDE_EGENCACHE:-1}"
+INCLUDE_EGENCACHE="${INCLUDE_EGENCACHE:-0}"
 
 # Locate egencache (stock, no patches). We use the system one by default
 # so we do not rely on any hacked portage tree. You can override EGENCACHE=...
@@ -168,8 +170,8 @@ run_one() {
     rm -f "$tf"
 }
 
-printf "%-12s  %-4s  %-4s  %-12s  %-12s  %-12s\n" \
-    "tool" "j" "run" "real" "user" "sys"
+echo '| tool | j | run | real | user | sys | files |'
+echo '|------|---|-----|------|------|-----|-------|'
 
 for J in "${JOBS[@]}"; do
     for tool in "${TOOLS[@]}"; do
@@ -178,14 +180,13 @@ for J in "${JOBS[@]}"; do
             log="$WORK/$tool-j$J-i$i.log"
             mkdir -p "$out_dir"
             read -r real user sys < <(run_one "$tool" "$J" "$out_dir" "$log")
-            printf "%-12s  %-4s  %-4s  %-12s  %-12s  %-12s\n" \
-                "$tool" "$J" "$i" "$real" "$user" "$sys"
             if [[ "$tool" == "egencache" ]]; then
                 cnt=$(cat "$out_dir/.eg_files_count" 2>/dev/null || echo 0)
             else
                 cnt=$(find "$out_dir" -type f | wc -l)
             fi
-            echo "    files=$cnt"
+            printf '| %-12s | %-4s | %-4s | %-12s | %-12s | %-12s | %s |\n' \
+                "$tool" "$J" "$i" "$real" "$user" "$sys" "$cnt"
         done
     done
 done
