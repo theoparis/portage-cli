@@ -110,7 +110,7 @@ Re-executed everything with the fixed scripts after identifying fishy issues (ou
 - `portage-repo/bench-pk.sh` (pk + RSS)
 - `portage-repo/bench.sh` (hyperfine timing + RSS for regen_only vs pk)
 - `./bench-regen.sh` (top-level, for full em CLI binary + RSS; fixed positional `em regen "$REPO" ...`)
-- `benchmarks/scripts/compare-regen.sh` (unified em / patched-egencache / pk wall time table; fixed SCRIPT_DIR + robust PK/EM lookup + updated egencache invocation comments)
+- `benchmarks/scripts/compare-regen.sh` (unified em / pk wall time table only; egencache support dropped entirely — we stopped hacking portage per request)
 - `benchmarks/bench-em-vs-emerge.sh` (package set parity from -p output + hyperfine timings for em -p / emerge -p and em -s / emerge -s)
 
 Repro commands (run from portage-cli/ root, after `cargo build --release --bin em`):
@@ -124,33 +124,38 @@ PK=../pkgcraft/target/release/pk GENTOO_REPO=portage-repo/gentoo ./portage-repo/
 # top level em CLI + RSS (fixed)
 GENTOO_REPO=portage-repo/gentoo ./bench-regen.sh 8 20
 
-# unified 3-way (em CLI, egencache via patch, pk) — full blown isolated
-GENTOO_REPO=/var/db/repos/gentoo EM=target/release/em PK=../pkgcraft/target/release/pk INCLUDE_EGENCACHE=1 ITERATIONS=1 ./benchmarks/scripts/compare-regen.sh 8 16 20 24 32
+# two-way em CLI vs pk only — full blown isolated
+# (egencache dropped from automated compares; we stopped hacking portage)
+GENTOO_REPO=/var/db/repos/gentoo EM=target/release/em PK=../pkgcraft/target/release/pk ITERATIONS=1 ./benchmarks/scripts/compare-regen.sh 8 16 20 24 32
 
 # dep resolution parity + timing (uses default/system repo discovery for both em and emerge)
 RUNS=3 EM=target/release/em ./benchmarks/bench-em-vs-emerge.sh
 ```
 
-Manual verify (for file counts after full scan into isolated dirs):
+Manual verify (em/pk only; egencache is no longer part of the automated compare script):
 
 ```sh
 REPO=/var/db/repos/gentoo
-rm -rf /tmp/regen-verify-{em,eg,pk}-j8; mkdir -p /tmp/regen-verify-{em,eg,pk}-j8
+rm -rf /tmp/regen-verify-{em,pk}-j8; mkdir -p /tmp/regen-verify-{em,pk}-j8
 target/release/em regen "$REPO" -o /tmp/regen-verify-em-j8 -j 8
-/home/lu_zero/Sources/portage-3.0.79/bin/egencache --update --repo gentoo --jobs=8 --cache-dir /tmp/regen-verify-eg-j8 --external-cache-only --config-root /tmp/cfg --repositories-configuration $'[DEFAULT]\nmain-repo = gentoo\n[gentoo]\nlocation = '"$REPO" || true
 ../pkgcraft/target/release/pk repo metadata regen -j 8 -p /tmp/regen-verify-pk-j8 -f -n "$REPO"
 for d in /tmp/regen-verify-*-j8; do echo "$d: $(find "$d" -type f | wc -l) files"; done
-# (compare-regen.sh now automates the full --cache-dir invocation for eg)
 ```
 (See also `benchmarks/results/em-regen-help.txt` — captured from the built binary used for these runs.)
 
-Main test tree `portage-repo/gentoo/metadata/md5-cache` remained untouched throughout. (Live system metadata was only temporarily relocated+restored during one std egencache timing reproduction; all --cache-dir and script compare work used isolated dirs.)
+Main test tree `portage-repo/gentoo/metadata/md5-cache` remained untouched throughout. For reference egencache timings use the stock binary + manual `sudo rm -fR .../md5-cache && time sudo egencache -j20 --repo gentoo --update` (correct full cold datapoint: real 4m37.251s). We stopped maintaining patches/hacks against portage for this.
 
-### Cache Regen Comparative (from compare-regen.sh, post --cache-dir full-fix)
+### Cache Regen Comparative (historical; from before we stopped hacking portage)
 
-**Important**: The tables below were captured *before* the source-cache hide logic was added to the egencache leg of the script. They reflect "warm" source cache runs for eg (fast copy, ~8s) even though file counts were full. See the notes above for the *correct* cold sourcing datapoint (~4m37s real at j=20 for the std full path after rm, or equivalent via the updated script).
+**All egencache rows and "patched --cache-dir" discussion below are historical only and superseded.**
 
-All runs used `NUMACTL` binding (node 0, 32c) via the script for apples-to-apples on 4-NUMA thalia; file counts were made full for eg via earlier patches. With the hide logic now in place, subsequent INCLUDE_EGENCACHE runs will produce the slow full-cold sourcing timings for the eg leg (temporarily clearing source pregen cache for that leg only).
+We no longer run or maintain any egencache support in the compare script or patches against the portage tree.
+
+See the notes immediately above for the correct stock egencache full-cold datapoint (4m37s at j=20) and why we dropped it.
+
+The numbers here (including the eg ~8s "full file count" ones) came from warm-cache + custom-patched egencache runs. They are not comparable to the true cold work.
+
+All runs used `NUMACTL` binding (node 0, 32c). em/pk numbers remain valid for their full cold work.
 
 j=8 (1 iter):
 
@@ -192,9 +197,9 @@ j=32 (1 iter):
 | egencache | 32| 1   | 0m8.393s  | 0m5.107s  | 0m2.075s  |
 | pk        | 32| 1   | 0m17.963s | 5m16.770s | 0m47.683s |
 
-**Notes on egencache --cache-dir + the "correct" full cold datapoint** (user: "sudo rm ... && time sudo egencache -j20 --repo gentoo --update produces the expected results. egencache --cache-dir isn't really working as intended."):
+**We stopped hacking portage** (per "please stop hacking portage it is not worth it.").
 
-The *correct* full cold egencache timing (the one after clearing the *source* live cache so that a true regen happens) is:
+The *correct* full cold egencache timing (stock upstream, after clearing the source md5-cache so true full sourcing happens) is the one the user supplied:
 
 ```
 time sudo egencache -j 20 --repo gentoo --update
@@ -203,20 +208,13 @@ user    0m0.006s
 sys     0m0.000s
 ```
 
-(Note the tiny user/sys: the launcher mostly waits; the real time is the makespan of the -j workers doing the actual ebuild sourcing. Total CPU time across workers is much higher.)
+All the --cache-dir, external-cache-only, cp_iter forcing, categories hacks, synthetic profiles, source-cache hide/restore logic, etc. in the compare script and in ../portage-3.0.79/bin/egencache have been removed.
 
-Previous "fast" egencache numbers in early tables (~7-8s) from the compare script were *not* full cold sourcing apples-to-apples:
-- With a pre-existing repo md5-cache, the --cache-dir --external path mostly did cache hits in _pull_valid_cache + cheap copies/writes to the target dir (fast "export" of the already-computed metadata). File count could be made full with the earlier cps/categories patches, but the *work* (expensive sourcing) was skipped.
-- The std path + explicit rm of the source cache forces the slow path (full EbuildMetadataPhases for ~31.8k ebuilds).
+`compare-regen.sh` now only compares em vs pk (both always do the real full cold exhaustive work into isolated output dirs, no sudo, no source cache games needed).
 
-To make future `compare-regen.sh ... INCLUDE_EGENCACHE=1` runs produce the *correct* (slow, full cold sourcing) numbers for eg too, the script now temporarily hides `$REPO/metadata/md5-cache` (mv, sudo only if needed) around the eg leg and restores after. This eliminates the short-circuit for that measurement while leaving the caller's tree state unchanged. (The hide/restore only affects the eg legs; em and pk always perform full sourcing regardless.)
+The tables below that still mention "egencache" rows are historical (warm-cache + patched runs) and are superseded. Use the 4m37s figure + direct stock runs for any egencache reference data.
 
-Thus the "correct" comparative picture (full cold exhaustive work for all three) will show egencache significantly slower than em for this workload.
-
-The root causes were in how the benchmark drove the (patched) egencache for isolation:
-- The invocation prefixed a non-ini `PORTAGE_REPOSITORIES=gentoo=$REPO` (fed as the entire repos.conf content via StringIO) which often caused repo registration to fail or partially fallback, affecting tree and/or categories.
-- The synthetic `--config-root` only symlinked a narrow amd64 profile (yielding ~174 cats in settings.categories vs 176); cp_list() in portage then pruned cps for any "invalid_category" (wiping mylist=[] for undeclared cats that happened to have pkgs in some snapshots).
-- Even the cp_iter fs-walk for external_cache_only was defeated downstream by the above.
+This also means the "fast eg" numbers were never truly comparable; the real reference impl is much slower on full cold regen than em.
 
 The std live path (after rm of `/var/db/.../md5-cache`) used the system config/profile (complete categories) + normal cp_iter=None path and thus always produced full.
 

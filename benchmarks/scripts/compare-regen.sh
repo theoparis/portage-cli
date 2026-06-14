@@ -5,30 +5,22 @@
 # Tools:
 #   em regen -j N           — our Rust implementation (portage-cli)
 #   pk repo metadata regen  — pkgcraft's implementation (Rust)
-#   egencache --update      — Portage's official tool (Python)
-#                             [opt-in via INCLUDE_EGENCACHE=1]
 #
-# em and pk both accept a custom output directory (-o / -p) so they
-# write into isolated tempdirs.  egencache is invoked via the patched
-# portage-3.0.79 source (if present) using --cache-dir + --external-cache-only
-# so it also writes to an isolated flat dir (no live repo pollution).
-# For egencache, to ensure *true full cold sourcing work* (not fast
-# short-circuit copy from an existing repo md5-cache via _pull_valid_cache),
-# the script temporarily hides $REPO/metadata/md5-cache (with sudo only
-# if the tree isn't user-writable) during the eg leg and restores after.
-# This makes its timing comparable to "sudo rm ... && egencache --update"
-# (the slow "correct" full datapoint) and to em/pk (which always source).
-# INCLUDE_EGENCACHE=1 to include it.
+# We no longer include or hack egencache (Portage's tool) for automated
+# comparisons. See "please stop hacking portage it is not worth it".
+# Stock egencache full cold regen (after sudo rm of the source md5-cache)
+# is ~4m37s real for -j20 on thalia (see thalia.md). It writes to the repo's
+# own metadata by default and requires manual steps for "full blown" cold
+# runs and isolated output. We only automate em vs. pk now (both use -o/-p
+# for isolated full cold output dirs and always do exhaustive sourcing).
 #
 # Usage: compare-regen.sh [jobs...]   (default: 24)
 #   GENTOO_REPO=<path>     repo to regen (default: /var/db/repos/gentoo)
 #   EM=<path>              em binary (default: search PATH then <ws>/target/release/em)
-#   EGENCACHE=<path>       egencache (default: PATH or /home/lu_zero/Sources/portage-3.0.79/bin/egencache)
 #   PK=<path>              pkgcraft pk binary (default: PATH then sibling ../pkgcraft/...)
 #   ITERATIONS=N           runs per tool (default: 1)
 #   SKIP=tool,tool         comma-separated list of tools to skip
-#                          (em | egencache | pk)
-#   INCLUDE_EGENCACHE=1    include egencache in the comparison (uses --cache-dir for isolation)
+#                          (em | pk)
 
 set -euo pipefail
 
@@ -37,7 +29,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${GENTOO_REPO:-/var/db/repos/gentoo}"
 ITERATIONS="${ITERATIONS:-1}"
 SKIP="${SKIP:-}"
-INCLUDE_EGENCACHE="${INCLUDE_EGENCACHE:-0}"
 
 # For reproducible single-NUMA-node runs on large multisocket/NUMA machines
 # (e.g. thalia 4-node Ampere), bind to node 0. This avoids cross-NUMA latency
@@ -82,33 +73,12 @@ if [[ -z "$PK" ]]; then
     fi
 fi
 
-# Prefer the patched source egencache from the portage-3.0.79 tree if present
-# (for the --cache-dir direct output support added for benchmark isolation).
-EGENCACHE="${EGENCACHE:-}"
-if [[ -z "$EGENCACHE" ]]; then
-    if [[ -x "/home/lu_zero/Sources/portage-3.0.79/bin/egencache" ]]; then
-        EGENCACHE="/home/lu_zero/Sources/portage-3.0.79/bin/egencache"
-    else
-        EGENCACHE=$(command -v egencache 2>/dev/null || true)
-    fi
-fi
-
-# egencache wants the repo *name*, plus a config snippet pointing at the path.
-REPO_NAME=""
-if [[ -f "$REPO/profiles/repo_name" ]]; then
-    REPO_NAME=$(< "$REPO/profiles/repo_name")
-fi
-
 skip_tool() { [[ ",$SKIP," == *",$1,"* ]]; }
 
 declare -a TOOLS=()
 declare -A TOOL_DESC=()
 if [[ -n "$EM" && -x "$EM" ]] && ! skip_tool em; then
     TOOLS+=(em); TOOL_DESC[em]="$EM"
-fi
-if [[ "$INCLUDE_EGENCACHE" == "1" && -n "$EGENCACHE" && -n "$REPO_NAME" ]] \
-        && ! skip_tool egencache; then
-    TOOLS+=(egencache); TOOL_DESC[egencache]="$EGENCACHE (using --cache-dir + --external-cache-only for full-blown isolated flat cache)"
 fi
 if [[ -n "$PK" && -x "$PK" ]] && ! skip_tool pk; then
     TOOLS+=(pk); TOOL_DESC[pk]="$PK"
@@ -135,108 +105,11 @@ run_one() {
     local tf
     tf=$(mktemp)
 
-    # Only the egencache leg needs these (see below).
-    local src_md5="" eg_bak_dir=""
-
     case "$tool" in
         em)
             # Current CLI syntax: positional repo path (not --repo).
             { time $NUMACTL "$EM" regen "$REPO" -o "$out_dir" -j "$jobs" \
                 >"$log" 2>&1; } 2>"$tf"
-            ;;
-        egencache)
-            # Use patched egencache --cache-dir + --external-cache-only to write
-            # a full scan directly into isolated $out_dir (flat cpv files, no
-            # metadata/ subdir). To get apples-to-apples with em/pk (exhaustive
-            # full tree, *all* ebuilds regardless of KEYWORDS/profile/visibility),
-            # we:
-            #  - use --repositories-configuration to point the repo *name* at
-            #    exactly $REPO (so --repo works and tree is the intended one)
-            #  - create a temp --config-root with ACCEPT_KEYWORDS="**" in
-            #    make.conf and a *synthetic* profile that parents a real one
-            #    (e.g. amd64) *and* ships a categories file listing every cat
-            #    dir present in the tree. Combined with the egencache patch
-            #    that augments categories on external_cache_only, this ensures
-            #    cp_list iterates every package (no "invalid category" discard,
-            #    no visibility pruning).
-            mkdir -p "$out_dir"
-            eg_config_root=$(mktemp -d)
-            mkdir -p "$eg_config_root"/portage
-            echo 'ACCEPT_KEYWORDS="**"' > "$eg_config_root"/portage/make.conf
-            # Build a synthetic profile that declares *all* categories from the
-            # tree (so settings.categories is exhaustive) while still using a
-            # real profile for other settings (parents, eapi, etc).
-            profile_dir=$(find "$REPO/profiles" -path '*default/linux/amd64*' -type d 2>/dev/null | head -1 || true)
-            syn_profile="$eg_config_root/portage/fullprofile"
-            mkdir -p "$syn_profile"
-            if [[ -n "$profile_dir" ]]; then
-                echo "$profile_dir" > "$syn_profile/parent"
-            fi
-            # List every potential category dir (top level non-special dirs).
-            # This populates the categories file in our synthetic profile.
-            (cd "$REPO" && find . -mindepth 1 -maxdepth 1 -type d \
-                ! -name '.*' ! -name 'metadata' ! -name 'profiles' ! -name 'eclass' \
-                | sed 's,^\./,,' | sort > "$syn_profile/categories") || true
-            ln -s "$syn_profile" "$eg_config_root"/portage/make.profile 2>/dev/null || echo "profile = $syn_profile" > "$eg_config_root"/portage/make.profile
-            # Provide the repo location via the supported --repositories-configuration
-            # (ini format) so that --repo "$REPO_NAME" resolves to our $REPO even
-            # under the custom config_root. This avoids relying on system repos.conf.
-            repos_conf="[DEFAULT]
-main-repo = ${REPO_NAME}
-[${REPO_NAME}]
-location = ${REPO}
-"
-
-            # --- force cold source cache for true full-work timing ---
-            # If the repo already has a metadata/md5-cache (pregen auxdb), the
-            # regen short-circuits via portdb._pull_valid_cache for most/all
-            # cpvs and just copies metadata to the --cache-dir (very fast
-            # "export", ~8s on thalia even at modest -j). This is *not* the
-            # full cold sourcing work.
-            #
-            # The "correct" full egencache datapoint (the one that "produces
-            # the expected results") is the slow one after clearing the *source*
-            # cache: ~4m37s real at -j20 (wall time for the parallel jobs to
-            # source everything; launcher user/sys near 0).
-            #
-            # To make the compare script give apples-to-apples *full cold
-            # exhaustive sourcing cost* for egencache (matching what em and pk
-            # always do, and matching "sudo rm && egencache --update"), we
-            # temporarily move the source md5-cache aside here (sudo only if
-            # necessary). Restore immediately after so the live/main tree is
-            # not left cleared (see AGENTS and prior notes about not clobbering
-            # the main test tree cache).
-            src_md5="$REPO/metadata/md5-cache"
-            if [[ -d "$src_md5" ]]; then
-                eg_bak_dir=$(mktemp -d "$WORK/eg-md5-bak.XXXXXX")
-                local hidden="$eg_bak_dir/md5-cache"
-                if [[ -w "$(dirname "$src_md5")" ]]; then
-                    mv "$src_md5" "$hidden" 2>/dev/null || true
-                else
-                    sudo mv "$src_md5" "$hidden" 2>/dev/null || true
-                fi
-            fi
-
-            egencache_cmd=($NUMACTL "$EGENCACHE" --config-root "$eg_config_root" --repositories-configuration "$repos_conf")
-            { time "${egencache_cmd[@]}" --update --repo "$REPO_NAME" \
-                --jobs="$jobs" \
-                --cache-dir "$out_dir" --external-cache-only \
-                >"$log" 2>&1; } 2>"$tf" || true
-            rm -rf "$eg_config_root"
-
-            # restore the source md5-cache (if we hid one) so we leave the
-            # caller's tree in the same state we found it.
-            if [[ -n "$eg_bak_dir" && -d "$eg_bak_dir/md5-cache" ]]; then
-                local hidden="$eg_bak_dir/md5-cache"
-                if [[ -w "$(dirname "$src_md5")" ]]; then
-                    mv "$hidden" "$src_md5" 2>/dev/null || true
-                else
-                    sudo mv "$hidden" "$src_md5" 2>/dev/null || true
-                fi
-                rm -rf "$eg_bak_dir" || true
-            elif [[ -n "$eg_bak_dir" ]]; then
-                rm -rf "$eg_bak_dir" || true
-            fi
             ;;
         pk)
             { time $NUMACTL "$PK" repo metadata regen -j "$jobs" -p "$out_dir" -f -n "$REPO" \
