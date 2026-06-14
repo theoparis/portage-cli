@@ -1,0 +1,36 @@
+== package-set parity (em -p vs emerge -p)
+   dev-qt/qtbase                            emerge=42   em=42   diffs=0
+   app-text/texlive-core                    emerge=64   em=63   diffs=3
+   www-client/firefox                       emerge=79   em=79   diffs=0
+   dev-qt/qtwebengine                       emerge=82   em=82   diffs=0
+   mail-client/thunderbird                  emerge=82   em=82   diffs=0
+   app-office/libreoffice                   emerge=141  em=141  diffs=0
+   app-emulation/qemu                       emerge=2    em=2    diffs=0
+   cross-riscv64-unknown-elf/gcc            emerge=1    em=1    diffs=0
+== multi-target set (informational: cascade-tail divergence expected)
+   emerge=184 em=187
+   > dev-libs/wayland-1.25.0-r1
+   > dev-libs/wayland-protocols-1.49
+   > dev-util/wayland-scanner-1.25.0
+== timing (hyperfine, 5 runs)
+Benchmark 1: target/release/em -p www-client/firefox
+  Time (mean ± σ):      1.003 s ±  0.155 s    [User: 1.912 s, System: 9.491 s]
+Benchmark 2: emerge -p www-client/firefox
+  Time (mean ± σ):      3.875 s ±  0.037 s    [User: 4.161 s, System: 0.252 s]
+    3.86 ± 0.60 times faster than emerge -p www-client/firefox
+Benchmark 1: target/release/em -p app-office/libreoffice
+  Time (mean ± σ):      1.180 s ±  0.158 s    [User: 1.985 s, System: 12.413 s]
+Benchmark 2: emerge -p app-office/libreoffice
+  Time (mean ± σ):      4.186 s ±  0.027 s    [User: 4.490 s, System: 0.249 s]
+    3.55 ± 0.47 times faster than emerge -p app-office/libreoffice
+Benchmark 1: target/release/em -p app-office/libreoffice dev-qt/qtwebengine mail-client/thunderbird app-emulation/qemu www-client/firefox
+  Time (mean ± σ):      1.028 s ±  0.123 s    [User: 1.974 s, System: 2.915 s]
+Benchmark 2: emerge -p app-office/libreoffice dev-qt/qtwebengine mail-client/thunderbird app-emulation/qemu www-client/firefox
+  Time (mean ± σ):      5.015 s ±  0.118 s    [User: 5.300 s, System: 0.255 s]
+    4.88 ± 0.60 times faster than emerge -p app-office/libreoffice dev-qt/qtwebengine mail-client/thunderbird app-emulation/qemu www-client/firefox
+Benchmark 1: target/release/em -s gcc
+  Time (mean ± σ):     100.3 ms ±  34.9 ms    [User: 46.8 ms, System: 40.9 ms]
+Benchmark 2: emerge -s gcc
+  Time (mean ± σ):      5.199 s ±  0.006 s    [User: 4.477 s, System: 0.972 s]
+   51.83 ± 18.04 times faster than emerge -s gcc
+RESULT: parity FAILED

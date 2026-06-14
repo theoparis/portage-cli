@@ -89,6 +89,12 @@ cargo bench --no-default-features --features lasso
 - [portage-atom-pubgrub](https://github.com/lu-zero/portage-atom-pubgrub) — PubGrub solver bridge
 - [pkgcraft](https://github.com/pkgcraft/pkgcraft) — baseline comparison library
 
+## Data & Blogpost Material
+
+See [`BENCHMARKS.md`](./BENCHMARKS.md) for a consolidated collection of all tables, raw data from historical runs, descriptions of every benchmark, and up-to-date reproduction instructions tailored to this workspace.
+
+**Per-machine info**: Hardware details, NUMA, characterization commands, and notes live in `machines/` (one `.md` per machine, e.g. `machines/thalia.md`, `machines/mneme.md`). Always link the relevant machine file when publishing results for reproducibility.
+
 ## License
 
 [MIT](LICENSE-MIT)

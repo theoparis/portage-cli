@@ -20,8 +20,7 @@ This document explains how to benchmark the `em regen` command for the Gentoo Po
 
 4. **Built Tools**:
    ```bash
-   cd /Users/lu_zero/Sources/rust/portage-cli
-   cargo build --release
+   cargo build --release -p portage-cli  # or from portage-cli root: cargo build --release
    ```
 
 ---
@@ -69,23 +68,14 @@ done
 To compare two brush versions (e.g., baseline vs. PR #1156):
 
 ```bash
-# Switch to baseline branch
-cd /Users/lu_zero/Sources/rust/brush
-git checkout for-portage-repo
+# Example (adjust paths and branches to your setup):
+# cd /path/to/brush
+# git checkout for-portage-repo
+# cd /path/to/portage-cli
+# cargo build --release
+# hyperfine --warmup 2 --runs 5 './target/release/em --repo /path/to/gentoo regen -o /tmp/regen-baseline -j 6'
 
-# Rebuild and benchmark
-cd /Users/lu_zero/Sources/rust/portage-cli
-cargo build --release
-hyperfine --warmup 2 --runs 5 './target/release/em --repo /path/to/gentoo regen -o /tmp/regen-baseline -j 6'
-
-# Switch to PR #1156 branch
-cd /Users/lu_zero/Sources/rust/brush
-git checkout for-portage-repo-flat+1156
-
-# Rebuild and benchmark
-cd /Users/lu_zero/Sources/rust/portage-cli
-cargo build --release
-hyperfine --warmup 2 --runs 5 './target/release/em --repo /path/to/gentoo regen -o /tmp/regen-1156 -j 6'
+# ... similarly for the other branch
 
 # Verify both produce identical caches
 find /tmp/regen-baseline -type f -exec md5 -q {} \; | sort | md5

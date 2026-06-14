@@ -1,9 +1,17 @@
 # portage-bench Memory
 
-## Hardware
+**Note**: Historical results below are from the Apple M2 Max machine (see `machines/mneme.md` for details + prep for future runs).
+
+**Fresh M2 Max benchmarks will be run later** (user note: "we'll run the benchmarks on the m2 later"). Until then, these tables represent prior M2 data.
+
+New/fresh numbers on thalia (AmpereOne) or elsewhere: see `machines/thalia.md` and `BENCHMARKS.md` (Machines section). Old laptop numbers are not directly comparable to server-class NUMA hardware.
+
+## Hardware (historical M2 Max)
 
 All benchmark results below are from an **Apple M2 Max** (12 cores), rustc 1.95.0.
 Gentoo tree: shallow clone (~31919 ebuilds).
+
+See `machines/mneme.md` for more.
 
 ## Why papaya as default interner
 

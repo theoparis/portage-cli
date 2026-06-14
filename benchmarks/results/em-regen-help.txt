@@ -1,0 +1,33 @@
+Regenerate metadata cache
+
+Usage: em regen [OPTIONS] [REPOS]...
+
+Arguments:
+  [REPOS]...  
+
+Options:
+      --color <WHEN>        Controls when to use color [default: auto] [possible values: auto,
+                            always, never]
+  -o, --output <DIR>        Write cache files to this directory instead of metadata/md5-cache
+      --repos-dir <DIR>     Directory containing master repositories
+  -j, --jobs <JOBS>         Number of parallel workers
+      --dedup               Deduplicate top-level dep tokens before writing
+  -v, --verbose...          
+  -q, --quiet               
+      --prefix <DIR>        Unprivileged offset: merge ROOT, the VDB, distfiles and build trees all
+                            live under DIR. Configuration (profile, make.conf) still comes from the
+                            host; use --root for a full config offset
+      --setup               Bootstrap the prefix layout before building: skeleton directories, a
+                            `bashrc` overlay search-path recipe, and a commented `make.conf`. Use
+                            with `--local` (`~/.gentoo`) or `--prefix DIR`. Safe to re-run (never
+                            clobbers existing files). With no atoms it just sets up and exits
+      --local               Unprivileged in-place install into a Gentoo-Prefix at `~/.gentoo`
+                            (`EPREFIX=~/.gentoo`): packages are configured for and installed to
+                            `~/.gentoo/usr/...`, usable in place (add `~/.gentoo/usr/bin` to PATH).
+                            Profile/make.conf come from the host; `~/.gentoo/etc/portage` overlays
+                            `package.use`/`bashrc` (see `--setup`). Full XDG layout is issue #2
+      --root <PATH>         Installation root (the offset all applets install into / query) [env:
+                            ROOT=]
+      --config-root <PATH>  Read config (profile, make.conf) from this root instead of `--root`
+      --vdb <PATH>          Override VDB path (default: $ROOT/var/db/pkg)
+  -h, --help                Print help
