@@ -11,7 +11,7 @@
 //! matching `do*` builtin here, so there is a single install path. The pure
 //! destination-state setters (`into`/`insinto`/…) also stay in bash.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -884,6 +884,224 @@ impl builtins::Command for FownersCommand {
                 ok_status(st, "chown", &path).map_err(|e| format!("fowners: {e}"))?;
             }
             Ok(())
+        })
+        .await)
+    }
+}
+
+// ---- new* helpers ----
+
+/// Which `new*` helper is running. Each mirrors its `do*` sibling's destination
+/// tree and install mode; the only `new*`-specific behaviour is staging the
+/// source under the requested name (and reading stdin when the source is `-`).
+///
+/// See [PMS 12.3.4](https://projects.gentoo.org/pms/9/pms.html#available-commands).
+enum NewKind {
+    Bin,
+    Sbin,
+    Ins,
+    Exe,
+    Doc,
+    Man,
+    Header,
+    LibA,
+    LibSo,
+    Initd,
+    Confd,
+    Envd,
+}
+
+impl NewKind {
+    /// Map a registered builtin name to its kind.
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "newbin" => Self::Bin,
+            "newsbin" => Self::Sbin,
+            "newins" => Self::Ins,
+            "newexe" => Self::Exe,
+            "newdoc" => Self::Doc,
+            "newman" => Self::Man,
+            "newheader" => Self::Header,
+            "newlib.a" => Self::LibA,
+            "newlib.so" => Self::LibSo,
+            "newinitd" => Self::Initd,
+            "newconfd" => Self::Confd,
+            "newenvd" => Self::Envd,
+            _ => return None,
+        })
+    }
+
+    /// `(dest_dir, install_opts)` for this helper, computed from the shell env.
+    /// `name` is the target filename — only `newman` inspects it (for the
+    /// section, which it takes from the *name* since the source may be stdin).
+    fn target<SE: brush_core::ShellExtensions>(
+        &self,
+        shell: &brush_core::Shell<SE>,
+        name: &str,
+    ) -> (PathBuf, Vec<String>) {
+        let ed = ed(shell);
+        let into = var(shell, "_into_dir", "/usr");
+        match self {
+            Self::Bin => (under_ed(&ed, &format!("{into}/bin")), vec!["-m0755".into()]),
+            Self::Sbin => (
+                under_ed(&ed, &format!("{into}/sbin")),
+                vec!["-m0755".into()],
+            ),
+            Self::Ins => (
+                under_ed(&ed, &var(shell, "INSDESTTREE", "")),
+                opts_var(shell, "_insopts", "-m0644"),
+            ),
+            Self::Exe => (
+                under_ed(&ed, &var(shell, "EXEDESTTREE", "")),
+                opts_var(shell, "_exeopts", "-m0755"),
+            ),
+            Self::Doc => {
+                let pf = var(shell, "PF", "");
+                let dd = var(shell, "DOCDESTTREE", "");
+                let sub = if dd.is_empty() {
+                    format!("usr/share/doc/{pf}")
+                } else {
+                    format!("usr/share/doc/{pf}/{dd}")
+                };
+                (under_ed(&ed, &sub), vec!["-m0644".into()])
+            }
+            Self::Man => {
+                let ext = Path::new(name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or("");
+                (
+                    under_ed(&ed, &format!("usr/share/man/man{ext}")),
+                    vec!["-m0644".into()],
+                )
+            }
+            Self::Header => (under_ed(&ed, "usr/include"), vec!["-m0644".into()]),
+            Self::LibA => {
+                let libdir = get_libdir(shell);
+                (
+                    under_ed(&ed, &format!("{into}/{libdir}")),
+                    vec!["-m0644".into()],
+                )
+            }
+            Self::LibSo => {
+                let libdir = get_libdir(shell);
+                (
+                    under_ed(&ed, &format!("{into}/{libdir}")),
+                    vec!["-m0755".into()],
+                )
+            }
+            Self::Initd => (under_ed(&ed, "etc/init.d"), vec!["-m0755".into()]),
+            Self::Confd => (under_ed(&ed, "etc/conf.d"), vec!["-m0644".into()]),
+            Self::Envd => (under_ed(&ed, "etc/env.d"), vec!["-m0644".into()]),
+        }
+    }
+}
+
+/// Split a whitespace-separated options var (`_insopts`/`_exeopts`) into args,
+/// falling back to `default` when unset/empty.
+fn opts_var<SE: brush_core::ShellExtensions>(
+    shell: &brush_core::Shell<SE>,
+    name: &str,
+    default: &str,
+) -> Vec<String> {
+    var(shell, name, default)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Shared `new* <src> <name>` parser (PMS 12.3.4). A single type is registered
+/// under every `new*` name; [`builtins::Command::execute`] dispatches on
+/// `context.command_name`. A literal `-` source reads the content from stdin
+/// (PMS 12.3.x), staged under `${T}` before install so the file lands under the
+/// requested name — e.g. `acct-group.eclass`'s `newins - foo.conf < <(…)`.
+#[derive(Parser)]
+pub(crate) struct NewCommand {
+    #[arg(allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
+impl builtins::Command for NewCommand {
+    type State = ();
+    type SharedState = ();
+    type Error = brush_core::Error;
+
+    async fn execute<SE: brush_core::ShellExtensions>(
+        &self,
+        context: brush_core::ExecutionContext<'_, SE>,
+    ) -> Result<brush_core::ExecutionResult, Self::Error> {
+        let helper = context.command_name.clone();
+        let Some(kind) = NewKind::from_name(&helper) else {
+            return Ok(raise_die(&context, &format!("{helper}: not a new* helper")));
+        };
+        if self.args.len() != 2 {
+            return Ok(raise_die(
+                &context,
+                &format!("{helper}: exactly two arguments required"),
+            ));
+        }
+        let name = self.args[1].clone();
+
+        // For newman the section comes from the *name* (the source may be
+        // stdin and have no extension); validate it before any I/O, matching
+        // doman's error.
+        if matches!(kind, NewKind::Man)
+            && Path::new(&name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .filter(|e| !e.is_empty())
+                .is_none()
+        {
+            return Ok(raise_die(
+                &context,
+                &format!("newman: cannot determine man section for {name}"),
+            ));
+        }
+
+        let env = super::context_env(&context);
+        let (dest, opts) = kind.target(context.shell, &name);
+        let cwd = context.shell.working_dir().to_path_buf();
+        let t = var(context.shell, "T", "");
+        let t_dir = if t.is_empty() {
+            std::env::temp_dir()
+        } else {
+            PathBuf::from(t)
+        };
+        let src = self.args[0].clone();
+
+        // `-` = stdin: read it now (new* payloads are small — configs/scripts)
+        // and stage under ${T}, so the blocking install closure has a plain
+        // file to hand to install(1). Mirrors the old bash `cat > "${T}/$2"`.
+        let stdin_buf: Option<Vec<u8>> = if src == "-" {
+            let mut buf = Vec::new();
+            match context.stdin().read_to_end(&mut buf) {
+                Ok(_) => Some(buf),
+                Err(e) => {
+                    return Ok(raise_die(
+                        &context,
+                        &format!("{helper}: failed to read stdin: {e}"),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(run_blocking(&context, move || {
+            mkdir_p(&dest).map_err(|e| format!("{helper}: {e}"))?;
+            let target = dest.join(&name);
+            if let Some(buf) = stdin_buf {
+                let stage = t_dir.join(format!(".{name}.new-src"));
+                let r = std::fs::write(&stage, buf).and_then(|()| {
+                    install_file(&env, &opts, &stage, &target).map_err(std::io::Error::other)
+                });
+                let _ = std::fs::remove_file(&stage);
+                r.map_err(|e| format!("{helper}: {e}"))
+            } else {
+                install_file(&env, &opts, &cwd.join(&src), &target)
+                    .map_err(|e| format!("{helper}: {e}"))
+            }
         })
         .await)
     }

@@ -32,7 +32,7 @@ pub(crate) use has::{HasCommand, HasvCommand, InIuseCommand};
 pub(crate) use install::{
     DobinCommand, DodirCommand, DodocCommand, DoexeCommand, DoheaderCommand, DoinfoCommand,
     DoinsCommand, DolibCommand, DolibaCommand, DolibsoCommand, DomanCommand, DomoCommand,
-    DosbinCommand, DosymCommand, FownersCommand, FpermsCommand, KeepdirCommand,
+    DosbinCommand, DosymCommand, FownersCommand, FpermsCommand, KeepdirCommand, NewCommand,
 };
 pub(crate) use install_paths::{DocompressCommand, DostripCommand};
 pub(crate) use output::{EbeginCommand, EchoMessageCommand, EendCommand};

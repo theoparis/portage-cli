@@ -276,43 +276,13 @@ insopts() { _insopts="$*"; }
 exeopts() { _exeopts="$*"; }
 
 # The do* install helpers (dodir keepdir doins doexe dobin dosbin dodoc doheader
-# doinfo doman domo dolib dolib.a dolib.so dosym fperms fowners) are Rust
-# builtins — see commands/install.rs.  They are registered on the shell and the
-# metadata stubs unset in init_build_env so the builtins win.  The new* helpers
-# below stay in bash: each stages its source as ${T}/$2 (via __new_stage, which
-# handles the `-` = stdin convention) then defers to the matching do* builtin.
-
-# Resolve a new*-helper source ($1) for target name ($2): a literal `-` means
-# read the content from stdin (PMS 12.3.x), staged at ${T}/$2. Result in REPLY.
-# Used so e.g. acct-group.eclass's `newins - foo.conf < <(...)` works.
-__new_src() {
-    if [[ $1 == - ]]; then
-        cat > "${T}/$2" || die "${FUNCNAME[1]:-new}: failed to read stdin for $2"
-        REPLY="${T}/$2"
-    else
-        REPLY=$1
-    fi
-}
-
-# Stage a new*-helper source ($1) as ${T}/$2 so the do* builtin (which installs
-# using the basename) writes it under the requested name.
-__new_stage() {
-    __new_src "$1" "$2"
-    [[ ${REPLY} == "${T}/$2" ]] || cp "${REPLY}" "${T}/$2" \
-        || die "${FUNCNAME[1]:-new}: failed to stage $1"
-}
-
-newbin()  { [[ $# -eq 2 ]] || die "newbin: exactly two arguments required";  __new_stage "$1" "$2"; dobin  "${T}/$2"; }
-newsbin() { [[ $# -eq 2 ]] || die "newsbin: exactly two arguments required"; __new_stage "$1" "$2"; dosbin "${T}/$2"; }
-
-newins()    { [[ $# -eq 2 ]] || die "newins: exactly two arguments required";    __new_stage "$1" "$2"; doins    "${T}/$2"; }
-newexe()    { [[ $# -eq 2 ]] || die "newexe: exactly two arguments required";    __new_stage "$1" "$2"; doexe    "${T}/$2"; }
-newlib.a()  { [[ $# -eq 2 ]] || die "newlib.a: exactly two arguments required";  __new_stage "$1" "$2"; dolib.a  "${T}/$2"; }
-newlib.so() { [[ $# -eq 2 ]] || die "newlib.so: exactly two arguments required"; __new_stage "$1" "$2"; dolib.so "${T}/$2"; }
-
-newdoc()    { [[ $# -eq 2 ]] || die "newdoc: exactly two arguments required";    __new_stage "$1" "$2"; dodoc    "${T}/$2"; }
-newman()    { [[ $# -eq 2 ]] || die "newman: exactly two arguments required";    __new_stage "$1" "$2"; doman    "${T}/$2"; }
-newheader() { [[ $# -eq 2 ]] || die "newheader: exactly two arguments required"; __new_stage "$1" "$2"; doheader "${T}/$2"; }
+# doinfo doman domo dolib dolib.a dolib.so dosym fperms fowners) and the new*
+# helpers (newbin newsbin newins newexe newdoc newman newheader newlib.a
+# newlib.so newinitd newconfd newenvd) are Rust builtins — see
+# commands/install.rs.  They are registered on the shell and the metadata stubs
+# unset in init_build_env so the builtins win.  new* reads stdin when its source
+# arg is `-`.  The pure destination-state setters and the doinitd/doconfd/doenvd
+# do* wrappers (which set insinto then call doins) stay in bash for now.
 
 doinitd() {
     [[ $# -gt 0 ]] || die "doinitd: at least one argument required"
@@ -332,29 +302,6 @@ doenvd() {
     [[ $# -gt 0 ]] || die "doenvd: at least one argument required"
     insinto /etc/env.d
     doins "$@"
-}
-
-# new* variants: stage the source under ${T} as the requested name, then defer
-# to the matching do* helper (portage does the same via __helpers_die wrappers).
-newinitd() {
-    [[ $# -eq 2 ]] || die "newinitd: exactly two arguments required"
-    __new_src "$1" "$2"
-    [[ ${REPLY} == "${T}/$2" ]] || cp "${REPLY}" "${T}/$2" || die "newinitd: failed to stage $1"
-    doinitd "${T}/$2"
-}
-
-newconfd() {
-    [[ $# -eq 2 ]] || die "newconfd: exactly two arguments required"
-    __new_src "$1" "$2"
-    [[ ${REPLY} == "${T}/$2" ]] || cp "${REPLY}" "${T}/$2" || die "newconfd: failed to stage $1"
-    doconfd "${T}/$2"
-}
-
-newenvd() {
-    [[ $# -eq 2 ]] || die "newenvd: exactly two arguments required"
-    __new_src "$1" "$2"
-    [[ ${REPLY} == "${T}/$2" ]] || cp "${REPLY}" "${T}/$2" || die "newenvd: failed to stage $1"
-    doenvd "${T}/$2"
 }
 
 edo() {
@@ -615,9 +562,8 @@ impl EbuildShell {
         );
 
         // Install helpers migrated from bash (INSTALL_HELPERS) to Rust builtins
-        // (clap arg parsing, ${ED}/dest-tree aware). The do* doers live here;
-        // new* stay in INSTALL_HELPERS as thin wrappers that stage ${T}/$2 and
-        // call the matching do* builtin, so there is one install path.
+        // (clap arg parsing, ${ED}/dest-tree aware). The do* doers and the new*
+        // variants both live here; new* reads stdin when its source arg is `-`.
         macro_rules! register_install {
             ($($name:literal => $ty:ident),+ $(,)?) => {$(
                 shell.register_builtin(
@@ -644,6 +590,20 @@ impl EbuildShell {
             "dosym" => DosymCommand,
             "fperms" => FpermsCommand,
             "fowners" => FownersCommand,
+            // One NewCommand type is registered under every new* name; it
+            // dispatches on context.command_name.
+            "newbin" => NewCommand,
+            "newsbin" => NewCommand,
+            "newins" => NewCommand,
+            "newexe" => NewCommand,
+            "newdoc" => NewCommand,
+            "newman" => NewCommand,
+            "newheader" => NewCommand,
+            "newlib.a" => NewCommand,
+            "newlib.so" => NewCommand,
+            "newinitd" => NewCommand,
+            "newconfd" => NewCommand,
+            "newenvd" => NewCommand,
         }
 
         // Register P4 unpack builtin.
@@ -1116,7 +1076,8 @@ impl EbuildShell {
         // Unsetting them lets the Rust builtin registry take over during build.
         self.run_string(
             "unset -f econf emake einstall unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal has_version best_version docompress dostrip \
-             dodir keepdir doins doexe dobin dosbin dodoc doheader doinfo doman domo dolib dolib.a dolib.so dosym fperms fowners",
+             dodir keepdir doins doexe dobin dosbin dodoc doheader doinfo doman domo dolib dolib.a dolib.so dosym fperms fowners \
+             newbin newsbin newins newexe newdoc newman newheader newlib.a newlib.so newinitd newconfd newenvd",
         )
         .await
         .ok();
@@ -2147,7 +2108,8 @@ cache-formats = md5-dict
             .run_string(&format!(
                 "{INSTALL_HELPERS}\n\
                  unset -f dodir keepdir doins doexe dobin dosbin dodoc doheader \
-                          doinfo doman domo dolib dolib.a dolib.so dosym fperms fowners; \
+                          doinfo doman domo dolib dolib.a dolib.so dosym fperms fowners \
+                          newbin newsbin newins newexe newdoc newman newheader newlib.a newlib.so newinitd newconfd newenvd; \
                  export D={d} ED={d} T={t} CATEGORY=cat PN=pkg SLOT=0 PF=pkg-1; \
                  into /usr/local; dobin {src}/myprog; \
                  [[ ${{DESTTREE}} == /usr/local ]] || die 'into did not set DESTTREE'; \
@@ -2168,6 +2130,51 @@ cache-formats = md5-dict
         assert!(d.join("etc/conf.d/renamed.conf").exists(), "newconfd");
         assert!(d.join("etc/env.d/foo.envd").exists(), "doenvd");
         assert!(d.join("etc/init.d/svc").exists(), "newinitd");
+    }
+
+    #[tokio::test]
+    async fn new_helpers_read_stdin_for_dash_source() {
+        // `newins - <name>` (and every new* with `-`) reads the file body from
+        // stdin — e.g. acct-group.eclass's `newins - foo.conf < <(…)`. Here a
+        // here-string feeds the builtin's stdin; the content must land under the
+        // requested name. newman additionally derives the section from the name.
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+        std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+        std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+        std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+        let d = dir.path().join("image");
+        let t = dir.path().join("temp");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::create_dir_all(&t).unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        shell
+            .run_string(&format!(
+                "{INSTALL_HELPERS}\n\
+                 unset -f newbin newsbin newins newexe newdoc newman newheader \
+                          newlib.a newlib.so newinitd newconfd newenvd; \
+                 export D={d} ED={d} T={t} CATEGORY=cat PN=pkg SLOT=0 PF=pkg-1; \
+                 newins - etc.conf <<< 'KEY=value'; \
+                 newman - app.1 <<< '.TH app 1'",
+                d = d.display(),
+                t = t.display(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(d.join("etc.conf")).unwrap(),
+            "KEY=value\n",
+            "newins - reads stdin into the named file"
+        );
+        assert!(
+            d.join("usr/share/man/man1/app.1").exists(),
+            "newman - derives the section from the name"
+        );
     }
 
     #[tokio::test]
