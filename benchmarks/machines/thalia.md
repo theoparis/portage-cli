@@ -148,7 +148,9 @@ Main test tree `portage-repo/gentoo/metadata/md5-cache` remained untouched throu
 
 ### Cache Regen Comparative (from compare-regen.sh, post --cache-dir full-fix)
 
-All runs used `NUMACTL` binding (node 0, 32c) via the script for apples-to-apples on 4-NUMA thalia; full tree exhaustive for *all three* tools (31880 files).
+**Important**: The tables below were captured *before* the source-cache hide logic was added to the egencache leg of the script. They reflect "warm" source cache runs for eg (fast copy, ~8s) even though file counts were full. See the notes above for the *correct* cold sourcing datapoint (~4m37s real at j=20 for the std full path after rm, or equivalent via the updated script).
+
+All runs used `NUMACTL` binding (node 0, 32c) via the script for apples-to-apples on 4-NUMA thalia; file counts were made full for eg via earlier patches. With the hide logic now in place, subsequent INCLUDE_EGENCACHE runs will produce the slow full-cold sourcing timings for the eg leg (temporarily clearing source pregen cache for that leg only).
 
 j=8 (1 iter):
 
@@ -190,7 +192,26 @@ j=32 (1 iter):
 | egencache | 32| 1   | 0m8.393s  | 0m5.107s  | 0m2.075s  |
 | pk        | 32| 1   | 0m17.963s | 5m16.770s | 0m47.683s |
 
-**Notes on egencache --cache-dir now producing expected full results** (user: "sudo rm ... && time sudo egencache -j20 --repo gentoo --update produces the expected results. egencache --cache-dir isn't really working as intended."):
+**Notes on egencache --cache-dir + the "correct" full cold datapoint** (user: "sudo rm ... && time sudo egencache -j20 --repo gentoo --update produces the expected results. egencache --cache-dir isn't really working as intended."):
+
+The *correct* full cold egencache timing (the one after clearing the *source* live cache so that a true regen happens) is:
+
+```
+time sudo egencache -j 20 --repo gentoo --update
+real    4m37.251s
+user    0m0.006s
+sys     0m0.000s
+```
+
+(Note the tiny user/sys: the launcher mostly waits; the real time is the makespan of the -j workers doing the actual ebuild sourcing. Total CPU time across workers is much higher.)
+
+Previous "fast" egencache numbers in early tables (~7-8s) from the compare script were *not* full cold sourcing apples-to-apples:
+- With a pre-existing repo md5-cache, the --cache-dir --external path mostly did cache hits in _pull_valid_cache + cheap copies/writes to the target dir (fast "export" of the already-computed metadata). File count could be made full with the earlier cps/categories patches, but the *work* (expensive sourcing) was skipped.
+- The std path + explicit rm of the source cache forces the slow path (full EbuildMetadataPhases for ~31.8k ebuilds).
+
+To make future `compare-regen.sh ... INCLUDE_EGENCACHE=1` runs produce the *correct* (slow, full cold sourcing) numbers for eg too, the script now temporarily hides `$REPO/metadata/md5-cache` (mv, sudo only if needed) around the eg leg and restores after. This eliminates the short-circuit for that measurement while leaving the caller's tree state unchanged. (The hide/restore only affects the eg legs; em and pk always perform full sourcing regardless.)
+
+Thus the "correct" comparative picture (full cold exhaustive work for all three) will show egencache significantly slower than em for this workload.
 
 The root causes were in how the benchmark drove the (patched) egencache for isolation:
 - The invocation prefixed a non-ini `PORTAGE_REPOSITORIES=gentoo=$REPO` (fed as the entire repos.conf content via StringIO) which often caused repo registration to fail or partially fallback, affecting tree and/or categories.

@@ -66,7 +66,9 @@ All comparisons executed via the bash scripts that live in the crates (`portage-
 | egencache | 8 | 1   | 0m7.894s  | 0m5.222s  | 0m1.956s  | Patched (3.0.79) + --cache-dir --external-cache-only (now full 31880 too) |
 | pk        | 8 | 1   | 0m48.263s | 5m25.512s | 1m7.887s  | pkgcraft (NUMA0) |
 
-All three now produce matching full file counts (31880) after fixes to egencache patch (categories force on external) + compare script (proper --repositories-configuration, synthetic full profile with categories file, NUMACTL). See thalia.md for complete j=8/16/20/24/32 tables + explanation of why --cache-dir previously gave partial results while "sudo rm live && egencache --update" gave expected full.
+All three now produce matching full file counts (31880) after fixes to egencache patch (categories force on external) + compare script (proper --repositories-configuration, synthetic full profile with categories file, NUMACTL + *source md5-cache hide/restore during eg legs*).
+
+**Critical for apples-to-apples**: the "fast" egencache times (~8s) were warm-cache copies (source md5-cache hits, cheap export to --cache-dir). The correct full *cold sourcing* datapoint for egencache (after clearing source cache, as in "sudo rm ... && egencache --update") is ~4m37s real at j=20 (launcher user/sys ~0; wall time for the parallel sourcing workers). The updated compare script now hides the source cache during eg legs (restore after) so that INCLUDE_EGENCACHE runs will report the true expensive full-cold numbers for eg too. See thalia.md for the exact user-provided 4m37s datapoint + explanation + (warm) historical numbers.
 
 Repro: `GENTOO_REPO=/var/db/repos/gentoo EM=target/release/em PK=../pkgcraft/target/release/pk INCLUDE_EGENCACHE=1 ITERATIONS=1 ./benchmarks/scripts/compare-regen.sh 8 16 20 24 32`
 

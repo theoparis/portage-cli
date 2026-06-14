@@ -12,6 +12,12 @@
 # write into isolated tempdirs.  egencache is invoked via the patched
 # portage-3.0.79 source (if present) using --cache-dir + --external-cache-only
 # so it also writes to an isolated flat dir (no live repo pollution).
+# For egencache, to ensure *true full cold sourcing work* (not fast
+# short-circuit copy from an existing repo md5-cache via _pull_valid_cache),
+# the script temporarily hides $REPO/metadata/md5-cache (with sudo only
+# if the tree isn't user-writable) during the eg leg and restores after.
+# This makes its timing comparable to "sudo rm ... && egencache --update"
+# (the slow "correct" full datapoint) and to em/pk (which always source).
 # INCLUDE_EGENCACHE=1 to include it.
 #
 # Usage: compare-regen.sh [jobs...]   (default: 24)
@@ -129,6 +135,9 @@ run_one() {
     local tf
     tf=$(mktemp)
 
+    # Only the egencache leg needs these (see below).
+    local src_md5="" eg_bak_dir=""
+
     case "$tool" in
         em)
             # Current CLI syntax: positional repo path (not --repo).
@@ -177,12 +186,57 @@ main-repo = ${REPO_NAME}
 [${REPO_NAME}]
 location = ${REPO}
 "
+
+            # --- force cold source cache for true full-work timing ---
+            # If the repo already has a metadata/md5-cache (pregen auxdb), the
+            # regen short-circuits via portdb._pull_valid_cache for most/all
+            # cpvs and just copies metadata to the --cache-dir (very fast
+            # "export", ~8s on thalia even at modest -j). This is *not* the
+            # full cold sourcing work.
+            #
+            # The "correct" full egencache datapoint (the one that "produces
+            # the expected results") is the slow one after clearing the *source*
+            # cache: ~4m37s real at -j20 (wall time for the parallel jobs to
+            # source everything; launcher user/sys near 0).
+            #
+            # To make the compare script give apples-to-apples *full cold
+            # exhaustive sourcing cost* for egencache (matching what em and pk
+            # always do, and matching "sudo rm && egencache --update"), we
+            # temporarily move the source md5-cache aside here (sudo only if
+            # necessary). Restore immediately after so the live/main tree is
+            # not left cleared (see AGENTS and prior notes about not clobbering
+            # the main test tree cache).
+            src_md5="$REPO/metadata/md5-cache"
+            if [[ -d "$src_md5" ]]; then
+                eg_bak_dir=$(mktemp -d "$WORK/eg-md5-bak.XXXXXX")
+                local hidden="$eg_bak_dir/md5-cache"
+                if [[ -w "$(dirname "$src_md5")" ]]; then
+                    mv "$src_md5" "$hidden" 2>/dev/null || true
+                else
+                    sudo mv "$src_md5" "$hidden" 2>/dev/null || true
+                fi
+            fi
+
             egencache_cmd=($NUMACTL "$EGENCACHE" --config-root "$eg_config_root" --repositories-configuration "$repos_conf")
             { time "${egencache_cmd[@]}" --update --repo "$REPO_NAME" \
                 --jobs="$jobs" \
                 --cache-dir "$out_dir" --external-cache-only \
                 >"$log" 2>&1; } 2>"$tf" || true
             rm -rf "$eg_config_root"
+
+            # restore the source md5-cache (if we hid one) so we leave the
+            # caller's tree in the same state we found it.
+            if [[ -n "$eg_bak_dir" && -d "$eg_bak_dir/md5-cache" ]]; then
+                local hidden="$eg_bak_dir/md5-cache"
+                if [[ -w "$(dirname "$src_md5")" ]]; then
+                    mv "$hidden" "$src_md5" 2>/dev/null || true
+                else
+                    sudo mv "$hidden" "$src_md5" 2>/dev/null || true
+                fi
+                rm -rf "$eg_bak_dir" || true
+            elif [[ -n "$eg_bak_dir" ]]; then
+                rm -rf "$eg_bak_dir" || true
+            fi
             ;;
         pk)
             { time $NUMACTL "$PK" repo metadata regen -j "$jobs" -p "$out_dir" -f -n "$REPO" \
