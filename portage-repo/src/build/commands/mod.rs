@@ -29,7 +29,11 @@ pub(crate) use einstall::EinstallCommand;
 pub(crate) use emake::EmakeCommand;
 pub(crate) use export_functions::ExportFunctionsCommand;
 pub(crate) use has::{HasCommand, HasvCommand, InIuseCommand};
-pub(crate) use install::DoinsCommand;
+pub(crate) use install::{
+    DobinCommand, DodirCommand, DodocCommand, DoexeCommand, DoheaderCommand, DoinfoCommand,
+    DoinsCommand, DolibCommand, DolibaCommand, DolibsoCommand, DomanCommand, DomoCommand,
+    DosbinCommand, DosymCommand, FownersCommand, FpermsCommand, KeepdirCommand,
+};
 pub(crate) use install_paths::{DocompressCommand, DostripCommand};
 pub(crate) use output::{EbeginCommand, EchoMessageCommand, EendCommand};
 pub(crate) use phase_funcs::{EAPI_PREDICATE_NAMES, EapiPredicateCommand, EbuildPhaseFuncsCommand};
@@ -45,11 +49,17 @@ pub(crate) fn context_stdio<SE: brush_core::ShellExtensions>(
     use brush_core::openfiles::{OpenFile, OpenFiles};
     let stdout = match context.try_fd(OpenFiles::STDOUT_FD) {
         Some(OpenFile::Stdout(_)) | None => std::process::Stdio::inherit(),
-        Some(f) => f.into(),
+        // brush dup's the descriptor (handles are Arc-shared, so not movable);
+        // a dup failure falls back to inheriting the host fd.
+        Some(f) => f
+            .try_into()
+            .unwrap_or_else(|_| std::process::Stdio::inherit()),
     };
     let stderr = match context.try_fd(OpenFiles::STDERR_FD) {
         Some(OpenFile::Stderr(_)) | None => std::process::Stdio::inherit(),
-        Some(f) => f.into(),
+        Some(f) => f
+            .try_into()
+            .unwrap_or_else(|_| std::process::Stdio::inherit()),
     };
     (stdout, stderr)
 }

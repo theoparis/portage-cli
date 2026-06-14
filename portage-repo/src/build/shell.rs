@@ -275,30 +275,12 @@ docinto() { DOCDESTTREE="$1"; }
 insopts() { _insopts="$*"; }
 exeopts() { _exeopts="$*"; }
 
-dodir() {
-    local d
-    for d in "$@"; do
-        install -d "${ED%/}/${d#/}" || die "dodir: failed to create ${d}"
-    done
-}
-
-keepdir() {
-    dodir "$@"
-    local d
-    for d in "$@"; do
-        : > "${ED%/}/${d#/}/.keep_${CATEGORY}_${PN}-${SLOT//\//_}"
-    done
-}
-
-dobin() {
-    [[ $# -gt 0 ]] || die "dobin: at least one argument required"
-    dodir "${_into_dir}/bin"
-    local f
-    for f in "$@"; do
-        install -m0755 "${f}" "${ED%/}/${_into_dir#/}/bin/${f##*/}" \
-            || die "dobin: failed to install ${f}"
-    done
-}
+# The do* install helpers (dodir keepdir doins doexe dobin dosbin dodoc doheader
+# doinfo doman domo dolib dolib.a dolib.so dosym fperms fowners) are Rust
+# builtins — see commands/install.rs.  They are registered on the shell and the
+# metadata stubs unset in init_build_env so the builtins win.  The new* helpers
+# below stay in bash: each stages its source as ${T}/$2 (via __new_stage, which
+# handles the `-` = stdin convention) then defers to the matching do* builtin.
 
 # Resolve a new*-helper source ($1) for target name ($2): a literal `-` means
 # read the content from stdin (PMS 12.3.x), staged at ${T}/$2. Result in REPLY.
@@ -312,197 +294,25 @@ __new_src() {
     fi
 }
 
-newbin() {
-    [[ $# -eq 2 ]] || die "newbin: exactly two arguments required"
+# Stage a new*-helper source ($1) as ${T}/$2 so the do* builtin (which installs
+# using the basename) writes it under the requested name.
+__new_stage() {
     __new_src "$1" "$2"
-    dodir "${_into_dir}/bin"
-    install -m0755 "${REPLY}" "${ED%/}/${_into_dir#/}/bin/$2" \
-        || die "newbin: failed to install $1 as $2"
+    [[ ${REPLY} == "${T}/$2" ]] || cp "${REPLY}" "${T}/$2" \
+        || die "${FUNCNAME[1]:-new}: failed to stage $1"
 }
 
-dosbin() {
-    [[ $# -gt 0 ]] || die "dosbin: at least one argument required"
-    dodir "${_into_dir}/sbin"
-    local f
-    for f in "$@"; do
-        install -m0755 "${f}" "${ED%/}/${_into_dir#/}/sbin/${f##*/}" \
-            || die "dosbin: failed to install ${f}"
-    done
-}
+newbin()  { [[ $# -eq 2 ]] || die "newbin: exactly two arguments required";  __new_stage "$1" "$2"; dobin  "${T}/$2"; }
+newsbin() { [[ $# -eq 2 ]] || die "newsbin: exactly two arguments required"; __new_stage "$1" "$2"; dosbin "${T}/$2"; }
 
-newsbin() {
-    [[ $# -eq 2 ]] || die "newsbin: exactly two arguments required"
-    __new_src "$1" "$2"
-    dodir "${_into_dir}/sbin"
-    install -m0755 "${REPLY}" "${ED%/}/${_into_dir#/}/sbin/$2" \
-        || die "newsbin: failed to install $1 as $2"
-}
+newins()    { [[ $# -eq 2 ]] || die "newins: exactly two arguments required";    __new_stage "$1" "$2"; doins    "${T}/$2"; }
+newexe()    { [[ $# -eq 2 ]] || die "newexe: exactly two arguments required";    __new_stage "$1" "$2"; doexe    "${T}/$2"; }
+newlib.a()  { [[ $# -eq 2 ]] || die "newlib.a: exactly two arguments required";  __new_stage "$1" "$2"; dolib.a  "${T}/$2"; }
+newlib.so() { [[ $# -eq 2 ]] || die "newlib.so: exactly two arguments required"; __new_stage "$1" "$2"; dolib.so "${T}/$2"; }
 
-# doins is a Rust builtin (commands::DoinsCommand) — registered in shell setup.
-
-newins() {
-    [[ $# -eq 2 ]] || die "newins: exactly two arguments required"
-    __new_src "$1" "$2"
-    dodir "${INSDESTTREE:-/}"
-    install ${_insopts} "${REPLY}" "${ED%/}/${INSDESTTREE#/}/$2" \
-        || die "newins: failed to install $1 as $2"
-}
-
-doexe() {
-    [[ $# -gt 0 ]] || die "doexe: at least one argument required"
-    dodir "${EXEDESTTREE:-/}"
-    local dest="${ED%/}/${EXEDESTTREE#/}"
-    local f
-    for f in "$@"; do
-        install ${_exeopts} "${f}" "${dest}/${f##*/}" \
-            || die "doexe: failed to install ${f}"
-    done
-}
-
-newexe() {
-    [[ $# -eq 2 ]] || die "newexe: exactly two arguments required"
-    __new_src "$1" "$2"
-    dodir "${EXEDESTTREE:-/}"
-    install ${_exeopts} "${REPLY}" "${ED%/}/${EXEDESTTREE#/}/$2" \
-        || die "newexe: failed to install $1 as $2"
-}
-
-dolib.a() {
-    [[ $# -gt 0 ]] || die "dolib.a: at least one argument required"
-    local libdir; libdir=$(get_libdir)
-    dodir "${_into_dir}/${libdir}"
-    local f
-    for f in "$@"; do
-        install -m0644 "${f}" "${ED%/}/${_into_dir#/}/${libdir}/${f##*/}" \
-            || die "dolib.a: failed to install ${f}"
-    done
-}
-
-dolib.so() {
-    [[ $# -gt 0 ]] || die "dolib.so: at least one argument required"
-    local libdir; libdir=$(get_libdir)
-    dodir "${_into_dir}/${libdir}"
-    local f
-    for f in "$@"; do
-        install -m0755 "${f}" "${ED%/}/${_into_dir#/}/${libdir}/${f##*/}" \
-            || die "dolib.so: failed to install ${f}"
-    done
-}
-
-dolib() {
-    [[ $# -gt 0 ]] || die "dolib: at least one argument required"
-    local f
-    for f in "$@"; do
-        case "${f}" in
-            *.so|*.so.*) dolib.so "${f}" ;;
-            *)           dolib.a  "${f}" ;;
-        esac
-    done
-}
-
-newlib.a() {
-    [[ $# -eq 2 ]] || die "newlib.a: exactly two arguments required"
-    local libdir; libdir=$(get_libdir)
-    dodir "${_into_dir}/${libdir}"
-    install -m0644 "$1" "${ED%/}/${_into_dir#/}/${libdir}/$2" \
-        || die "newlib.a: failed to install $1 as $2"
-}
-
-newlib.so() {
-    [[ $# -eq 2 ]] || die "newlib.so: exactly two arguments required"
-    local libdir; libdir=$(get_libdir)
-    dodir "${_into_dir}/${libdir}"
-    install -m0755 "$1" "${ED%/}/${_into_dir#/}/${libdir}/$2" \
-        || die "newlib.so: failed to install $1 as $2"
-}
-
-dodoc() {
-    local recursive=0
-    [[ $1 == -r ]] && { recursive=1; shift; }
-    [[ $# -gt 0 ]] || die "dodoc: at least one argument required"
-    local docdir="${ED%/}/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
-    dodir "/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
-    local f
-    for f in "$@"; do
-        if [[ $recursive -eq 1 && -d ${f} ]]; then
-            cp -pPR "${f}" "${docdir}/" || die "dodoc: failed to copy ${f}"
-        else
-            install -m0644 "${f}" "${docdir}/${f##*/}" \
-                || die "dodoc: failed to install ${f}"
-        fi
-    done
-}
-
-newdoc() {
-    [[ $# -eq 2 ]] || die "newdoc: exactly two arguments required"
-    __new_src "$1" "$2"
-    local docdir="${ED%/}/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
-    dodir "/usr/share/doc/${PF}${DOCDESTTREE:+/${DOCDESTTREE}}"
-    install -m0644 "${REPLY}" "${docdir}/$2" || die "newdoc: failed to install $1 as $2"
-}
-
-doman() {
-    [[ $# -gt 0 ]] || die "doman: at least one argument required"
-    local f ext
-    for f in "$@"; do
-        ext="${f##*.}"
-        [[ -n ${ext} ]] || die "doman: cannot determine man section for ${f}"
-        dodir "/usr/share/man/man${ext}"
-        install -m0644 "${f}" "${ED%/}/usr/share/man/man${ext}/${f##*/}" \
-            || die "doman: failed to install ${f}"
-    done
-}
-
-newman() {
-    [[ $# -eq 2 ]] || die "newman: exactly two arguments required"
-    __new_src "$1" "$2"
-    local ext="${2##*.}"
-    [[ -n ${ext} ]] || die "newman: cannot determine man section for $2"
-    dodir "/usr/share/man/man${ext}"
-    install -m0644 "${REPLY}" "${ED%/}/usr/share/man/man${ext}/$2" \
-        || die "newman: failed to install $1 as $2"
-}
-
-doheader() {
-    local recursive=0
-    [[ $1 == -r ]] && { recursive=1; shift; }
-    [[ $# -gt 0 ]] || die "doheader: at least one argument required"
-    dodir "/usr/include"
-    local f
-    for f in "$@"; do
-        if [[ $recursive -eq 1 && -d ${f} ]]; then
-            cp -pPR "${f}" "${ED%/}/usr/include/" || die "doheader: failed to copy ${f}"
-        else
-            install -m0644 "${f}" "${ED%/}/usr/include/${f##*/}" \
-                || die "doheader: failed to install ${f}"
-        fi
-    done
-}
-
-newheader() {
-    [[ $# -eq 2 ]] || die "newheader: exactly two arguments required"
-    __new_src "$1" "$2"
-    dodir "/usr/include"
-    install -m0644 "${REPLY}" "${ED%/}/usr/include/$2" \
-        || die "newheader: failed to install $1 as $2"
-}
-
-dosym() {
-    local relative=0
-    [[ $1 == -r ]] && { relative=1; shift; }
-    [[ $# -eq 2 ]] || die "dosym: usage: dosym [-r] target link"
-    local target="$1" link="$2"
-    dodir "${link%/*}"
-    if [[ $relative -eq 1 ]]; then
-        local rel_target
-        rel_target=$(python3 -c \
-            "import os,sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))" \
-            "$target" "$link") || die "dosym: failed to compute relative path"
-        ln -snf "$rel_target" "${ED%/}/${link#/}" || die "dosym: failed to create symlink"
-    else
-        ln -snf "$target" "${ED%/}/${link#/}" || die "dosym: failed to create symlink"
-    fi
-}
+newdoc()    { [[ $# -eq 2 ]] || die "newdoc: exactly two arguments required";    __new_stage "$1" "$2"; dodoc    "${T}/$2"; }
+newman()    { [[ $# -eq 2 ]] || die "newman: exactly two arguments required";    __new_stage "$1" "$2"; doman    "${T}/$2"; }
+newheader() { [[ $# -eq 2 ]] || die "newheader: exactly two arguments required"; __new_stage "$1" "$2"; doheader "${T}/$2"; }
 
 doinitd() {
     [[ $# -gt 0 ]] || die "doinitd: at least one argument required"
@@ -547,24 +357,6 @@ newenvd() {
     doenvd "${T}/$2"
 }
 
-fperms() {
-    [[ $# -ge 2 ]] || die "fperms: usage: fperms mode file..."
-    local mode="$1"; shift
-    local f
-    for f in "$@"; do
-        chmod "$mode" "${ED%/}/${f#/}" || die "fperms: failed to chmod ${f}"
-    done
-}
-
-fowners() {
-    [[ $# -ge 2 ]] || die "fowners: usage: fowners owner file..."
-    local owner="$1"; shift
-    local f
-    for f in "$@"; do
-        chown "$owner" "${ED%/}/${f#/}" || die "fowners: failed to chown ${f}"
-    done
-}
-
 edo() {
     einfo "$@"
     "$@" || die "edo: command failed: $*"
@@ -579,55 +371,6 @@ get_libdir() {
         v=${CONF_LIBDIR}
     fi
     echo "${v}"
-}
-
-fperms() {
-    local mode=$1; shift
-    local f
-    for f in "$@"; do
-        chmod "${mode}" "${ED%/}/${f#/}" || die "fperms ${mode} ${f} failed"
-    done
-}
-
-fowners() {
-    local owner=$1; shift
-    local f
-    for f in "$@"; do
-        chown "${owner}" "${ED%/}/${f#/}" || die "fowners ${owner} ${f} failed"
-    done
-}
-
-doinfo() {
-    [[ $# -ge 1 ]] || die "doinfo: at least one argument needed"
-    local d="${ED%/}/usr/share/info"
-    install -d "${d}" || die "doinfo: mkdir failed"
-    install -m 0644 "$@" "${d}" || die "doinfo failed"
-}
-
-dolib.so() {
-    [[ $# -ge 1 ]] || die "dolib.so: at least one argument needed"
-    local d="${ED%/}/usr/$(get_libdir)"
-    install -d "${d}" || die "dolib.so: mkdir failed"
-    install -m 0755 "$@" "${d}" || die "dolib.so failed"
-}
-
-dolib.a() {
-    [[ $# -ge 1 ]] || die "dolib.a: at least one argument needed"
-    local d="${ED%/}/usr/$(get_libdir)"
-    install -d "${d}" || die "dolib.a: mkdir failed"
-    install -m 0644 "$@" "${d}" || die "dolib.a failed"
-}
-
-domo() {
-    [[ $# -ge 1 ]] || die "domo: at least one argument needed"
-    local f
-    for f in "$@"; do
-        local locale=${f##*/}
-        locale=${locale%.mo}
-        local d="${ED%/}/usr/share/locale/${locale}/LC_MESSAGES"
-        install -d "${d}" || die "domo: mkdir failed"
-        install -m 0644 "${f}" "${d}/${MOPREFIX:-${PN}}.mo" || die "domo ${f} failed"
-    done
 }
 
 einstalldocs() {
@@ -871,13 +614,37 @@ impl EbuildShell {
             brush_core::builtins::builtin::<commands::EinstallCommand, _>(),
         );
 
-        // Install helpers being migrated from bash (INSTALL_HELPERS) to Rust
-        // builtins (clap arg parsing, ${ED}/dest-tree aware). The bash version
-        // of each is removed from INSTALL_HELPERS as it lands here.
-        shell.register_builtin(
-            "doins",
-            brush_core::builtins::builtin::<commands::DoinsCommand, _>(),
-        );
+        // Install helpers migrated from bash (INSTALL_HELPERS) to Rust builtins
+        // (clap arg parsing, ${ED}/dest-tree aware). The do* doers live here;
+        // new* stay in INSTALL_HELPERS as thin wrappers that stage ${T}/$2 and
+        // call the matching do* builtin, so there is one install path.
+        macro_rules! register_install {
+            ($($name:literal => $ty:ident),+ $(,)?) => {$(
+                shell.register_builtin(
+                    $name,
+                    brush_core::builtins::builtin::<commands::$ty, _>(),
+                );
+            )+};
+        }
+        register_install! {
+            "dodir" => DodirCommand,
+            "keepdir" => KeepdirCommand,
+            "doins" => DoinsCommand,
+            "doexe" => DoexeCommand,
+            "dobin" => DobinCommand,
+            "dosbin" => DosbinCommand,
+            "dodoc" => DodocCommand,
+            "doheader" => DoheaderCommand,
+            "doinfo" => DoinfoCommand,
+            "doman" => DomanCommand,
+            "domo" => DomoCommand,
+            "dolib" => DolibCommand,
+            "dolib.a" => DolibaCommand,
+            "dolib.so" => DolibsoCommand,
+            "dosym" => DosymCommand,
+            "fperms" => FpermsCommand,
+            "fowners" => FownersCommand,
+        }
 
         // Register P4 unpack builtin.
         shell.register_builtin(
@@ -1348,7 +1115,8 @@ impl EbuildShell {
         // These stubs shadow the Rust builtins for econf, emake, einfo, etc.
         // Unsetting them lets the Rust builtin registry take over during build.
         self.run_string(
-            "unset -f econf emake einstall unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal has_version best_version docompress dostrip doins",
+            "unset -f econf emake einstall unpack einfo einfon elog ewarn eerror eqawarn ebegin eend nonfatal has_version best_version docompress dostrip \
+             dodir keepdir doins doexe dobin dosbin dodoc doheader doinfo doman domo dolib dolib.a dolib.so dosym fperms fowners",
         )
         .await
         .ok();
@@ -2378,7 +2146,8 @@ cache-formats = md5-dict
         shell
             .run_string(&format!(
                 "{INSTALL_HELPERS}\n\
-                 unset -f doins; \
+                 unset -f dodir keepdir doins doexe dobin dosbin dodoc doheader \
+                          doinfo doman domo dolib dolib.a dolib.so dosym fperms fowners; \
                  export D={d} ED={d} T={t} CATEGORY=cat PN=pkg SLOT=0 PF=pkg-1; \
                  into /usr/local; dobin {src}/myprog; \
                  [[ ${{DESTTREE}} == /usr/local ]] || die 'into did not set DESTTREE'; \
