@@ -48,6 +48,13 @@ impl<I: Interner> IUse<I> {
         I::resolve(&self.name)
     }
 
+    /// Whether this flag carries a `+` (enabled) IUSE default — i.e. it is on
+    /// unless the configuration turns it off. Used when computing a package's
+    /// effective build USE.
+    pub fn is_enabled_default(&self) -> bool {
+        self.default == Some(IUseDefault::Enabled)
+    }
+
     /// Parse a single IUSE token.
     pub fn parse(s: &str) -> Result<Self> {
         if s.is_empty() {

@@ -692,7 +692,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             let (mut depend, mut bdepend) = (Vec::new(), Vec::new());
             if let Some(cache) = repo::find_cache(&data, pkg, ver) {
                 for iuse in &cache.metadata.iuse {
-                    if matches!(iuse.default, Some(portage_metadata::IUseDefault::Enabled))
+                    if iuse.is_enabled_default()
                         && effective.get_opt(&Interned::intern(iuse.name())).is_none()
                     {
                         flags.push(iuse.name().to_string());

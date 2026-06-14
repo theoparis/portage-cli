@@ -235,6 +235,33 @@ async fn run_inner(
         // profile-resolved set (the sourced environment stays).
         let refs: Vec<&str> = flags.iter().map(String::as_str).collect();
         shell.set_use_flags(&refs).context("setting USE flags")?;
+    } else if let Ok(Some(entry)) = repo.cache_entry(ebuild.cpv()) {
+        // Standalone `em ebuild` (no resolved plan): apply the ebuild's own IUSE
+        // `+` defaults on top of the profile USE, so phases see the flags the
+        // merge path would compute (e.g. llvm-r1's `+llvm_slot_NN`). The full
+        // resolver isn't run here, so package.use / REQUIRED_USE nuances aren't
+        // reflected — this just closes the common IUSE-default gap that
+        // otherwise makes standalone phase runs diverge from a real merge.
+        let mut use_set: Vec<String> = shell
+            .get_var("USE")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let have: std::collections::HashSet<String> = use_set.iter().cloned().collect();
+        let mut added = false;
+        for iuse in &entry.metadata.iuse {
+            if iuse.is_enabled_default() && !have.contains(iuse.name()) {
+                use_set.push(iuse.name().to_string());
+                added = true;
+            }
+        }
+        if added {
+            let refs: Vec<&str> = use_set.iter().map(String::as_str).collect();
+            shell
+                .set_use_flags(&refs)
+                .context("applying IUSE defaults for em ebuild")?;
+        }
     }
 
     // PMS 11.1: REPLACING_VERSIONS — the installed versions this merge
