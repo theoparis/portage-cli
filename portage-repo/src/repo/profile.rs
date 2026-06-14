@@ -408,10 +408,12 @@ impl UseFlags {
         self.0.iter()
     }
 
+    /// Whether the effective USE set is empty.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Number of effective USE flags in this set.
     pub fn len(&self) -> usize {
         self.0.len()
     }

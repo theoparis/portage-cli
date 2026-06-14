@@ -11,7 +11,7 @@ mod package_use;
 mod repo;
 mod required_use;
 mod subslot;
-mod use_env;
+pub(crate) mod use_env;
 
 use std::collections::HashMap;
 

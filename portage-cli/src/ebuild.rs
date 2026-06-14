@@ -83,6 +83,15 @@ async fn apply_profile_env(
     if user.is_file() {
         bashrc.push(user);
     }
+    // User XDG overlay (~/.config/portage/bashrc), sourced last so it wins —
+    // the natural home for an unprivileged --prefix overlay search-path recipe
+    // (see docs/root-model.md), no --config-root needed.
+    if let Some(xdg) = crate::query::depgraph::use_env::xdg_portage_dir() {
+        let xdg_bashrc = xdg.join("bashrc");
+        if xdg_bashrc.is_file() {
+            bashrc.push(xdg_bashrc);
+        }
+    }
     shell.set_bashrc_files(bashrc);
 
     Ok(true)

@@ -73,9 +73,11 @@ justified. Prefer standard library solutions where reasonable.
 
 ## MSRV
 
-Minimum Supported Rust Version is **1.71.0**. CI tests against both stable and
-MSRV. Do not use features that require a newer version without updating
-`rust-version` in `Cargo.toml` and the CI matrix.
+Minimum Supported Rust Version is **1.88** (edition 2024). (See root AGENTS.md
+for the per-crate split and the MSRV confirmation pass over all Cargo.toml
+and AGENTS.md files.)
+CI tests against both stable and MSRV. Do not use features that require a newer
+version without updating `rust-version` in `Cargo.toml` and the CI matrix.
 
 ## Slop Warning
 

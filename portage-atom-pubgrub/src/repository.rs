@@ -153,6 +153,11 @@ impl InMemoryRepository {
         self.packages.entry(cpn).or_default().push((cpv, versions));
     }
 
+    /// Insert a version using the full set of fields (slot/subslot/repo/iuse/deps).
+    ///
+    /// Internal helper used by `add_version*` shims and by `InMemoryRepository`
+    /// test fixtures. Callers that already have a `PackageVersions` should use
+    /// `add_package_versions` instead.
     pub fn add_version_full(
         &mut self,
         cpv: Cpv,

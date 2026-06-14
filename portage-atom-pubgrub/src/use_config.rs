@@ -112,8 +112,7 @@ impl UseConfig {
         }
     }
 
-    /// Returns all solver-decided flags.
-    /// Every flag this config explicitly enables (sorted, for stable output).
+    /// Returns all flags explicitly enabled in this config (sorted, for stable output).
     pub fn enabled_flags(&self) -> Vec<Interned<DefaultInterner>> {
         let mut v: Vec<Interned<DefaultInterner>> = self
             .flags
@@ -125,6 +124,8 @@ impl UseConfig {
         v
     }
 
+    /// Returns all flags marked `SolverDecided` (the ones ceded to the solver
+    /// for Level-C `REQUIRED_USE` handling). Order is not guaranteed.
     pub fn solver_decided_flags(&self) -> Vec<Interned<DefaultInterner>> {
         self.flags
             .iter()

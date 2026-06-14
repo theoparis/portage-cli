@@ -10,12 +10,19 @@ pub enum Error {
 
     /// A package directory is malformed (e.g. missing required files).
     #[error("malformed package directory {path}: {reason}")]
-    MalformedPackage { path: Utf8PathBuf, reason: String },
+    MalformedPackage {
+        /// Path to the malformed package directory (relative to VDB root).
+        path: Utf8PathBuf,
+        /// Explanation of the malformation (e.g. "missing CONTENTS").
+        reason: String,
+    },
 
     /// An I/O error occurred reading a VDB file.
     #[error("I/O error reading {path}: {source}")]
     Io {
+        /// Path to the file that could not be read.
         path: Utf8PathBuf,
+        /// The underlying I/O error (source).
         source: std::io::Error,
     },
 }

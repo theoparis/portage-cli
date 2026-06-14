@@ -55,9 +55,11 @@ All public types must reference the relevant PMS section in their doc comments
 
 ## MSRV
 
-Minimum Supported Rust Version is **1.88** (required by brush-core). CI tests against
-both stable and MSRV. Do not use features that require a newer version without updating
-`rust-version` in `Cargo.toml` and the CI matrix.
+Minimum Supported Rust Version is **1.88** (edition 2024; required by brush-core
+and thus by the CLI/workspace). See root AGENTS.md for the full per-crate split
+(1.85 for foundational crates) and the MSRV confirmation pass.
+CI tests against both stable and MSRV. Do not use features that require a newer
+version without updating `rust-version` in `Cargo.toml` and the CI matrix.
 
 ## Slop Warning
 

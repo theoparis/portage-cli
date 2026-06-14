@@ -2,7 +2,7 @@
 name = "portage-atom-pubgrub"
 version = "0.4.1"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.88"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Bridge between portage-atom and the PubGrub dependency solver"

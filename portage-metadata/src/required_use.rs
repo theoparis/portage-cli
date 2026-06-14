@@ -618,9 +618,10 @@ mod tests {
         assert_eq!(bad.len(), 1);
         assert_eq!(bad[0].to_string(), "wayland? ( dbus )");
         // everything satisfied → empty
-        assert!(expr
-            .unsatisfied(&enabled_set(&["X", "wayland", "dbus", "a"]))
-            .is_empty());
+        assert!(
+            expr.unsatisfied(&enabled_set(&["X", "wayland", "dbus", "a"]))
+                .is_empty()
+        );
     }
 
     #[test]

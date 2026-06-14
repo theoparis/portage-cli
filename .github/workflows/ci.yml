@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rust: [stable, "1.92"]
+        rust: [stable, "1.88"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -62,6 +62,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUSTDOCFLAGS: -D warnings
+      # TODO: consider -D missing_docs (or -D rustdoc::missing_docs) once remaining
+      # pre-existing gaps in portage-repo (and any other local crates) are documented.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

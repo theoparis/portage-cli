@@ -60,9 +60,11 @@ cargo run --example parse_cache   # Smoke-test the example
 
 ## MSRV
 
-Minimum Supported Rust Version is **1.88**. CI tests against both stable and
-MSRV. Do not use features that require a newer version without updating
-`rust-version` in `Cargo.toml` and the CI matrix.
+Minimum Supported Rust Version is **1.88** (edition 2024). (See root AGENTS.md
+for the per-crate split and confirmation pass over Cargo.toml rust-version +
+AGENTS.md claims.)
+CI tests against both stable and MSRV. Do not use features that require a newer
+version without updating `rust-version` in `Cargo.toml` and the CI matrix.
 
 ## Slop Warning
 

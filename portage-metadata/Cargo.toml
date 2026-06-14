@@ -1,7 +1,7 @@
 [package]
 name = "portage-metadata"
 version = "0.7.1"
-edition = "2021"
+edition = "2024"
 rust-version = "1.88"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"

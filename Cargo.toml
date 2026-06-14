@@ -54,7 +54,6 @@ md5 = "0.7"
 libc = "0.2"
 humansize = "2"
 humantime = "2"
-rayon = "1"
 
 [profile.release]
 opt-level = 3

@@ -55,4 +55,5 @@ Use `{tag}!:` when the commit breaks the API.
 
 ## MSRV
 
-Minimum Supported Rust Version is **1.85** (edition 2024).
+Minimum Supported Rust Version is **1.85** (edition 2024). (Foundational crate;
+see root AGENTS.md for the per-crate MSRV split and confirmation pass.)

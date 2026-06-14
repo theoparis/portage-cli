@@ -1,4 +1,4 @@
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use portage_atom::Dep;
 use portage_atom_pubgrub::{UseConfig, UseFlagState};
 use portage_repo::{ProfileStack, Repository};
@@ -104,6 +104,12 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
 
     let mut package_use = stack.package_use().unwrap_or_default();
     package_use.extend(load_package_use(portage_dir.join("package.use").as_str()));
+    // User XDG overlay (~/.config/portage), highest priority — lets an
+    // unprivileged user set package.use without writing the system /etc/portage
+    // or passing --config-root. Applied last so it overrides per flag.
+    if let Some(xdg) = xdg_portage_dir() {
+        package_use.extend(load_package_use(xdg.join("package.use").as_str()));
+    }
 
     // Mask sources, in portage's order: the repo-global `profiles/package.mask`
     // (applies regardless of profile), the profile chain (with `-atom` removals
@@ -141,6 +147,25 @@ async fn compute_use_env(repo: &Repository, root: Option<&Utf8Path>) -> Result<U
         accept_license,
         distdir,
     })
+}
+
+/// The user's XDG portage config directory (`$XDG_CONFIG_HOME/portage`, else
+/// `~/.config/portage`), layered on top of the host `/etc/portage`. Lets an
+/// unprivileged user set `package.use` and a `bashrc` overlay without touching
+/// the system config or passing `--config-root`. `None` when neither
+/// `XDG_CONFIG_HOME` nor `HOME` is set.
+pub(crate) fn xdg_portage_dir() -> Option<Utf8PathBuf> {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(Utf8PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|h| Utf8PathBuf::from(h).join(".config"))
+        })?;
+    Some(base.join("portage"))
 }
 
 fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {

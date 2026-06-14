@@ -15,6 +15,11 @@ the installed package database.
 > thoroughly audited, some crates are already polished up to a degree and perform
 > correctly. Use at your own risk.
 
+> **Pre-release git checkout**: This is development source from `git` before the
+> first release of `portage-cli` / the `em` binary on crates.io. The Applet status
+> table below (and the per-crate "Published" vs "Local only" table) documents the
+> current implementation state. See the warning above.
+
 ## The `em` binary
 
 `em` is a unified front-end for the Portage tool suite. It dispatches to

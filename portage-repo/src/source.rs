@@ -39,6 +39,7 @@ type AstCache = Arc<papaya::HashMap<String, brush_parser::ast::Program>>;
 pub struct SourceContext(pub(crate) AstCache);
 
 impl SourceContext {
+    /// Create a fresh (empty) sourcing context.
     pub fn new() -> Self {
         Self(Arc::new(papaya::HashMap::new()))
     }

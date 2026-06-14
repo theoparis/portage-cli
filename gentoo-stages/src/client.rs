@@ -103,28 +103,28 @@ impl Client {
         if let Ok(entries) = std::fs::read_dir(&arch_cache_dir) {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
-                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("xz") {
-                    if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-                        if file_name.starts_with("stage3-") {
-                            // Try to extract info from the filename
-                            let variant = extract_variant_from_filename(file_name);
-                            let date = extract_date_from_filename(file_name);
+                if path.is_file()
+                    && path.extension().and_then(|s| s.to_str()) == Some("xz")
+                    && let Some(file_name) = path.file_name().and_then(|s| s.to_str())
+                    && file_name.starts_with("stage3-")
+                {
+                    // Try to extract info from the filename
+                    let variant = extract_variant_from_filename(file_name);
+                    let date = extract_date_from_filename(file_name);
 
-                            // Create a Stage3 instance for the cached file
-                            // We don't have size or URL for cached files, so use placeholders
-                            let stage3 = Stage3::new(
-                                file_name.to_string(),
-                                String::new(), // Empty URL for cached files
-                                0,             // Unknown size
-                                date,
-                                self.arch,
-                                variant,
-                                self.cache_dir.path(),
-                            );
+                    // Create a Stage3 instance for the cached file
+                    // We don't have size or URL for cached files, so use placeholders
+                    let stage3 = Stage3::new(
+                        file_name.to_string(),
+                        String::new(), // Empty URL for cached files
+                        0,             // Unknown size
+                        date,
+                        self.arch,
+                        variant,
+                        self.cache_dir.path(),
+                    );
 
-                            cached_files.push(stage3);
-                        }
-                    }
+                    cached_files.push(stage3);
                 }
             }
         }

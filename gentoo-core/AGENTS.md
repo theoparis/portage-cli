@@ -59,7 +59,9 @@ Use `{tag}!:` when the commit breaks the API.
 
 ## MSRV
 
-Minimum Supported Rust Version is **1.88** (edition 2024).
+Minimum Supported Rust Version is **1.88** (edition 2024). (See root AGENTS.md
+for the documented per-crate MSRV differences and the confirmation pass that
+keeps all Cargo.toml + AGENTS.md claims accurate.)
 CI tests against both stable and MSRV.
 Do not use features that require a newer version without updating `rust-version` in `Cargo.toml` and the CI matrix.
 
