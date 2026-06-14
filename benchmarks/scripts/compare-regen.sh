@@ -7,15 +7,14 @@
 #   pk repo metadata regen  — pkgcraft's implementation (Rust)
 #
 # egencache support (default INCLUDE_EGENCACHE=1 if binary found) uses stock
-# egencache (no portage source hacks). It always runs the exact plain command
-# for the "correct" full cold results:
+# egencache (no portage source hacks). It always runs the *exact* plain command
+# the user specified for the "correct" full cold results (no NUMACTL, no extra):
 #   sudo rm -rf /var/db/repos/gentoo/metadata/md5-cache
 #   sudo egencache -j $jobs --repo gentoo --update
-# (hardcoded to the live gentoo to guarantee the expected full/slow datapoints
-# the user measured, ~4m37s real at j=20). The count is from the live cache
-# after. em/pk use the GENTOO_REPO with isolated dirs. Set INCLUDE_EGENCACHE=0
-# or SKIP=egencache to disable. No extra args needed beyond the env for EGENCACHE
-# if not in PATH.
+# (hardcoded live; guarantees the slow full datapoints like 4m37s at j=20).
+# em/pk use GENTOO_REPO (set to live for same tree compare).
+# Set INCLUDE_EGENCACHE=0 or SKIP=egencache to disable. No extra setup needed
+# (EGENCACHE= only if not in PATH).
 #
 # Usage: compare-regen.sh [jobs...]   (default: 24)
 #   GENTOO_REPO=<path>     repo to regen (default: /var/db/repos/gentoo)
@@ -25,9 +24,8 @@
 #   ITERATIONS=N           runs per tool (default: 1)
 #   SKIP=tool,tool         comma-separated list of tools to skip
 #                          (em | egencache | pk)
-#   INCLUDE_EGENCACHE=0    set to 0 to disable egencache (default 1: uses the plain
-#                          sudo rm + sudo egencache -j N --repo gentoo --update on
-#                          the live /var/db one for the correct full slow datapoints)
+#   INCLUDE_EGENCACHE=0    set to 0 to disable (defaults to on; runs the plain
+#                          sudo rm + sudo egencache -j N --repo gentoo --update on live)
 
 set -euo pipefail
 
@@ -142,26 +140,15 @@ run_one() {
                 >"$log" 2>&1; } 2>"$tf"
             ;;
         egencache)
-            # Use the exact "correct" plain command the user specified for
-            # expected full results (slow but complete cold full tree):
+            # Exact plain command the user specified for the "correct" full results:
             #   sudo rm -rf /var/db/repos/gentoo/metadata/md5-cache
             #   sudo egencache -j $jobs --repo gentoo --update
-            # (hardcoded live to guarantee the datapoints match user's repro,
-            # even if GENTOO_REPO is a different tree for em/pk comparison).
-            # No extra PORTAGE_REPOSITORIES or config-root etc. (stock plain).
-            # The NUMACTL is prepended if active for consistency (numactl sudo egencache...).
-            # Note: this always collects eg data on the live system gentoo repo
-            # using the plain way that produces full results. For em/pk use the
-            # GENTOO_REPO (set it to /var/db/repos/gentoo for full apples-to-apples).
+            # (hardcoded to live gentoo; no NUMACTL, no extra args/env. This collects
+            # the slow full datapoints. em/pk use GENTOO_REPO; set to /var/db for same tree.)
             local EG_LIVE="/var/db/repos/gentoo"
             local EG_RNAME="gentoo"
             sudo rm -rf "$EG_LIVE/metadata/md5-cache" || true
-            local -a base_eg=( "$EGENCACHE" --repo "$EG_RNAME" -j "$jobs" --update )
-            local -a numa_prefix=()
-            if [[ -n "$NUMACTL" ]]; then
-                numa_prefix=( $NUMACTL )
-            fi
-            local eg_cmd=( sudo "${numa_prefix[@]}" "${base_eg[@]}" )
+            local eg_cmd=( sudo "$EGENCACHE" -j "$jobs" --repo "$EG_RNAME" --update )
             { time "${eg_cmd[@]}" >"$log" 2>&1 ; } 2>"$tf" || true
             mkdir -p "$out_dir"
             local live_cnt
