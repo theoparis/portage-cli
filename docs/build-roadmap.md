@@ -232,10 +232,14 @@ Iterate target-by-target, hardest last:
 - [x] meson package end-to-end — `app-arch/zstd` (meson build system) merged
       into a prefix with working binary and libraries
 - [ ] cmake package end-to-end (`app-arch/zstd` if not done in M1)
-- [ ] python-any-r1 BDEPEND package (host python detection, no target installs)
-- [ ] `check-reqs` (needs /proc memory introspection), `multiprocessing`,
-      `toolchain-funcs` audit under our shell
-- [ ] llvm-r1 slot detection against host LLVM
+- [x] python-any-r1 BDEPEND package (host python detection, no target installs)
+      — `python_setup` picks python3.14, prepends the wrapper bin dir to PATH
+      without dropping the system dirs (verified in isolation and in firefox)
+- [x] `check-reqs` (disk-space check runs), `multiprocessing`,
+      `toolchain-funcs` audit under our shell — exercised by firefox pkg_setup
+- [x] llvm-r1 slot detection against host LLVM — `LLVM_SLOT=21` via the
+      USE_EXPAND reverse mapping; firefox's "Skipping Rust … does not match
+      llvm_slot_21" / "Using Rust 1.94.0" path works
 - [ ] cargo eclass: vendored-crates SRC_URI unpack (`cargo_src_unpack`),
       offline `cargo build`; small rust package end-to-end first
 - [x] self-contained install helpers: the `do*`/`new*` family lives in
@@ -246,8 +250,20 @@ Iterate target-by-target, hardest last:
       and fixed `into` to mirror `DESTTREE`
 - [ ] ebuild-helpers coverage audit: list what firefox's install phase calls
       and confirm each has a self-contained equivalent in `INSTALL_HELPERS`
-- [ ] firefox dry-run ladder: `setup → unpack → configure` first, catalog
-      failures here, fix, extend to compile
+- [x] firefox dry-run ladder — `setup` is **green** (`em ebuild firefox setup`):
+      check-reqs → llvm-r1 → rust → python-any-r1 → linux-info all complete
+      with no "command not found". Survey fixes that got it there:
+      * PATH established as a shell var (eclasses doing `export PATH=…:${PATH}`
+        no longer strand the system bin dirs)
+      * USE_EXPAND groups reverse-mapped from final USE (`LLVM_SLOT` et al)
+      * sandbox path-reg functions stubbed as no-ops (addread/write/predict/deny)
+      * `em ebuild` applies the ebuild's IUSE `+` defaults (merge-path parity)
+      * **brush fix**: `$*`/`${a[*]}` now join via the IFS first char in scalar
+        contexts, so llvm-utils' `local IFS=:; …; export PATH=${sp[*]}` keeps
+        its `:` separators instead of mangling them to spaces
+      Remaining (cosmetic): linux-info prints `//usr/src/linux` (double-slash
+      ROOT join) and falls back to the running kernel — check still `[ ok ]`.
+      Next: extend to `unpack → configure`.
 
 **Gate:** `em --prefix /tmp/p www-client/firefox` completes
 setup→configure. (Full compile is hours of CPU — gate on configure, run
