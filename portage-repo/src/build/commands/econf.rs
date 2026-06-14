@@ -1,5 +1,9 @@
+use std::io::Write;
+
 use brush_core::builtins;
 use clap::Parser;
+
+use super::die::DieFlag;
 
 /// `econf [extra-args...]`
 ///
@@ -21,6 +25,10 @@ impl builtins::Command for EconfCommand {
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         let (stdout, stderr) = super::context_stdio(&context);
+        // Capture the shared die flag before the shell is moved out of context;
+        // econf self-dies on configure failure (PMS 12.3.2), so the eclasses
+        // that call bare `econf` (no `|| die`) still abort the build.
+        let die_flag = context.shared::<DieFlag>().ok().cloned();
         let shell = context.shell;
 
         let get = |var: &str| {
@@ -44,6 +52,8 @@ impl builtins::Command for EconfCommand {
             if s.is_empty() { "/".to_string() } else { s }
         };
         let extra_econf = get("EXTRA_ECONF");
+        // `nonfatal econf` (PORTAGE_NONFATAL) suppresses the self-die.
+        let nonfatal = get("PORTAGE_NONFATAL") == "1";
         // get_libdir: LIBDIR_${ABI} from the profile, CONF_LIBDIR fallback,
         // else plain "lib" (PMS econf passes --libdir=${EPREFIX}/usr/$(get_libdir)).
         let libdir = {
@@ -177,6 +187,19 @@ impl builtins::Command for EconfCommand {
         })
         .await
         .unwrap_or(127);
+
+        // PMS: econf aborts the build when configure fails. Raise the shared
+        // die flag (checked by the phase driver after the phase returns) so a
+        // failed configure can't silently proceed to emake/src_install and
+        // merge an empty package. `exit == 0` also covers the no-configure
+        // fast path above, which is intentionally a no-op.
+        if exit != 0 && !nonfatal {
+            let msg = format!("econf failed (configure exited {exit})");
+            if let Some(flag) = &die_flag {
+                flag.raise(&msg);
+            }
+            let _ = writeln!(context.params.stderr(shell), "die: {msg}");
+        }
 
         Ok(brush_core::ExecutionResult::new(exit))
     }
