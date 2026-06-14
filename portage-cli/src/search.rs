@@ -1,9 +1,25 @@
 use std::collections::BTreeMap;
+use std::io::Write as _;
 
+use anstyle::{AnsiColor, Effects, Style};
 use anyhow::{Result, bail};
 use portage_atom::{Cpn, Cpv};
 use portage_metadata::RawCacheEntry;
 use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
+
+// Color styles for `em search` (compact listing) and emerge-style `em -s` / `-S`
+// output. Uses anstream + anstyle so colors are stripped automatically for
+// --color=never, pipes, NO_COLOR, etc. C_PKG matches the green package style
+// used elsewhere in em (e.g. emerge -p output).
+const C_PKG: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
+const C_LABEL: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
+const C_BOLD: Style = Style::new().effects(Effects::BOLD);
+const C_STAR: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)))
+    .effects(Effects::BOLD);
+const C_MASKED: Style = Style::new()
+    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)))
+    .effects(Effects::BOLD);
 
 pub async fn run(
     repo_paths: &[std::path::PathBuf],
@@ -75,16 +91,22 @@ fn run_name(
         }
     }
 
+    let mut out = anstream::stdout();
+
     if name_only {
         for key in matched.keys() {
-            println!("{key}");
+            writeln!(out, "{C_PKG}{key}{C_PKG:#}").ok();
         }
         return Ok(());
     }
 
     for (key, (cpn, idx)) in &matched {
         let info = latest_entry_info(&repos[*idx], cpn, homepage);
-        println!("{key}: {info}");
+        if info.is_empty() {
+            writeln!(out, "{C_PKG}{key}{C_PKG:#}").ok();
+        } else {
+            writeln!(out, "{C_PKG}{key}{C_PKG:#}: {info}").ok();
+        }
     }
     Ok(())
 }
@@ -150,12 +172,13 @@ async fn run_desc(
             .then_with(|| a.cpn.package.cmp(&b.cpn.package))
     });
 
+    let mut out = anstream::stdout();
     for (cpv, info) in &entries {
         let key = format!("{}/{}", cpv.cpn.category, cpv.cpn.package);
         match info {
-            None => println!("{key}"),
-            Some(s) => println!("{key}: {s}"),
-        }
+            None => writeln!(out, "{C_PKG}{key}{C_PKG:#}").ok(),
+            Some(s) => writeln!(out, "{C_PKG}{key}{C_PKG:#}: {s}").ok(),
+        };
     }
     Ok(())
 }
@@ -206,8 +229,13 @@ pub async fn run_emerge_style(
     let arch_str = arch.as_str().to_string();
 
     for pat in patterns {
-        println!("\n[ Results for search key : {pat} ]");
-        println!("Searching...\n");
+        let mut out = anstream::stdout();
+        writeln!(
+            out,
+            "\n[ Results for search key : {C_BOLD}{pat}{C_BOLD:#} ]"
+        )
+        .ok();
+        writeln!(out, "Searching...\n").ok();
 
         // Name matches from a category walk over every repo. For repos
         // without an md5-cache (overlays), the description is matched here
@@ -224,7 +252,7 @@ pub async fn run_emerge_style(
                     };
                     if !hit && search_desc && !has_cache {
                         hit = latest_visible(&repos, idx, pkg.cpn(), &arch_str)
-                            .is_some_and(|(_, e)| contains_ci(&e.metadata.description, pat));
+                            .is_some_and(|(_, e, _)| contains_ci(&e.metadata.description, pat));
                     }
                     if hit {
                         matched
@@ -267,31 +295,36 @@ pub async fn run_emerge_style(
 }
 
 /// The latest version whose KEYWORDS accept this arch (stable or testing),
-/// with its metadata; falls back to the newest version with any metadata.
+/// with its metadata and a visibility flag.
+///
+/// The bool is `true` iff a keyword-matching version (stable ~ or *) was
+/// found for the arch; `false` means the returned entry is a fallback to the
+/// newest version that had metadata (the package appears as "[ Masked ]" in
+/// emerge-style search output).
 fn latest_visible(
     repos: &[Repository],
     idx: usize,
     cpn: &Cpn,
     arch: &str,
-) -> Option<(portage_atom::Version, portage_metadata::CacheEntry)> {
+) -> Option<(portage_atom::Version, portage_metadata::CacheEntry, bool)> {
     let repo = &repos[idx];
     let cat = repo.category(cpn.category.as_str())?;
     let pkg = cat.package(cpn.package.as_str())?;
     let ebuilds = pkg.ebuilds().ok()?;
-    let mut newest: Option<(portage_atom::Version, portage_metadata::CacheEntry)> = None;
+    let mut newest: Option<(portage_atom::Version, portage_metadata::CacheEntry, bool)> = None;
     for eb in ebuilds.iter().rev() {
         let Some(entry) = entry_for(repos, idx, eb) else {
             continue;
         };
         if newest.is_none() {
-            newest = Some((eb.cpv().version.clone(), entry.clone()));
+            newest = Some((eb.cpv().version.clone(), entry.clone(), false));
         }
         let visible = entry.metadata.keywords.iter().any(|k| {
             let k = k.to_string();
             k == arch || k == format!("~{arch}") || k == "*" || k == "~*"
         });
         if visible {
-            return Some((eb.cpv().version.clone(), entry));
+            return Some((eb.cpv().version.clone(), entry, true));
         }
     }
     newest
@@ -360,29 +393,68 @@ fn print_search_block(
     arch: &str,
 ) {
     let latest = latest_visible(repos, idx, cpn, arch);
-    println!("*  {key}");
+    let is_masked = latest.as_ref().is_some_and(|(_, _, vis)| !vis);
+
+    let mut out = anstream::stdout();
+    write!(out, "{C_STAR}*{C_STAR:#}  {C_BOLD}{key}{C_BOLD:#}").ok();
+    if is_masked {
+        write!(out, " {C_MASKED}[ Masked ]{C_MASKED:#}").ok();
+    }
+    writeln!(out).ok();
+
     match &latest {
-        Some((ver, _)) => println!("      Latest version available: {ver}"),
-        None => println!("      Latest version available: [ Unknown ]"),
-    }
+        Some((ver, _, _)) => writeln!(
+            out,
+            "      {C_LABEL}Latest version available:{C_LABEL:#} {ver}"
+        )
+        .ok(),
+        None => writeln!(
+            out,
+            "      {C_LABEL}Latest version available:{C_LABEL:#} [ Unknown ]"
+        )
+        .ok(),
+    };
     match installed.get(cpn) {
-        Some(v) => println!("      Latest version installed: {v}"),
-        None => println!("      Latest version installed: [ Not Installed ]"),
-    }
-    if let Some((_, entry)) = &latest {
+        Some(v) => writeln!(
+            out,
+            "      {C_LABEL}Latest version installed:{C_LABEL:#} {v}"
+        )
+        .ok(),
+        None => writeln!(
+            out,
+            "      {C_LABEL}Latest version installed:{C_LABEL:#} [ Not Installed ]"
+        )
+        .ok(),
+    };
+    if let Some((_, entry, _)) = &latest {
         let size = distfiles_size(&repos[idx], cpn, &entry.metadata);
-        println!("      Size of files: {} KiB", size.div_ceil(1024));
-        println!("      Homepage:      {}", entry.metadata.homepage.join(" "));
-        println!("      Description:   {}", entry.metadata.description);
+        writeln!(
+            out,
+            "      {C_LABEL}Size of files:{C_LABEL:#} {} KiB",
+            size.div_ceil(1024)
+        )
+        .ok();
+        writeln!(
+            out,
+            "      {C_LABEL}Homepage:{C_LABEL:#}      {}",
+            entry.metadata.homepage.join(" ")
+        )
+        .ok();
+        writeln!(
+            out,
+            "      {C_LABEL}Description:{C_LABEL:#}   {}",
+            entry.metadata.description
+        )
+        .ok();
         let license = entry
             .metadata
             .license
             .as_ref()
             .map(|l| l.to_string())
             .unwrap_or_default();
-        println!("      License:       {license}");
+        writeln!(out, "      {C_LABEL}License:{C_LABEL:#}       {license}").ok();
     }
-    println!();
+    writeln!(out).ok();
 }
 
 /// Sum of the package's `Manifest` DIST sizes for every file the latest
