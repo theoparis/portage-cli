@@ -51,3 +51,20 @@ pub(crate) fn context_stdio<SE: brush_core::ShellExtensions>(
     };
     (stdout, stderr)
 }
+
+/// The shell's exported environment as `(name, value)` pairs. A Rust builtin's
+/// spawned child (`configure`, `make`, …) otherwise inherits only em's host
+/// process environment, missing the build env the shell carries: make.conf
+/// flags, USE-driven vars, and — crucially for `--prefix` overlay builds — the
+/// `PKG_CONFIG_*`/`CPPFLAGS`/`LDFLAGS` a `bashrc` hook exports to expose
+/// already-merged deps. Mirrors how brush builds the env for external commands.
+pub(crate) fn context_env<SE: brush_core::ShellExtensions>(
+    context: &brush_core::ExecutionContext<'_, SE>,
+) -> Vec<(String, String)> {
+    context
+        .shell
+        .env()
+        .iter_exported()
+        .map(|(k, v)| (k.clone(), v.value().to_cow_str(context.shell).into_owned()))
+        .collect()
+}

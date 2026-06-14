@@ -29,6 +29,9 @@ impl builtins::Command for EconfCommand {
         // econf self-dies on configure failure (PMS 12.3.2), so the eclasses
         // that call bare `econf` (no `|| die`) still abort the build.
         let die_flag = context.shared::<DieFlag>().ok().cloned();
+        // configure (and the pkg-config it spawns) must see the full build
+        // environment, including any bashrc-exported overlay search paths.
+        let env_vars = super::context_env(&context);
         let shell = context.shell;
 
         let get = |var: &str| {
@@ -74,24 +77,6 @@ impl builtins::Command for EconfCommand {
                 }
             }
         };
-
-        let mut env_vars: Vec<(String, String)> = Vec::new();
-        for var in &[
-            "CC",
-            "CXX",
-            "AR",
-            "RANLIB",
-            "NM",
-            "CFLAGS",
-            "CXXFLAGS",
-            "CPPFLAGS",
-            "LDFLAGS",
-            "CONFIG_SHELL",
-        ] {
-            if let Some(val) = shell.env_str(var) {
-                env_vars.push((var.to_string(), val.into_owned()));
-            }
-        }
 
         let user_args = self.args.clone();
         let cwd = shell.working_dir().to_path_buf();

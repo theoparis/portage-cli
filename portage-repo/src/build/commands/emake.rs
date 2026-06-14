@@ -22,6 +22,9 @@ impl builtins::Command for EmakeCommand {
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         let (stdout, stderr) = super::context_stdio(&context);
+        // make (and any pkg-config/linker it spawns) must see the full build
+        // environment, including bashrc-exported overlay search paths.
+        let env_vars = super::context_env(&context);
         let shell = context.shell;
         let make = shell
             .env_str("MAKE")
@@ -49,6 +52,7 @@ impl builtins::Command for EmakeCommand {
                 .args(&makeopts)
                 .args(&extra)
                 .args(&args)
+                .envs(env_vars)
                 .stdout(stdout)
                 .stderr(stderr)
                 .status()
