@@ -272,31 +272,19 @@ j=20: real 0m10.289s user 2m35.449s sys 0m17.388s peak 809 MB
 
    > dev-util/wayland-scanner-1.25.0
 
-== timing (hyperfine, 5 runs)
+== timing (hyperfine, RUNS runs; script now also emits a consolidated markdown table below the raw hyperfine summaries)
 
-Benchmark 1: target/release/em -p www-client/firefox
-  Time (mean ± σ):      1.003 s ±  0.155 s    [User: 1.912 s, System: 9.491 s]
-Benchmark 2: emerge -p www-client/firefox
-  Time (mean ± σ):      3.875 s ±  0.037 s    [User: 4.161 s, System: 0.252 s]
-    3.86 ± 0.60 times faster than emerge -p www-client/firefox
+(The raw hyperfine lines are still printed by the script for full ±σ and range details. SKIP_TIMING=1 skips this entire block for fast parity-only runs.)
 
-Benchmark 1: target/release/em -p app-office/libreoffice
-  Time (mean ± σ):      1.180 s ±  0.158 s    [User: 1.985 s, System: 12.413 s]
-Benchmark 2: emerge -p app-office/libreoffice
-  Time (mean ± σ):      4.186 s ±  0.027 s    [User: 4.490 s, System: 0.249 s]
-    3.55 ± 0.47 times faster than emerge -p app-office/libreoffice
+Example recent run (RUNS=2 on current tree state; timings vary with load/numa/cache — re-run for your env):
 
-Benchmark 1: target/release/em -p app-office/libreoffice dev-qt/qtwebengine mail-client/thunderbird app-emulation/qemu www-client/firefox
-  Time (mean ± σ):      1.028 s ±  0.123 s    [User: 1.974 s, System: 2.915 s]
-Benchmark 2: emerge -p app-office/libreoffice dev-qt/qtwebengine mail-client/thunderbird app-emulation/qemu www-client/firefox
-  Time (mean ± σ):      5.015 s ±  0.118 s    [User: 5.300 s, System: 0.255 s]
-    4.88 ± 0.60 times faster than emerge -p app-office/libreoffice dev-qt/qtwebengine mail-client/thunderbird app-emulation/qemu www-client/firefox
-
-Benchmark 1: target/release/em -s gcc
-  Time (mean ± σ):     100.3 ms ±  34.9 ms    [User: 46.8 ms, System: 40.9 ms]
-Benchmark 2: emerge -s gcc
-  Time (mean ± σ):      5.199 s ±  0.006 s    [User: 4.477 s, System: 0.972 s]
-   51.83 ± 18.04 times faster than emerge -s gcc
+### Timing summary (markdown table)
+| Benchmark | em (mean ± σ) | emerge (mean ± σ) | speedup (em vs emerge) |
+|-----------|-----------------|-------------------|------------------------|
+| firefox -p | 0.917 s ± 0.082 s | 3.675 s ± 0.000 s | 4.01× |
+| libreoffice -p | 0.918 s ± 0.026 s | 3.953 s ± 0.013 s | 4.31× |
+| multi (5 pkgs) -p | 1.041 s ± 0.025 s | 4.724 s ± 0.196 s | 4.54× |
+| gcc -s | 0.154 s ± 0.011 s | 5.175 s ± 0.006 s | 33.63× |
 
 RESULT: parity FAILED
 

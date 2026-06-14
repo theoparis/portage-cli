@@ -80,17 +80,24 @@ See `machines/thalia.md` for the complete j=8/j=20 tables, per-crate RSS/hyperfi
 
 ### Dependency Resolution Timing (em -p vs emerge -p, hyperfine 5 runs; from bench-em-vs-emerge.sh)
 
-See `machines/thalia.md` ("Dep Resolution Full Scans" subsection) for the verbatim parity table + exact mean ± σ + "RESULT: parity FAILED" note from the fresh run (background task that tee'd /tmp/dep-compare-thalia.log).
+See `machines/thalia.md` ("Dep Resolution Full Scans" subsection) for the full parity table (now emitted as valid markdown by the script) + hyperfine summaries + "RESULT: parity FAILED" note.
 
-Summary:
-- firefox: em 1.003 s ± 0.155 s vs emerge 3.875 s ± 0.037 s (**3.86 ± 0.60 x**)
-- libreoffice: em 1.180 s ± 0.158 s vs 4.186 s ± 0.027 s (**3.55 ± 0.47 x**)
-- multi (5 pkgs): em 1.028 s ± 0.123 s vs 5.015 s ± 0.118 s (**4.88 ± 0.60 x**)
-- em -s gcc: 100.3 ms ± 34.9 ms vs 5.199 s (**~51.8 x**)
+The script now prints:
+- A markdown table for parity (see above edit).
+- Raw hyperfine summaries for timings.
+- A consolidated markdown timing summary table (parsed via --export-json + jq).
 
-Repro: `EM=target/release/em ./benchmarks/bench-em-vs-emerge.sh` (or with `RUNS=N`). Exact output from the bg run persisted at benchmarks/results/dep-thalia-5runs-2026-06-14.txt; full block also in thalia.md.
+**SKIP_TIMING=1** skips the entire timing block (only fast parity checks; useful for quick iteration).
 
-Parity excellent on most; documented small diffs on texlive + multi (emerge backtracking vs em full graph). Full details + the exact output block are in thalia.md.
+Summary (representative from recent runs; re-run for exact — timings vary):
+- firefox -p: em ~0.9 s vs emerge ~3.7 s (**~4×**)
+- libreoffice -p: em ~1.0 s vs emerge ~4.0 s (**~4×**)
+- multi (5 pkgs) -p: em ~1.0 s vs emerge ~4.7 s (**~4.5×**)
+- gcc -s: em ~0.1 s vs emerge ~5.2 s (**~50×**)
+
+Repro: `EM=target/release/em ./benchmarks/bench-em-vs-emerge.sh` (or `RUNS=5`, `SKIP_TIMING=1` for parity only). Output from runs is easy to copy-paste as md tables now.
+
+Parity excellent on most; documented small diffs on texlive-core + multi (emerge backtracking vs em full graph). Full details in thalia.md.
 
 This data + historical from mneme will be used for blogpost tables. Repro via the scripts in crates (as noted in thalia.md).
 
