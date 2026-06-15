@@ -1305,6 +1305,25 @@ impl EbuildShell {
             self.set_var("BROOT", "/");
         }
 
+        // PORTAGE_INST_UID/GID: the owner dobin/dosbin apply via `install -o/-g`.
+        // Default to the current process's ids so a root install yields
+        // root-owned files while an unprivileged `--local` build yields
+        // user-owned ones — no explicit mode flag needed, and `install -o
+        // <self>` stays a succeeding no-op when not root. A value already in the
+        // environment (e.g. make.conf userpriv) is preserved.
+        if self.shell.env_str("PORTAGE_INST_UID").is_none() {
+            self.set_var(
+                "PORTAGE_INST_UID",
+                &rustix::process::getuid().as_raw().to_string(),
+            );
+        }
+        if self.shell.env_str("PORTAGE_INST_GID").is_none() {
+            self.set_var(
+                "PORTAGE_INST_GID",
+                &rustix::process::getgid().as_raw().to_string(),
+            );
+        }
+
         let accum_vars: &[&str] = if eapi >= Eapi::Eight {
             &[
                 "IUSE",
@@ -1348,6 +1367,7 @@ impl EbuildShell {
             "export CATEGORY PN PV PR PVR P PF FILESDIR WORKDIR S T D TMPDIR EAPI EBUILD \
              HOME ROOT DISTDIR PORTAGE_BIN_PATH PATH EBUILD_PHASE EBUILD_PHASE_FUNC \
              MERGE_TYPE EPREFIX ED EROOT SYSROOT ESYSROOT BROOT PORTAGE_CONFIGROOT USE \
+             PORTAGE_INST_UID PORTAGE_INST_GID \
              REPLACING_VERSIONS REPLACED_BY_VERSION \
              MAKEOPTS CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CC CXX AR RANLIB NM STRIP",
         )

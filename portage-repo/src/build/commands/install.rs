@@ -66,6 +66,20 @@ fn get_libdir<SE: brush_core::ShellExtensions>(shell: &brush_core::Shell<SE>) ->
     "lib".to_string()
 }
 
+/// `-o <uid> -g <gid>` install args from `PORTAGE_INST_UID`/`PORTAGE_INST_GID`
+/// (default `0`), matching portage's `dobin`/`dosbin`. Other helpers leave
+/// ownership to the running process, as portage does. `init_build_env` seeds
+/// these to the current process ids, so this resolves to root for a root
+/// install and the user for an unprivileged `--local` build.
+fn inst_owner_opts<SE: brush_core::ShellExtensions>(shell: &brush_core::Shell<SE>) -> Vec<String> {
+    vec![
+        "-o".into(),
+        var(shell, "PORTAGE_INST_UID", "0"),
+        "-g".into(),
+        var(shell, "PORTAGE_INST_GID", "0"),
+    ]
+}
+
 /// Raise the shared die flag with `msg` and return exit status 1, matching the
 /// bash helpers' `|| die "..."`.
 fn raise_die<SE: brush_core::ShellExtensions>(
@@ -132,14 +146,75 @@ fn install_file(
     ok_status(st, "install", src)
 }
 
-fn cp_recursive(env: &[(String, String)], src: &Path, destdir: &Path) -> Result<(), String> {
-    let st = Command::new("cp")
-        .arg("-pPR")
-        .arg(src)
-        .arg(format!("{}/", destdir.display()))
-        .envs(env.iter().cloned())
-        .status();
-    ok_status(st, "copy", src)
+/// Install `src` into `destdir`, but if `src` is a symlink recreate it as a
+/// symlink (`ln -s "$(readlink src)"`) rather than dereferencing and copying its
+/// target. Mirrors portage's `dolib`, which preserves the `libfoo.so ->
+/// libfoo.so.N` symlinks shipped alongside the real shared object.
+fn install_or_symlink(
+    env: &[(String, String)],
+    opts: &[String],
+    src: &Path,
+    destdir: &Path,
+) -> Result<(), String> {
+    let dest = destdir.join(basename(src));
+    if src.is_symlink() {
+        let link =
+            std::fs::read_link(src).map_err(|e| format!("reading link {}: {e}", src.display()))?;
+        let st = Command::new("ln")
+            .arg("-sf")
+            .arg(&link)
+            .arg(&dest)
+            .envs(env.iter().cloned())
+            .status();
+        ok_status(st, "symlink", &dest)
+    } else {
+        install_file(env, opts, src, &dest)
+    }
+}
+
+/// Create `dir` (and parents) with `install -d` semantics: directory mode 0755
+/// regardless of umask, matching portage's empty `DIROPTIONS`.
+fn install_dir(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    mkdir_p(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| format!("setting mode on {}: {e}", dir.display()))
+}
+
+/// Recursively install the directory `src` under `dest_parent` (landing at
+/// `dest_parent/<basename(src)>`), mirroring portage `doins --recursive`: each
+/// subdirectory is created with mode 0755, each regular file is installed with
+/// `opts` (so modes/owner are normalised, timestamps are not preserved), and
+/// symlinks are recreated as symlinks rather than dereferenced.
+fn install_tree(
+    env: &[(String, String)],
+    opts: &[String],
+    src: &Path,
+    dest_parent: &Path,
+) -> Result<(), String> {
+    let dest = dest_parent.join(basename(src));
+    install_dir(&dest)?;
+    let entries = std::fs::read_dir(src).map_err(|e| format!("reading {}: {e}", src.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("reading {}: {e}", src.display()))?;
+        let path = entry.path();
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+        if ft.is_symlink() {
+            let target = dest.join(entry.file_name());
+            let link = std::fs::read_link(&path)
+                .map_err(|e| format!("reading link {}: {e}", path.display()))?;
+            let _ = std::fs::remove_file(&target);
+            std::os::unix::fs::symlink(&link, &target)
+                .map_err(|e| format!("symlink {}: {e}", target.display()))?;
+        } else if ft.is_dir() {
+            install_tree(env, opts, &path, &dest)?;
+        } else {
+            install_file(env, opts, &path, &dest.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 fn basename(p: &Path) -> std::ffi::OsString {
@@ -166,6 +241,58 @@ fn relpath(target: &str, link: &str) -> String {
     }
 }
 
+/// First-character man section for `name`, honouring a trailing compression
+/// suffix (`Z`/`gz`/`bz2` are stripped before taking the section). Returns
+/// `None` if the section isn't `[0-9n]`. Mirrors portage doman's
+/// `man${suffix:0:1}` plus its `*man[0-9n]` validity check.
+fn man_section(name: &str) -> Option<char> {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let real = match base.rsplit_once('.') {
+        Some((stem, "Z" | "gz" | "bz2")) => stem,
+        _ => base,
+    };
+    let suffix = real.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    let c = suffix.chars().next()?;
+    (c.is_ascii_digit() || c == 'n').then_some(c)
+}
+
+/// Filename-based man locale routing: `name.LL.sect` / `name.LL_CC.sect` →
+/// `(stripped_name, locale)`. Mirrors portage doman's `BASH_REMATCH` path,
+/// used only when no explicit `-i18n=` was given.
+fn man_locale(name: &str) -> Option<(String, String)> {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let parts: Vec<&str> = base.split('.').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let locale = parts[parts.len() - 2];
+    let b = locale.as_bytes();
+    let ok = (b.len() == 2 && b[0].is_ascii_lowercase() && b[1].is_ascii_lowercase())
+        || (b.len() == 5
+            && b[0].is_ascii_lowercase()
+            && b[1].is_ascii_lowercase()
+            && b[2] == b'_'
+            && b[3].is_ascii_uppercase()
+            && b[4].is_ascii_uppercase());
+    if !ok {
+        return None;
+    }
+    let sect = parts[parts.len() - 1];
+    let base_name = parts[..parts.len() - 2].join(".");
+    Some((format!("{base_name}.{sect}"), locale.to_string()))
+}
+
+macro_rules! require_files {
+    ($ctx:expr, $files:expr, $helper:literal) => {
+        if $files.is_empty() {
+            return Ok(raise_die(
+                &$ctx,
+                concat!($helper, ": at least one argument required"),
+            ));
+        }
+    };
+}
+
 // ---- destination-directory helpers ----
 
 /// `dodir <dir>...` (PMS 12.3.1): create directories under `${ED}`.
@@ -184,6 +311,7 @@ impl builtins::Command for DodirCommand {
         &self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
+        require_files!(context, self.dirs, "dodir");
         let ed = ed(context.shell);
         let dirs = self.dirs.clone();
         Ok(run_blocking(&context, move || {
@@ -213,10 +341,13 @@ impl builtins::Command for KeepdirCommand {
         &self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
+        require_files!(context, self.dirs, "keepdir");
         let ed = ed(context.shell);
         let category = var(context.shell, "CATEGORY", "");
         let pn = var(context.shell, "PN", "");
-        let slot = var(context.shell, "SLOT", "").replace('/', "_");
+        // Marker uses the main slot only (`${SLOT%/*}`): drop any subslot.
+        let slot = var(context.shell, "SLOT", "");
+        let slot = slot.split('/').next().unwrap_or("").to_string();
         let dirs = self.dirs.clone();
         Ok(run_blocking(&context, move || {
             for d in &dirs {
@@ -250,7 +381,7 @@ fn install_files_closure(
         for f in &files {
             let src = cwd.join(f);
             if recursive && src.is_dir() {
-                cp_recursive(&env, &src, &dest).map_err(|e| format!("{helper}: {e}"))?;
+                install_tree(&env, &opts, &src, &dest).map_err(|e| format!("{helper}: {e}"))?;
             } else {
                 let target = dest.join(basename(&src));
                 install_file(&env, &opts, &src, &target).map_err(|e| format!("{helper}: {e}"))?;
@@ -258,17 +389,6 @@ fn install_files_closure(
         }
         Ok(())
     }
-}
-
-macro_rules! require_files {
-    ($ctx:expr, $files:expr, $helper:literal) => {
-        if $files.is_empty() {
-            return Ok(raise_die(
-                &$ctx,
-                concat!($helper, ": at least one argument required"),
-            ));
-        }
-    };
 }
 
 /// `doins [-r] <file>...` (PMS 12.3.4): install into `${ED}${INSDESTTREE}` with
@@ -371,17 +491,11 @@ impl builtins::Command for DobinCommand {
         let into = var(context.shell, "_into_dir", "/usr");
         let dest = under_ed(&ed(context.shell), &format!("{into}/bin"));
         let cwd = context.shell.working_dir().to_path_buf();
+        let mut opts = vec!["-m0755".to_string()];
+        opts.extend(inst_owner_opts(context.shell));
         Ok(run_blocking(
             &context,
-            install_files_closure(
-                "dobin",
-                env,
-                vec!["-m0755".into()],
-                dest,
-                cwd,
-                self.files.clone(),
-                false,
-            ),
+            install_files_closure("dobin", env, opts, dest, cwd, self.files.clone(), false),
         )
         .await)
     }
@@ -409,17 +523,11 @@ impl builtins::Command for DosbinCommand {
         let into = var(context.shell, "_into_dir", "/usr");
         let dest = under_ed(&ed(context.shell), &format!("{into}/sbin"));
         let cwd = context.shell.working_dir().to_path_buf();
+        let mut opts = vec!["-m0755".to_string()];
+        opts.extend(inst_owner_opts(context.shell));
         Ok(run_blocking(
             &context,
-            install_files_closure(
-                "dosbin",
-                env,
-                vec!["-m0755".into()],
-                dest,
-                cwd,
-                self.files.clone(),
-                false,
-            ),
+            install_files_closure("dosbin", env, opts, dest, cwd, self.files.clone(), false),
         )
         .await)
     }
@@ -570,18 +678,48 @@ impl builtins::Command for DomanCommand {
         let cwd = context.shell.working_dir().to_path_buf();
         let files = self.files.clone();
         Ok(run_blocking(&context, move || {
+            let mut i18n = String::new();
             for f in &files {
+                // `-i18n=<locale>` sets the locale prefix for following files
+                // (empty resets it); `.keep_*` markers are silently ignored.
+                if let Some(loc) = f.strip_prefix("-i18n=") {
+                    i18n = if loc.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{loc}/")
+                    };
+                    continue;
+                }
+                let base = f.rsplit('/').next().unwrap_or(f).to_string();
+                if base.starts_with(".keep_") {
+                    continue;
+                }
+                let not_a_man = || format!("doman: '{f}' is probably not a man page");
+                let (mandir, name) = if i18n.is_empty() {
+                    if let Some((nm, locale)) = man_locale(&base) {
+                        let sect = man_section(&nm).ok_or_else(not_a_man)?;
+                        (format!("{locale}/man{sect}"), nm)
+                    } else {
+                        let sect = man_section(&base).ok_or_else(not_a_man)?;
+                        (format!("man{sect}"), base)
+                    }
+                } else {
+                    let sect = man_section(&base).ok_or_else(not_a_man)?;
+                    (format!("{i18n}man{sect}"), base)
+                };
                 let src = cwd.join(f);
-                let name = basename(&src);
-                let ext = Path::new(&name)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .filter(|e| !e.is_empty())
-                    .ok_or_else(|| format!("doman: cannot determine man section for {f}"))?;
-                let dest = under_ed(&ed, &format!("usr/share/man/man{ext}"));
-                mkdir_p(&dest).map_err(|e| format!("doman: {e}"))?;
-                install_file(&env, &["-m0644".into()], &src, &dest.join(&name))
-                    .map_err(|e| format!("doman: {e}"))?;
+                // portage's `[[ -s ]]`: install only non-empty files; a missing
+                // source is an error, an existing-but-empty one is skipped.
+                match std::fs::metadata(&src) {
+                    Ok(m) if m.len() > 0 => {
+                        let dest = under_ed(&ed, &format!("usr/share/man/{mandir}"));
+                        mkdir_p(&dest).map_err(|e| format!("doman: {e}"))?;
+                        install_file(&env, &["-m0644".into()], &src, &dest.join(&name))
+                            .map_err(|e| format!("doman: {e}"))?;
+                    }
+                    Ok(_) => {}
+                    Err(_) => return Err(format!("doman: {f} does not exist")),
+                }
             }
             Ok(())
         })
@@ -661,18 +799,15 @@ impl builtins::Command for DolibaCommand {
         let libdir = get_libdir(context.shell);
         let dest = under_ed(&ed(context.shell), &format!("{into}/{libdir}"));
         let cwd = context.shell.working_dir().to_path_buf();
-        Ok(run_blocking(
-            &context,
-            install_files_closure(
-                "dolib.a",
-                env,
-                vec!["-m0644".into()],
-                dest,
-                cwd,
-                self.files.clone(),
-                false,
-            ),
-        )
+        let files = self.files.clone();
+        Ok(run_blocking(&context, move || {
+            mkdir_p(&dest).map_err(|e| format!("dolib.a: {e}"))?;
+            for f in &files {
+                install_or_symlink(&env, &["-m0644".into()], &cwd.join(f), &dest)
+                    .map_err(|e| format!("dolib.a: {e}"))?;
+            }
+            Ok(())
+        })
         .await)
     }
 }
@@ -700,18 +835,15 @@ impl builtins::Command for DolibsoCommand {
         let libdir = get_libdir(context.shell);
         let dest = under_ed(&ed(context.shell), &format!("{into}/{libdir}"));
         let cwd = context.shell.working_dir().to_path_buf();
-        Ok(run_blocking(
-            &context,
-            install_files_closure(
-                "dolib.so",
-                env,
-                vec!["-m0755".into()],
-                dest,
-                cwd,
-                self.files.clone(),
-                false,
-            ),
-        )
+        let files = self.files.clone();
+        Ok(run_blocking(&context, move || {
+            mkdir_p(&dest).map_err(|e| format!("dolib.so: {e}"))?;
+            for f in &files {
+                install_or_symlink(&env, &["-m0755".into()], &cwd.join(f), &dest)
+                    .map_err(|e| format!("dolib.so: {e}"))?;
+            }
+            Ok(())
+        })
         .await)
     }
 }
@@ -751,7 +883,7 @@ impl builtins::Command for DolibCommand {
                 } else {
                     "-m0644"
                 };
-                install_file(&env, &[mode.into()], &src, &dest.join(&name))
+                install_or_symlink(&env, &[mode.into()], &src, &dest)
                     .map_err(|e| format!("dolib: {e}"))?;
             }
             Ok(())
@@ -789,6 +921,15 @@ impl builtins::Command for DosymCommand {
         let target = self.args[0].clone();
         let link = self.args[1].clone();
         let relative = self.relative;
+        // PMS forbids an implicit basename (bug #379899): reject a link that
+        // ends in '/' or names an existing non-symlink directory.
+        let link_path = under_ed(&ed, &link);
+        if link.ends_with('/') || (link_path.is_dir() && !link_path.is_symlink()) {
+            return Ok(raise_die(
+                &context,
+                &format!("dosym: link omits basename: '{link}'"),
+            ));
+        }
         Ok(run_blocking(&context, move || {
             let link_dir = link.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
             mkdir_p(&under_ed(&ed, link_dir)).map_err(|e| format!("dosym: {e}"))?;
@@ -826,24 +967,36 @@ impl builtins::Command for FpermsCommand {
         &self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        if self.args.len() < 2 {
+        if self.args.is_empty() {
             return Ok(raise_die(&context, "fperms: usage: fperms mode file..."));
         }
         let env = super::context_env(&context);
         let ed = ed(context.shell);
-        let mode = self.args[0].clone();
-        let files = self.args[1..].to_vec();
+        let raw = self.args.clone();
         Ok(run_blocking(&context, move || {
-            for f in &files {
-                let path = under_ed(&ed, f);
-                let st = Command::new("chmod")
-                    .arg(&mode)
-                    .arg(&path)
-                    .envs(env.iter().cloned())
-                    .status();
-                ok_status(st, "chmod", &path).map_err(|e| format!("fperms: {e}"))?;
+            // Leading `-*` are options unless they're a bare mode char
+            // (`-[ugorwxXst]`); the first non-option is the mode (unprefixed),
+            // the rest are paths under ${ED}. Mirrors portage's fperms.
+            let mut cmd_args: Vec<std::ffi::OsString> = Vec::new();
+            let mut got_mode = false;
+            for arg in &raw {
+                let is_opt = arg.starts_with('-')
+                    && !(arg.len() == 2 && b"ugorwxXst".contains(&arg.as_bytes()[1]));
+                if is_opt || !got_mode {
+                    got_mode |= !is_opt;
+                    cmd_args.push(arg.into());
+                } else {
+                    cmd_args.push(under_ed(&ed, arg).into_os_string());
+                }
             }
-            Ok(())
+            let st = Command::new("chmod")
+                .args(&cmd_args)
+                .envs(env.iter().cloned())
+                .status();
+            match st {
+                Ok(s) if s.success() => Ok(()),
+                _ => Err("fperms failed".to_string()),
+            }
         })
         .await)
     }
@@ -866,24 +1019,36 @@ impl builtins::Command for FownersCommand {
         &self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
-        if self.args.len() < 2 {
+        if self.args.is_empty() {
             return Ok(raise_die(&context, "fowners: usage: fowners owner file..."));
         }
         let env = super::context_env(&context);
         let ed = ed(context.shell);
-        let owner = self.args[0].clone();
-        let files = self.args[1..].to_vec();
+        let raw = self.args.clone();
         Ok(run_blocking(&context, move || {
-            for f in &files {
-                let path = under_ed(&ed, f);
-                let st = Command::new("chown")
-                    .arg(&owner)
-                    .arg(&path)
-                    .envs(env.iter().cloned())
-                    .status();
-                ok_status(st, "chown", &path).map_err(|e| format!("fowners: {e}"))?;
+            // Leading `-*` are options; the first non-option is the owner
+            // (unprefixed), the rest are paths under ${ED}. Mirrors portage's
+            // fowners (minus its numeric-uid-gid resolution from the target
+            // passwd/group — owner is passed to chown verbatim).
+            let mut cmd_args: Vec<std::ffi::OsString> = Vec::new();
+            let mut got_owner = false;
+            for arg in &raw {
+                let is_opt = arg.starts_with('-');
+                if is_opt || !got_owner {
+                    got_owner |= !is_opt;
+                    cmd_args.push(arg.into());
+                } else {
+                    cmd_args.push(under_ed(&ed, arg).into_os_string());
+                }
             }
-            Ok(())
+            let st = Command::new("chown")
+                .args(&cmd_args)
+                .envs(env.iter().cloned())
+                .status();
+            match st {
+                Ok(s) if s.success() => Ok(()),
+                _ => Err("fowners failed".to_string()),
+            }
         })
         .await)
     }
@@ -966,13 +1131,9 @@ impl NewKind {
                 (under_ed(&ed, &sub), vec!["-m0644".into()])
             }
             Self::Man => {
-                let ext = Path::new(name)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .filter(|e| !e.is_empty())
-                    .unwrap_or("");
+                let sect = man_section(name).map(|c| c.to_string()).unwrap_or_default();
                 (
-                    under_ed(&ed, &format!("usr/share/man/man{ext}")),
+                    under_ed(&ed, &format!("usr/share/man/man{sect}")),
                     vec!["-m0644".into()],
                 )
             }
@@ -1046,16 +1207,10 @@ impl builtins::Command for NewCommand {
         // For newman the section comes from the *name* (the source may be
         // stdin and have no extension); validate it before any I/O, matching
         // doman's error.
-        if matches!(kind, NewKind::Man)
-            && Path::new(&name)
-                .extension()
-                .and_then(|e| e.to_str())
-                .filter(|e| !e.is_empty())
-                .is_none()
-        {
+        if matches!(kind, NewKind::Man) && man_section(&name).is_none() {
             return Ok(raise_die(
                 &context,
-                &format!("newman: cannot determine man section for {name}"),
+                &format!("newman: '{name}' is probably not a man page"),
             ));
         }
 
@@ -1104,5 +1259,68 @@ impl builtins::Command for NewCommand {
             }
         })
         .await)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn man_section_takes_first_char_of_suffix() {
+        // Plain single-char sections.
+        assert_eq!(man_section("foo.1"), Some('1'));
+        assert_eq!(man_section("foo.8"), Some('8'));
+        assert_eq!(man_section("foo.n"), Some('n'));
+        // Multi-char suffixes collapse to the first char (portage's
+        // `${suffix:0:1}`): `.3pm` -> man3, not man3pm.
+        assert_eq!(man_section("Foo.3pm"), Some('3'));
+        assert_eq!(man_section("bar.1p"), Some('1'));
+        // Compression suffixes are stripped before taking the section.
+        assert_eq!(man_section("foo.1.gz"), Some('1'));
+        assert_eq!(man_section("foo.3pm.bz2"), Some('3'));
+        // Leading path is ignored.
+        assert_eq!(man_section("a/b/foo.5"), Some('5'));
+        // Not a man page: non-`[0-9n]` section, or no extension.
+        assert_eq!(man_section("foo.txt"), None);
+        assert_eq!(man_section("README"), None);
+    }
+
+    #[test]
+    fn man_locale_detects_language_in_filename() {
+        assert_eq!(
+            man_locale("foo.de.1"),
+            Some(("foo.1".to_string(), "de".to_string()))
+        );
+        assert_eq!(
+            man_locale("foo.pt_BR.8"),
+            Some(("foo.8".to_string(), "pt_BR".to_string()))
+        );
+        // Dotted basename keeps the leading components.
+        assert_eq!(
+            man_locale("foo.bar.de.1"),
+            Some(("foo.bar.1".to_string(), "de".to_string()))
+        );
+        // Not a locale: wrong shape, uppercase lang, plain page.
+        assert_eq!(man_locale("foo.1"), None);
+        assert_eq!(man_locale("foo.DE.1"), None);
+        assert_eq!(man_locale("foo.deu.1"), None);
+    }
+
+    #[test]
+    fn relpath_matches_os_path_relpath() {
+        // dosym -r: link path -> relative target from the link's dir.
+        assert_eq!(relpath("/usr/bin/foo", "/usr/bin/bar"), "foo");
+        assert_eq!(
+            relpath("/usr/lib/libfoo.so", "/usr/bin/foo"),
+            "../lib/libfoo.so"
+        );
+        // target is inside the link's own directory.
+        assert_eq!(relpath("/a/b/c", "/a/b/link"), "c");
+        // target equals the link's directory.
+        assert_eq!(relpath("/a/b", "/a/b/link"), ".");
+        assert_eq!(relpath("/bin/sh", "/usr/bin/sh"), "../../bin/sh");
+        // Relative inputs are passed through verbatim.
+        assert_eq!(relpath("../x", "y"), "../x");
     }
 }
