@@ -126,8 +126,42 @@ where
 
 // ---- blocking primitives (run inside `run_blocking`'s closure) ----
 
+/// Create `dir` and any missing parents, setting every *newly created*
+/// directory to `mode` regardless of the process umask — coreutils
+/// `install -d -m<mode>` semantics. Pre-existing components are left untouched
+/// (we chmod only what we create), so passing an absolute image path never
+/// re-modes `/usr` and friends.
+///
+/// Pure rustix (mkdir + chmod per component): distinguishes `Ok` (created,
+/// so apply `mode`) from `EEXIST` (predecessor already there, leave its mode
+/// alone), which is exactly the create-vs-exist distinction coreutils makes.
+fn mkdir_p_mode(dir: &Path, mode: u32) -> Result<(), String> {
+    use rustix::fs::{Mode, chmod, mkdir};
+    use rustix::io::Errno;
+    let mode = Mode::from_bits_truncate(mode);
+    let mut acc = PathBuf::new();
+    for comp in dir.components() {
+        acc.push(comp);
+        if acc.as_os_str().is_empty() {
+            continue;
+        }
+        match mkdir(&acc, Mode::from_bits_truncate(0o777)) {
+            Ok(()) => {
+                chmod(&acc, mode).map_err(|e| format!("chmod {}: {e}", acc.display()))?;
+            }
+            Err(Errno::EXIST) => {}
+            Err(e) => return Err(format!("creating {}: {e}", acc.display())),
+        }
+    }
+    Ok(())
+}
+
+/// Create `dir` (and parents) with mode 0o755, matching portage's empty
+/// `${DIROPTIONS}` default. Every image-dir creation in this module goes
+/// through here so modes are normalised to 0755 even when an ebuild tightens
+/// the umask (`umask 077`) via the brush builtin.
 fn mkdir_p(dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))
+    mkdir_p_mode(dir, 0o755)
 }
 
 fn ok_status(
@@ -183,15 +217,6 @@ fn install_or_symlink(
     }
 }
 
-/// Create `dir` (and parents) with `install -d` semantics: directory mode 0755
-/// regardless of umask, matching portage's empty `DIROPTIONS`.
-fn install_dir(dir: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    mkdir_p(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("setting mode on {}: {e}", dir.display()))
-}
-
 /// Recursively install the directory `src` under `dest_parent` (landing at
 /// `dest_parent/<basename(src)>`), mirroring portage `doins --recursive`: each
 /// subdirectory is created with mode 0755, each regular file is installed with
@@ -204,7 +229,7 @@ fn install_tree(
     dest_parent: &Path,
 ) -> Result<(), String> {
     let dest = dest_parent.join(basename(src));
-    install_dir(&dest)?;
+    mkdir_p(&dest)?;
     let entries = std::fs::read_dir(src).map_err(|e| format!("reading {}: {e}", src.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("reading {}: {e}", src.display()))?;
@@ -1419,5 +1444,46 @@ mod tests {
         assert_eq!(relpath("/bin/sh", "/usr/bin/sh"), "../../bin/sh");
         // Relative inputs are passed through verbatim.
         assert_eq!(relpath("../x", "y"), "../x");
+    }
+
+    #[test]
+    fn mkdir_p_mode_applies_mode_to_each_created_component() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        // The requested mode lands on every directory we create along the way,
+        // not just the leaf — matching `install -d -m<mode>`. Mode is set with
+        // an explicit chmod, so it is independent of the process umask.
+        let created = dir.path().join("a/b/c");
+        mkdir_p_mode(&created, 0o755).unwrap();
+        for part in ["a", "a/b", "a/b/c"] {
+            assert_eq!(
+                std::fs::metadata(dir.path().join(part)).unwrap().mode() & 0o777,
+                0o755,
+                "{part} not 0755"
+            );
+        }
+    }
+
+    #[test]
+    fn mkdir_p_mode_leaves_preexisting_parents_untouched() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        // A parent created earlier with a custom mode must keep it — we only
+        // chmod what we create (matching `install -d`). This is the one thing
+        // a custom recursive mkdir does that `create_dir_all` cannot: an
+        // absolute image path must never re-mode /usr and friends.
+        let parent = dir.path().join("pre");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o750)).unwrap();
+        mkdir_p_mode(&parent.join("child"), 0o755).unwrap();
+        assert_eq!(
+            std::fs::metadata(&parent).unwrap().mode() & 0o777,
+            0o750,
+            "pre-existing parent mode was clobbered"
+        );
+        assert_eq!(
+            std::fs::metadata(parent.join("child")).unwrap().mode() & 0o777,
+            0o755
+        );
     }
 }
