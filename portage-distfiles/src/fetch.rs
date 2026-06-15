@@ -104,8 +104,15 @@ pub struct Fetcher {
 
 impl Fetcher {
     pub fn new(distdir: Utf8PathBuf, config: FetchConfig) -> Self {
+        // Send a User-Agent: some mirrors (e.g. freedesktop.org's Apache)
+        // return HTTP 403 for requests with an empty/missing UA, mirroring how
+        // portage's default wget/curl FETCHCOMMAND always identifies itself.
+        let client = reqwest::Client::builder()
+            .user_agent(concat!("em/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            client: reqwest::Client::new(),
+            client,
             distdir,
             ro_distdirs: Vec::new(),
             config,
