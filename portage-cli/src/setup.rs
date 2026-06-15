@@ -136,6 +136,7 @@ pub fn bootstrap(roots: &Roots) -> Result<()> {
 
     if is_local {
         link_host_pythons(eroot)?;
+        link_host_base_tools(eroot)?;
     }
 
     let mode = if is_local {
@@ -195,6 +196,30 @@ fn make_conf_template(is_local: bool, eroot: &Utf8Path) -> String {
 fn link_host_pythons(eroot: &Utf8Path) -> Result<()> {
     link_host_entries(&eroot.join("usr/bin"), "/usr/bin", "python")?;
     link_host_entries(&eroot.join("usr/include"), "/usr/include", "python")?;
+    Ok(())
+}
+
+/// Host base-system tools that ebuilds reference by their prefix-absolute path
+/// (`${EPREFIX}/usr/bin/<tool>`) rather than via `PATH`. In a real Gentoo Prefix
+/// the whole userland lives under `${EPREFIX}`; in `--local` only built packages
+/// do, so these must be exposed from the host. Example: the firefox ebuild sets
+/// `XARGS=${EPREFIX}/usr/bin/xargs` in its mozconfig, and the build greps trees
+/// with `find`. Extend as more such hard-coded references surface.
+const HOST_BASE_TOOLS: &[&str] = &["xargs", "find"];
+
+/// Symlink the host base tools in [`HOST_BASE_TOOLS`] into `${EPREFIX}/usr/bin`
+/// when they are not already provided by the prefix. Idempotent, best-effort.
+fn link_host_base_tools(eroot: &Utf8Path) -> Result<()> {
+    let bin = eroot.join("usr/bin");
+    std::fs::create_dir_all(bin.as_std_path()).with_context(|| format!("creating {bin}"))?;
+    for tool in HOST_BASE_TOOLS {
+        let host = format!("/usr/bin/{tool}");
+        let link = bin.join(tool);
+        if link.as_std_path().symlink_metadata().is_ok() || !Utf8Path::new(&host).exists() {
+            continue;
+        }
+        let _ = std::os::unix::fs::symlink(&host, link.as_std_path());
+    }
     Ok(())
 }
 
