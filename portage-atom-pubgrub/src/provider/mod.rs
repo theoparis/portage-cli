@@ -164,6 +164,12 @@ pub struct PortageDependencyProvider {
     pub(crate) installed_cpns: HashSet<Cpn>,
     pub(crate) installed_use: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
     pub(crate) installed_iuse: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
+    /// Installed packages whose installed version is **not in the repository**
+    /// (it was pruned from the tree). Populated by [`add_installed`](Self::add_installed)
+    /// when it has to synthesize the version. `choose_version` does not favour
+    /// these: there is nothing to keep — portage would update to the newest
+    /// available in-slot version instead.
+    pub(crate) installed_missing_from_repo: HashSet<PortagePackage>,
     pub(crate) dropped_deps: Vec<DroppedDep>,
     /// USE flag requirements collected by the post-solve validation pass.
     ///
@@ -460,6 +466,7 @@ impl PortageDependencyProvider {
             installed_cpns: HashSet::new(),
             installed_use: HashMap::new(),
             installed_iuse: HashMap::new(),
+            installed_missing_from_repo: HashSet::new(),
             dropped_deps,
             use_flag_requirements: Vec::new(),
             upgrade_pins: HashMap::new(),
@@ -492,6 +499,12 @@ impl PortageDependencyProvider {
         {
             let vd = VersionData::from_by_class(vec![vec![], vec![], vec![], vec![], vec![]]);
             pkg_data.versions.insert(installed.version.clone(), vd);
+            // Record that the installed version is gone from the repo so the
+            // Favor policy does not pin a stale build: there is nothing to
+            // keep, so the solver should pick the newest available in-slot
+            // version (portage's update-on-prune behaviour).
+            self.installed_missing_from_repo
+                .insert(installed.package.clone());
         }
 
         if !installed.active_use.is_empty() {
@@ -2457,5 +2470,117 @@ mod tests {
             .cloned();
         let req = req.expect("b[flag] from the new parent must raise a requirement");
         assert!(req.required_enabled.contains(&Interned::intern("flag")));
+    }
+
+    /// Same-slot update where the installed version was *removed from the
+    /// repo* and a newer version in the same slot is available, with no USE
+    /// violation to trigger the upgrade path. Mirrors `dev-lang/python:3.13`
+    /// installed at an old 3.13.x that's been dropped from the tree, with a
+    /// newer 3.13.y present. The resolver must select the newer version.
+    #[test]
+    fn installed_version_removed_from_repo_upgrades_in_slot() {
+        let mut repo = InMemoryRepository::new();
+
+        // Only the newer version exists in the tree; the installed version
+        // (1.0) is deliberately NOT registered here.
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-python/b-2.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
+
+        // Installed at 1.0 (absent from the repo above), same slot 0.
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::slotted(
+                Cpn::parse("dev-python/b").unwrap(),
+                Interned::intern("0"),
+            ),
+            version: Version::parse("1.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
+        });
+
+        let b = PortagePackage::slotted(Cpn::parse("dev-python/b").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(b, PortageVersionSet::any())])
+            .unwrap();
+
+        let b_ver = solution
+            .iter()
+            .find(|(p, _)| p.cpn().package.as_str() == "b")
+            .map(|(_, v)| v.clone());
+        assert_eq!(
+            b_ver,
+            Some(Version::parse("2.0").unwrap()),
+            "an installed version removed from the repo must upgrade to the newer in-slot version"
+        );
+    }
+
+    /// Same scenario as above, but `b` is reached *transitively* (not a root
+    /// target) — the actual `dev-lang/python:3.13` case, where python is
+    /// pulled in by something else, not named on the command line.
+    #[test]
+    fn installed_version_removed_from_repo_upgrades_transitive() {
+        let mut repo = InMemoryRepository::new();
+
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                rdepend: DepEntry::parse("dev-python/b").unwrap(),
+                ..empty_deps()
+            },
+        );
+        // Only the newer version exists in the tree; the installed version
+        // (1.0) is deliberately NOT registered here.
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-python/b-2.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
+
+        // b installed at 1.0 (absent from the repo), reached only via a.
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::slotted(
+                Cpn::parse("dev-python/b").unwrap(),
+                Interned::intern("0"),
+            ),
+            version: Version::parse("1.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
+        });
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        let b_ver = solution
+            .iter()
+            .find(|(p, _)| p.cpn().package.as_str() == "b")
+            .map(|(_, v)| v.clone());
+        assert_eq!(
+            b_ver,
+            Some(Version::parse("2.0").unwrap()),
+            "transitive installed dep whose installed version was removed from \
+             the repo must upgrade to the newer in-slot version"
+        );
     }
 }

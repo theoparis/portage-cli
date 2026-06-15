@@ -87,7 +87,14 @@ impl DependencyProvider for PortageDependencyProvider {
                 InstalledPolicy::Favor => {
                     // Explicit targets are not favored: a named argument pulls
                     // the best accepted version (emerge argument semantics).
-                    if !self.root_targets.contains(package) && range.contains(installed_ver) {
+                    // Nor is a package whose installed version is no longer in
+                    // the repo: there is nothing to keep, so fall through to the
+                    // newest candidate (portage updates an installed package
+                    // whose version was pruned from the tree).
+                    if !self.root_targets.contains(package)
+                        && !self.installed_missing_from_repo.contains(package)
+                        && range.contains(installed_ver)
+                    {
                         return Ok(Some(installed_ver.clone()));
                     }
                 }
