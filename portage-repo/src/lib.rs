@@ -64,6 +64,7 @@ pub use repo::LayoutConf;
 pub use repo::Package;
 pub use repo::UseDb;
 pub use repo::UseExpand;
+pub use repo::sets::{SetResolver, is_set_ref, set_name};
 pub use repo::{CacheEntries, CacheEntriesIter, Ebuilds, EbuildsIter, ProfileUpdate, Repository};
 pub use repo::{Categories, CategoriesIter, Category, Packages, PackagesIter};
 pub use repo::{Maintainer, MaintainerKind, PkgMetadata};

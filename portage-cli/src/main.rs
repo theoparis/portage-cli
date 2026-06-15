@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 
 use anyhow::{Context, bail};
+use camino::Utf8Path;
 use clap::Parser;
 use error::Result;
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -36,6 +37,59 @@ fn parse_atoms(raw: &[String]) -> Vec<portage_atom::Dep> {
             }
         })
         .collect()
+}
+
+/// Expand `@set` references in `raw` to concrete atoms, leaving plain atoms
+/// untouched. Sets are a portage-config concept (not PMS); resolution lives in
+/// `portage_repo::SetResolver`. The profile stack comes from
+/// `<config_root>/etc/portage/make.profile` (for `@system`/`@profile`); user
+/// sets, `@world`, and `@selected` are read from `eroot` (the install target).
+///
+/// Failures (unknown set, bad profile link) are reported and the offending
+/// token dropped, matching `parse_atoms`' tolerance of bad atoms — a typo
+/// shouldn't abort the whole run, and `@system` against a host with no profile
+/// is a configuration error, not a crash.
+fn expand_sets(raw: &[String], config_root: Option<&Utf8Path>, eroot: &Utf8Path) -> Vec<String> {
+    // Build the resolver lazily, only when a set ref is actually present, so a
+    // plain `em foo` (no sets) pays no profile-build cost.
+    #[allow(unused_assignments)] // stack_holder's initial None is overwritten before read.
+    let mut stack_holder: Option<portage_repo::ProfileStack> = None;
+    let mut resolver: Option<portage_repo::SetResolver<'_>> = None;
+    let mut out = Vec::with_capacity(raw.len());
+    for s in raw {
+        let Some(name) = portage_repo::set_name(s) else {
+            out.push(s.clone());
+            continue;
+        };
+        if resolver.is_none() {
+            let portage_dir = config_root
+                .unwrap_or(Utf8Path::new("/"))
+                .join("etc/portage");
+            let profile_link = portage_dir.join("make.profile");
+            match std::fs::canonicalize(profile_link.as_std_path())
+                .map_err(|e| anyhow::anyhow!("cannot resolve make.profile for @set expansion: {e}"))
+                .and_then(|p| {
+                    portage_repo::ProfileStack::build(p)
+                        .map_err(|e| anyhow::anyhow!("failed to build profile stack: {e}"))
+                }) {
+                Ok(st) => {
+                    stack_holder = Some(st);
+                    // Safe: stack_holder outlives resolver (both dropped at fn end).
+                    let stack = stack_holder.as_ref().unwrap();
+                    resolver = Some(portage_repo::SetResolver::new(stack, eroot));
+                }
+                Err(e) => {
+                    eprintln!("warning: cannot expand @{name}: {e}");
+                    continue;
+                }
+            }
+        }
+        match resolver.as_ref().unwrap().resolve(name) {
+            Ok(atoms) => out.extend(atoms.iter().map(|d| d.to_string())),
+            Err(e) => eprintln!("warning: skipping @{name}: {e}"),
+        }
+    }
+    out
 }
 
 #[tokio::main]
@@ -98,15 +152,19 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     } else {
         query::ResolveMode::Error
     };
-    let parsed = query::resolve_atoms(&cli.atoms, &repo, vdb.as_ref(), mode);
-    let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
-    if atoms.is_empty() {
-        bail!("em: no valid atoms");
-    }
     // Root model (docs/root-model.md): config from roots.config (host for a
     // --prefix overlay), installed view = VDB(base) ∪ VDB(target), and the
     // plan installs into target.
     let roots = cli.roots();
+    // Expand @set references (e.g. @system, @world) to concrete atoms before
+    // resolution. Sets are read from the config root's profile (@system) and
+    // the merge target (@world/@selected, user sets).
+    let expanded = expand_sets(&cli.atoms, roots.config(), roots.merge_root());
+    let parsed = query::resolve_atoms(&expanded, &repo, vdb.as_ref(), mode);
+    let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
+    if atoms.is_empty() {
+        bail!("em: no valid atoms");
+    }
     let format = if cli.tree {
         cli::DepgraphFormat::Tree
     } else {

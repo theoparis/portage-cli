@@ -1,0 +1,365 @@
+//! Portage set resolution: expand `@name` references into concrete atoms.
+//!
+//! Sets are *not* PMS-defined — they are a portage-config concept (`man emerge`,
+//! §SETS). A set is a named collection of atoms and (recursively) other `@set`
+//! references. This module resolves a set name to its flat atom list, mirroring
+//! portage's `SetConfig.getSetAtoms`:
+//!
+//! - [`SetResolver::system`] and [`SetResolver::profile`] read the profile
+//!   `packages` file (PMS 5.2.6): `*cat/pkg` lines are `@system`, all lines are
+//!   `@profile`.
+//! - [`SetResolver::selected`] reads `/var/lib/portage/world` +
+//!   `world_sets` (the `@set` refs the user asked to track).
+//! - [`SetResolver::world`] is always `@selected ∪ @system`.
+//! - User sets live in `etc/portage/sets/<name>` (one atom/`@ref` per line) and
+//!   `etc/portage/sets.conf` (ini `[name]` sections, portage's `StaticFileSet`/
+//!   `ConfigFileSet` builders).
+//!
+//! Recursion: a set file may reference another set (`@other`); resolution is
+//! recursive with a visited-set cycle guard, matching portage's `ignorelist`
+//! (cycles are silently broken, not errors).
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use camino::{Utf8Path, Utf8PathBuf};
+use portage_atom::Dep;
+
+use crate::error::{Error, Result};
+use crate::repo::ProfileStack;
+
+/// The `@` prefix that marks a set reference (portage `SETPREFIX`).
+pub(crate) const SET_PREFIX: char = '@';
+
+/// The result of classifying a raw token from the command line or a set file:
+/// either a concrete atom or a nested set reference.
+#[derive(Debug, Clone)]
+enum Token {
+    Atom(Dep),
+    Set(String),
+}
+
+/// Resolve portage set references to flat atom lists.
+///
+/// Constructed once per run from a resolved [`ProfileStack`] (for the
+/// profile-derived sets) and the portage config root (for `@world`,
+/// `@selected`, and user sets). All methods are recursive with a visited-set
+/// cycle guard; a set that (directly or transitively) references itself is
+/// resolved once, then the back-edge is dropped — matching portage, which does
+/// not treat set cycles as an error.
+pub struct SetResolver<'a> {
+    profile_stack: &'a ProfileStack,
+    /// `EROOT` — the root holding `var/lib/portage/world[_sets]` and
+    /// `etc/portage/sets[.conf]`. Usually the install target.
+    eroot: &'a Utf8Path,
+}
+
+impl<'a> SetResolver<'a> {
+    /// Build a resolver over `profile_stack` (for `@system`/`@profile`) and the
+    /// files under `eroot` (for `@world`/`@selected`/user sets).
+    pub fn new(profile_stack: &'a ProfileStack, eroot: &'a Utf8Path) -> Self {
+        Self {
+            profile_stack,
+            eroot,
+        }
+    }
+
+    /// Resolve any `@name` to its flat atom list. Unknown names and the bare
+    /// `@` (no name) are errors. The four built-ins dispatch to their sources;
+    /// anything else is looked up as a user set.
+    pub fn resolve(&self, name: &str) -> Result<Vec<Dep>> {
+        let mut visited = HashSet::new();
+        self.resolve_named(name, &mut visited)
+    }
+
+    fn resolve_named(&self, name: &str, visited: &mut HashSet<String>) -> Result<Vec<Dep>> {
+        if name.is_empty() {
+            return Err(Error::InvalidProfile("empty set name".to_string()));
+        }
+        if !visited.insert(name.to_string()) {
+            // Already being resolved higher up the stack: cycle. Silently stop,
+            // matching portage's `ignorelist` (cycles are not errors).
+            return Ok(Vec::new());
+        }
+        let atoms = match name {
+            "system" => self.profile_stack.system_set()?,
+            "profile" => self
+                .profile_stack
+                .packages()?
+                .into_iter()
+                .map(|(_, d)| d)
+                .collect(),
+            "selected" => self.resolve_selected(visited)?,
+            // @world is always @selected ∪ @system (portage invariant).
+            "world" => {
+                let mut v = self.resolve_named("selected", visited)?;
+                v.extend(self.resolve_named("system", visited)?);
+                v
+            }
+            other => self.resolve_user_set(other, visited)?,
+        };
+        Ok(atoms)
+    }
+
+    /// `@selected`: the `world` file (atoms) plus `world_sets` (`@set` refs),
+    /// expanded recursively. Both live under `var/lib/portage/`.
+    fn resolve_selected(&self, visited: &mut HashSet<String>) -> Result<Vec<Dep>> {
+        let mut out = read_atoms(&self.eroot.join("var/lib/portage/world"))?;
+        for set_ref in read_lines(&self.eroot.join("var/lib/portage/world_sets"))? {
+            let name = set_ref
+                .trim()
+                .strip_prefix(SET_PREFIX)
+                .unwrap_or(&set_ref)
+                .trim();
+            if name.is_empty() {
+                continue;
+            }
+            out.extend(self.resolve_named(name, visited)?);
+        }
+        Ok(out)
+    }
+
+    /// A user-defined set: either `/etc/portage/sets/<name>` (a static file:
+    /// one atom or `@ref` per line) or a `[name]` section in
+    /// `etc/portage/sets.conf`. Unknown → error.
+    fn resolve_user_set(&self, name: &str, visited: &mut HashSet<String>) -> Result<Vec<Dep>> {
+        // Static set file takes precedence (matches portage's StaticFileSet
+        // multiBuilder, which discovers one set per file under sets/).
+        let file = self.eroot.join("etc/portage/sets").join(name);
+        if file.exists() {
+            return self.expand_set_file(&file, visited);
+        }
+        // Fall back to sets.conf `[name]` section. Only the common `class =
+        // StaticFileSet`/`files.StaticFileSet` form pointing at a filename is
+        // supported; exotic builder classes (dbapi, shell, …) are an error.
+        if let Some(filename) = lookup_sets_conf(&self.eroot.join("etc/portage/sets.conf"), name)? {
+            return self.expand_set_file(
+                Utf8Path::from_path(&filename).ok_or_else(|| {
+                    Error::InvalidProfile(format!("non-utf8 set path for @{name}"))
+                })?,
+                visited,
+            );
+        }
+        Err(Error::InvalidProfile(format!("unknown set @{name}")))
+    }
+
+    /// Read a set file: each non-comment line is an atom or an `@ref`; refs
+    /// recurse. Matches portage `StaticFileSet` validation (a line is valid if
+    /// it is a `@`-prefixed set ref or a real atom).
+    fn expand_set_file(&self, path: &Utf8Path, visited: &mut HashSet<String>) -> Result<Vec<Dep>> {
+        let mut out = Vec::new();
+        for line in read_lines(path)? {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            match classify(trimmed)? {
+                Token::Atom(d) => out.push(d),
+                Token::Set(n) => out.extend(self.resolve_named(&n, visited)?),
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Classify a token as atom or set ref (`@name`). A bare `@` is rejected.
+fn classify(token: &str) -> Result<Token> {
+    if let Some(rest) = token.strip_prefix(SET_PREFIX) {
+        if rest.is_empty() {
+            return Err(Error::InvalidProfile(
+                "bare '@' is not a valid set ref".to_string(),
+            ));
+        }
+        Ok(Token::Set(rest.to_string()))
+    } else {
+        Ok(Token::Atom(Dep::parse(token)?))
+    }
+}
+
+/// Read a file as atom lines (no `@` handling) — for `world`.
+fn read_atoms(path: &Utf8Path) -> Result<Vec<Dep>> {
+    let mut out = Vec::new();
+    for line in read_lines(path)? {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        out.push(Dep::parse(trimmed)?);
+    }
+    Ok(out)
+}
+
+/// Read a file into trimmed lines, tolerating absence (→ empty).
+fn read_lines(path: &Utf8Path) -> Result<Vec<String>> {
+    match std::fs::read_to_string(path.as_std_path()) {
+        Ok(s) => Ok(s.lines().map(|l| l.trim().to_string()).collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(Error::Io {
+            path: path.as_std_path().to_path_buf(),
+            source: e,
+        }),
+    }
+}
+
+/// Look up `[name]` in an ini-style `sets.conf` and return its `filename =`
+/// value (resolved relative to the config root) when the section is a
+/// `StaticFileSet`. Returns `Ok(None)` if the section or key is absent or the
+/// section is an unsupported builder class.
+fn lookup_sets_conf(path: &Utf8Path, name: &str) -> Result<Option<PathBuf>> {
+    let Ok(content) = std::fs::read_to_string(path.as_std_path()) else {
+        return Ok(None);
+    };
+    let mut in_section = false;
+    let mut class = String::new();
+    let mut filename: Option<String> = None;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if let Some(inner) = line
+            .strip_prefix('[')
+            .and_then(|l| l.strip_suffix(']'))
+            .map(str::trim)
+        {
+            // Section boundary: flush the previous section if it matched.
+            if in_section {
+                return finish_static_file(&class, filename.as_deref(), path);
+            }
+            in_section = inner == name;
+            class.clear();
+            filename = None;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let (k, v) = (k.trim(), v.trim());
+            if k.eq_ignore_ascii_case("class") {
+                class = v.to_string();
+            } else if k.eq_ignore_ascii_case("filename") {
+                filename = Some(v.to_string());
+            }
+        }
+    }
+    if in_section {
+        return finish_static_file(&class, filename.as_deref(), path);
+    }
+    Ok(None)
+}
+
+/// Map a `[name]` section's `class` + `filename` to a path, accepting the
+/// `StaticFileSet` / `files.StaticFileSet` builder only.
+fn finish_static_file(
+    class: &str,
+    filename: Option<&str>,
+    conf_path: &Utf8Path,
+) -> Result<Option<PathBuf>> {
+    let is_static = class
+        .rsplit('.')
+        .next()
+        .is_some_and(|c| c.eq_ignore_ascii_case("StaticFileSet"));
+    if !is_static {
+        return Ok(None);
+    }
+    let Some(f) = filename else {
+        return Ok(None);
+    };
+    let p = Utf8PathBuf::from(f);
+    let resolved = if p.is_absolute() {
+        p.into_std_path_buf()
+    } else {
+        conf_path
+            .parent()
+            .unwrap_or(Utf8Path::new("."))
+            .join(&p)
+            .into_std_path_buf()
+    };
+    Ok(Some(resolved))
+}
+
+/// True iff `s` is a set reference (starts with `@`).
+pub fn is_set_ref(s: &str) -> bool {
+    s.starts_with(SET_PREFIX)
+}
+
+/// Strip the leading `@` from a set reference, or `None` if `s` is not one.
+pub fn set_name(s: &str) -> Option<&str> {
+    s.strip_prefix(SET_PREFIX).filter(|n| !n.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    fn write(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn make_profile_stack(dir: &Path) -> ProfileStack {
+        // `ProfileStack::build` follows a `parent` file; a bare dir with no
+        // parent is a valid single-profile stack.
+        ProfileStack::build(dir.to_path_buf()).unwrap()
+    }
+
+    #[test]
+    fn classify_atom_vs_set() {
+        assert!(matches!(classify("dev-libs/openssl"), Ok(Token::Atom(_))));
+        assert!(matches!(classify("@system"), Ok(Token::Set(_))));
+        assert!(classify("@").is_err(), "bare @ is not a valid set ref");
+    }
+
+    #[test]
+    fn is_set_ref_and_name() {
+        assert!(is_set_ref("@world"));
+        assert!(!is_set_ref("dev-libs/openssl"));
+        assert_eq!(set_name("@system"), Some("system"));
+        assert_eq!(set_name("dev-libs/openssl"), None);
+        assert_eq!(set_name("@"), None);
+    }
+
+    #[test]
+    fn user_set_file_with_nested_refs() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write(
+            &root.join("etc/portage/sets/base"),
+            "sys-libs/zlib\n@extra\n",
+        );
+        write(&root.join("etc/portage/sets/extra"), "dev-libs/openssl\n");
+        // An empty profile stack is fine: only user sets are touched here.
+        let stack = make_profile_stack(root);
+        let eroot = Utf8Path::from_path(root).unwrap();
+        let r = SetResolver::new(&stack, eroot);
+        let atoms = r.resolve("base").unwrap();
+        let names: Vec<String> = atoms.iter().map(|d| d.to_string()).collect();
+        assert!(names.contains(&"sys-libs/zlib".to_string()));
+        assert!(names.contains(&"dev-libs/openssl".to_string()));
+    }
+
+    #[test]
+    fn set_cycle_is_broken_not_errored() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        // a -> b -> a (cycle), plus a real atom so it is not empty.
+        write(&root.join("etc/portage/sets/a"), "sys-libs/zlib\n@b\n");
+        write(&root.join("etc/portage/sets/b"), "dev-libs/openssl\n@a\n");
+        let stack = make_profile_stack(root);
+        let eroot = Utf8Path::from_path(root).unwrap();
+        let r = SetResolver::new(&stack, eroot);
+        let atoms = r.resolve("a").unwrap();
+        // zlib (from a), openssl (from b); the a->b->a back-edge is dropped.
+        assert_eq!(atoms.len(), 2);
+    }
+
+    #[test]
+    fn unknown_set_is_an_error() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let stack = make_profile_stack(root);
+        let eroot = Utf8Path::from_path(root).unwrap();
+        let r = SetResolver::new(&stack, eroot);
+        assert!(r.resolve("does-not-exist").is_err());
+    }
+}

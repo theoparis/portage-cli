@@ -7,6 +7,7 @@ pub mod pkgmetadata;
 pub mod profile;
 pub mod repos_conf;
 pub mod repository;
+pub mod sets;
 pub mod use_expand;
 pub mod usedb;
 pub(crate) mod util;

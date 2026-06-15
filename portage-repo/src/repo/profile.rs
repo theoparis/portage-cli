@@ -109,6 +109,18 @@ pub struct Profile {
     eapi: Eapi,
 }
 
+/// One entry from a profile `packages` file (PMS 5.2.6).
+///
+/// `*cat/pkg` is a system-package add; `cat/pkg` an advisory (`@profile`) add;
+/// `-cat/pkg` removes a prior add across the stack; `-*` clears all accumulated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PackageEntry {
+    System(Dep),
+    Plain(Dep),
+    Remove(Dep),
+    Clear,
+}
+
 impl Profile {
     /// Open a profile at the given directory path.
     pub fn open(path: PathBuf) -> Result<Self> {
@@ -140,23 +152,22 @@ impl Profile {
         Ok(lines.iter().map(|l| self.path.join(l)).collect())
     }
 
-    /// Parse the `packages` file.
-    ///
-    /// Returns `(is_system, dep)` pairs. Lines prefixed with `*` indicate
-    /// system packages.
-    ///
-    /// See [PMS 5.2.6](https://projects.gentoo.org/pms/9/pms.html#packages).
-    pub fn packages(&self) -> Result<Vec<(bool, Dep)>> {
+    /// Parse the `packages` file into raw [`PackageEntry`]s (no cross-profile
+    /// removal applied; that happens in [`ProfileStack::packages`]).
+    fn packages_raw(&self) -> Result<Vec<PackageEntry>> {
         let lines = util::read_lines(self.path.join("packages"))?;
         let mut result = Vec::new();
         for line in lines {
-            let (is_system, atom_str) = if let Some(rest) = line.strip_prefix('*') {
-                (true, rest.trim())
+            let entry = if line == "-*" {
+                PackageEntry::Clear
+            } else if let Some(rest) = line.strip_prefix('-') {
+                PackageEntry::Remove(Dep::parse(rest.trim())?)
+            } else if let Some(rest) = line.strip_prefix('*') {
+                PackageEntry::System(Dep::parse(rest.trim())?)
             } else {
-                (false, line.as_str())
+                PackageEntry::Plain(Dep::parse(line.trim())?)
             };
-            let dep = Dep::parse(atom_str)?;
-            result.push((is_system, dep));
+            result.push(entry);
         }
         Ok(result)
     }
@@ -347,16 +358,48 @@ impl ProfileStack {
         )
     }
 
-    /// Accumulated `packages` entries across the full stack.
+    /// Accumulated `packages` entries across the full stack, with incremental
+    /// `-atom` / `-*` removal applied (portage `stack_lists(..., incremental=1)`).
     ///
-    /// Returns `(is_system, dep)` pairs from all profiles, ancestors first.
+    /// Returns `(is_system, dep)` pairs. A `*cat/pkg` line is a system package
+    /// (PMS 5.2.6); a `-cat/pkg` line removes a prior `cat/pkg` across the
+    /// stack; `-*` clears everything accumulated so far. Ancestors are processed
+    /// first (root → leaf), so a leaf `-` correctly removes a parent's add.
+    /// `@set` references are not valid in profile `packages` files (portage
+    /// rejects them at parse time) and are not handled here.
+    ///
     /// See [PMS 5.2.6](https://projects.gentoo.org/pms/9/pms.html#packages).
     pub fn packages(&self) -> Result<Vec<(bool, Dep)>> {
-        let mut acc = Vec::new();
+        // Preserve insertion order while allowing removal. A `-cat/pkg` removes
+        // the matching prior atom (plain or system) — portage strips `*` before
+        // recording, so the `-` form matches the resulting atom regardless of
+        // whether it was a system add.
+        let mut acc: Vec<(bool, Dep)> = Vec::new();
         for p in &self.profiles {
-            acc.extend(p.packages()?);
+            for entry in p.packages_raw()? {
+                match entry {
+                    PackageEntry::System(d) => acc.push((true, d)),
+                    PackageEntry::Plain(d) => acc.push((false, d)),
+                    PackageEntry::Remove(d) => {
+                        acc.retain(|(_, existing)| existing != &d);
+                    }
+                    PackageEntry::Clear => acc.clear(),
+                }
+            }
         }
         Ok(acc)
+    }
+
+    /// The profile-derived `@system` set: the `*cat/pkg` entries from
+    /// [`packages`](Self::packages), with incremental `-` removal applied across
+    /// the stack. Matches portage's `ProfilePackageSet`, which keeps only the
+    /// `*`-marked atoms (the plain ones are advisory `@profile`, not `@system`).
+    pub fn system_set(&self) -> Result<Vec<Dep>> {
+        Ok(self
+            .packages()?
+            .into_iter()
+            .filter_map(|(is_sys, d)| is_sys.then_some(d))
+            .collect())
     }
 
     /// Accumulated `package.use` entries from the full stack, ancestors first.
