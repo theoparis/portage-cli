@@ -47,7 +47,7 @@ pub use build::inherit;
 pub use error::{Error, Result};
 
 // Re-export the most-used types at crate root for backwards compat
-pub use build::EbuildShell;
+pub use build::{EbuildShell, run_helper};
 pub use cache::{
     CacheReadOpts, RegenOpts, RegenStats, cache_cpvs, cache_entries_parallel, regen_cache,
 };

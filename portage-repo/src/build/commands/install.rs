@@ -1262,6 +1262,89 @@ impl builtins::Command for NewCommand {
     }
 }
 
+/// do*/new* helper names backed by Rust builtins. `init_build_env` drops a tiny
+/// PATH shim per name (each re-invoking `em __helper <name>`) so `find -exec
+/// doman` / `xargs do*` work: `find` needs a real executable, which an in-shell
+/// builtin is not. The bash-only `doinitd`/`doconfd`/`doenvd` wrappers are
+/// intentionally excluded (no builtin to dispatch to, and `find -exec` on them
+/// is effectively never used).
+pub(crate) const HELPER_NAMES: &[&str] = &[
+    "dodir",
+    "keepdir",
+    "doins",
+    "doexe",
+    "dobin",
+    "dosbin",
+    "dodoc",
+    "doheader",
+    "doinfo",
+    "doman",
+    "domo",
+    "dolib",
+    "dolib.a",
+    "dolib.so",
+    "dosym",
+    "fperms",
+    "fowners",
+    "newbin",
+    "newsbin",
+    "newins",
+    "newexe",
+    "newdoc",
+    "newman",
+    "newheader",
+    "newlib.a",
+    "newlib.so",
+    "newinitd",
+    "newconfd",
+    "newenvd",
+];
+
+/// Register every do*/new* install-helper builtin on `shell`. Shared by the
+/// ebuild shell and the standalone `em __helper` runner so both use identical
+/// logic. One `NewCommand` is registered under every `new*` name; it dispatches
+/// on `context.command_name`.
+pub(crate) fn register_install_builtins<SE: brush_core::ShellExtensions>(
+    shell: &mut brush_core::Shell<SE>,
+) {
+    macro_rules! reg {
+        ($($name:literal => $ty:ident),+ $(,)?) => {$(
+            shell.register_builtin($name, builtins::builtin::<$ty, _>());
+        )+};
+    }
+    reg! {
+        "dodir" => DodirCommand,
+        "keepdir" => KeepdirCommand,
+        "doins" => DoinsCommand,
+        "doexe" => DoexeCommand,
+        "dobin" => DobinCommand,
+        "dosbin" => DosbinCommand,
+        "dodoc" => DodocCommand,
+        "doheader" => DoheaderCommand,
+        "doinfo" => DoinfoCommand,
+        "doman" => DomanCommand,
+        "domo" => DomoCommand,
+        "dolib" => DolibCommand,
+        "dolib.a" => DolibaCommand,
+        "dolib.so" => DolibsoCommand,
+        "dosym" => DosymCommand,
+        "fperms" => FpermsCommand,
+        "fowners" => FownersCommand,
+        "newbin" => NewCommand,
+        "newsbin" => NewCommand,
+        "newins" => NewCommand,
+        "newexe" => NewCommand,
+        "newdoc" => NewCommand,
+        "newman" => NewCommand,
+        "newheader" => NewCommand,
+        "newlib.a" => NewCommand,
+        "newlib.so" => NewCommand,
+        "newinitd" => NewCommand,
+        "newconfd" => NewCommand,
+        "newenvd" => NewCommand,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

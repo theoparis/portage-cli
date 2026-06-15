@@ -410,6 +410,54 @@ pub struct EbuildShell {
     use_flags: HashSet<String>,
 }
 
+/// Run a single do*/new* install helper as a standalone process, reading build
+/// state from the (exported) environment. Backs the PATH shims `init_build_env`
+/// drops so `find -exec doman` / `xargs do*` reach helpers that are otherwise
+/// in-shell builtins. Returns the process exit code.
+///
+/// A minimal brush shell is created inheriting the process environment (so ED,
+/// INSDESTTREE, _insopts, _into_dir, PF, … are present as the builtins expect),
+/// the same install builtins are registered, and `<name> <args…>` is run.
+pub async fn run_helper(name: &str, args: &[String]) -> i32 {
+    let mut shell = match Shell::builder()
+        .profile(ProfileLoadBehavior::Skip)
+        .rc(RcLoadBehavior::Skip)
+        .parser(ParserImpl::Winnow)
+        .build()
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("em __helper: failed to create shell: {e}");
+            return 1;
+        }
+    };
+    shell.register_default_builtins(brush_builtins::BuiltinSet::BashMode);
+    commands::register_install_builtins(&mut shell);
+
+    // Build `name 'arg1' 'arg2' …`, single-quoting each argument so paths with
+    // spaces or glob characters survive re-parsing by the shell.
+    let mut cmd = name.to_string();
+    for a in args {
+        cmd.push(' ');
+        cmd.push('\'');
+        cmd.push_str(&a.replace('\'', r"'\''"));
+        cmd.push('\'');
+    }
+
+    let params = shell.default_exec_params();
+    match shell
+        .run_string(cmd, &SourceInfo::from("em __helper"), &params)
+        .await
+    {
+        Ok(result) => u8::from(result.exit_code) as i32,
+        Err(e) => {
+            eprintln!("em __helper {name}: {e}");
+            1
+        }
+    }
+}
+
 impl EbuildShell {
     /// Create a new shell configured for the given repository.
     ///
@@ -573,47 +621,7 @@ impl EbuildShell {
         // Install helpers migrated from bash (INSTALL_HELPERS) to Rust builtins
         // (clap arg parsing, ${ED}/dest-tree aware). The do* doers and the new*
         // variants both live here; new* reads stdin when its source arg is `-`.
-        macro_rules! register_install {
-            ($($name:literal => $ty:ident),+ $(,)?) => {$(
-                shell.register_builtin(
-                    $name,
-                    brush_core::builtins::builtin::<commands::$ty, _>(),
-                );
-            )+};
-        }
-        register_install! {
-            "dodir" => DodirCommand,
-            "keepdir" => KeepdirCommand,
-            "doins" => DoinsCommand,
-            "doexe" => DoexeCommand,
-            "dobin" => DobinCommand,
-            "dosbin" => DosbinCommand,
-            "dodoc" => DodocCommand,
-            "doheader" => DoheaderCommand,
-            "doinfo" => DoinfoCommand,
-            "doman" => DomanCommand,
-            "domo" => DomoCommand,
-            "dolib" => DolibCommand,
-            "dolib.a" => DolibaCommand,
-            "dolib.so" => DolibsoCommand,
-            "dosym" => DosymCommand,
-            "fperms" => FpermsCommand,
-            "fowners" => FownersCommand,
-            // One NewCommand type is registered under every new* name; it
-            // dispatches on context.command_name.
-            "newbin" => NewCommand,
-            "newsbin" => NewCommand,
-            "newins" => NewCommand,
-            "newexe" => NewCommand,
-            "newdoc" => NewCommand,
-            "newman" => NewCommand,
-            "newheader" => NewCommand,
-            "newlib.a" => NewCommand,
-            "newlib.so" => NewCommand,
-            "newinitd" => NewCommand,
-            "newconfd" => NewCommand,
-            "newenvd" => NewCommand,
-        }
+        commands::install::register_install_builtins(&mut shell);
 
         // Register P4 unpack builtin.
         shell.register_builtin(
@@ -1258,6 +1266,35 @@ impl EbuildShell {
         // DISTDIR is already set by init_build_env() from env or ~/.cache/distfiles;
         // do not override it here.
 
+        // Drop PATH shims for the do*/new* install helpers so ebuilds that run
+        // them via `find -exec`/`xargs` (which need a real executable, not an
+        // in-shell builtin) work. Each shim re-invokes `em __helper <name>`,
+        // which runs the same builtin logic against the exported build env.
+        // Written once per package; the directory is prepended to PATH each
+        // phase (init_build_env rebuilds PATH from scratch).
+        let helper_dir = work_root.join(".em-helpers");
+        if need_source && let Ok(em) = std::env::current_exe() {
+            if let Err(e) = std::fs::create_dir_all(&helper_dir) {
+                return Err(Error::Shell(format!(
+                    "creating helper shim dir {}: {e}",
+                    helper_dir.display()
+                )));
+            }
+            use std::os::unix::fs::PermissionsExt;
+            for name in commands::HELPER_NAMES {
+                let shim = helper_dir.join(name);
+                let script = format!(
+                    "#!/bin/sh\nexec '{}' __helper '{name}' \"$@\"\n",
+                    em.display()
+                );
+                if std::fs::write(&shim, script).is_ok() {
+                    let _ = std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755));
+                }
+            }
+        }
+        let path = self.get_var("PATH").unwrap_or_default();
+        self.set_var("PATH", &format!("{}:{path}", helper_dir.display()));
+
         // Phase and merge variables.
         let (phase_val, func_name) = phase_to_func(phase);
         self.set_var("EBUILD_PHASE", phase_val);
@@ -1407,7 +1444,9 @@ impl EbuildShell {
              MERGE_TYPE EPREFIX ED EROOT SYSROOT ESYSROOT BROOT PORTAGE_CONFIGROOT USE \
              PORTAGE_INST_UID PORTAGE_INST_GID \
              REPLACING_VERSIONS REPLACED_BY_VERSION \
-             MAKEOPTS CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CC CXX AR RANLIB NM STRIP",
+             MAKEOPTS CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CC CXX AR RANLIB NM STRIP \
+             INSDESTTREE EXEDESTTREE DOCDESTTREE DESTTREE _into_dir _insopts _exeopts \
+             MOPREFIX ABI CONF_LIBDIR",
         )
         .await
         .ok();

@@ -463,6 +463,11 @@ async fn merge_parallel(
 
 async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
     match applet {
+        // Internal helper shim entry point: run the helper and exit with its
+        // status (the shim's caller — `find -exec`/`xargs` — checks it).
+        Applet::Helper { name, args } => {
+            std::process::exit(portage_repo::run_helper(name, args).await);
+        }
         Applet::Ebuild {
             ebuild_path,
             phase,

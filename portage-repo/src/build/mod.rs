@@ -7,4 +7,4 @@ pub(crate) mod ver_funcs;
 
 pub use commands::inherit;
 pub use env::EbuildEnv;
-pub use shell::EbuildShell;
+pub use shell::{EbuildShell, run_helper};

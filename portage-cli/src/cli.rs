@@ -347,6 +347,19 @@ impl Cli {
 
 #[derive(Subcommand)]
 pub enum Applet {
+    /// Run one do*/new* install helper standalone against the exported build
+    /// env. Internal: backs the PATH shims dropped during a build so
+    /// `find -exec doman` / `xargs do*` reach helpers that are in-shell
+    /// builtins. Not for direct use.
+    #[command(name = "__helper", hide = true)]
+    Helper {
+        /// Helper name (e.g. `doman`, `dolib.a`).
+        name: String,
+        /// Arguments passed through to the helper.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     #[command(about = "Execute ebuild phases")]
     Ebuild {
         #[arg(required = true)]

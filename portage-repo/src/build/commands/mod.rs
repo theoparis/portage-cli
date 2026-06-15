@@ -29,11 +29,7 @@ pub(crate) use einstall::EinstallCommand;
 pub(crate) use emake::EmakeCommand;
 pub(crate) use export_functions::ExportFunctionsCommand;
 pub(crate) use has::{HasCommand, HasvCommand, InIuseCommand};
-pub(crate) use install::{
-    DobinCommand, DodirCommand, DodocCommand, DoexeCommand, DoheaderCommand, DoinfoCommand,
-    DoinsCommand, DolibCommand, DolibaCommand, DolibsoCommand, DomanCommand, DomoCommand,
-    DosbinCommand, DosymCommand, FownersCommand, FpermsCommand, KeepdirCommand, NewCommand,
-};
+pub(crate) use install::{HELPER_NAMES, register_install_builtins};
 pub(crate) use install_paths::{DocompressCommand, DostripCommand};
 pub(crate) use output::{EbeginCommand, EchoMessageCommand, EendCommand};
 pub(crate) use phase_funcs::{EAPI_PREDICATE_NAMES, EapiPredicateCommand, EbuildPhaseFuncsCommand};
