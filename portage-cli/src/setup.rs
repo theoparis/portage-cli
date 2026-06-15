@@ -33,6 +33,14 @@ if [[ -n ${EPREFIX} ]]; then
 	# first, then the host. Without this, the meson font/cairo/harfbuzz chain
 	# can't find host deps.
 	export PKG_CONFIG_LIBDIR="${_ov}/usr/${_libdir}/pkgconfig:${_ov}/usr/share/pkgconfig:/usr/${_libdir}/pkgconfig:/usr/share/pkgconfig${PKG_CONFIG_LIBDIR:+:${PKG_CONFIG_LIBDIR}}"
+	# The prefix .pc record correct -L${EPREFIX}/usr/lib for *direct* deps, but
+	# the host toolchain's default link search does not include the prefix, so a
+	# lib's transitive NEEDED (e.g. libxcb → libXau/libXdmcp) can't be resolved
+	# at link time — every meson link probe then fails and configure misdetects
+	# functions (cairo's xrender gradient fallback clashes with the new header).
+	# -rpath (not just -rpath-link) so in-place prefix binaries also resolve
+	# their prefix deps at runtime.
+	export LDFLAGS="-L${_ov}/usr/${_libdir} -Wl,-rpath,${_ov}/usr/${_libdir}${LDFLAGS:+ ${LDFLAGS}}"
 	export CMAKE_PREFIX_PATH="${_ov}/usr${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
 	# Build tools merged into the prefix (vala, cbindgen, …) must be on PATH,
 	# and their python modules (xcb-proto's xcbgen, gobject-introspection, …)
