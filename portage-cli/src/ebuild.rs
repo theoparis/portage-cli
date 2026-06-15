@@ -1012,30 +1012,22 @@ fn scan_cfg(dest: &Utf8Path) -> (Utf8PathBuf, Option<Utf8PathBuf>) {
 /// go through `utimensat(AT_SYMLINK_NOFOLLOW)`. Best-effort: failures are
 /// ignored, matching the regular-file mtime path.
 fn set_symlink_times(path: &Utf8Path, meta: &std::fs::Metadata) {
-    let to_ts = |t: std::io::Result<std::time::SystemTime>| -> libc::timespec {
+    use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
+    let to_ts = |t: std::io::Result<std::time::SystemTime>| -> Timespec {
         let d = t
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .unwrap_or_default();
-        libc::timespec {
-            tv_sec: d.as_secs() as libc::time_t,
-            tv_nsec: libc::c_long::from(d.subsec_nanos() as i32),
+        Timespec {
+            tv_sec: d.as_secs() as i64,
+            tv_nsec: d.subsec_nanos() as i64,
         }
     };
-    let times = [to_ts(meta.accessed()), to_ts(meta.modified())];
-    let Ok(c_path) = std::ffi::CString::new(path.as_str()) else {
-        return;
+    let times = Timestamps {
+        last_access: to_ts(meta.accessed()),
+        last_modification: to_ts(meta.modified()),
     };
-    // SAFETY: c_path is a valid NUL-terminated string and `times` is a
-    // two-element array, as utimensat requires.
-    unsafe {
-        libc::utimensat(
-            libc::AT_FDCWD,
-            c_path.as_ptr(),
-            times.as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        );
-    }
+    let _ = utimensat(CWD, path.as_str(), &times, AtFlags::SYMLINK_NOFOLLOW);
 }
 
 /// Result of merging the image into ROOT.
@@ -1516,20 +1508,20 @@ mod tests {
         fs::create_dir_all(root.as_std_path()).unwrap();
 
         // Backdate the image symlink's own mtime.
-        let want = libc::timespec {
+        use rustix::fs::{AtFlags, CWD, Timespec, Timestamps, utimensat};
+        let want = Timespec {
             tv_sec: 1_000_000_000,
             tv_nsec: 0,
         };
-        let times = [want, want];
-        let c = std::ffi::CString::new(image.join("usr/bin/tp").as_str()).unwrap();
-        unsafe {
-            libc::utimensat(
-                libc::AT_FDCWD,
-                c.as_ptr(),
-                times.as_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            );
-        }
+        let _ = utimensat(
+            CWD,
+            image.join("usr/bin/tp").as_str(),
+            &Timestamps {
+                last_access: want,
+                last_modification: want,
+            },
+            AtFlags::SYMLINK_NOFOLLOW,
+        );
 
         walk_image(&image, &root, &ConfigProtect::none()).unwrap();
 

@@ -11,16 +11,15 @@ use tempfile::TempDir;
 /// The default macOS soft limit (256) is too low for 124 concurrent shells,
 /// each of which clones stdin/stdout/stderr during brush initialisation.
 fn raise_fd_limit() {
-    #[cfg(unix)]
-    unsafe {
-        let mut rlim = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
-            rlim.rlim_cur = rlim.rlim_max;
-            libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
-        }
+    let max = rustix::process::getrlimit(rustix::process::Resource::Nofile).maximum;
+    if let Some(max) = max {
+        let _ = rustix::process::setrlimit(
+            rustix::process::Resource::Nofile,
+            rustix::process::Rlimit {
+                current: Some(max),
+                maximum: Some(max),
+            },
+        );
     }
 }
 
