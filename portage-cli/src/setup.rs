@@ -41,6 +41,13 @@ if [[ -n ${EPREFIX} ]]; then
 	# -rpath (not just -rpath-link) so in-place prefix binaries also resolve
 	# their prefix deps at runtime.
 	export LDFLAGS="-L${_ov}/usr/${_libdir} -Wl,-rpath,${_ov}/usr/${_libdir}${LDFLAGS:+ ${LDFLAGS}}"
+	# Prefix tools invoked *during* a build (g-ir-compiler, g-ir-scanner, vala,
+	# …) are dynamically linked against prefix libs. The -rpath above covers
+	# tools built after it landed, but anything installed earlier — and tools
+	# whose rpath the host loader still doesn't search — needs the prefix libdir
+	# on the runtime search path. This is build-time only (portage bashrc), so it
+	# does not leak into the installed packages' runtime.
+	export LD_LIBRARY_PATH="${_ov}/usr/${_libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 	export CMAKE_PREFIX_PATH="${_ov}/usr${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
 	# Build tools merged into the prefix (vala, cbindgen, …) must be on PATH,
 	# and their python modules (xcb-proto's xcbgen, gobject-introspection, …)
@@ -120,6 +127,10 @@ pub fn bootstrap(roots: &Roots) -> Result<()> {
         &make_conf_template(is_local, eroot),
     )?;
 
+    if is_local {
+        link_host_pythons(eroot)?;
+    }
+
     let mode = if is_local {
         format!("em --local            (in-place Gentoo-Prefix at {eroot})")
     } else {
@@ -156,6 +167,39 @@ fn make_conf_template(is_local: bool, eroot: &Utf8Path) -> String {
          # in `package.use`, e.g.:\n\
          #   media-libs/freetype harfbuzz\n"
     )
+}
+
+/// Expose the host's Python interpreters at the prefix path.
+///
+/// In `--local` mode the host (`/`) is the base system and provides Python, but
+/// python.eclass bakes `${EPREFIX}/usr/bin/pythonX.Y` into installed scripts'
+/// shebangs (e.g. g-ir-scanner). Without an interpreter there, every such script
+/// dies with `bad interpreter: No such file or directory` — which surfaces as
+/// meson's opaque "Unhandled python OSError" and breaks the whole
+/// gobject-introspection chain (harfbuzz, pango, gdk-pixbuf, gtk+, …). Symlink
+/// the host `/usr/bin/python*` entries into `${EPREFIX}/usr/bin` so those
+/// absolute shebangs resolve. Idempotent and best-effort.
+fn link_host_pythons(eroot: &Utf8Path) -> Result<()> {
+    let bin = eroot.join("usr/bin");
+    std::fs::create_dir_all(bin.as_std_path()).with_context(|| format!("creating {bin}"))?;
+    let Ok(entries) = std::fs::read_dir("/usr/bin") else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("python") {
+            continue;
+        }
+        let link = bin.join(name);
+        // Skip if anything is already there (including a broken symlink).
+        if link.as_std_path().symlink_metadata().is_ok() {
+            continue;
+        }
+        let target = format!("/usr/bin/{name}");
+        let _ = std::os::unix::fs::symlink(&target, link.as_std_path());
+    }
+    Ok(())
 }
 
 fn write_if_absent(path: &Utf8Path, contents: &str) -> Result<()> {
