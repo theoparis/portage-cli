@@ -1028,8 +1028,8 @@ impl EbuildShell {
             .collect::<Vec<_>>()
             .join(":");
         self.set_var("PATH", &base_path);
-        // Our do*/new* install helpers are self-contained bash functions
-        // (INSTALL_HELPERS below), so portage need not be installed. We still
+        // Our do*/new* install helpers are Rust builtins plus a few bash
+        // wrappers (INSTALL_HELPERS below), so portage need not be installed. We still
         // export PORTAGE_BIN_PATH when available because some eclasses reference
         // it (e.g. for misc data files), but we do NOT prepend its
         // ebuild-helpers/ to PATH: the in-shell functions are authoritative and

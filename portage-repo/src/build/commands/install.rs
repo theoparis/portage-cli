@@ -1,4 +1,4 @@
-//! `do*` install helpers as Rust builtins (PMS 12.3.x).
+//! `do*`/`new*` install helpers as Rust builtins (PMS 12.3.x).
 //!
 //! These replace the hand-parsed bash versions in `INSTALL_HELPERS`: real clap
 //! arg parsing (`-r`, `-x`), `${ED}`/dest-tree awareness, and the shared
@@ -6,10 +6,10 @@
 //! `install`/`cp`/`ln` for byte-identical mode/ownership semantics — the win is
 //! removing fragile bash, not reimplementing install(1).
 //!
-//! The `new*` helpers stay in `INSTALL_HELPERS` as thin wrappers: they stage the
-//! source as `${T}/$2` (handling the `-` = stdin convention) and then call the
-//! matching `do*` builtin here, so there is a single install path. The pure
-//! destination-state setters (`into`/`insinto`/…) also stay in bash.
+//! Both families live here as registered builtins; `new*` reads stdin when its
+//! source arg is `-` (PMS 12.3.x). The pure destination-state setters
+//! (`into`/`insinto`/…) and the `doinitd`/`doconfd`/`doenvd` `do*` wrappers (which
+//! set `insinto` then call `doins`) still live in bash.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
