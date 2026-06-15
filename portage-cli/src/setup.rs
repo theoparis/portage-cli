@@ -26,6 +26,13 @@ if [[ -n ${EPREFIX} ]]; then
 	_ov="${EPREFIX%/}"
 	_libdir="$(get_libdir 2>/dev/null || echo lib)"
 	export PKG_CONFIG_PATH="${_ov}/usr/${_libdir}/pkgconfig:${_ov}/usr/share/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+	# meson.eclass pins PKG_CONFIG_LIBDIR to the prefix, which *replaces*
+	# pkg-config's built-in default — so host base packages (zlib, …) become
+	# invisible and prefix .pc with `Requires: zlib` fail to resolve. In an
+	# in-place prefix the host (/) is the base system, so search the prefix
+	# first, then the host. Without this, the meson font/cairo/harfbuzz chain
+	# can't find host deps.
+	export PKG_CONFIG_LIBDIR="${_ov}/usr/${_libdir}/pkgconfig:${_ov}/usr/share/pkgconfig:/usr/${_libdir}/pkgconfig:/usr/share/pkgconfig${PKG_CONFIG_LIBDIR:+:${PKG_CONFIG_LIBDIR}}"
 	export CMAKE_PREFIX_PATH="${_ov}/usr${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
 	# Build tools merged into the prefix (vala, cbindgen, …) must be on PATH,
 	# and their python modules (xcb-proto's xcbgen, gobject-introspection, …)
