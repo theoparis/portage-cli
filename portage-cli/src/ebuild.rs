@@ -311,6 +311,26 @@ async fn run_inner(
         .collect();
     let merge_mode = use_flags.is_some();
 
+    // Clean the build tree before starting a merge, mirroring portage's `clean`
+    // phase that precedes `setup`. `run_phase` creates work/image/temp/homedir
+    // with `create_dir_all` (additive), so without this a re-emerge after a
+    // failed build would carry the previous attempt's stale ${WORKDIR} and,
+    // worse, a stale ${D} image whose leftover files would then be merged.
+    // Standalone `em ebuild` (merge_mode=false) is left untouched — re-running
+    // a single phase against the existing tree is a debug use case, and
+    // portage's `ebuild` command doesn't auto-clean either. `keepwork` opts out
+    // (FEATURES=keepwork keeps the tree for inspection), matching the post-merge
+    // cleanup below. `build.log` and the `.em-helpers` shim dir are left: the
+    // log is truncated by the phase-log tee, and the shims are idempotent.
+    if merge_mode
+        && !features.contains("keepwork")
+        && let Some(wd) = work_dir
+    {
+        for sub in ["work", "image", "temp", "homedir"] {
+            let _ = std::fs::remove_dir_all(wd.join(sub));
+        }
+    }
+
     for phase in phases {
         // In the merge chain, src_test only runs under FEATURES=test
         // (an explicit `em ebuild … test` always runs it).
