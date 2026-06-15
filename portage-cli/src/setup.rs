@@ -40,6 +40,13 @@ if [[ -n ${EPREFIX} ]]; then
 	# functions (cairo's xrender gradient fallback clashes with the new header).
 	# -rpath (not just -rpath-link) so in-place prefix binaries also resolve
 	# their prefix deps at runtime.
+	# Most prefix headers are found via pkg-config -I, but some sources include
+	# a prefix-only header transitively without their target declaring the dep
+	# (e.g. mesa's gbm-dri backend pulls <xcb/xcb.h>). On the host that header
+	# lives in the default search path; in the prefix it does not, so put the
+	# prefix include dir on the global search path — the -I counterpart of the
+	# LDFLAGS -L below, matching what --prefix mode already does.
+	export CPPFLAGS="-I${_ov}/usr/include${CPPFLAGS:+ ${CPPFLAGS}}"
 	export LDFLAGS="-L${_ov}/usr/${_libdir} -Wl,-rpath,${_ov}/usr/${_libdir}${LDFLAGS:+ ${LDFLAGS}}"
 	# Prefix tools invoked *during* a build (g-ir-compiler, g-ir-scanner, vala,
 	# …) are dynamically linked against prefix libs. The -rpath above covers
@@ -169,34 +176,48 @@ fn make_conf_template(is_local: bool, eroot: &Utf8Path) -> String {
     )
 }
 
-/// Expose the host's Python interpreters at the prefix path.
+/// Expose the host's Python at the prefix paths the eclasses expect.
 ///
 /// In `--local` mode the host (`/`) is the base system and provides Python, but
-/// python.eclass bakes `${EPREFIX}/usr/bin/pythonX.Y` into installed scripts'
-/// shebangs (e.g. g-ir-scanner). Without an interpreter there, every such script
-/// dies with `bad interpreter: No such file or directory` — which surfaces as
-/// meson's opaque "Unhandled python OSError" and breaks the whole
-/// gobject-introspection chain (harfbuzz, pango, gdk-pixbuf, gtk+, …). Symlink
-/// the host `/usr/bin/python*` entries into `${EPREFIX}/usr/bin` so those
-/// absolute shebangs resolve. Idempotent and best-effort.
+/// the python eclasses derive prefix-absolute paths from `EPREFIX`/`ESYSROOT`:
+///
+/// - `${EPREFIX}/usr/bin/pythonX.Y` is baked into installed scripts' shebangs
+///   (e.g. g-ir-scanner). With no interpreter there, every such script dies with
+///   `bad interpreter: No such file or directory` — surfacing as meson's opaque
+///   "Unhandled python OSError" and breaking the whole gobject-introspection
+///   chain (harfbuzz, pango, gdk-pixbuf, gtk+, …).
+/// - `PYTHON_INCLUDEDIR=${ESYSROOT}/usr/include/pythonX.Y` is checked for
+///   existence by python-utils-r1 (`does not install any header files!`),
+///   breaking C-extension packages like dev-python/pillow.
+///
+/// Symlink the host `/usr/bin/python*` entries and `/usr/include/python*` dirs
+/// into the prefix so those paths resolve. Idempotent and best-effort.
 fn link_host_pythons(eroot: &Utf8Path) -> Result<()> {
-    let bin = eroot.join("usr/bin");
-    std::fs::create_dir_all(bin.as_std_path()).with_context(|| format!("creating {bin}"))?;
-    let Ok(entries) = std::fs::read_dir("/usr/bin") else {
+    link_host_entries(&eroot.join("usr/bin"), "/usr/bin", "python")?;
+    link_host_entries(&eroot.join("usr/include"), "/usr/include", "python")?;
+    Ok(())
+}
+
+/// Symlink every entry of `host_dir` whose name starts with `prefix` into
+/// `dst_dir`, pointing back at the host path. Skips entries already present.
+fn link_host_entries(dst_dir: &Utf8Path, host_dir: &str, prefix: &str) -> Result<()> {
+    std::fs::create_dir_all(dst_dir.as_std_path())
+        .with_context(|| format!("creating {dst_dir}"))?;
+    let Ok(entries) = std::fs::read_dir(host_dir) else {
         return Ok(());
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        if !name.starts_with("python") {
+        if !name.starts_with(prefix) {
             continue;
         }
-        let link = bin.join(name);
+        let link = dst_dir.join(name);
         // Skip if anything is already there (including a broken symlink).
         if link.as_std_path().symlink_metadata().is_ok() {
             continue;
         }
-        let target = format!("/usr/bin/{name}");
+        let target = format!("{host_dir}/{name}");
         let _ = std::os::unix::fs::symlink(&target, link.as_std_path());
     }
     Ok(())
