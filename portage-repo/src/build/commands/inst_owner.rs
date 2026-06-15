@@ -133,7 +133,9 @@ fn portage_default_inst_ids(merge_root: &Path) -> (String, String) {
     let mut uid = "0".to_string();
     let mut gid = "0".to_string();
     let eroot = eroot_or_parent(merge_root);
-    if unprivileged_mode(&eroot) && let Ok(meta) = std::fs::metadata(&eroot) {
+    if unprivileged_mode(&eroot)
+        && let Ok(meta) = std::fs::metadata(&eroot)
+    {
         use std::os::unix::fs::MetadataExt;
         uid = meta.uid().to_string();
         gid = meta.gid().to_string();
@@ -162,7 +164,9 @@ fn eroot_or_parent(merge_root: &Path) -> PathBuf {
     if merge_root.exists() {
         return merge_root.to_path_buf();
     }
-    if let Some(parent) = merge_root.parent() && parent.exists() {
+    if let Some(parent) = merge_root.parent()
+        && parent.exists()
+    {
         return parent.to_path_buf();
     }
     merge_root.to_path_buf()
