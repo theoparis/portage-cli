@@ -394,6 +394,15 @@ pub struct EbuildShell {
     /// options — leaks into the next (`brush_core::Shell` is a deep `Clone`).
     /// Configuration mutators reset it to `None` for re-capture.
     baseline: Option<Box<Shell>>,
+    /// Path of the ebuild already sourced into the live (carried-forward) shell
+    /// for the current package's phase run. Phases of one package reuse a single
+    /// sourcing: the ebuild + eclass global scope runs once, and later phases run
+    /// against the carried environment (matching portage's saved-env model)
+    /// rather than re-sourcing — which would re-assert raw ebuild variables while
+    /// `inherit` skips the eclass that mutates them (e.g. distutils-r1 converting
+    /// `DISTUTILS_USE_PEP517=flit` → `flit-core`). `None` until the first phase
+    /// sources it; reset when a different ebuild is run.
+    phase_sourced_ebuild: Option<Utf8PathBuf>,
     repo_path: Utf8PathBuf,
     eclass_dirs: Vec<Utf8PathBuf>,
     /// Active USE flags for this shell session.
@@ -654,6 +663,7 @@ impl EbuildShell {
             build_eprefix: None,
             bashrc_files: Vec::new(),
             baseline: None,
+            phase_sourced_ebuild: None,
             repo_path: repo.path().to_path_buf(),
             eclass_dirs,
             use_flags: HashSet::new(),
@@ -789,6 +799,10 @@ impl EbuildShell {
         // Hermetic sourcing: start from the configured baseline so nothing
         // from a previously sourced ebuild survives into this one.
         self.restore_baseline();
+        // This re-sources from a clean baseline, so any phase-run sourcing of an
+        // ebuild into the live shell is no longer valid; force the next phase to
+        // re-source. (See `phase_sourced_ebuild`.)
+        self.phase_sourced_ebuild = None;
 
         // Set PM-provided variables
         let category = ebuild.category();
@@ -1163,6 +1177,15 @@ impl EbuildShell {
         // Hermetic sourcing, as in `source_ebuild`.
         self.restore_baseline();
 
+        // A package's phases share a single sourcing of the ebuild: its global
+        // scope (and every eclass's, via `inherit`) runs once on the first
+        // phase, and later phases execute against the carried-forward shell.
+        // Re-sourcing each phase would re-assert the ebuild's raw global
+        // variables while `inherit` skips the now-"already inherited" eclasses,
+        // dropping eclass global-scope mutations (e.g. distutils-r1 converting
+        // `DISTUTILS_USE_PEP517=flit` → `flit-core`). See `phase_sourced_ebuild`.
+        let need_source = self.phase_sourced_ebuild.as_deref() != Some(ebuild.path());
+
         let category = ebuild.category();
         let pn = ebuild.name();
         let version = ebuild.version();
@@ -1212,7 +1235,12 @@ impl EbuildShell {
                 .map_err(|e| Error::Shell(format!("creating {}: {e}", dir.display())))?;
         }
         self.set_var("WORKDIR", &workdir.to_string_lossy());
-        self.set_var("S", &workdir.join(&p).to_string_lossy());
+        // S defaults to ${WORKDIR}/${P}; the ebuild may override it at global
+        // scope while sourcing. Only (re)assert the default when about to source,
+        // so later phases keep the value carried from the first phase.
+        if need_source {
+            self.set_var("S", &workdir.join(&p).to_string_lossy());
+        }
         self.set_var("T", &t.to_string_lossy());
         self.set_var("TMPDIR", &t.to_string_lossy());
         self.set_var("HOME", &homedir.to_string_lossy());
@@ -1374,29 +1402,35 @@ impl EbuildShell {
         .await
         .ok();
 
-        // Source the ebuild — defines all phase functions and global variables.
-        let params = self.shell.default_exec_params();
-        self.shell
-            .source_script(
-                ebuild.path().as_std_path(),
-                std::iter::empty::<&str>(),
-                &params,
-            )
-            .await
-            .map_err(|e| Error::Shell(format!("sourcing {}: {e}", ebuild.path())))?;
+        // Source the ebuild — defines all phase functions and global variables —
+        // only on the first phase of the package; later phases reuse the carried
+        // environment (see `need_source` above).
+        if need_source {
+            let params = self.shell.default_exec_params();
+            self.shell
+                .source_script(
+                    ebuild.path().as_std_path(),
+                    std::iter::empty::<&str>(),
+                    &params,
+                )
+                .await
+                .map_err(|e| Error::Shell(format!("sourcing {}: {e}", ebuild.path())))?;
 
-        // Combine eclass E_* contributions with ebuild-defined values (PMS 10.2).
-        for (&var, &e_var) in accum_vars.iter().zip(e_vars.iter()) {
-            let ebuild_val = self.get_var(var).unwrap_or_default();
-            let eclass_val = self.get_var(e_var).unwrap_or_default();
-            let combined = match (ebuild_val.is_empty(), eclass_val.is_empty()) {
-                (true, true) => String::new(),
-                (true, false) => eclass_val.trim().to_string(),
-                (false, true) => ebuild_val,
-                (false, false) => format!("{} {}", ebuild_val, eclass_val.trim()),
-            };
-            self.set_var(var, &combined);
-            self.set_var(e_var, "");
+            // Combine eclass E_* contributions with ebuild-defined values (PMS 10.2).
+            for (&var, &e_var) in accum_vars.iter().zip(e_vars.iter()) {
+                let ebuild_val = self.get_var(var).unwrap_or_default();
+                let eclass_val = self.get_var(e_var).unwrap_or_default();
+                let combined = match (ebuild_val.is_empty(), eclass_val.is_empty()) {
+                    (true, true) => String::new(),
+                    (true, false) => eclass_val.trim().to_string(),
+                    (false, true) => ebuild_val,
+                    (false, false) => format!("{} {}", ebuild_val, eclass_val.trim()),
+                };
+                self.set_var(var, &combined);
+                self.set_var(e_var, "");
+            }
+
+            self.phase_sourced_ebuild = Some(ebuild.path().to_path_buf());
         }
 
         // Compute $A from $SRC_URI for the active USE flag set.
