@@ -44,7 +44,7 @@ camino = { workspace = true }
 papaya = { workspace = true }
 md5 = "0.7"
 winnow = { version = "1", features = ["parser"] }
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
 libc = { workspace = true }

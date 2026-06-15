@@ -370,6 +370,9 @@ pub struct EbuildShell {
     /// (PMS 12.3.9/12.3.10), populated during `src_install` and read by the
     /// merge driver's post-install pass. Shared (Arc) like `die_flag`.
     install_paths: commands::install_paths::InstallPaths,
+    /// Resolved `PORTAGE_INST_UID`/`PORTAGE_INST_GID` for `dobin`/`dosbin` and
+    /// PATH shims. Shared (Arc) like `die_flag`.
+    inst_owner: commands::inst_owner::InstOwnerDefaults,
     /// `PORTAGE_CONFIGROOT` for phases — where profile/make.conf live. `None`
     /// keeps the host. Set by the merge driver from the root model.
     build_config_root: Option<Utf8PathBuf>,
@@ -434,6 +437,17 @@ pub async fn run_helper(name: &str, args: &[String]) -> i32 {
     };
     shell.register_default_builtins(brush_builtins::BuiltinSet::BashMode);
     commands::register_install_builtins(&mut shell);
+
+    let inst_owner = commands::inst_owner::InstOwnerDefaults::default();
+    inst_owner.seed_from_process_env();
+    shell.set_shared(inst_owner.clone());
+    let (inst_uid, inst_gid) = inst_owner.resolved_pair();
+    for (name, value) in [
+        ("PORTAGE_INST_UID", inst_uid),
+        ("PORTAGE_INST_GID", inst_gid),
+    ] {
+        let _ = shell.set_env_global(name, ShellVariable::new(ShellValue::String(value)));
+    }
 
     // Build `name 'arg1' 'arg2' …`, single-quoting each argument so paths with
     // spaces or glob characters survive re-parsing by the shell.
@@ -660,12 +674,16 @@ impl EbuildShell {
         let install_paths = commands::install_paths::InstallPaths::default();
         shell.set_shared(install_paths.clone());
 
+        let inst_owner = commands::inst_owner::InstOwnerDefaults::default();
+        shell.set_shared(inst_owner.clone());
+
         let mut ebuild_shell = EbuildShell {
             shell,
             distdir_override: None,
             phase_log: None,
             die_flag,
             install_paths,
+            inst_owner,
             build_config_root: None,
             build_sysroot: None,
             build_eprefix: None,
@@ -1380,24 +1398,14 @@ impl EbuildShell {
             self.set_var("BROOT", "/");
         }
 
-        // PORTAGE_INST_UID/GID: the owner dobin/dosbin apply via `install -o/-g`.
-        // Default to the current process's ids so a root install yields
-        // root-owned files while an unprivileged `--local` build yields
-        // user-owned ones — no explicit mode flag needed, and `install -o
-        // <self>` stays a succeeding no-op when not root. A value already in the
-        // environment (e.g. make.conf userpriv) is preserved.
-        if self.shell.env_str("PORTAGE_INST_UID").is_none() {
-            self.set_var(
-                "PORTAGE_INST_UID",
-                &rustix::process::getuid().as_raw().to_string(),
-            );
-        }
-        if self.shell.env_str("PORTAGE_INST_GID").is_none() {
-            self.set_var(
-                "PORTAGE_INST_GID",
-                &rustix::process::getgid().as_raw().to_string(),
-            );
-        }
+        // PORTAGE_INST_UID/GID: owner dobin/dosbin apply via `install -o/-g`.
+        // Resolve Portage-style (0/0 privileged, EROOT owner in unprivileged
+        // mode, make.conf overrides) into shared state and sync shell vars so
+        // `export` and PATH shims (`em __helper`) inherit the same values.
+        let (inst_uid, inst_gid) =
+            commands::inst_owner::resolve_inst_owner(&self.shell, &self.inst_owner, root);
+        self.set_var("PORTAGE_INST_UID", &inst_uid);
+        self.set_var("PORTAGE_INST_GID", &inst_gid);
 
         let accum_vars: &[&str] = if eapi >= Eapi::Eight {
             &[

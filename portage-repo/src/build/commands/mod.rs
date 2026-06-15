@@ -15,6 +15,7 @@ pub(crate) mod emake;
 pub(crate) mod export_functions;
 pub(crate) mod has;
 pub mod inherit;
+pub(crate) mod inst_owner;
 pub(crate) mod install;
 pub(crate) mod install_paths;
 pub(crate) mod output;

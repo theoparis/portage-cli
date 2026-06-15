@@ -19,6 +19,7 @@ use brush_core::builtins;
 use clap::Parser;
 
 use super::die::DieFlag;
+use super::inst_owner::InstOwnerDefaults;
 
 /// The image staging root files install into: `${ED}` (= `${D}${EPREFIX}`),
 /// trailing slash trimmed. Falls back to `${D}` then `/` (should not happen
@@ -66,18 +67,28 @@ fn get_libdir<SE: brush_core::ShellExtensions>(shell: &brush_core::Shell<SE>) ->
     "lib".to_string()
 }
 
-/// `-o <uid> -g <gid>` install args from `PORTAGE_INST_UID`/`PORTAGE_INST_GID`
-/// (default `0`), matching portage's `dobin`/`dosbin`. Other helpers leave
-/// ownership to the running process, as portage does. `init_build_env` seeds
-/// these to the current process ids, so this resolves to root for a root
-/// install and the user for an unprivileged `--local` build.
-fn inst_owner_opts<SE: brush_core::ShellExtensions>(shell: &brush_core::Shell<SE>) -> Vec<String> {
-    vec![
-        "-o".into(),
-        var(shell, "PORTAGE_INST_UID", "0"),
-        "-g".into(),
-        var(shell, "PORTAGE_INST_GID", "0"),
-    ]
+/// `-o <uid> -g <gid>` install args for `dobin`/`dosbin`/`newbin`/`newsbin`.
+fn inst_owner_install_opts<SE: brush_core::ShellExtensions>(
+    context: &brush_core::ExecutionContext<'_, SE>,
+) -> Vec<String> {
+    if let Ok(owner) = context.shared::<InstOwnerDefaults>() {
+        owner.install_opts(context.shell)
+    } else {
+        vec![
+            "-o".into(),
+            var(
+                context.shell,
+                "PORTAGE_INST_UID",
+                &rustix::process::getuid().as_raw().to_string(),
+            ),
+            "-g".into(),
+            var(
+                context.shell,
+                "PORTAGE_INST_GID",
+                &rustix::process::getgid().as_raw().to_string(),
+            ),
+        ]
+    }
 }
 
 /// Raise the shared die flag with `msg` and return exit status 1, matching the
@@ -492,7 +503,7 @@ impl builtins::Command for DobinCommand {
         let dest = under_ed(&ed(context.shell), &format!("{into}/bin"));
         let cwd = context.shell.working_dir().to_path_buf();
         let mut opts = vec!["-m0755".to_string()];
-        opts.extend(inst_owner_opts(context.shell));
+        opts.extend(inst_owner_install_opts(&context));
         Ok(run_blocking(
             &context,
             install_files_closure("dobin", env, opts, dest, cwd, self.files.clone(), false),
@@ -524,7 +535,7 @@ impl builtins::Command for DosbinCommand {
         let dest = under_ed(&ed(context.shell), &format!("{into}/sbin"));
         let cwd = context.shell.working_dir().to_path_buf();
         let mut opts = vec!["-m0755".to_string()];
-        opts.extend(inst_owner_opts(context.shell));
+        opts.extend(inst_owner_install_opts(&context));
         Ok(run_blocking(
             &context,
             install_files_closure("dosbin", env, opts, dest, cwd, self.files.clone(), false),
@@ -1215,7 +1226,10 @@ impl builtins::Command for NewCommand {
         }
 
         let env = super::context_env(&context);
-        let (dest, opts) = kind.target(context.shell, &name);
+        let (dest, mut opts) = kind.target(context.shell, &name);
+        if matches!(kind, NewKind::Bin | NewKind::Sbin) {
+            opts.extend(inst_owner_install_opts(&context));
+        }
         let cwd = context.shell.working_dir().to_path_buf();
         let t = var(context.shell, "T", "");
         let t_dir = if t.is_empty() {
