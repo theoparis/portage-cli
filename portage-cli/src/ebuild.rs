@@ -478,10 +478,18 @@ async fn run_fetch(
     repo: &Repository,
     work_root: &Utf8Path,
 ) -> Result<()> {
-    let sourced = shell
-        .source_ebuild(ebuild)
-        .await
-        .context("sourcing ebuild")?;
+    // Read SRC_URI from the live shell. In a merge run the ebuild is already
+    // sourced (the `pretend` phase ran first), so avoid re-sourcing here: doing
+    // so over an already-sourced shell no-ops the eclasses (their include guards
+    // are set) and would drop their global-scope effects (e.g. gnome.org's
+    // custom `S`). Only source when running `fetch` standalone (nothing sourced
+    // yet), where there are no later phases to disturb.
+    if !shell.is_phase_sourced(ebuild) {
+        shell
+            .source_ebuild(ebuild)
+            .await
+            .context("sourcing ebuild")?;
+    }
     shell.set_a_from_src_uri();
 
     let src_uri_str = shell.get_var("SRC_URI").unwrap_or_default();
@@ -561,8 +569,6 @@ async fn run_fetch(
             }
         }
     }
-
-    let _ = sourced;
 
     if any_restricted || any_failed {
         shell

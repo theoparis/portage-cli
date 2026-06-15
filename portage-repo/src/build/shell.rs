@@ -755,6 +755,16 @@ impl EbuildShell {
         self.baseline = None;
     }
 
+    /// Whether `ebuild` is the one already sourced into the live shell for the
+    /// current package's phase run (see `phase_sourced_ebuild`). Lets callers
+    /// (e.g. the `fetch` phase) read ebuild variables like `SRC_URI` from the
+    /// carried environment instead of re-sourcing — which over an
+    /// already-sourced shell would no-op the eclasses (their include guards are
+    /// set) and lose their global-scope effects such as a custom `S`.
+    pub fn is_phase_sourced(&self, ebuild: &Ebuild) -> bool {
+        self.phase_sourced_ebuild.as_deref() == Some(ebuild.path())
+    }
+
     /// Append an eclass directory (searched after existing dirs).
     pub fn add_eclass_dir(&mut self, dir: Utf8PathBuf) {
         self.invalidate_baseline();
