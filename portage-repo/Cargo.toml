@@ -24,9 +24,9 @@ gentoo-core = { workspace = true }
 # Pinned to a fork commit for reproducible CI (we don't commit Cargo.lock);
 # bump when intentionally updating brush. Local dev overrides to a worktree
 # via .cargo/config.toml.
-brush-core = { git = "https://github.com/lu-zero/brush.git", rev = "eaf59282", features = ["experimental-parser"] }
-brush-builtins = { git = "https://github.com/lu-zero/brush.git", rev = "eaf59282" }
-brush-parser = { git = "https://github.com/lu-zero/brush.git", rev = "eaf59282" }
+brush-core = { git = "https://github.com/lu-zero/brush.git", rev = "7d3bbdda", features = ["experimental-parser"] }
+brush-builtins = { git = "https://github.com/lu-zero/brush.git", rev = "7d3bbdda" }
+brush-parser = { git = "https://github.com/lu-zero/brush.git", rev = "7d3bbdda" }
 clap = { workspace = true }
 tokio = { version = "1", features = ["rt"] }
 regex = "1"
