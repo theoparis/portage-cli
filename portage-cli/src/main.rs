@@ -40,6 +40,15 @@ fn parse_atoms(raw: &[String]) -> Vec<portage_atom::Dep> {
 
 #[tokio::main]
 async fn main() {
+    // Portage's ebuild.sh sets `umask 022` before running any phase; mirror it
+    // so file and directory modes under ${D} and the build tree match a real
+    // merge regardless of the invoking shell's umask. The install helpers
+    // additionally chmod each created image dir to 0755 (see mkdir_p_mode), so
+    // they stay correct even under a tighter ebuild-local umask; this call
+    // covers everything else (ebuild-written files, distfiles, the prefix
+    // layout, cache regen).
+    rustix::process::umask(rustix::fs::Mode::from_bits_truncate(0o022));
+
     let cli = cli::Cli::parse();
     cli.color.write_global();
 
