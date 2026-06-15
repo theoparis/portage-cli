@@ -607,8 +607,17 @@ pub(super) fn print_pretty(
     sizes: &HashMap<Cpv, u64>,
     slot_op_cpns: &std::collections::HashSet<Cpn>,
     verbose: u8,
+    target_root: Option<&camino::Utf8Path>,
 ) {
     let mut out = anstream::stdout();
+
+    // Match emerge: when merging into a non-host root, annotate every line
+    // with ` to <ROOT>/`. `target_root` is None or "/" for the host, where
+    // there is nothing to add (the normal emerge-style output).
+    let dest_suffix = match target_root {
+        Some(r) if r.as_str() != "/" => format!(" to {}/", r),
+        _ => String::new(),
+    };
 
     writeln!(
         out,
@@ -681,7 +690,7 @@ pub(super) fn print_pretty(
         let colored_field = colorize_status_field(&field);
         writeln!(
             out,
-            "[{C_BRACKET}ebuild {colored_field}{C_BRACKET:#}] {C_PKG}{cpn}-{ver}{slot_repo}{C_PKG:#}{old}{flag_str}{size_str}",
+            "[{C_BRACKET}ebuild {colored_field}{C_BRACKET:#}] {C_PKG}{cpn}-{ver}{slot_repo}{C_PKG:#}{old}{flag_str}{size_str}{dest_suffix}",
         ).ok();
     }
 

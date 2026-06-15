@@ -589,6 +589,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 &sizes,
                 &slot_op_cpns,
                 verbose,
+                target_root,
             )
         }
         DepgraphFormat::Json => output::print_json(&data, &order, &edges, &installed, &flag_reqs),
