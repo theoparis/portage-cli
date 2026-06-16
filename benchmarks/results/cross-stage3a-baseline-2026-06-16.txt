@@ -1,0 +1,24 @@
+== cross merge-list parity (riscv64-unknown-linux-gnu, em --root-aware)
+| package | emerge | em | only emerge | only em |
+|---------|--------|----|-------------|---------|
+| sys-devel/gcc          |   18 |   22 |           0 |       4 |
+   emerge-only:
+   em-only:
+     app-alternatives/bzip2-1
+     app-arch/bzip2-1.0.8-r5
+     dev-lang/perl-5.42.2
+     sys-apps/locale-gen-3.10
+| sys-libs/zlib          |    1 |    1 |           0 |       0 |
+| virtual/libiconv       |    1 |    1 |           0 |       0 |
+
+== with-bdeps host-front matter (informational)
+   sys-devel/gcc: emerge=18 (typical) em --with-bdeps=54 (without=1) host-root lines=0
+   (post-solve host BDEPEND expansion still over-pulls; see docs/root-model.md Stage 3a)
+
+== timing (hyperfine, 3 runs)
+Benchmark 1: ACCEPT_LICENSE='*' target/release/em -p --root-aware --config-root /usr/riscv64-unknown-linux-gnu --root /usr/riscv64-unknown-linux-gnu --arch riscv64 sys-devel/gcc
+  Time (mean ± σ):     618.6 ms ±  52.7 ms    [User: 1745.4 ms, System: 3341.3 ms]
+Benchmark 2: riscv64-unknown-linux-gnu-emerge -pv sys-devel/gcc
+  Time (mean ± σ):      1.638 s ±  0.014 s    [User: 1.572 s, System: 0.063 s]
+    2.65 ± 0.23 times faster than riscv64-unknown-linux-gnu-emerge -pv sys-devel/gcc
+RESULT: parity drift (expected until license groups + tighter cross closure)
