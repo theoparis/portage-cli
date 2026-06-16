@@ -352,8 +352,10 @@ never the root handling.
 - **Stage 3a — BDEPEND native parity [partial]:** `--with-bdeps` flag,
   `host_installed` filtering, default-off matching `emerge --with-bdeps=n` on
   offset builds. Per-edge filter only; see [BDEPEND / crossdev](#bdepend-rdepend-and-with-bdeps).
-- **Stage 3b — crossdev planner:** `(cpv, slot, root)` plan entries,
-  `running_installed` / `target_installed` / `sysroot_installed` in the solver,
-  `{target}-emerge` parity including `ROOT=/tmp/place` overrides. Reuses
-  merged-sysroot (M3) and existing builder `BROOT`/`SYSROOT`/`ROOT` threading.
+- **Stage 3b — dual-root planner [partial, 2026-06]:** `MergeRoot` on
+  `PortagePackage`; auto-activation for crossdev, `config_root ≠ merge_root`,
+  or `merge_root ≠ /` (native stage/offset). Dep classes routed per PMS table
+  8.2; host-satisfied `BDEPEND`/`IDEPEND` dropped on BROOT. Cross `gcc -p`
+  matches emerge (18 packages). Still open: `--with-bdeps` over-pull,
+  within-run `host_installed` growth, `@FREE` license groups.
 - **Orthogonal — binpkg:** producer-only; plugs into the existing merge.
