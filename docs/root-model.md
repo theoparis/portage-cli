@@ -54,7 +54,8 @@ That is the whole difference between "full offset" and "overlay":
 | `em --root stage1/ @system` | stage1/ | stage1/ | empty | **build a stage from scratch** |
 | `em --prefix foo/ firefox` | / | foo/ | host ∪ VDB(foo/) | host is the base; install only the **new** packages into `foo/` — unprivileged `.local` **overlay** |
 | `em --prefix a/ --root b/ firefox` | b/ | a/ | VDB(b/) ∪ VDB(a/) | general overlay: base `b/`, delta into `a/`, config from `b/` |
-| crossdev (future) | host | target | target + host BDEPEND | `CHOST≠CBUILD`, sysroot = cross sysroot, `BROOT=/` |
+| `{target}-emerge` (crossdev) | `/` (BROOT) | `/usr/<CHOST>/` or overridden `ROOT` | host VDB + target VDB | cross-compile; see [BDEPEND / crossdev](#bdepend-rdepend-and-with-bdeps) |
+| `em` crossdev parity (future) | host | target | same model as portage | Stage 3 — dual-root plan entries |
 
 `em --root foo/` and `em --prefix foo/` differ in exactly one thing: whether the
 host counts as already installed. `--root` ignores it (full closure rebuilt into
@@ -70,6 +71,163 @@ host counts as already installed. `--root` ignores it (full closure rebuilt into
 2. Config (profile/make.conf/USE) is read from `config_root`.
 3. The plan is the set of packages needed to satisfy the targets that the
    installed view does not already provide; each is merged into `target`.
+
+## BDEPEND, RDEPEND, and `--with-bdeps`
+
+PMS splits build-time needs across three dep classes, each with its own
+**satisfaction root**:
+
+| class | runs on / resolved against | typical role |
+|---|---|---|
+| `BDEPEND` | **BROOT** (always host `/`) | build-host tools: `cmake`, `perl`, host `python` |
+| `DEPEND` | **SYSROOT** / **ESYSROOT** | headers/libs `.pc` files for the compile |
+| `RDEPEND` | **ROOT** (install destination) | binaries/libraries needed at runtime on the target |
+
+A single atom can appear in more than one class for the same parent ebuild.
+That does **not** mean “one plan entry is enough” in general — it means each
+**edge** is checked against the VDB for its class's root. Whether the planner
+must schedule a build depends on which edges remain unsatisfied after that
+check.
+
+### Native (`CBUILD == CHOST`, one architecture)
+
+When host, base, and target all collapse to `/`, a package that is both
+`BDEPEND` of `A` and `RDEPEND` of `C` usually needs **one** native build into
+`ROOT`: the host copy satisfies the build edge, and the same binary serves
+runtime once installed.
+
+Portage's depgraph processes each class against the appropriate root; em
+approximates this in `portage-atom-pubgrub` via `get_dependencies()`:
+
+- **`--with-bdeps=n` (em default, `with_bdeps=false`)** — strip all `BDEPEND`
+  edges for packages being built. Assumes BROOT already provides build tools.
+  Matches `emerge -p --with-bdeps=n` on offset/stage plans.
+- **`--with-bdeps` (`with_bdeps=true`)** — keep `BDEPEND`, but drop each edge
+  individually when `host_installed` (host `/var/db/pkg`) already satisfies the
+  version set. `RDEPEND` / `DEPEND` edges are unaffected. This is **per-edge**
+  filtering, not per-package suppression: if `foo` is host-satisfied as `A`'s
+  `BDEPEND` but still required as `C`'s `RDEPEND`, `foo` stays in the plan.
+
+`preflight` mirrors the same split after the solve: `DEPEND` against
+`VDB(base) ∪ VDB(target)`, `BDEPEND` against host `BROOT` (plus prefix target
+for native `--prefix` within-run visibility).
+
+**Current gap (native):** the solver snapshot is static — `host_installed` is
+read once at the start, not grown as earlier plan entries would land on BROOT
+during a live merge. Fine for `em -p`; a parity nit for long native-prefix
+chains with `--with-bdeps`.
+
+### Cross (`CBUILD ≠ CHOST`) — why per-edge filtering is not enough
+
+Crossdev does not implement a separate resolver. `crossdev -t <tuple>` lays down
+`/usr/<CHOST>/` (profile, `make.conf`, overlay symlinks) and installs
+`/usr/bin/<CHOST>-emerge` → `cross-emerge`. The wrapper sets:
+
+```
+CHOST     = <target triple>          # from argv[0] or env
+SYSROOT   = /usr/${CHOST}            # unless overridden
+PORTAGE_CONFIGROOT = ${SYSROOT}      # target profile/make.conf
+CBUILD    = <host triple>            # portageq with CHOST unset
+BROOT     = /                        # always host
+CROSS_CMD = emerge --root-deps=rdeps # legacy; EAPI 7+ uses BDEPEND instead
+```
+
+Target `make.conf` (written by crossdev) pins `CHOST`, `CBUILD`, and default
+`ROOT=/usr/${CHOST}/`. Every `[ebuild N]` line in `riscv64-unknown-linux-gnu-emerge -p gcc`
+shows `to /usr/riscv64-unknown-linux-gnu/`: the **whole closure** is a cross
+build for the target. Host `cmake`/`perl` do not appear because `BDEPEND` edges
+are satisfied from host `/var/db/pkg`.
+
+Portage's depgraph (_emerge_, EAPI 7+) routes each dep string with an explicit
+**`(dep_root, priority)`** pair:
+
+| dep class | `dep_root` | priority |
+|---|---|---|
+| `RDEPEND` | target `ROOT` | runtime |
+| `DEPEND` | `ESYSROOT` | buildtime |
+| `BDEPEND` | **running root** (`/`, host) | buildtime |
+| `IDEPEND` | running root | installtime + runtime |
+
+Each scheduled task is a `Package` with a `.root` field. The **same CPV** can
+appear twice: once merged to host (`/`), once to target (`ROOT`). Resolver tests
+mark the target copy `{targetroot}`. Example with `--root-deps=y` (pre-BDEPEND
+EAPI): `dev-libs/B` merged to **both** `/` and target; with EAPI 7+ and
+`BDEPEND`, host-only build tools stay on `/` while runtime deps land on `ROOT`.
+
+The hard case the user cares about:
+
+```
+foo  ∈  BDEPEND(A)   →  must exist on BROOT (native ${CBUILD}) to *run* during A's build
+foo  ∈  RDEPEND(C)   →  must exist on ROOT   (cross  ${CHOST}) for C at runtime
+```
+
+If host already has native `foo`, only the cross `foo` is planned for `ROOT`. If
+host lacks `foo` and only `BDEPEND` demands it, portage schedules a **native**
+merge to `/`. If `RDEPEND` also needs it, portage schedules a **second** merge
+to `ROOT` with target `CHOST` — two tasks, two images, two VDB locations.
+
+**`em` today:** one `PortagePackage` node per `(CPN, slot)` and a single merge
+into `target`. `host_installed` + `bdepend_filtered()` correctly implements the
+host-satisfaction **check** for native builds, but there is no
+`(cpv, slot, root)` plan entry, no per-task `CHOST`, and no “merge to BROOT”
+path. Stage 3 must add portage's dual-root scheduling, not extend the current
+filter.
+
+### `ROOT=/tmp/place` + `{target}-emerge foo`
+
+Crossdev's default target root is `/usr/<CHOST>/`, but nothing requires it.
+`{target}-emerge` is `cross-emerge`: it fixes `SYSROOT` and `PORTAGE_CONFIGROOT`
+to `/usr/<CHOST>` (unless you override those env vars), then execs plain `emerge`.
+
+A custom merge destination is just a `ROOT` override on top:
+
+```bash
+# Profile/config still from /usr/riscv64-unknown-linux-gnu/
+# Binaries land under /tmp/place instead of /usr/riscv64-unknown-linux-gnu/
+ROOT=/tmp/place riscv64-unknown-linux-gnu-emerge -p foo
+```
+
+What each variable does in that invocation:
+
+| variable | typical value | role |
+|---|---|---|
+| `PORTAGE_CONFIGROOT` | `/usr/riscv64-unknown-linux-gnu` | profile, `make.conf`, `package.*` — set by wrapper |
+| `SYSROOT` / `ESYSROOT` | `/usr/riscv64-unknown-linux-gnu` | where `DEPEND` headers/libs are found |
+| `ROOT` / `EROOT` | `/tmp/place` (**override**) | where `foo` and its **target** closure install |
+| `BROOT` | `/` | where `BDEPEND` tools execute; unchanged |
+| `CBUILD` | host triple | compiler that builds build-tools |
+| `CHOST` | `riscv64-unknown-linux-gnu` | compiler that builds target packages |
+
+Effects:
+
+1. **Resolver** still distinguishes `_running_eroot` (host `/`) from
+   `_target_eroot` (`/tmp/place`). `BDEPEND` checks host VDB; `RDEPEND` checks
+   `/tmp/place/var/db/pkg`.
+2. **Pretend output** shows `to /tmp/place/` on every target-scheduled package.
+3. **Host merges** (when portage schedules a native copy for an unsatisfied
+   `BDEPEND`) still go to `/` — they do not follow the `ROOT` override.
+4. **Builder** on the target task sets `ROOT=/tmp/place`, `SYSROOT` to the
+   cross sysroot, `BROOT=/`, `CHOST=riscv64-…`, `CBUILD=aarch64-…` (on this
+   host).
+
+So `ROOT=/tmp/place` is an alternate **install tree** for the cross target,
+not a different config root. Common uses: disposable chroots, CI images, keeping
+`/usr/<CHOST>` clean while iterating. `em` has no equivalent entry point yet;
+mapping it would be `em -p --root /tmp/place --config-root /usr/<CHOST> …` once
+the planner honours per-class roots and dual plan entries.
+
+### `--with-bdeps` under cross
+
+Same semantics as native, but the roots differ:
+
+| flag | native offset | cross `{target}-emerge` |
+|---|---|---|
+| default (`with_bdeps=false`) | assume host tools; plan only target closure | same — host satisfies `BDEPEND`, plan goes to `ROOT` |
+| `--with-bdeps` | include unsatisfied `BDEPEND` into plan (still merged to target on native) | unsatisfied `BDEPEND` must merge to **BROOT** `/`, not `ROOT` |
+
+The last row is the Stage 3 requirement: `--with-bdeps` under cross is not
+“also merge build tools into `/tmp/place`”; it is “schedule native builds to
+`/` when the host lacks them.”
 
 ## Builder behaviour
 
@@ -191,6 +349,11 @@ never the root handling.
   the user wires overlay search paths there (recipe in "Overlay support"). No
   build-system knowledge in code. The zero-config **merged sysroot** (single
   `ESYSROOT` over a `fuse-overlayfs`/`overlayfs` union) is deferred to M3.
-- **Stage 3 — crossdev:** `CBUILD`/`CHOST`/`CTARGET`, decoupled sysroot,
-  CHOST-prefixed toolchain, QEMU for tests. Reuses the merged-sysroot work.
+- **Stage 3a — BDEPEND native parity [partial]:** `--with-bdeps` flag,
+  `host_installed` filtering, default-off matching `emerge --with-bdeps=n` on
+  offset builds. Per-edge filter only; see [BDEPEND / crossdev](#bdepend-rdepend-and-with-bdeps).
+- **Stage 3b — crossdev planner:** `(cpv, slot, root)` plan entries,
+  `running_installed` / `target_installed` / `sysroot_installed` in the solver,
+  `{target}-emerge` parity including `ROOT=/tmp/place` overrides. Reuses
+  merged-sysroot (M3) and existing builder `BROOT`/`SYSROOT`/`ROOT` threading.
 - **Orthogonal — binpkg:** producer-only; plugs into the existing merge.

@@ -56,6 +56,13 @@ portage (`NS` = new in new slot; em does not yet distinguish slot-update install
    its installed version, only RDEPEND (1), PDEPEND (3), and IDEPEND (4) are
    returned; DEPEND (0) and BDEPEND (2) are dropped.
 
+7. **`--with-bdeps` / BDEPEND filtering [partial, 2026-06]:** default-off
+   `BDEPEND` exclusion plus per-edge `host_installed` filtering when
+   `--with-bdeps` is set. Closes most of the native offset `@system` over-pull
+   (316 → ~197 vs emerge's ~183). Crossdev dual-root scheduling (`BDEPEND` merge
+   to `/`, `RDEPEND` merge to `ROOT`, same CPV twice) is **not** implemented —
+   see [root-model.md § BDEPEND / crossdev](./root-model.md#bdepend-rdepend-and-with-bdeps).
+
    Without this, even with `InstalledPolicy::Favor`, the solver still tried to
    satisfy the build-time deps of already-installed packages — pulling in old
    toolchain packages (e.g. the exact old gcc/autoconf needed to build each
