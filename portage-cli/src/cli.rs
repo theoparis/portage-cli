@@ -273,6 +273,11 @@ impl Roots {
     pub fn relocate(&self) -> bool {
         self.relocate
     }
+
+    /// `ESYSROOT` / cross sysroot: `PORTAGE_CONFIGROOT` when set, else base.
+    pub fn sysroot(&self) -> Option<&camino::Utf8Path> {
+        self.config.as_deref().or(self.base.as_deref())
+    }
 }
 
 /// The user's home directory from `$HOME`, falling back to `/root` only if

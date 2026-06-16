@@ -22,6 +22,8 @@ use portage_atom::{Cpv, Dep, DepEntry};
 use portage_vdb::Vdb;
 
 use crate::cli::Roots;
+use portage_atom_pubgrub::MergeRoot;
+
 use crate::query::depgraph::PlannedMerge;
 
 /// Verify the plan's build dependencies are satisfiable in install order.
@@ -66,8 +68,13 @@ pub fn check(plan: &[PlannedMerge], roots: &Roots) -> Result<()> {
         // merged. Slot is left unknown (None) — a permissive presence check,
         // which is the right bias for a guard that must not block a valid plan.
         if let Ok(cpv) = Cpv::parse(&planned.cpv) {
-            depend_avail.push((cpv.clone(), None));
-            bdepend_avail.push((cpv, None));
+            match planned.merge_root {
+                MergeRoot::Host => bdepend_avail.push((cpv, None)),
+                MergeRoot::Target => {
+                    depend_avail.push((cpv.clone(), None));
+                    bdepend_avail.push((cpv, None));
+                }
+            }
         }
     }
 

@@ -6,7 +6,7 @@ use portage_atom::{Cpn, Dep, Version};
 use pubgrub::{Dependencies, SelectedDependencies};
 
 use crate::convert;
-use crate::package::PortagePackage;
+use crate::package::{MergeRoot, PortagePackage};
 use crate::repository::PackageRepository;
 use crate::use_config::{UseConfig, UseFlagState};
 use crate::version_set::PortageVersionSet;
@@ -174,6 +174,14 @@ pub struct PortageDependencyProvider {
     /// other BROOTs / within-run merges). Always "present" (Lock-equivalent):
     /// the solver never re-chooses these, it just checks satisfaction.
     pub(crate) host_installed: HashMap<PortagePackage, Version>,
+    /// Packages present in the cross **sysroot** (`ESYSROOT`), used to satisfy
+    /// `DEPEND` edges for target-root instances when [`cross_active`](Self::cross_active).
+    pub(crate) sysroot_installed: HashMap<PortagePackage, Version>,
+    /// Dual-root solver mode: stamp dependency targets with [`MergeRoot`] and
+    /// register host-side package instances.
+    pub(crate) cross_active: bool,
+    /// Host `@host` instances alias target package data (no duplicate ingest).
+    pub(crate) host_aliases: HashMap<PortagePackage, PortagePackage>,
     /// Installed packages whose installed version is **not in the repository**
     /// (it was pruned from the tree). Populated by [`add_installed`](Self::add_installed)
     /// when it has to synthesize the version. `choose_version` does not favour
@@ -493,6 +501,9 @@ impl PortageDependencyProvider {
             installed_iuse: HashMap::new(),
             installed_missing_from_repo: HashSet::new(),
             host_installed: HashMap::new(),
+            sysroot_installed: HashMap::new(),
+            cross_active: false,
+            host_aliases: HashMap::new(),
             dropped_deps,
             use_flag_requirements: Vec::new(),
             upgrade_pins: HashMap::new(),
@@ -546,13 +557,50 @@ impl PortageDependencyProvider {
             .insert(installed.package, (installed.version, installed.policy));
     }
 
-    /// Record a package as present on the build host (BROOT), so its BDEPEND
-    /// edges can be satisfied without building it into the plan. Always
-    /// "present" — there is no policy to re-choose it; this only feeds the
-    /// BDEPEND-satisfaction check in `get_dependencies`. See
+    /// Record a package as present on the build host (BROOT), so host-routed
+    /// `BDEPEND` and `IDEPEND` edges can be satisfied without building it into
+    /// the plan. Always "present" — there is no policy to re-choose it; this
+    /// only feeds the host-satisfaction check in `get_dependencies`. See
     /// [`host_installed`](Self::host_installed).
     pub fn add_host_installed(&mut self, package: PortagePackage, version: Version) {
-        self.host_installed.insert(package, version);
+        self.host_installed
+            .insert(package.at_merge_root(MergeRoot::Host), version);
+    }
+
+    /// Record a package as present in the cross sysroot (`ESYSROOT`) for `DEPEND`
+    /// satisfaction when [`set_cross_active`](Self::set_cross_active) is on.
+    pub fn add_sysroot_installed(&mut self, package: PortagePackage, version: Version) {
+        self.sysroot_installed
+            .insert(package.at_merge_root(MergeRoot::Target), version);
+    }
+
+    /// Enable dual-root `(package, merge_root)` solver nodes for crossdev.
+    pub fn set_cross_active(&mut self, active: bool) {
+        self.cross_active = active;
+        if active {
+            self.ensure_host_instances();
+        }
+    }
+
+    fn ensure_host_instances(&mut self) {
+        let targets: Vec<PortagePackage> = self
+            .packages
+            .keys()
+            .filter(|p| !p.is_virtual() && p.merge_root() == MergeRoot::Target)
+            .cloned()
+            .collect();
+        for pkg in targets {
+            let host = pkg.at_merge_root(MergeRoot::Host);
+            self.host_aliases.entry(host).or_insert(pkg);
+        }
+    }
+
+    pub(crate) fn package_data_key<'a>(&'a self, package: &'a PortagePackage) -> &'a PortagePackage {
+        self.host_aliases.get(package).unwrap_or(package)
+    }
+
+    pub(crate) fn package_data(&self, package: &PortagePackage) -> Option<&PackageData> {
+        self.packages.get(self.package_data_key(package))
     }
 
     /// Set whether to include BDEPEND in the resolution.
@@ -2658,7 +2706,9 @@ mod tests {
         let config = UseConfig::new();
         let mut provider = {
             repo.set_use_config(config);
-            PortageDependencyProvider::new(repo)
+            let mut p = PortageDependencyProvider::new(repo);
+            p.set_with_bdeps(true);
+            p
         };
         // b-1.0 is present on BROOT (the host).
         provider.add_host_installed(
@@ -2741,6 +2791,102 @@ mod tests {
                 .iter()
                 .any(|(p, _)| p.cpn().package.as_str() == "b"),
             "b is c's RDEPEND, so it must be built despite a's BDEPEND being host-satisfied"
+        );
+    }
+
+    /// Native offset / host: host-satisfied `IDEPEND` (BROOT) must not enter the plan.
+    #[test]
+    fn host_installed_satisfies_native_idepend() {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version(
+            portage_atom::Cpv::parse("sys-apps/locale-gen-1.0").unwrap(),
+            None,
+            None,
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("sys-libs/glibc-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                idepend: DepEntry::parse("sys-apps/locale-gen").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
+        provider.add_host_installed(
+            PortagePackage::unslotted(Cpn::parse("sys-apps/locale-gen").unwrap()),
+            Version::parse("1.0").unwrap(),
+        );
+
+        let glibc =
+            PortagePackage::slotted(Cpn::parse("sys-libs/glibc").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(glibc, PortageVersionSet::any())])
+            .unwrap();
+
+        assert!(
+            solution
+                .iter()
+                .all(|(p, _)| p.cpn().package.as_str() != "locale-gen"),
+            "locale-gen is satisfied on BROOT and must not be built into the native plan"
+        );
+    }
+
+    /// Cross target build: host-satisfied `IDEPEND` (BROOT) must not enter the plan.
+    /// Mirrors glibc `!compile-locales? ( sys-apps/locale-gen )` when locale-gen
+    /// is already installed on the build host.
+    #[test]
+    fn host_installed_satisfies_cross_idepend() {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version(
+            portage_atom::Cpv::parse("sys-apps/locale-gen-1.0").unwrap(),
+            None,
+            None,
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("sys-libs/glibc-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                idepend: DepEntry::parse("sys-apps/locale-gen").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
+        provider.set_cross_active(true);
+        provider.add_host_installed(
+            PortagePackage::unslotted(Cpn::parse("sys-apps/locale-gen").unwrap()),
+            Version::parse("1.0").unwrap(),
+        );
+
+        let glibc =
+            PortagePackage::slotted(Cpn::parse("sys-libs/glibc").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(glibc, PortageVersionSet::any())])
+            .unwrap();
+
+        assert!(
+            solution
+                .iter()
+                .all(|(p, _)| p.cpn().package.as_str() != "locale-gen"),
+            "locale-gen is satisfied on BROOT and must not be built into the cross plan"
+        );
+        assert!(
+            solution
+                .iter()
+                .any(|(p, _)| p.cpn().package.as_str() == "glibc")
         );
     }
 }

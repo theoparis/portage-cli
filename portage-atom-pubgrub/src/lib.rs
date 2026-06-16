@@ -53,7 +53,7 @@ mod version_set;
 
 pub use error::{Error, Result};
 pub use graph::{DepClass, DepEdge};
-pub use package::PortagePackage;
+pub use package::{MergeRoot, PortagePackage};
 pub use portage_atom::interner::{DefaultInterner, Interned};
 pub use provider::{
     CededFlag, DroppedDep, InstalledPackage, InstalledPolicy, PortageDependencyProvider,

@@ -10,7 +10,7 @@ use pubgrub::{
 };
 
 use crate::error::Error;
-use crate::package::PortagePackage;
+use crate::package::{MergeRoot, PortagePackage};
 use crate::version_set::PortageVersionSet;
 
 use super::{InstalledPolicy, PortageDependencyProvider, VersionData};
@@ -30,8 +30,7 @@ impl DependencyProvider for PortageDependencyProvider {
         stats: &PackageResolutionStatistics,
     ) -> Self::Priority {
         let count = self
-            .packages
-            .get(package)
+            .package_data(package)
             .map(|d| d.versions.keys().filter(|v| range.contains(v)).count())
             .unwrap_or(0);
         (stats.conflict_count(), Reverse(count))
@@ -42,7 +41,7 @@ impl DependencyProvider for PortageDependencyProvider {
         package: &Self::P,
         range: &Self::VS,
     ) -> std::result::Result<Option<Self::V>, Self::Err> {
-        let Some(data) = self.packages.get(package) else {
+        let Some(data) = self.package_data(package) else {
             return Ok(None);
         };
 
@@ -225,7 +224,7 @@ impl DependencyProvider for PortageDependencyProvider {
         package: &Self::P,
         version: &Self::V,
     ) -> std::result::Result<Dependencies<Self::P, Self::VS, Self::M>, Self::Err> {
-        let Some(data) = self.packages.get(package) else {
+        let Some(data) = self.package_data(package) else {
             return Ok(Dependencies::Unavailable(format!(
                 "package not found: {}",
                 package
@@ -258,16 +257,33 @@ impl DependencyProvider for PortageDependencyProvider {
         }
 
         // A package being *built* (not at its installed version):
+        if self.cross_active && package.merge_root() == MergeRoot::Target {
+            if self.with_bdeps {
+                return Ok(Dependencies::Available(cross_target_deps(
+                    vd,
+                    &self.host_installed,
+                    &self.sysroot_installed,
+                )));
+            }
+            return Ok(Dependencies::Available(cross_target_runtime_deps(
+                vd,
+                &self.host_installed,
+            )));
+        }
+        if self.cross_active && package.merge_root() == MergeRoot::Host && self.with_bdeps {
+            return Ok(Dependencies::Available(host_native_deps(
+                vd,
+                &self.host_installed,
+            )));
+        }
+
         if self.with_bdeps {
-            // BDEPEND runs on the build host (BROOT), so drop every BDEPEND edge
-            // already satisfied there. This keeps an offset build (`--root <empty>`)
-            // from pulling host-provided build tools (gcc, autoconf, cmake, …) into
-            // the plan, matching portage. Only BDEPEND (index 2) is filtered —
-            // DEPEND (0) resolves against the base sysroot and RDEPEND (1) against
-            // the target, so those stay even when the host happens to provide them.
-            // A BDEPEND the host lacks stays (built into the plan).
+            // BDEPEND and IDEPEND run on BROOT; drop each edge already satisfied on
+            // the host. This keeps an offset build (`--root <empty>`) from pulling
+            // host-provided build/install tools into the plan, matching portage.
+            // DEPEND/RDEPEND are unaffected.
             if !self.host_installed.is_empty() {
-                return Ok(Dependencies::Available(bdepend_filtered(
+                return Ok(Dependencies::Available(broot_filtered(
                     vd,
                     &self.host_installed,
                 )));
@@ -275,16 +291,11 @@ impl DependencyProvider for PortageDependencyProvider {
             Ok(vd.merged.clone())
         } else {
             // BDEPEND excluded entirely (emerge --with-bdeps=n default).
-            // Return only runtime deps: DEPEND (0), RDEPEND (1), PDEPEND (3), IDEPEND (4).
-            // This matches emerge's default where BDEPEND are assumed provided by BROOT.
-            let runtime: DependencyConstraints<PortagePackage, PortageVersionSet> = vd.by_class[0]
-                .iter() // DEPEND
-                .chain(vd.by_class[1].iter()) // RDEPEND
-                .chain(vd.by_class[3].iter()) // PDEPEND
-                .chain(vd.by_class[4].iter()) // IDEPEND
-                .map(|(p, vs, _)| (p.clone(), vs.clone()))
-                .collect();
-            Ok(Dependencies::Available(runtime))
+            // DEPEND/RDEPEND/PDEPEND plus host-satisfied IDEPEND filtering.
+            Ok(Dependencies::Available(native_runtime_deps(
+                vd,
+                &self.host_installed,
+            )))
         }
     }
 }
@@ -294,24 +305,119 @@ impl DependencyProvider for PortageDependencyProvider {
 /// BDEPEND edge `(pkg, vset)` is dropped when `pkg` is present and `vset`
 /// accepts that version. Per-edge (not per-package): a package that is both a
 /// BDEPEND of A and an RDEPEND of B is still built when B needs it.
-fn bdepend_filtered(
+fn stamp_root(p: &PortagePackage, root: MergeRoot) -> PortagePackage {
+    p.at_merge_root(root)
+}
+
+fn cross_target_runtime_deps(
     vd: &VersionData,
     host_installed: &HashMap<PortagePackage, Version>,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
-    // by_class indices: 0 DEPEND, 1 RDEPEND, 2 BDEPEND, 3 PDEPEND, 4 IDEPEND.
     let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
         .iter()
         .chain(vd.by_class[1].iter())
         .chain(vd.by_class[3].iter())
-        .chain(vd.by_class[4].iter())
-        .map(|(p, vs, _)| (p.clone(), vs.clone()))
+        .map(|(p, vs, _)| (stamp_root(p, MergeRoot::Target), vs.clone()))
         .collect();
-    for (p, vs, _) in &vd.by_class[2] {
-        // BDEPEND
-        let satisfied = host_installed.get(p).is_some_and(|hv| vs.contains(hv));
+    append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Host);
+    out.into_iter().collect()
+}
+
+/// Target-root build under cross: route each dep class to the correct merge root.
+fn cross_target_deps(
+    vd: &VersionData,
+    host_installed: &HashMap<PortagePackage, Version>,
+    sysroot_installed: &HashMap<PortagePackage, Version>,
+) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
+    let mut out: Vec<(PortagePackage, PortageVersionSet)> = Vec::new();
+    for (p, vs, _) in &vd.by_class[0] {
+        let tp = stamp_root(p, MergeRoot::Target);
+        let satisfied = sysroot_installed
+            .get(&tp)
+            .is_some_and(|hv| vs.contains(hv));
         if !satisfied {
-            out.push((p.clone(), vs.clone()));
+            out.push((tp, vs.clone()));
         }
     }
+    for (p, vs, _) in &vd.by_class[1] {
+        out.push((stamp_root(p, MergeRoot::Target), vs.clone()));
+    }
+    append_unsatisfied_broot(&mut out, &vd.by_class[2], host_installed, MergeRoot::Host);
+    for (p, vs, _) in &vd.by_class[3] {
+        out.push((stamp_root(p, MergeRoot::Target), vs.clone()));
+    }
+    append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Host);
     out.into_iter().collect()
+}
+
+/// Host-root native build (BDEPEND front-matter): all deps target the host instance.
+fn host_native_deps(
+    vd: &VersionData,
+    host_installed: &HashMap<PortagePackage, Version>,
+) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
+    let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
+        .iter()
+        .chain(vd.by_class[1].iter())
+        .chain(vd.by_class[3].iter())
+        .map(|(p, vs, _)| (stamp_root(p, MergeRoot::Host), vs.clone()))
+        .collect();
+    append_unsatisfied_broot(&mut out, &vd.by_class[2], host_installed, MergeRoot::Host);
+    append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Host);
+    out.into_iter().collect()
+}
+
+/// Native build with `--with-bdeps=n`: DEPEND/RDEPEND/PDEPEND plus host-filtered IDEPEND.
+fn native_runtime_deps(
+    vd: &VersionData,
+    host_installed: &HashMap<PortagePackage, Version>,
+) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
+    let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
+        .iter()
+        .chain(vd.by_class[1].iter())
+        .chain(vd.by_class[3].iter())
+        .map(|(p, vs, _)| (p.clone(), vs.clone()))
+        .collect();
+    append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Target);
+    out.into_iter().collect()
+}
+
+/// Native build with `--with-bdeps`: keep DEPEND/RDEPEND/PDEPEND; drop host-satisfied
+/// BDEPEND and IDEPEND (both resolve on BROOT per PMS table 8.2).
+fn broot_filtered(
+    vd: &VersionData,
+    host_installed: &HashMap<PortagePackage, Version>,
+) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
+    let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
+        .iter()
+        .chain(vd.by_class[1].iter())
+        .chain(vd.by_class[3].iter())
+        .map(|(p, vs, _)| (p.clone(), vs.clone()))
+        .collect();
+    append_unsatisfied_broot(&mut out, &vd.by_class[2], host_installed, MergeRoot::Target);
+    append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Target);
+    out.into_iter().collect()
+}
+
+fn host_satisfied_on_broot(
+    host_installed: &HashMap<PortagePackage, Version>,
+    p: &PortagePackage,
+    vs: &PortageVersionSet,
+) -> bool {
+    let hp = stamp_root(p, MergeRoot::Host);
+    host_installed
+        .get(&hp)
+        .is_some_and(|hv| vs.contains(hv))
+}
+
+fn append_unsatisfied_broot(
+    out: &mut Vec<(PortagePackage, PortageVersionSet)>,
+    edges: &[crate::convert::Req],
+    host_installed: &HashMap<PortagePackage, Version>,
+    unsatisfied_root: MergeRoot,
+) {
+    for (p, vs, _) in edges {
+        if !host_satisfied_on_broot(host_installed, p, vs) {
+            out.push((stamp_root(p, unsatisfied_root), vs.clone()));
+        }
+    }
 }

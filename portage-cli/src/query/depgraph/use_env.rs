@@ -91,13 +91,20 @@ async fn compute_use_env(
 
     let expand = split_var("USE_EXPAND");
     let expand_hidden = split_var("USE_EXPAND_HIDDEN");
-    let accept_keywords = split_var("ACCEPT_KEYWORDS");
+    let accept_keywords = effective_accept_keywords(&split_var, &shell);
     let accept_license = {
-        let v = split_var("ACCEPT_LICENSE");
-        if v.is_empty() {
-            vec!["*".to_string()]
-        } else {
-            v
+        let from_profile = {
+            let v = split_var("ACCEPT_LICENSE");
+            if v.is_empty() {
+                vec!["*".to_string()]
+            } else {
+                v
+            }
+        };
+        // Portage honours ACCEPT_LICENSE from the process environment.
+        match std::env::var("ACCEPT_LICENSE") {
+            Ok(env) if !env.is_empty() => env.split_whitespace().map(str::to_string).collect(),
+            _ => from_profile,
         }
     };
     let distdir = shell
@@ -155,6 +162,27 @@ async fn compute_use_env(
         accept_license,
         distdir,
     })
+}
+
+/// `make.conf` often sets `ACCEPT_KEYWORDS="${ARCH} ~${ARCH}"`. When `ARCH` is
+/// not yet visible at source time, brush leaves `~` only — rebuild from `ARCH`
+/// once the profile stack has settled.
+fn effective_accept_keywords(
+    split_var: &dyn Fn(&str) -> Vec<String>,
+    shell: &portage_repo::EbuildShell,
+) -> Vec<String> {
+    let arch = shell.get_var("ARCH").unwrap_or_default();
+    let ak = split_var("ACCEPT_KEYWORDS");
+    if arch.is_empty() {
+        return ak;
+    }
+    let testing = format!("~{arch}");
+    let has_arch = ak.iter().any(|k| k == &arch || k == &testing);
+    if has_arch {
+        return ak;
+    }
+    // Broken expansion (e.g. `["~"]` or empty) — mirror portage's make.conf default.
+    vec![arch, testing]
 }
 
 fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {

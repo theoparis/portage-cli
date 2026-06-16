@@ -593,7 +593,58 @@ fn format_kib(bytes: u64) -> String {
     format!("{} KiB", bytes.div_ceil(1024))
 }
 
+/// Like [`print_pretty`], but honours per-entry [`MergeRoot`](super::root_aware::MergeRoot).
 #[allow(clippy::too_many_arguments)]
+pub(super) fn print_pretty_rooted(
+    data: &RepoData,
+    plan: &[super::root_aware::PlanEntry],
+    installed: &HashMap<Cpn, HashMap<String, Version>>,
+    installed_entries: &[super::installed::VdbEntry],
+    use_config: &UseConfig,
+    package_use: &[(Dep, Vec<String>)],
+    use_expand: &[String],
+    use_expand_hidden: &[String],
+    flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
+    sizes: &HashMap<Cpv, u64>,
+    slot_op_cpns: &std::collections::HashSet<Cpn>,
+    verbose: u8,
+    cross: &super::root_aware::CrossContext,
+) {
+    if cross.active && cross.is_cross_arch() {
+        let mut err = anstream::stderr();
+        let chost = cross.chost.as_deref().unwrap_or("?");
+        let cbuild = cross.cbuild.as_deref().unwrap_or("?");
+        writeln!(
+            err,
+            "Root-aware cross plan: CHOST={chost} CBUILD={cbuild} sysroot={} target={}",
+            cross.sysroot, cross.target
+        )
+        .ok();
+    }
+    let order: Vec<_> = plan
+        .iter()
+        .map(|e| (e.pkg.clone(), e.version.clone()))
+        .collect();
+    let merge_roots: Vec<_> = plan.iter().map(|e| e.merge_root).collect();
+    print_pretty_with_roots(
+        data,
+        &order,
+        &merge_roots,
+        installed,
+        installed_entries,
+        use_config,
+        package_use,
+        use_expand,
+        use_expand_hidden,
+        flag_reqs,
+        sizes,
+        slot_op_cpns,
+        verbose,
+        cross,
+    );
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(super) fn print_pretty(
     data: &RepoData,
     order: &[(PortagePackage, Version)],
@@ -609,15 +660,55 @@ pub(super) fn print_pretty(
     verbose: u8,
     target_root: Option<&camino::Utf8Path>,
 ) {
-    let mut out = anstream::stdout();
-
-    // Match emerge: when merging into a non-host root, annotate every line
-    // with ` to <ROOT>/`. `target_root` is None or "/" for the host, where
-    // there is nothing to add (the normal emerge-style output).
-    let dest_suffix = match target_root {
-        Some(r) if r.as_str() != "/" => format!(" to {}/", r),
-        _ => String::new(),
+    let merge_roots: Vec<_> = order
+        .iter()
+        .map(|_| portage_atom_pubgrub::MergeRoot::Target)
+        .collect();
+    let cross = super::root_aware::CrossContext {
+        active: false,
+        sysroot: camino::Utf8PathBuf::from("/"),
+        target: target_root
+            .map(|p| p.to_owned())
+            .unwrap_or_else(|| camino::Utf8PathBuf::from("/")),
+        chost: None,
+        cbuild: None,
     };
+    print_pretty_with_roots(
+        data,
+        order,
+        &merge_roots,
+        installed,
+        installed_entries,
+        use_config,
+        package_use,
+        use_expand,
+        use_expand_hidden,
+        flag_reqs,
+        sizes,
+        slot_op_cpns,
+        verbose,
+        &cross,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn print_pretty_with_roots(
+    data: &RepoData,
+    order: &[(PortagePackage, Version)],
+    merge_roots: &[portage_atom_pubgrub::MergeRoot],
+    installed: &HashMap<Cpn, HashMap<String, Version>>,
+    installed_entries: &[super::installed::VdbEntry],
+    use_config: &UseConfig,
+    package_use: &[(Dep, Vec<String>)],
+    use_expand: &[String],
+    use_expand_hidden: &[String],
+    flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
+    sizes: &HashMap<Cpv, u64>,
+    slot_op_cpns: &std::collections::HashSet<Cpn>,
+    verbose: u8,
+    cross: &super::root_aware::CrossContext,
+) {
+    let mut out = anstream::stdout();
 
     writeln!(
         out,
@@ -626,7 +717,11 @@ pub(super) fn print_pretty(
     .ok();
     writeln!(out, "Calculating dependencies... done!").ok();
 
-    for (pkg, ver) in order {
+    for ((pkg, ver), merge_root) in order.iter().zip(merge_roots) {
+        let dest_suffix = match super::root_aware::display_root(*merge_root, &cross.target, cross) {
+            r if r.as_str() == "/" => String::new(),
+            r => format!(" to {}/", r),
+        };
         let cpn = pkg.cpn();
         let (tag, old_ver) = action_tag(pkg, ver, installed);
         let req = flag_reqs.get(pkg).copied();

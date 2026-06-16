@@ -24,6 +24,19 @@ use std::fmt;
 use portage_atom::Cpn;
 use portage_atom::interner::{DefaultInterner, Interned};
 
+/// Where a real package instance is merged — host `BROOT` or target `ROOT`.
+///
+/// Solver nodes are keyed by `(CPN, slot, merge_root)` so the same CPV can
+/// appear twice under cross (native host tool + cross target runtime).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Default)]
+pub enum MergeRoot {
+    /// Native build merged to the build host (`BROOT`, `/`).
+    Host,
+    /// Cross (or native target) build merged to `ROOT` / `EROOT`.
+    #[default]
+    Target,
+}
+
 /// A PubGrub-compatible package identifier.
 ///
 /// Real packages carry a CPN and optional slot.  Virtual variants
@@ -40,6 +53,8 @@ pub enum PortagePackage {
     Real {
         cpn: Cpn,
         slot: Option<Interned<DefaultInterner>>,
+        /// Merge destination; defaults to [`MergeRoot::Target`].
+        merge_root: MergeRoot,
     },
     /// Synthetic root node for the solver.
     Root,
@@ -54,19 +69,58 @@ pub enum PortagePackage {
 impl PortagePackage {
     /// Create a real package from a CPN and optional slot.
     pub fn new(cpn: Cpn, slot: Option<Interned<DefaultInterner>>) -> Self {
-        Self::Real { cpn, slot }
+        Self::Real {
+            cpn,
+            slot,
+            merge_root: MergeRoot::Target,
+        }
     }
 
-    /// Create an unslotted real package.
+    /// Create an unslotted real package at `merge_root`.
     pub fn unslotted(cpn: Cpn) -> Self {
-        Self::Real { cpn, slot: None }
+        Self::unslotted_at(cpn, MergeRoot::Target)
     }
 
-    /// Create a slotted real package.
+    /// Create an unslotted real package at `merge_root`.
+    pub fn unslotted_at(cpn: Cpn, merge_root: MergeRoot) -> Self {
+        Self::Real {
+            cpn,
+            slot: None,
+            merge_root,
+        }
+    }
+
+    /// Create a slotted real package at the target root.
     pub fn slotted(cpn: Cpn, slot: Interned<DefaultInterner>) -> Self {
+        Self::slotted_at(cpn, slot, MergeRoot::Target)
+    }
+
+    /// Create a slotted real package at `merge_root`.
+    pub fn slotted_at(cpn: Cpn, slot: Interned<DefaultInterner>, merge_root: MergeRoot) -> Self {
         Self::Real {
             cpn,
             slot: Some(slot),
+            merge_root,
+        }
+    }
+
+    /// Returns the merge root for real packages (target when virtual).
+    pub fn merge_root(&self) -> MergeRoot {
+        match self {
+            Self::Real { merge_root, .. } => *merge_root,
+            _ => MergeRoot::Target,
+        }
+    }
+
+    /// Clone a real package at another merge root; virtual nodes are unchanged.
+    pub fn at_merge_root(&self, merge_root: MergeRoot) -> Self {
+        match self {
+            Self::Real { cpn, slot, .. } => Self::Real {
+                cpn: *cpn,
+                slot: *slot,
+                merge_root,
+            },
+            other => other.clone(),
         }
     }
 
@@ -128,17 +182,22 @@ impl Ord for PortagePackage {
                 Self::Real {
                     cpn: a_cpn,
                     slot: a_slot,
+                    merge_root: a_root,
                 },
                 Self::Real {
                     cpn: b_cpn,
                     slot: b_slot,
+                    merge_root: b_root,
                 },
-            ) => a_cpn.cmp(b_cpn).then_with(|| match (a_slot, b_slot) {
-                (Some(a), Some(b)) => a.as_str().cmp(b.as_str()),
-                (Some(_), None) => Ordering::Greater,
-                (None, Some(_)) => Ordering::Less,
-                (None, None) => Ordering::Equal,
-            }),
+            ) => a_cpn
+                .cmp(b_cpn)
+                .then_with(|| match (a_slot, b_slot) {
+                    (Some(a), Some(b)) => a.as_str().cmp(b.as_str()),
+                    (Some(_), None) => Ordering::Greater,
+                    (None, Some(_)) => Ordering::Less,
+                    (None, None) => Ordering::Equal,
+                })
+                .then(a_root.cmp(b_root)),
             (Self::Real { .. }, _) => Ordering::Less,
             (_, Self::Real { .. }) => Ordering::Greater,
             // Internal variants: order by discriminant, then by the interned
@@ -178,8 +237,23 @@ impl fmt::Display for PortagePackage {
             Self::Real {
                 cpn,
                 slot: Some(slot),
+                merge_root: MergeRoot::Target,
             } => write!(f, "{}:{}", cpn, slot),
-            Self::Real { cpn, slot: None } => write!(f, "{}", cpn),
+            Self::Real {
+                cpn,
+                slot: Some(slot),
+                merge_root: MergeRoot::Host,
+            } => write!(f, "{}:{}@host", cpn, slot),
+            Self::Real {
+                cpn,
+                slot: None,
+                merge_root: MergeRoot::Target,
+            } => write!(f, "{}", cpn),
+            Self::Real {
+                cpn,
+                slot: None,
+                merge_root: MergeRoot::Host,
+            } => write!(f, "{}@host", cpn),
             Self::Root => write!(f, "__internal__/root"),
             Self::UseDecision { name } => write!(f, "__internal__/{}", name),
             Self::Choice { name } => write!(f, "__internal__/{}", name),
@@ -216,6 +290,16 @@ mod tests {
             Interned::intern("3.12"),
         );
         assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn different_merge_roots_are_different_packages() {
+        let cpn = Cpn::parse("dev-libs/foo").unwrap();
+        let host = PortagePackage::unslotted_at(cpn, MergeRoot::Host);
+        let target = PortagePackage::unslotted_at(cpn, MergeRoot::Target);
+        assert_ne!(host, target);
+        use std::cmp::Ordering;
+        assert_ne!(host.cmp(&target), Ordering::Equal);
     }
 
     #[test]

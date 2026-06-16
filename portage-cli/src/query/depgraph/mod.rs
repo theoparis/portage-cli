@@ -1,4 +1,7 @@
 mod autounmask;
+mod root_aware;
+
+pub use portage_atom_pubgrub::MergeRoot;
 #[cfg(test)]
 mod c7;
 mod conflicts;
@@ -30,6 +33,8 @@ use crate::cli::DepgraphFormat;
 /// One entry of the resolved merge list, in install order — everything the
 /// build loop needs to emerge it.
 pub struct PlannedMerge {
+    /// Where this package is merged (`BROOT` host vs target `ROOT`).
+    pub merge_root: MergeRoot,
     /// `category/name-version` (display + work-dir naming).
     pub cpv: String,
     /// Absolute path to the ebuild.
@@ -101,8 +106,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         onlydeps,
         with_bdeps,
     } = opts;
+    let cross = root_aware::detect(roots);
     let config_root = roots.config();
-    let base_root = roots.base();
+    let base_root = root_aware::planner_base(roots, &cross).or(roots.base());
     let target_root = roots.target();
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
@@ -242,6 +248,16 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         }
         let mut provider =
             PortageDependencyProvider::new_for_targets_with_bdeps(adapter, seeds, with_bdeps);
+        provider.set_cross_active(cross.active);
+        if cross.active && !empty {
+            for e in installed::load_sysroot_entries(cross.sysroot.as_path()) {
+                let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
+                    Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
+                    None => PortagePackage::unslotted(e.cpn),
+                };
+                provider.add_sysroot_installed(pkg, e.version.clone());
+            }
+        }
         if !empty {
             for e in &installed_entries {
                 let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
@@ -571,6 +587,25 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         entries
     };
 
+    let _display_adapter = repo::Adapter {
+        data: &data,
+        arch,
+        accept_keywords: &accept_keywords,
+        package_mask: &package_mask,
+        package_unmask: &package_unmask,
+        accept_license: &accept_license,
+        use_config: &use_config,
+        package_use: &package_use,
+        force_mask: &force_mask,
+        installed_cpvs: if empty {
+            &no_installed
+        } else {
+            &installed_cpvs
+        },
+        autosolve_use: false,
+    };
+    let plan_entries = root_aware::build_plan(order.clone());
+
     match format {
         DepgraphFormat::Pretty => {
             // Verbose mode shows per-package download size and a total; skip the
@@ -587,9 +622,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             } else {
                 HashMap::new()
             };
-            output::print_pretty(
+            output::print_pretty_rooted(
                 &data,
-                &order,
+                &plan_entries,
                 &installed,
                 &installed_entries,
                 &use_config,
@@ -600,7 +635,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 &sizes,
                 &slot_op_cpns,
                 verbose,
-                target_root,
+                &cross,
             )
         }
         DepgraphFormat::Json => output::print_json(&data, &order, &edges, &installed, &flag_reqs),
@@ -693,10 +728,12 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 .unwrap_or_else(|| repo_path.to_owned())
         }
     };
-    let plan: Vec<PlannedMerge> = order
+    let plan: Vec<PlannedMerge> = plan_entries
         .iter()
-        .filter(|(pkg, _)| !pkg.is_virtual())
-        .map(|(pkg, ver)| {
+        .filter(|e| !e.pkg.is_virtual())
+        .map(|entry| {
+            let pkg = &entry.pkg;
+            let ver = &entry.version;
             let cpn = pkg.cpn();
             let cpv = Cpv::new(*cpn, ver.clone());
             let effective = portage_atom_pubgrub::apply_package_use(
@@ -732,6 +769,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 .join(cpn.package.as_str())
                 .join(format!("{}-{}.ebuild", cpn.package, ver));
             PlannedMerge {
+                merge_root: entry.merge_root,
                 cpv: format!("{}/{}-{}", cpn.category, cpn.package, ver),
                 ebuild_path,
                 use_flags: flags,
@@ -748,18 +786,23 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     // any cycle. A spurious blocker only costs parallelism; a missing one would
     // risk building before a dep is merged, so CPN matching errs on the safe
     // (more-blocking) side.
-    let index_of: HashMap<Cpn, usize> = plan
+    let index_of: HashMap<(MergeRoot, Cpn), usize> = plan
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| Cpv::parse(&p.cpv).ok().map(|cpv| (cpv.cpn, i)))
+        .filter_map(|(i, p)| {
+            Cpv::parse(&p.cpv)
+                .ok()
+                .map(|cpv| ((p.merge_root, cpv.cpn), i))
+        })
         .collect();
     let mut build_blockers: Vec<Vec<usize>> = vec![Vec::new(); plan.len()];
     for e in &edges {
         if !matches!(e.class, DepClass::Depend | DepClass::Bdepend) {
             continue;
         }
-        let (Some(&from), Some(&to)) = (index_of.get(e.from.0.cpn()), index_of.get(e.to.0.cpn()))
-        else {
+        let from_key = (e.from.0.merge_root(), *e.from.0.cpn());
+        let to_key = (e.to.0.merge_root(), *e.to.0.cpn());
+        let (Some(&from), Some(&to)) = (index_of.get(&from_key), index_of.get(&to_key)) else {
             continue;
         };
         if to < from && !build_blockers[from].contains(&to) {

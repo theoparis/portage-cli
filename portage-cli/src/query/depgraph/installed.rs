@@ -63,6 +63,11 @@ pub(super) fn load_host_installed() -> Vec<(PortagePackage, Version)> {
         .collect()
 }
 
+/// VDB entries from a cross sysroot (`ESYSROOT`) for `DEPEND` satisfaction.
+pub(super) fn load_sysroot_entries(sysroot: &camino::Utf8Path) -> Vec<VdbEntry> {
+    load_one(Some(sysroot))
+}
+
 fn load_one(root: Option<&camino::Utf8Path>) -> Vec<VdbEntry> {
     let vdb = match root {
         Some(r) => Vdb::open(r.join("var/db/pkg")),
