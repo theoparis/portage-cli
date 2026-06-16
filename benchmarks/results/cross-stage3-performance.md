@@ -10,8 +10,9 @@ Target: `sys-devel/gcc -p`, `ACCEPT_LICENSE=*` (embedded profile `@FREE` not exp
 | **3a** (post-solve host BDEPEND, `--root-aware` flag) | 618.6 ms ± 52.7 ms | 1.638 s ± 0.014 s | **2.65×** |
 | **3b** (solver `(package, merge_root)` nodes, auto dual-root) | 595.3 ms ± 25.7 ms | 1.627 s ± 0.003 s | **2.73×** |
 | **3c** (3b + BROOT `IDEPEND`/`BDEPEND` host satisfaction, offset dual-root) | 633.2 ms ± 23.6 ms | 1.665 s ± 0.006 s | **2.63×** |
+| **3d** (3c + cross `--with-bdeps` no longer expands BDEPEND onto ROOT) | 613.8 ms ± 27.0 ms | 1.657 s ± 0.003 s | **2.70×** |
 
-Stage 3c matches emerge merge-list parity (18 packages for `sys-devel/gcc`); wall time is within noise of 3a/3b (~2.6× faster than `{target}-emerge` for `-p`).
+Stage 3c/3d match emerge merge-list parity (18 packages for `sys-devel/gcc`); wall time is within noise of 3a/3b (~2.6× faster than `{target}-emerge` for `-p`).
 
 ## Merge-list parity (no `--with-bdeps`)
 
@@ -21,20 +22,21 @@ Stage 3c matches emerge merge-list parity (18 packages for `sys-devel/gcc`); wal
 | `sys-libs/zlib` | 1 | 1 | 1 | — |
 | `virtual/libiconv` | 1 | 1 | 1 | — |
 
-## `--with-bdeps` (still open)
+## `--with-bdeps` (fixed in 3d)
 
-| | emerge | em 3a | em 3b/3c |
-|---|--------|-------|----------|
-| `sys-devel/gcc` plan size | 18 | 54 (post-solve mini-resolve) | 53 (in-solver host instances) |
+| | emerge | em 3d |
+|---|--------|-------|
+| `sys-devel/gcc` default | 18 | 18 |
+| `sys-devel/gcc` `--with-bdeps` | 18 | 18 |
 
-Host-root lines (`to /`) are not yet aligned with portage: in-solver host nodes still over-pull when `--with-bdeps` is set. Next: tighter host-edge filtering and within-run `host_installed` growth.
+Cross `-p` does not expand host-satisfied BDEPEND onto ROOT (verified against `riscv64-emerge -pv --with-bdeps=y`). Still open: within-run `host_installed` growth for long native-prefix chains.
 
 ## Dual-root scheduling (3c)
 
 - **Solver:** `(CPN, slot, merge_root)` nodes; dep classes routed per PMS table 8.2.
 - **Auto-activation:** crossdev (`CHOST ≠ CBUILD`), `config_root ≠ merge_root`, or `merge_root ≠ /` (native stage/offset).
 - **BROOT satisfaction:** host `/var/db/pkg` drops satisfied `BDEPEND`/`IDEPEND` edges (native and cross).
-- **Still open:** unsatisfied BROOT deps on pure `--root stage1/` without host profile; `--with-bdeps` over-pull; `@FREE` license groups.
+- **Still open:** unsatisfied BROOT deps on pure `--root stage1/` without host profile; within-run `host_installed` growth; `@FREE` license groups.
 
 ## How to reproduce
 
@@ -44,4 +46,5 @@ benchmarks/bench-cross-emerge.sh target/release/em
 # baselines: benchmarks/results/cross-stage3a-baseline-2026-06-16.txt
 #           benchmarks/results/cross-stage3b-2026-06-16.txt
 #           benchmarks/results/cross-stage3c-idepend-2026-06-16.txt
+#           benchmarks/results/cross-stage3d-with-bdeps-2026-06-16.txt
 ```

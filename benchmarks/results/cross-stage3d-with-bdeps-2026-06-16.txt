@@ -1,0 +1,26 @@
+# Stage 3d — cross --with-bdeps parity fix (2026-06-16)
+
+Machine: same host as bench-cross-emerge.sh defaults.
+Target: riscv64-unknown-linux-gnu, sys-devel/gcc -p, ACCEPT_LICENSE=*
+
+## Change
+
+Cross target-root builds always use `cross_target_runtime_deps` (DEPEND/RDEPEND/PDEPEND
++ host-filtered IDEPEND). BDEPEND no longer expands onto ROOT when `--with-bdeps` is set.
+
+## Merge-list parity
+
+| Case | emerge | em |
+|------|--------|-----|
+| default | 18 | 18 |
+| --with-bdeps | 18 | 18 |
+
+Also: sys-libs/zlib 1/1, virtual/libiconv 1/1 (unchanged).
+
+## Wall time (hyperfine, 3 runs)
+
+| Tool | mean ± σ |
+|------|----------|
+| em | 613.8 ms ± 27.0 ms |
+| riscv64-unknown-linux-gnu-emerge | 1.657 s ± 0.003 s |
+| Speedup | 2.70× |

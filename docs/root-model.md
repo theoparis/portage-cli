@@ -223,11 +223,13 @@ Same semantics as native, but the roots differ:
 | flag | native offset | cross `{target}-emerge` |
 |---|---|---|
 | default (`with_bdeps=false`) | assume host tools; plan only target closure | same — host satisfies `BDEPEND`, plan goes to `ROOT` |
-| `--with-bdeps` | include unsatisfied `BDEPEND` into plan (still merged to target on native) | unsatisfied `BDEPEND` must merge to **BROOT** `/`, not `ROOT` |
+| `--with-bdeps` | include unsatisfied `BDEPEND` into plan (still merged to target on native) | same closure as default on `-p` when BROOT is full; unsatisfied `BDEPEND` schedule to **BROOT** `/` via Host-root nodes, not onto `ROOT` |
 
-The last row is the Stage 3 requirement: `--with-bdeps` under cross is not
-“also merge build tools into `/tmp/place`”; it is “schedule native builds to
-`/` when the host lacks them.”
+Cross `-p` with `--with-bdeps=y` does not expand host-satisfied build tools onto
+the target merge list (verified: `riscv64-emerge -pv --with-bdeps=y gcc` still
+lists 18 packages). `em` matches: target-root builds always use runtime deps;
+`with_bdeps` only affects native offset filtering and future unsatisfied-BROOT
+host scheduling.
 
 ## Builder behaviour
 
@@ -356,6 +358,6 @@ never the root handling.
   `PortagePackage`; auto-activation for crossdev, `config_root ≠ merge_root`,
   or `merge_root ≠ /` (native stage/offset). Dep classes routed per PMS table
   8.2; host-satisfied `BDEPEND`/`IDEPEND` dropped on BROOT. Cross `gcc -p`
-  matches emerge (18 packages). Still open: `--with-bdeps` over-pull,
+  matches emerge (18 packages) with or without `--with-bdeps`. Still open:
   within-run `host_installed` growth, `@FREE` license groups.
 - **Orthogonal — binpkg:** producer-only; plugs into the existing merge.

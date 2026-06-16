@@ -258,13 +258,10 @@ impl DependencyProvider for PortageDependencyProvider {
 
         // A package being *built* (not at its installed version):
         if self.cross_active && package.merge_root() == MergeRoot::Target {
-            if self.with_bdeps {
-                return Ok(Dependencies::Available(cross_target_deps(
-                    vd,
-                    &self.host_installed,
-                    &self.sysroot_installed,
-                )));
-            }
+            // Cross `-p` never expands BDEPEND onto ROOT (emerge lists the same
+            // closure with or without `--with-bdeps=y`). Host-satisfied build
+            // tools stay on BROOT; unsatisfied BDEPEND schedule via Host-root
+            // nodes when `with_bdeps` is on (see `host_native_deps` below).
             return Ok(Dependencies::Available(cross_target_runtime_deps(
                 vd,
                 &self.host_installed,
@@ -319,33 +316,6 @@ fn cross_target_runtime_deps(
         .chain(vd.by_class[3].iter())
         .map(|(p, vs, _)| (stamp_root(p, MergeRoot::Target), vs.clone()))
         .collect();
-    append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Host);
-    out.into_iter().collect()
-}
-
-/// Target-root build under cross: route each dep class to the correct merge root.
-fn cross_target_deps(
-    vd: &VersionData,
-    host_installed: &HashMap<PortagePackage, Version>,
-    sysroot_installed: &HashMap<PortagePackage, Version>,
-) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
-    let mut out: Vec<(PortagePackage, PortageVersionSet)> = Vec::new();
-    for (p, vs, _) in &vd.by_class[0] {
-        let tp = stamp_root(p, MergeRoot::Target);
-        let satisfied = sysroot_installed
-            .get(&tp)
-            .is_some_and(|hv| vs.contains(hv));
-        if !satisfied {
-            out.push((tp, vs.clone()));
-        }
-    }
-    for (p, vs, _) in &vd.by_class[1] {
-        out.push((stamp_root(p, MergeRoot::Target), vs.clone()));
-    }
-    append_unsatisfied_broot(&mut out, &vd.by_class[2], host_installed, MergeRoot::Host);
-    for (p, vs, _) in &vd.by_class[3] {
-        out.push((stamp_root(p, MergeRoot::Target), vs.clone()));
-    }
     append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Host);
     out.into_iter().collect()
 }

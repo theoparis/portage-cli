@@ -90,13 +90,21 @@ for pkg in "${TARGETS[@]}"; do
 done
 
 echo
-echo "== with-bdeps host-front matter (informational)"
-if em_cmd --with-bdeps sys-devel/gcc 2>/dev/null | extract_cpns > "$tmp/em-bdeps.txt"; then
+echo "== with-bdeps parity (sys-devel/gcc)"
+if em_cmd sys-devel/gcc 2>/dev/null | extract_cpns > "$tmp/em-base.txt" \
+    && em_cmd --with-bdeps sys-devel/gcc 2>/dev/null | extract_cpns > "$tmp/em-bdeps.txt"; then
+    base_n=$(wc -l < "$tmp/em-base.txt")
     bdeps_n=$(wc -l < "$tmp/em-bdeps.txt")
-    base_n=$(wc -l < "$tmp/em.txt" 2>/dev/null || echo 0)
+    emerge_bdeps_n=0
+    if "$EMERGE" -pv --with-bdeps=y sys-devel/gcc 2>/dev/null | extract_cpns > "$tmp/emerge-bdeps.txt"; then
+        emerge_bdeps_n=$(wc -l < "$tmp/emerge-bdeps.txt")
+    fi
     host_lines=$(grep -c ' to /$' <(em_cmd --with-bdeps sys-devel/gcc 2>/dev/null) || true)
-    echo "   sys-devel/gcc: emerge=18 (typical) em --with-bdeps=$bdeps_n (without=${base_n}) host-root lines=$host_lines"
-    echo "   (post-solve host BDEPEND expansion still over-pulls; see docs/root-model.md Stage 3a)"
+    echo "   emerge --with-bdeps=y=$emerge_bdeps_n  em default=$base_n  em --with-bdeps=$bdeps_n  host-root lines=$host_lines"
+    if [ "$bdeps_n" -ne "$base_n" ] || { [ "$emerge_bdeps_n" -gt 0 ] && [ "$bdeps_n" -ne "$emerge_bdeps_n" ]; }; then
+        fail=1
+        echo "   with-bdeps drift: expected em counts to match default and emerge" >&2
+    fi
 fi
 
 if [ "${SKIP_TIMING:-0}" != 1 ] && command -v hyperfine >/dev/null 2>&1; then

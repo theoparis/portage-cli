@@ -2889,4 +2889,56 @@ mod tests {
                 .any(|(p, _)| p.cpn().package.as_str() == "glibc")
         );
     }
+
+    /// Cross target build with `--with-bdeps`: host-satisfied BDEPEND must not
+    /// enter the plan (same closure as without the flag; mirrors emerge cross `-p`).
+    #[test]
+    fn host_installed_satisfies_cross_bdepend_with_bdeps() {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                bdepend: DepEntry::parse("dev-build/b").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            let mut p = PortageDependencyProvider::new(repo);
+            p.set_cross_active(true);
+            p.set_with_bdeps(true);
+            p
+        };
+        provider.add_host_installed(
+            PortagePackage::slotted(Cpn::parse("dev-build/b").unwrap(), Interned::intern("0")),
+            Version::parse("1.0").unwrap(),
+        );
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        assert!(
+            solution
+                .iter()
+                .all(|(p, _)| p.cpn().package.as_str() != "b"),
+            "b is satisfied on BROOT; cross target build must not pull it even with --with-bdeps"
+        );
+        assert!(
+            solution
+                .iter()
+                .any(|(p, _)| p.cpn().package.as_str() == "a")
+        );
+    }
 }
