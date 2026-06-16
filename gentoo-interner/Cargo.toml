@@ -2,7 +2,7 @@
 name = "gentoo-interner"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "String interning for Gentoo-related crates"

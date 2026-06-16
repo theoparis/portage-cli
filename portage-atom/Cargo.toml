@@ -2,7 +2,7 @@
 name = "portage-atom"
 version = "0.9.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Lightweight Portage package atom parser based on PMS"

@@ -2,7 +2,7 @@
 name = "portage-metadata"
 version = "0.7.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Gentoo ebuild metadata cache types and parser based on PMS"

@@ -2,7 +2,7 @@
 name = "portage-atom-resolvo"
 version = "0.7.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Bridge between portage-atom and the resolvo dependency solver"

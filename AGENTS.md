@@ -59,25 +59,16 @@ cargo msrv verify                  # Verifies the rust-version declared in Cargo
 
 ## MSRV
 
-**Different crates report different MSRV**:
+Until the first complete release, the workspace tracks **latest stable**
+dependencies and bumps `rust-version` as needed (currently **1.92**, driven by
+`pubgrub` 0.4). Do not pin crates to older releases to satisfy a lower MSRV.
 
-- Foundational crates (`portage-atom`, `gentoo-interner`, `portage-atom-resolvo`)
-  target **1.85** (edition 2024) and can be used standalone at that version.
-- The workspace as a whole, the `em` CLI (`portage-cli`), `portage-repo`, and
-  any crate that depends on `portage-repo` (directly or transitively) target
-  **1.88** (edition 2024). This is dictated by the pinned brush fork
-  (`brush-core` etc. declare 1.88.0) used for ebuild sourcing.
+CI runs `stable` and the declared workspace minimum (`1.92`). After a release,
+foundational crates may again advertise a lower standalone MSRV; the workspace
+floor follows whatever latest deps require.
 
-We are fine with these minimums; they have been verified with `cargo msrv verify`
-(reading the `rust-version` from each `Cargo.toml`) as well as direct toolchain
-checks. CI tests the workspace minimum (1.88 + stable).
-
-When editing, do not introduce features requiring a newer Rust without bumping
-the relevant `rust-version` (and the CI matrix entry if it affects the
-workspace), then re-verify with `cargo msrv verify --manifest-path <path>`.
-
-See the Build Commands section above for the recommended `cargo msrv` usage.
-(We do not bisect further with `cargo msrv find` unless a specific need arises.)
+When a dependency bump needs a newer compiler, raise `rust-version` in every
+affected `Cargo.toml` and the CI matrix entry, then `cargo msrv verify`.
 
 ## Slop Warning
 
