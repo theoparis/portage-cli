@@ -80,6 +80,9 @@ pub struct DepgraphOpts<'a> {
     /// `--onlydeps`: drop the explicitly-requested targets from the plan,
     /// keeping only their dependencies (emerge's `--onlydeps`).
     pub onlydeps: bool,
+    /// Include BDEPEND in resolution (emerge's `--with-bdeps`). Default false
+    /// (exclude BDEPEND) to match emerge's default.
+    pub with_bdeps: bool,
 }
 
 pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome> {
@@ -96,6 +99,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         multi_repo,
         roots,
         onlydeps,
+        with_bdeps,
     } = opts;
     let config_root = roots.config();
     let base_root = roots.base();
@@ -137,9 +141,10 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         Vec::new()
     };
 
-    let (data, installed_entries, use_env_result) = tokio::join!(
+    let (data, installed_entries, host_installed, use_env_result) = tokio::join!(
         repo::load_repos(&repo, &overlays),
         async { installed::load_installed(base_root, target_root) },
+        async { installed::load_host_installed() },
         use_env::build_use_env(&repo, config_root, roots.config_overlay()),
     );
     let use_env = use_env_result?;
@@ -235,7 +240,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         if !empty {
             seeds.extend(installed_entries.iter().map(|e| e.cpn));
         }
-        let mut provider = PortageDependencyProvider::new_for_targets(adapter, seeds);
+        let mut provider =
+            PortageDependencyProvider::new_for_targets_with_bdeps(adapter, seeds, with_bdeps);
         if !empty {
             for e in &installed_entries {
                 let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
@@ -250,6 +256,11 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                     iuse: e.iuse.clone(),
                 });
             }
+        }
+        // BROOT (the host) provides build tools: a BDEPEND already present there
+        // is satisfied without building it into the plan (Half B wiring).
+        for (pkg, ver) in &host_installed {
+            provider.add_host_installed(pkg.clone(), ver.clone());
         }
         let result = provider.resolve_targets(root_deps.clone());
         (provider, result)

@@ -257,22 +257,35 @@ impl DependencyProvider for PortageDependencyProvider {
             return Ok(Dependencies::Available(runtime));
         }
 
-        // A package being *built* (not at its installed version): its BDEPEND
-        // runs on the build host (BROOT), so drop every BDEPEND edge already
-        // satisfied there. This keeps an offset build (`--root <empty>`) from
-        // pulling host-provided build tools (gcc, autoconf, cmake, …) into the
-        // plan, matching portage. Only BDEPEND (index 2) is filtered — DEPEND
-        // (0) resolves against the base sysroot and RDEPEND (1) against the
-        // target, so those stay even when the host happens to provide them.
-        // A BDEPEND the host lacks stays (built into the plan).
-        if !self.host_installed.is_empty() {
-            return Ok(Dependencies::Available(bdepend_filtered(
-                vd,
-                &self.host_installed,
-            )));
+        // A package being *built* (not at its installed version):
+        if self.with_bdeps {
+            // BDEPEND runs on the build host (BROOT), so drop every BDEPEND edge
+            // already satisfied there. This keeps an offset build (`--root <empty>`)
+            // from pulling host-provided build tools (gcc, autoconf, cmake, …) into
+            // the plan, matching portage. Only BDEPEND (index 2) is filtered —
+            // DEPEND (0) resolves against the base sysroot and RDEPEND (1) against
+            // the target, so those stay even when the host happens to provide them.
+            // A BDEPEND the host lacks stays (built into the plan).
+            if !self.host_installed.is_empty() {
+                return Ok(Dependencies::Available(bdepend_filtered(
+                    vd,
+                    &self.host_installed,
+                )));
+            }
+            Ok(vd.merged.clone())
+        } else {
+            // BDEPEND excluded entirely (emerge --with-bdeps=n default).
+            // Return only runtime deps: DEPEND (0), RDEPEND (1), PDEPEND (3), IDEPEND (4).
+            // This matches emerge's default where BDEPEND are assumed provided by BROOT.
+            let runtime: DependencyConstraints<PortagePackage, PortageVersionSet> = vd.by_class[0]
+                .iter() // DEPEND
+                .chain(vd.by_class[1].iter()) // RDEPEND
+                .chain(vd.by_class[3].iter()) // PDEPEND
+                .chain(vd.by_class[4].iter()) // IDEPEND
+                .map(|(p, vs, _)| (p.clone(), vs.clone()))
+                .collect();
+            Ok(Dependencies::Available(runtime))
         }
-
-        Ok(vd.merged.clone())
     }
 }
 

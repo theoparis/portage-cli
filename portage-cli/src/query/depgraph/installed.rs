@@ -40,6 +40,29 @@ pub(super) fn load_installed(
     out
 }
 
+/// Packages present on the **build host** (BROOT, always `/var/db/pkg`) for
+/// `host_installed` — a BDEPEND already present there is satisfied without
+/// building it. Only `(package, version)` is needed: the solver uses it purely
+/// as a BDEPEND-satisfaction source (no USE, no policy). Returns one entry per
+/// installed package; duplicates across slots of the same package are kept
+/// (each slot is a distinct `PortagePackage`).
+pub(super) fn load_host_installed() -> Vec<(PortagePackage, Version)> {
+    let Ok(vdb) = Vdb::open_default() else {
+        return Vec::new();
+    };
+    vdb.packages()
+        .into_iter()
+        .map(|pkg| {
+            let slot = pkg.slot_main().ok();
+            let p = match slot.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => PortagePackage::slotted(*pkg.cpn(), Interned::intern(s)),
+                None => PortagePackage::unslotted(*pkg.cpn()),
+            };
+            (p, pkg.cpv().version.clone())
+        })
+        .collect()
+}
+
 fn load_one(root: Option<&camino::Utf8Path>) -> Vec<VdbEntry> {
     let vdb = match root {
         Some(r) => Vdb::open(r.join("var/db/pkg")),

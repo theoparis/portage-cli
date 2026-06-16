@@ -149,6 +149,10 @@ pub struct Cli {
     #[arg(long)]
     pub complete_graph: bool,
 
+    /// Include build-time dependencies (BDEPEND) in the resolution.
+    /// Default is false (exclude BDEPEND), matching emerge's default.
+    /// When enabled, BDEPEND are included but filtered by what's already
+    /// installed on the build host (BROOT).
     #[arg(long)]
     pub with_bdeps: bool,
 

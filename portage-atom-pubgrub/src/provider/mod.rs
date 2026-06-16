@@ -198,6 +198,11 @@ pub struct PortageDependencyProvider {
     /// a named argument selects the best accepted version, as emerge does
     /// (installed-and-best still resolves to the installed version).
     pub(crate) root_targets: std::collections::HashSet<PortagePackage>,
+    /// Whether to include BDEPEND in the resolution (emerge's `--with-bdeps`).
+    /// When false (default), BDEPEND are excluded from resolution for packages
+    /// being built (assumed provided by BROOT). When true, BDEPEND are included
+    /// but filtered by `host_installed`.
+    pub(crate) with_bdeps: bool,
     /// Preferred version (`0`/`1`) for each `UseDecision` node, i.e. the value
     /// the caller's policy would have given the ceded flag.  `choose_version`
     /// biases toward it so a `SolverDecided` flag only flips when a constraint
@@ -234,7 +239,7 @@ impl PortageDependencyProvider {
     /// resolves policy itself.  See `docs/use-and-solver-boundary.md`.
     pub fn new<R: PackageRepository>(repo: R) -> Self {
         let seeds = repo.all_packages();
-        Self::new_with_seeds(repo, seeds)
+        Self::new_with_seeds(repo, seeds, false)
     }
 
     /// Like [`new`](Self::new), but converts only the packages *reachable*
@@ -245,10 +250,20 @@ impl PortageDependencyProvider {
     /// targeted resolve this converts a few hundred packages instead of the
     /// whole tree.
     pub fn new_for_targets<R: PackageRepository>(repo: R, seeds: Vec<Cpn>) -> Self {
-        Self::new_with_seeds(repo, seeds)
+        Self::new_with_seeds(repo, seeds, false)
     }
 
-    fn new_with_seeds<R: PackageRepository>(repo: R, seeds: Vec<Cpn>) -> Self {
+    /// Like [`new_for_targets`](Self::new_for_targets), but with explicit
+    /// control over whether BDEPEND are included in the resolution.
+    pub fn new_for_targets_with_bdeps<R: PackageRepository>(
+        repo: R,
+        seeds: Vec<Cpn>,
+        with_bdeps: bool,
+    ) -> Self {
+        Self::new_with_seeds(repo, seeds, with_bdeps)
+    }
+
+    fn new_with_seeds<R: PackageRepository>(repo: R, seeds: Vec<Cpn>, with_bdeps: bool) -> Self {
         let mut packages = HashMap::new();
         let mut use_decision_prefer: HashMap<PortagePackage, Version> = HashMap::new();
         let mut use_decision_meta: HashMap<PortagePackage, (Cpn, Interned<DefaultInterner>)> =
@@ -482,6 +497,7 @@ impl PortageDependencyProvider {
             use_flag_requirements: Vec::new(),
             upgrade_pins: HashMap::new(),
             root_targets: std::collections::HashSet::new(),
+            with_bdeps,
             use_decision_prefer,
             use_decision_meta,
             solved_use_decisions: HashMap::new(),
@@ -537,6 +553,15 @@ impl PortageDependencyProvider {
     /// [`host_installed`](Self::host_installed).
     pub fn add_host_installed(&mut self, package: PortagePackage, version: Version) {
         self.host_installed.insert(package, version);
+    }
+
+    /// Set whether to include BDEPEND in the resolution.
+    ///
+    /// When `false` (default), BDEPEND are excluded from resolution entirely,
+    /// matching emerge's `--with-bdeps=n` default. When `true`, BDEPEND are
+    /// included but filtered by `host_installed`.
+    pub fn set_with_bdeps(&mut self, with_bdeps: bool) {
+        self.with_bdeps = with_bdeps;
     }
 
     /// Returns the list of dependencies that were dropped during construction
@@ -1461,7 +1486,9 @@ mod tests {
         let config = UseConfig::new();
         let mut provider = {
             repo.set_use_config(config);
-            PortageDependencyProvider::new(repo)
+            let mut p = PortageDependencyProvider::new(repo);
+            p.set_with_bdeps(true);
+            p
         };
 
         // Install python:3.14, python:3.13, and docutils with p3.13 active

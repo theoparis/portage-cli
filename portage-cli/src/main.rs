@@ -183,6 +183,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         multi_repo: cli.repo.is_none(),
         roots: &roots,
         onlydeps: cli.onlydeps,
+        with_bdeps: cli.with_bdeps,
     })
     .await?;
 
@@ -738,6 +739,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 multi_repo: globals.repo.is_none(),
                 roots: &roots,
                 onlydeps: globals.onlydeps,
+                with_bdeps: globals.with_bdeps,
             })
             .await?;
             if outcome.exit_code != 0 {
