@@ -360,5 +360,6 @@ never the root handling.
   8.2; host-satisfied `BDEPEND`/`IDEPEND` dropped on BROOT. Cross `gcc -p`
   matches emerge (18 packages) with or without `--with-bdeps`. Post-solve
   within-run `BDEPEND` trim for `--with-bdeps` prefix chains (stage 3e).
-  Still open: `@FREE` license groups.
+  Profile `ACCEPT_LICENSE` `@GROUP` tokens expanded via `profiles/license_groups`
+  (`portage-repo::AcceptLicense`).
 - **Orthogonal — binpkg:** producer-only; plugs into the existing merge.

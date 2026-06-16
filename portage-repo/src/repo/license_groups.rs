@@ -1,0 +1,221 @@
+//! License group definitions from `profiles/license_groups` and
+//! [`AcceptLicense`] token expansion for `ACCEPT_LICENSE`.
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use portage_metadata::LicenseExpr;
+use portage_metadata::interner::{DefaultInterner, Interned};
+
+use crate::error::{Error, Result};
+use crate::repo::named_groups::{GroupEntry, expand_group, group_ref_name};
+use crate::repo::repository::Repository;
+
+/// Parsed `profiles/license_groups`: group name → direct members.
+#[derive(Debug, Clone, Default)]
+pub struct LicenseGroupRegistry {
+    groups: HashMap<String, Vec<GroupEntry<Interned<DefaultInterner>>>>,
+}
+
+impl LicenseGroupRegistry {
+    /// Load group definitions from `repo/profiles/license_groups`.
+    pub fn from_repo(repo: &Repository) -> Result<Self> {
+        let path = repo.path().join("profiles/license_groups");
+        Self::from_file(path.as_std_path())
+    }
+
+    /// Parse a `license_groups` file (tolerates absence → empty registry).
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return Ok(Self::default());
+        };
+        Ok(Self::parse(&content))
+    }
+
+    /// Parse `profiles/license_groups` content.
+    pub fn parse(content: &str) -> Self {
+        let mut groups: HashMap<String, Vec<GroupEntry<Interned<DefaultInterner>>>> =
+            HashMap::new();
+        for line in content.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut tokens = line.split_whitespace();
+            let Some(name) = tokens.next() else {
+                continue;
+            };
+            let members: Vec<_> = tokens
+                .filter_map(|t| classify_license_token(t).ok())
+                .collect();
+            if !members.is_empty() {
+                groups.insert(name.to_string(), members);
+            }
+        }
+        Self { groups }
+    }
+
+    /// Expand a group name to interned license identifiers (cycle-safe).
+    pub fn expand(&self, name: &str) -> Vec<Interned<DefaultInterner>> {
+        let mut visited = HashSet::new();
+        let mut lookup = |n: &str| Ok(self.groups.get(n).cloned().unwrap_or_default());
+        expand_group(name, &mut visited, &mut lookup).unwrap_or_default()
+    }
+
+    /// Whether `name` is a defined license group.
+    pub fn contains(&self, name: &str) -> bool {
+        self.groups.contains_key(name)
+    }
+}
+
+fn classify_license_token(token: &str) -> Result<GroupEntry<Interned<DefaultInterner>>> {
+    if let Some(name) = group_ref_name(token) {
+        return Ok(GroupEntry::Ref(name.to_string()));
+    }
+    if token.is_empty() {
+        return Err(Error::InvalidProfile("empty license token".to_string()));
+    }
+    Ok(GroupEntry::Leaf(Interned::intern(token)))
+}
+
+/// Effective `ACCEPT_LICENSE` after expanding `@GROUP` tokens and applying
+/// `-` denials (portage `accept_license` semantics).
+#[derive(Debug, Clone, Default)]
+pub struct AcceptLicense {
+    /// `*` was present among allow tokens.
+    pub allow_all: bool,
+    allowed: HashSet<Interned<DefaultInterner>>,
+    denied: HashSet<Interned<DefaultInterner>>,
+}
+
+impl AcceptLicense {
+    /// Build from raw `ACCEPT_LICENSE` tokens and a loaded group registry.
+    pub fn from_tokens(tokens: &[String], groups: &LicenseGroupRegistry) -> Self {
+        let mut out = Self::default();
+        for token in tokens {
+            let (deny, raw) = token
+                .strip_prefix('-')
+                .map_or((false, token.as_str()), |r| (true, r));
+            if raw == "*" {
+                if deny {
+                    // `-*` is not meaningful; ignore.
+                    continue;
+                }
+                out.allow_all = true;
+                continue;
+            }
+            if let Some(name) = group_ref_name(raw) {
+                for lic in groups.expand(name) {
+                    out.insert(deny, lic);
+                }
+                continue;
+            }
+            out.insert(deny, Interned::intern(raw));
+        }
+        out
+    }
+
+    fn insert(&mut self, deny: bool, lic: Interned<DefaultInterner>) {
+        if deny {
+            self.denied.insert(lic);
+        } else {
+            self.allowed.insert(lic);
+        }
+    }
+
+    /// Whether a single license identifier is accepted.
+    pub fn accepts(&self, name: &str) -> bool {
+        if self.denied.contains(&Interned::intern(name)) {
+            return false;
+        }
+        if self.allow_all {
+            return true;
+        }
+        self.allowed.contains(&Interned::intern(name))
+    }
+
+    /// Whether a `LICENSE` expression is fully covered by this accept list.
+    pub fn accepts_expr(&self, expr: &LicenseExpr) -> bool {
+        match expr {
+            LicenseExpr::License(name) => self.accepts(name),
+            LicenseExpr::AnyOf(children) => children.iter().any(|c| self.accepts_expr(c)),
+            LicenseExpr::All(children) => children.iter().all(|c| self.accepts_expr(c)),
+            LicenseExpr::UseConditional { entries, .. } => {
+                entries.iter().all(|e| self.accepts_expr(e))
+            }
+        }
+    }
+
+    /// Collect license names from `expr` not covered by this accept list.
+    pub fn licenses_needed(&self, expr: &LicenseExpr) -> Vec<String> {
+        if self.allow_all && self.denied.is_empty() {
+            return Vec::new();
+        }
+        match expr {
+            LicenseExpr::License(name) => {
+                if self.accepts(name) {
+                    Vec::new()
+                } else {
+                    vec![name.clone()]
+                }
+            }
+            LicenseExpr::AnyOf(children) => {
+                if children.iter().any(|c| self.accepts_expr(c)) {
+                    Vec::new()
+                } else {
+                    children
+                        .first()
+                        .map(|c| self.licenses_needed(c))
+                        .unwrap_or_default()
+                }
+            }
+            LicenseExpr::All(children) => children
+                .iter()
+                .flat_map(|c| self.licenses_needed(c))
+                .collect(),
+            LicenseExpr::UseConditional { entries, .. } => entries
+                .iter()
+                .flat_map(|e| self.licenses_needed(e))
+                .collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"
+# comment
+FREE-SOFTWARE @FSF @OSI
+FSF MIT GPL-2+
+OSI Apache-2.0
+"#;
+
+    #[test]
+    fn parse_and_expand_nested_groups() {
+        let reg = LicenseGroupRegistry::parse(SAMPLE);
+        let free = reg.expand("FREE-SOFTWARE");
+        let names: HashSet<_> = free.iter().map(|l| l.as_str().to_string()).collect();
+        assert!(names.contains("MIT"));
+        assert!(names.contains("GPL-2+"));
+        assert!(names.contains("Apache-2.0"));
+    }
+
+    #[test]
+    fn accept_license_expands_groups_and_denies() {
+        let reg = LicenseGroupRegistry::parse(SAMPLE);
+        let acc = AcceptLicense::from_tokens(&["@FREE-SOFTWARE".into(), "-GPL-2+".into()], &reg);
+        assert!(acc.accepts("MIT"));
+        assert!(!acc.accepts("GPL-2+"));
+        assert!(!acc.accepts("unknown"));
+    }
+
+    #[test]
+    fn accept_license_star_with_deny() {
+        let reg = LicenseGroupRegistry::default();
+        let acc = AcceptLicense::from_tokens(&["*".into(), "-MIT".into()], &reg);
+        assert!(acc.accepts("GPL-2"));
+        assert!(!acc.accepts("MIT"));
+    }
+}

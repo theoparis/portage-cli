@@ -7,19 +7,15 @@
 #   CROSS_CHOST=riscv64-unknown-linux-gnu
 #   SYSROOT=/usr/${CROSS_CHOST}   config + merge root for both tools
 #   ARCH=riscv64                  em --arch (keyword: riscv)
-#   ACCEPT_LICENSE=*              em workaround until @FREE group expansion
+#   ACCEPT_LICENSE=               unset by default; profile @FREE is expanded
 #   RUNS=3                        hyperfine runs (SKIP_TIMING=1 to skip)
-#
-# emerge reads ACCEPT_LICENSE from the cross profile (@FREE). em currently needs
-# ACCEPT_LICENSE=* (or an explicit list) because license groups are not expanded
-# yet — see use_env.rs.
 
 set -u
 EM=${1:-${EM:-target/release/em}}
 CROSS_CHOST=${CROSS_CHOST:-riscv64-unknown-linux-gnu}
 SYSROOT=${SYSROOT:-/usr/${CROSS_CHOST}}
 ARCH=${ARCH:-riscv64}
-ACCEPT_LICENSE=${ACCEPT_LICENSE:-*}
+# Honour ACCEPT_LICENSE only when set in the environment (profile default otherwise).
 RUNS=${RUNS:-3}
 EMERGE=${CROSS_CHOST}-emerge
 
@@ -50,8 +46,12 @@ extract_cpns() {
 }
 
 em_cmd() {
-    ACCEPT_LICENSE="$ACCEPT_LICENSE" \
+    if [ -n "${ACCEPT_LICENSE:-}" ]; then
+        ACCEPT_LICENSE="$ACCEPT_LICENSE" \
+            "$EM" -p --config-root "$SYSROOT" --root "$SYSROOT" --arch "$ARCH" "$@"
+    else
         "$EM" -p --config-root "$SYSROOT" --root "$SYSROOT" --arch "$ARCH" "$@"
+    fi
 }
 
 TARGETS=(
@@ -111,13 +111,13 @@ if [ "${SKIP_TIMING:-0}" != 1 ] && command -v hyperfine >/dev/null 2>&1; then
     echo
     echo "== timing (hyperfine, $RUNS runs)"
     hyperfine -w 1 -r "$RUNS" --ignore-failure \
-        "ACCEPT_LICENSE='$ACCEPT_LICENSE' $EM -p --config-root $SYSROOT --root $SYSROOT --arch $ARCH sys-devel/gcc" \
+        "$EM -p --config-root $SYSROOT --root $SYSROOT --arch $ARCH sys-devel/gcc" \
         "$EMERGE -pv sys-devel/gcc" \
         2>/dev/null | grep -E 'Benchmark|Time|faster'
 fi
 
 if [ "$fail" -ne 0 ]; then
-    echo "RESULT: parity drift (expected until license groups + tighter cross closure)" >&2
+    echo "RESULT: parity drift (expected until tighter cross closure)" >&2
     exit 1
 fi
 echo "RESULT: parity OK"

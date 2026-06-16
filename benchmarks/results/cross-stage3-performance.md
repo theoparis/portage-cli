@@ -1,7 +1,7 @@
 # Cross-emerge vs `em` performance (riscv64-unknown-linux-gnu)
 
 Machine: same host as `benchmarks/bench-cross-emerge.sh` defaults.  
-Target: `sys-devel/gcc -p`, `ACCEPT_LICENSE=*` (embedded profile `@FREE` not expanded in `em` yet).
+Target: `sys-devel/gcc -p`, profile `ACCEPT_LICENSE=@FREE` (license groups expanded in `em`).
 
 ## Wall time (hyperfine, 3 runs)
 
@@ -37,7 +37,7 @@ Cross `-p` does not expand host-satisfied BDEPEND onto ROOT (verified against `r
 - **Solver:** `(CPN, slot, merge_root)` nodes; dep classes routed per PMS table 8.2.
 - **Auto-activation:** crossdev (`CHOST ≠ CBUILD`), `config_root ≠ merge_root`, or `merge_root ≠ /` (native stage/offset).
 - **BROOT satisfaction:** host `/var/db/pkg` drops satisfied `BDEPEND`/`IDEPEND` edges (native and cross).
-- **Still open:** unsatisfied BROOT deps on pure `--root stage1/` without host profile; `@FREE` license groups.
+- **Still open:** unsatisfied BROOT deps on pure `--root stage1/` without host profile.
 
 ## How to reproduce
 

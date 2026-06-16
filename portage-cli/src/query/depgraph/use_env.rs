@@ -1,7 +1,7 @@
 use camino::Utf8Path;
 use portage_atom::Dep;
 use portage_atom_pubgrub::{UseConfig, UseFlagState};
-use portage_repo::{ProfileStack, Repository};
+use portage_repo::{AcceptLicense, LicenseGroupRegistry, ProfileStack, Repository};
 
 use super::force_mask::{ForceMask, index_by_cpn};
 
@@ -27,8 +27,8 @@ pub(super) struct UseEnv {
     pub force_mask: ForceMask,
     /// Effective ACCEPT_KEYWORDS tokens (e.g. `["arm64", "~arm64"]`).
     pub accept_keywords: Vec<String>,
-    /// Effective ACCEPT_LICENSE tokens (e.g. `["*"]` or `["MIT", "GPL-2"]`).
-    pub accept_license: Vec<String>,
+    /// Effective `ACCEPT_LICENSE` after `@GROUP` expansion and `-` denials.
+    pub accept_license: AcceptLicense,
     /// Resolved `DISTDIR` (where fetched distfiles live), for download-size accounting.
     pub distdir: String,
 }
@@ -92,7 +92,9 @@ async fn compute_use_env(
     let expand = split_var("USE_EXPAND");
     let expand_hidden = split_var("USE_EXPAND_HIDDEN");
     let accept_keywords = effective_accept_keywords(&split_var, &shell);
-    let accept_license = {
+    let license_groups = LicenseGroupRegistry::from_repo(repo)
+        .map_err(|e| anyhow::anyhow!("failed to load license groups: {e}"))?;
+    let accept_license_tokens = {
         let from_profile = {
             let v = split_var("ACCEPT_LICENSE");
             if v.is_empty() {
@@ -107,6 +109,7 @@ async fn compute_use_env(
             _ => from_profile,
         }
     };
+    let accept_license = AcceptLicense::from_tokens(&accept_license_tokens, &license_groups);
     let distdir = shell
         .get_var("DISTDIR")
         .filter(|s| !s.is_empty())

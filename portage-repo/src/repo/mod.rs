@@ -1,7 +1,9 @@
 pub mod category;
 pub mod ebuild;
 pub mod layout;
+pub mod license_groups;
 pub mod manifest;
+pub mod named_groups;
 pub mod package;
 pub mod pkgmetadata;
 pub mod profile;

@@ -6,7 +6,6 @@
 #   CROSS_CHOST=riscv64-unknown-linux-gnu
 #   SYSROOT=/usr/${CROSS_CHOST}
 #   ARCH=riscv64
-#   ACCEPT_LICENSE=*
 #   RUNS=3
 
 set -u
@@ -14,7 +13,6 @@ EM=${1:-${EM:-target/release/em}}
 CROSS_CHOST=${CROSS_CHOST:-riscv64-unknown-linux-gnu}
 SYSROOT=${SYSROOT:-/usr/${CROSS_CHOST}}
 ARCH=${ARCH:-riscv64}
-ACCEPT_LICENSE=${ACCEPT_LICENSE:-*}
 RUNS=${RUNS:-3}
 EMERGE=${CROSS_CHOST}-emerge
 
@@ -30,8 +28,7 @@ count_ebuilds() {
 }
 
 em_cmd() {
-    ACCEPT_LICENSE="$ACCEPT_LICENSE" \
-        "$EM" -p --config-root "$SYSROOT" --root "$SYSROOT" --arch "$ARCH" "$@"
+    "$EM" -p --config-root "$SYSROOT" --root "$SYSROOT" --arch "$ARCH" "$@"
 }
 
 echo "== plan size (cross sys-devel/gcc)"

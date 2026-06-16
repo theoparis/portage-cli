@@ -85,53 +85,14 @@ fn keyword_needed(keywords: &[Keyword], arch: &str, accept_keywords: &[String]) 
     })
 }
 
-/// Returns true if the license expression is fully covered by `accept_license`.
-pub(super) fn license_accepted(expr: &LicenseExpr, accept: &[String]) -> bool {
-    if accept.iter().any(|a| a == "*") {
-        return true;
-    }
-    match expr {
-        LicenseExpr::License(name) => accept.iter().any(|a| a == name),
-        LicenseExpr::AnyOf(children) => children.iter().any(|c| license_accepted(c, accept)),
-        LicenseExpr::All(children) => children.iter().all(|c| license_accepted(c, accept)),
-        LicenseExpr::UseConditional { entries, .. } => {
-            entries.iter().all(|e| license_accepted(e, accept))
-        }
-    }
+/// Returns true if the license expression is fully covered by `accept`.
+pub(super) fn license_accepted(expr: &LicenseExpr, accept: &portage_repo::AcceptLicense) -> bool {
+    accept.accepts_expr(expr)
 }
 
-/// Collects the license names that are NOT covered by `accept_license`.
-fn licenses_needed(expr: &LicenseExpr, accept: &[String]) -> Vec<String> {
-    if accept.iter().any(|a| a == "*") {
-        return vec![];
-    }
-    match expr {
-        LicenseExpr::License(name) => {
-            if accept.iter().any(|a| a == name) {
-                vec![]
-            } else {
-                vec![name.clone()]
-            }
-        }
-        LicenseExpr::AnyOf(children) => {
-            if children.iter().any(|c| license_accepted(c, accept)) {
-                vec![]
-            } else {
-                children
-                    .first()
-                    .map(|c| licenses_needed(c, accept))
-                    .unwrap_or_default()
-            }
-        }
-        LicenseExpr::All(children) => children
-            .iter()
-            .flat_map(|c| licenses_needed(c, accept))
-            .collect(),
-        LicenseExpr::UseConditional { entries, .. } => entries
-            .iter()
-            .flat_map(|e| licenses_needed(e, accept))
-            .collect(),
-    }
+/// Collects the license names that are NOT covered by `accept`.
+fn licenses_needed(expr: &LicenseExpr, accept: &portage_repo::AcceptLicense) -> Vec<String> {
+    accept.licenses_needed(expr)
 }
 
 /// Check whether `mask_dep` matches the given `cpv` (version + CPN, no slot check).
@@ -216,7 +177,7 @@ pub(super) struct Adapter<'a> {
     pub(super) accept_keywords: &'a [String],
     pub(super) package_mask: &'a [Dep],
     pub(super) package_unmask: &'a [Dep],
-    pub(super) accept_license: &'a [String],
+    pub(super) accept_license: &'a portage_repo::AcceptLicense,
     /// Global desired USE (profile + make.conf), folded with per-version
     /// `package.use` + IUSE defaults by `desired_use`.
     pub(super) use_config: &'a portage_atom_pubgrub::UseConfig,
@@ -587,7 +548,7 @@ pub(super) fn target_package(
     accept_keywords: &[String],
     package_mask: &[Dep],
     package_unmask: &[Dep],
-    accept_license: &[String],
+    accept_license: &portage_repo::AcceptLicense,
 ) -> portage_atom_pubgrub::PortagePackage {
     let entries = match data.versions.get(&dep.cpn) {
         Some(e) => e,
@@ -710,7 +671,7 @@ pub(super) fn find_autounmask_candidates(
     accept_keywords: &[String],
     package_mask: &[Dep],
     package_unmask: &[Dep],
-    accept_license: &[String],
+    accept_license: &portage_repo::AcceptLicense,
 ) -> Vec<AutounmaskCandidate> {
     let mut candidates = Vec::new();
 
@@ -777,6 +738,11 @@ mod tests {
     use super::super::force_mask::{ForceMask, index_by_cpn};
     use super::*;
     use portage_atom_pubgrub::{PackageRepository, UseConfig, UseFlagState};
+    use portage_repo::{AcceptLicense, LicenseGroupRegistry};
+
+    fn accept_all_licenses() -> AcceptLicense {
+        AcceptLicense::from_tokens(&["*".into()], &LicenseGroupRegistry::default())
+    }
 
     fn dep(s: &str) -> Dep {
         Dep::parse(s).unwrap()
@@ -824,7 +790,7 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
-            accept_license: &["*".to_string()],
+            accept_license: &accept_all_licenses(),
             use_config: &use_config,
             package_use: &[],
             force_mask: &fm, // a is use.force'd
@@ -865,7 +831,7 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
-            accept_license: &["*".to_string()],
+            accept_license: &accept_all_licenses(),
             use_config: &use_config,
             package_use: &[],
             force_mask: &fm,
@@ -903,7 +869,7 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
-            accept_license: &["*".to_string()],
+            accept_license: &accept_all_licenses(),
             use_config: &use_config,
             package_use: &[],
             force_mask: &fm,
@@ -946,7 +912,7 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
-            accept_license: &["*".to_string()],
+            accept_license: &accept_all_licenses(),
             use_config: &use_config,
             package_use: &[],
             force_mask: &fm,

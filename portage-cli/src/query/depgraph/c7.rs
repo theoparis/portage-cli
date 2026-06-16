@@ -25,6 +25,8 @@ use portage_atom_pubgrub::{
 use portage_metadata::CacheEntry;
 use std::collections::HashMap;
 
+use portage_repo::{AcceptLicense, LicenseGroupRegistry};
+
 use super::force_mask::ForceMask;
 use super::repo::{Adapter, RepoData, target_package};
 
@@ -79,7 +81,7 @@ impl Outcome {
 fn solve_with(data: &RepoData, targets: &[&str], pu: &[(Dep, Vec<String>)]) -> Option<Outcome> {
     let arch = Arch::intern("amd64");
     let accept = ["amd64".to_string()];
-    let lic = ["*".to_string()];
+    let lic = AcceptLicense::from_tokens(&["*".into()], &LicenseGroupRegistry::default());
     let fm = ForceMask::default();
     let use_config = UseConfig::new();
     let adapter = Adapter {
