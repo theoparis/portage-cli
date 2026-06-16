@@ -1,0 +1,34 @@
+# Stage 3e — post-solve within-run BDEPEND trim (2026-06-16)
+
+## Change
+
+After `install_order`, `bdepend_trim::trim_within_run_bdepend` walks the plan
+with the same BROOT growth model as `preflight`, dropping entries only needed
+for `BDEPEND` already satisfied on host/prefix VDB or earlier merges.
+No-op when `--with-bdeps` is off.
+
+## Cross parity (riscv64-unknown-linux-gnu, sys-devel/gcc)
+
+| Mode | em | emerge |
+|------|-----|--------|
+| default | 18 | 18 |
+| --with-bdeps | 18 | 18 |
+
+Trim does not change cross gcc closure (already correct after 3d).
+
+## Wall time (hyperfine, 3 runs)
+
+| Case | mean ± σ |
+|------|----------|
+| default `-p` | 634.8 ms ± 79.8 ms |
+| `--with-bdeps` | 636.5 ms ± 31.5 ms |
+
+Overhead vs 3d (~614 ms): within noise. Trim metadata walk is cheap relative
+to PubGrub solve; primary win is plan-size parity on long `--with-bdeps`
+prefix chains, not cross timing.
+
+## Reproduce
+
+```bash
+benchmarks/bench-bdepend-trim.sh target/release/em
+```

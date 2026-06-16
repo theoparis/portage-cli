@@ -112,10 +112,10 @@ approximates this in `portage-atom-pubgrub` via `get_dependencies()`:
 `VDB(base) ∪ VDB(target)`, `BDEPEND` against host `BROOT` (plus prefix target
 for native `--prefix` within-run visibility).
 
-**Current gap (native):** the solver snapshot is static — `host_installed` is
-read once at the start, not grown as earlier plan entries would land on BROOT
-during a live merge. Fine for `em -p`; a parity nit for long native-prefix
-chains with `--with-bdeps`.
+**Within-run trim (2026-06):** after `install_order`, a post-solve pass drops
+entries only needed for `BDEPEND` already satisfied on BROOT (host/prefix VDB)
+or earlier plan entries — same growth model as [`preflight`](../portage-cli/src/preflight.rs).
+Runs only with `--with-bdeps`; see `depgraph/bdepend_trim.rs`.
 
 ### Cross (`CBUILD ≠ CHOST`) — why per-edge filtering is not enough
 
@@ -358,6 +358,7 @@ never the root handling.
   `PortagePackage`; auto-activation for crossdev, `config_root ≠ merge_root`,
   or `merge_root ≠ /` (native stage/offset). Dep classes routed per PMS table
   8.2; host-satisfied `BDEPEND`/`IDEPEND` dropped on BROOT. Cross `gcc -p`
-  matches emerge (18 packages) with or without `--with-bdeps`. Still open:
-  within-run `host_installed` growth, `@FREE` license groups.
+  matches emerge (18 packages) with or without `--with-bdeps`. Post-solve
+  within-run `BDEPEND` trim for `--with-bdeps` prefix chains (stage 3e).
+  Still open: `@FREE` license groups.
 - **Orthogonal — binpkg:** producer-only; plugs into the existing merge.

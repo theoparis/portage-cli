@@ -1,3 +1,4 @@
+mod bdepend_avail;
 mod cli;
 mod ebuild;
 mod error;

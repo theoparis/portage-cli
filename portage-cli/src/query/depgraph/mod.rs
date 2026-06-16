@@ -1,4 +1,5 @@
 mod autounmask;
+mod bdepend_trim;
 mod root_aware;
 
 pub use portage_atom_pubgrub::MergeRoot;
@@ -471,6 +472,19 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             .collect();
         order.extend(to_reinstall);
     }
+
+    order = bdepend_trim::trim_within_run_bdepend(
+        order,
+        with_bdeps,
+        &bdepend_trim::TrimCtx {
+            roots,
+            data: &data,
+            use_config: &use_config,
+            package_use: &package_use,
+            root_cpns: &root_cpns,
+            reinstall_cpns: &reinstall_cpns,
+        },
+    );
 
     let edges: Vec<_> = provider
         .dependency_graph(&solution)
