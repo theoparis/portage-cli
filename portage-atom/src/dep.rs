@@ -221,17 +221,17 @@ impl fmt::Display for Dep {
             write!(f, ":{}", slot)?;
         }
 
-        if let Some(use_deps) = &self.use_deps {
-            if !use_deps.is_empty() {
-                write!(f, "[")?;
-                for (i, dep) in use_deps.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ",")?;
-                    }
-                    write!(f, "{}", dep)?;
+        if let Some(use_deps) = &self.use_deps
+            && !use_deps.is_empty()
+        {
+            write!(f, "[")?;
+            for (i, dep) in use_deps.iter().enumerate() {
+                if i > 0 {
+                    write!(f, ",")?;
                 }
-                write!(f, "]")?;
+                write!(f, "{}", dep)?;
             }
+            write!(f, "]")?;
         }
 
         if let Some(repo) = &self.repo {

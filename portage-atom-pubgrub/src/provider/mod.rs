@@ -560,8 +560,7 @@ impl PortageDependencyProvider {
     /// Record a package as present on the build host (BROOT), so host-routed
     /// `BDEPEND` and `IDEPEND` edges can be satisfied without building it into
     /// the plan. Always "present" — there is no policy to re-choose it; this
-    /// only feeds the host-satisfaction check in `get_dependencies`. See
-    /// [`host_installed`](Self::host_installed).
+    /// only feeds the host-satisfaction check in `get_dependencies`.
     pub fn add_host_installed(&mut self, package: PortagePackage, version: Version) {
         self.host_installed
             .insert(package.at_merge_root(MergeRoot::Host), version);
@@ -595,7 +594,10 @@ impl PortageDependencyProvider {
         }
     }
 
-    pub(crate) fn package_data_key<'a>(&'a self, package: &'a PortagePackage) -> &'a PortagePackage {
+    pub(crate) fn package_data_key<'a>(
+        &'a self,
+        package: &'a PortagePackage,
+    ) -> &'a PortagePackage {
         self.host_aliases.get(package).unwrap_or(package)
     }
 

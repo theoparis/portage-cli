@@ -1,7 +1,7 @@
 //! BROOT / within-run package availability for `BDEPEND` checks.
 //!
-//! Shared by [`crate::preflight`] (validate) and
-//! [`crate::query::depgraph::bdepend_trim`] (post-solve plan trim).
+//! Shared by [`crate::preflight`] (validate) and the depgraph post-solve
+//! `BDEPEND` trim pass.
 
 use camino::Utf8Path;
 use portage_atom::{Cpn, Cpv, Dep, DepEntry};
@@ -58,7 +58,9 @@ impl Avail {
 
     /// `true` when `entries` contain an unsatisfied atom on `cpn`.
     pub fn has_unsatisfied_atom_for_cpn(&self, entries: &[DepEntry], cpn: Cpn) -> bool {
-        entries.iter().any(|e| entry_unsatisfied_for_cpn(e, cpn, self))
+        entries
+            .iter()
+            .any(|e| entry_unsatisfied_for_cpn(e, cpn, self))
     }
 }
 
@@ -189,10 +191,7 @@ mod tests {
     fn has_unsatisfied_atom_for_cpn_detects_gap() {
         let avail = atoms(&["dev-build/b-1.0"]);
         let bdepend = parse(">=dev-build/b-2.0");
-        assert!(avail.has_unsatisfied_atom_for_cpn(
-            &bdepend,
-            Cpn::parse("dev-build/b").unwrap()
-        ));
+        assert!(avail.has_unsatisfied_atom_for_cpn(&bdepend, Cpn::parse("dev-build/b").unwrap()));
     }
 
     #[test]

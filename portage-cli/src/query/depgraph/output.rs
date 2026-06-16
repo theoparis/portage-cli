@@ -593,7 +593,7 @@ fn format_kib(bytes: u64) -> String {
     format!("{} KiB", bytes.div_ceil(1024))
 }
 
-/// Like [`print_pretty`], but honours per-entry [`MergeRoot`](super::root_aware::MergeRoot).
+/// Like [`print_pretty`], but honours per-entry [`MergeRoot`](portage_atom_pubgrub::MergeRoot).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn print_pretty_rooted(
     data: &RepoData,

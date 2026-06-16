@@ -374,9 +374,7 @@ fn host_satisfied_on_broot(
     vs: &PortageVersionSet,
 ) -> bool {
     let hp = stamp_root(p, MergeRoot::Host);
-    host_installed
-        .get(&hp)
-        .is_some_and(|hv| vs.contains(hv))
+    host_installed.get(&hp).is_some_and(|hv| vs.contains(hv))
 }
 
 fn append_unsatisfied_broot(

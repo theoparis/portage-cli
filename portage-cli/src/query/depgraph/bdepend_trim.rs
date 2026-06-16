@@ -57,10 +57,7 @@ pub fn trim_within_run_bdepend(
     kept
 }
 
-fn runtime_required_cpns(
-    order: &[(PortagePackage, Version)],
-    ctx: &TrimCtx<'_>,
-) -> HashSet<Cpn> {
+fn runtime_required_cpns(order: &[(PortagePackage, Version)], ctx: &TrimCtx<'_>) -> HashSet<Cpn> {
     let mut out = HashSet::new();
     for (pkg, ver) in order {
         if pkg.is_virtual() {
@@ -100,12 +97,8 @@ fn collect_cpns_from_entries(entries: &[DepEntry], out: &mut HashSet<Cpn>) {
 
 fn active_flags(pkg: &PortagePackage, ver: &Version, ctx: &TrimCtx<'_>) -> HashSet<String> {
     let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-    let effective = portage_atom_pubgrub::apply_package_use(
-        ctx.use_config,
-        &cpv,
-        pkg.slot(),
-        ctx.package_use,
-    );
+    let effective =
+        portage_atom_pubgrub::apply_package_use(ctx.use_config, &cpv, pkg.slot(), ctx.package_use);
     let mut flags: HashSet<String> = effective
         .enabled_flags()
         .iter()
@@ -114,9 +107,7 @@ fn active_flags(pkg: &PortagePackage, ver: &Version, ctx: &TrimCtx<'_>) -> HashS
     if let Some(cache) = repo::find_cache(ctx.data, pkg, ver) {
         for iuse in &cache.metadata.iuse {
             if iuse.is_enabled_default()
-                && effective
-                    .get_opt(&Interned::intern(iuse.name()))
-                    .is_none()
+                && effective.get_opt(&Interned::intern(iuse.name())).is_none()
             {
                 flags.insert(iuse.name().to_string());
             }

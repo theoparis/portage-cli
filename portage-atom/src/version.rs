@@ -328,10 +328,10 @@ impl Version {
                 return false;
             }
         }
-        if let Some(pattern_letter) = pattern.letter {
-            if self.letter.unwrap_or('\0') != pattern_letter {
-                return false;
-            }
+        if let Some(pattern_letter) = pattern.letter
+            && self.letter.unwrap_or('\0') != pattern_letter
+        {
+            return false;
         }
         true
     }

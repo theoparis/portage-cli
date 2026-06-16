@@ -1226,26 +1226,24 @@ impl fmt::Display for DisplayName<'_> {
                 .get(&self.1)
                 .is_some_and(|c| !c.is_empty());
 
-            if !has_candidates {
-                if let Some(slot_names) = self.0.cpn_slots.get(&pkg_name.cpn) {
-                    let available: Vec<_> = slot_names
-                        .iter()
-                        .filter(|&&nid| nid != self.1)
-                        .filter(|&&nid| self.0.candidates.get(&nid).is_some_and(|c| !c.is_empty()))
-                        .filter_map(|&nid| self.0.pool.resolve_name(nid).slot.as_deref())
-                        .collect();
+            if !has_candidates && let Some(slot_names) = self.0.cpn_slots.get(&pkg_name.cpn) {
+                let available: Vec<_> = slot_names
+                    .iter()
+                    .filter(|&&nid| nid != self.1)
+                    .filter(|&&nid| self.0.candidates.get(&nid).is_some_and(|c| !c.is_empty()))
+                    .filter_map(|&nid| self.0.pool.resolve_name(nid).slot.as_deref())
+                    .collect();
 
-                    if !available.is_empty() {
-                        write!(
-                            f,
-                            " (available slots: {})",
-                            available
-                                .iter()
-                                .map(|s| format!(":{s}"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )?;
-                    }
+                if !available.is_empty() {
+                    write!(
+                        f,
+                        " (available slots: {})",
+                        available
+                            .iter()
+                            .map(|s| format!(":{s}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )?;
                 }
             }
         }
@@ -1435,20 +1433,20 @@ fn dep_op_version(dep: &Dep) -> (Operator, Version) {
 /// context (enabled/disabled flags) that isn't available at solve time.
 /// USE deps should be validated post-solve, matching the pubgrub provider.
 fn slot_matches(meta: &PackageMetadata, constraint: &VersionConstraint) -> bool {
-    if let Some(required_slot) = constraint.slot {
-        if meta.slot != Some(required_slot) {
-            return false;
-        }
+    if let Some(required_slot) = constraint.slot
+        && meta.slot != Some(required_slot)
+    {
+        return false;
     }
-    if let Some(required_subslot) = constraint.subslot {
-        if meta.subslot != Some(required_subslot) {
-            return false;
-        }
+    if let Some(required_subslot) = constraint.subslot
+        && meta.subslot != Some(required_subslot)
+    {
+        return false;
     }
-    if let Some(required_repo) = constraint.repo {
-        if meta.repo != Some(required_repo) {
-            return false;
-        }
+    if let Some(required_repo) = constraint.repo
+        && meta.repo != Some(required_repo)
+    {
+        return false;
     }
     true
 }
@@ -1472,22 +1470,22 @@ fn dep_matches_solvable(dep: &Dep, meta: &PackageMetadata, use_config: &UseConfi
 
     // Slot / sub-slot from the dep atom.
     let (slot, subslot) = extract_slot(dep);
-    if let Some(required_slot) = slot {
-        if meta.slot != Some(required_slot) {
-            return false;
-        }
+    if let Some(required_slot) = slot
+        && meta.slot != Some(required_slot)
+    {
+        return false;
     }
-    if let Some(required_subslot) = subslot {
-        if meta.subslot != Some(required_subslot) {
-            return false;
-        }
+    if let Some(required_subslot) = subslot
+        && meta.subslot != Some(required_subslot)
+    {
+        return false;
     }
 
     // Repository constraint.
-    if let Some(required_repo) = dep.repo {
-        if meta.repo != Some(required_repo) {
-            return false;
-        }
+    if let Some(required_repo) = dep.repo
+        && meta.repo != Some(required_repo)
+    {
+        return false;
     }
 
     // USE dep constraints.

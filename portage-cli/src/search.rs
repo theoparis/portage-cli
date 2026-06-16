@@ -286,7 +286,7 @@ pub async fn run_emerge_style(
 ///
 /// The bool is `true` iff a keyword-matching version (stable ~ or *) was
 /// found for the arch; `false` means the returned entry is a fallback to the
-/// newest version that had metadata (the package appears as "[ Masked ]" in
+/// newest version that had metadata (the package appears as "\[ Masked \]" in
 /// emerge-style search output).
 fn latest_visible(
     repos: &[Repository],
