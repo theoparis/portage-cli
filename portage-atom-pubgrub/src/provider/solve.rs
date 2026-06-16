@@ -2,6 +2,7 @@
 //! version choice (installed-preference heuristics), and dependency lookup.
 
 use std::cmp::Reverse;
+use std::collections::HashMap;
 
 use portage_atom::Version;
 use pubgrub::{
@@ -12,7 +13,7 @@ use crate::error::Error;
 use crate::package::PortagePackage;
 use crate::version_set::PortageVersionSet;
 
-use super::{InstalledPolicy, PortageDependencyProvider};
+use super::{InstalledPolicy, PortageDependencyProvider, VersionData};
 
 impl DependencyProvider for PortageDependencyProvider {
     type P = PortagePackage;
@@ -256,6 +257,48 @@ impl DependencyProvider for PortageDependencyProvider {
             return Ok(Dependencies::Available(runtime));
         }
 
+        // A package being *built* (not at its installed version): its BDEPEND
+        // runs on the build host (BROOT), so drop every BDEPEND edge already
+        // satisfied there. This keeps an offset build (`--root <empty>`) from
+        // pulling host-provided build tools (gcc, autoconf, cmake, …) into the
+        // plan, matching portage. Only BDEPEND (index 2) is filtered — DEPEND
+        // (0) resolves against the base sysroot and RDEPEND (1) against the
+        // target, so those stay even when the host happens to provide them.
+        // A BDEPEND the host lacks stays (built into the plan).
+        if !self.host_installed.is_empty() {
+            return Ok(Dependencies::Available(bdepend_filtered(
+                vd,
+                &self.host_installed,
+            )));
+        }
+
         Ok(vd.merged.clone())
     }
+}
+
+/// Rebuild a version's merged constraints with host-satisfied BDEPEND edges
+/// dropped. `host_installed` maps a package to a present-on-BROOT version; a
+/// BDEPEND edge `(pkg, vset)` is dropped when `pkg` is present and `vset`
+/// accepts that version. Per-edge (not per-package): a package that is both a
+/// BDEPEND of A and an RDEPEND of B is still built when B needs it.
+fn bdepend_filtered(
+    vd: &VersionData,
+    host_installed: &HashMap<PortagePackage, Version>,
+) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
+    // by_class indices: 0 DEPEND, 1 RDEPEND, 2 BDEPEND, 3 PDEPEND, 4 IDEPEND.
+    let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
+        .iter()
+        .chain(vd.by_class[1].iter())
+        .chain(vd.by_class[3].iter())
+        .chain(vd.by_class[4].iter())
+        .map(|(p, vs, _)| (p.clone(), vs.clone()))
+        .collect();
+    for (p, vs, _) in &vd.by_class[2] {
+        // BDEPEND
+        let satisfied = host_installed.get(p).is_some_and(|hv| vs.contains(hv));
+        if !satisfied {
+            out.push((p.clone(), vs.clone()));
+        }
+    }
+    out.into_iter().collect()
 }

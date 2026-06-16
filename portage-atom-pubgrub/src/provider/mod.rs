@@ -164,6 +164,16 @@ pub struct PortageDependencyProvider {
     pub(crate) installed_cpns: HashSet<Cpn>,
     pub(crate) installed_use: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
     pub(crate) installed_iuse: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
+    /// Packages present on the **build host** (BROOT), used only to satisfy
+    /// `BDEPEND` edges — a BDEPEND that the host already provides is dropped in
+    /// [`get_dependencies`](crate::DependencyProvider::get_dependencies), so an
+    /// offset build (`--root <empty>`) doesn't pull host-provided build tools
+    /// (gcc, autoconf, cmake, …) into the plan. A flat atom set fed by the
+    /// caller (policy layer); the solver is root-agnostic and never knows how
+    /// many roots contributed (it may be `VDB(host)` alone, or a union with
+    /// other BROOTs / within-run merges). Always "present" (Lock-equivalent):
+    /// the solver never re-chooses these, it just checks satisfaction.
+    pub(crate) host_installed: HashMap<PortagePackage, Version>,
     /// Installed packages whose installed version is **not in the repository**
     /// (it was pruned from the tree). Populated by [`add_installed`](Self::add_installed)
     /// when it has to synthesize the version. `choose_version` does not favour
@@ -467,6 +477,7 @@ impl PortageDependencyProvider {
             installed_use: HashMap::new(),
             installed_iuse: HashMap::new(),
             installed_missing_from_repo: HashSet::new(),
+            host_installed: HashMap::new(),
             dropped_deps,
             use_flag_requirements: Vec::new(),
             upgrade_pins: HashMap::new(),
@@ -517,6 +528,15 @@ impl PortageDependencyProvider {
         }
         self.installed
             .insert(installed.package, (installed.version, installed.policy));
+    }
+
+    /// Record a package as present on the build host (BROOT), so its BDEPEND
+    /// edges can be satisfied without building it into the plan. Always
+    /// "present" — there is no policy to re-choose it; this only feeds the
+    /// BDEPEND-satisfaction check in `get_dependencies`. See
+    /// [`host_installed`](Self::host_installed).
+    pub fn add_host_installed(&mut self, package: PortagePackage, version: Version) {
+        self.host_installed.insert(package, version);
     }
 
     /// Returns the list of dependencies that were dropped during construction
@@ -2581,6 +2601,119 @@ mod tests {
             Some(Version::parse("2.0").unwrap()),
             "transitive installed dep whose installed version was removed from \
              the repo must upgrade to the newer in-slot version"
+        );
+    }
+
+    /// `host_installed` (BROOT) satisfies BDEPEND: a package being built whose
+    /// BDEPEND is already present on the host must not pull that build tool into
+    /// the plan. Mirrors portage — `em --root <empty> a` doesn't build host-gcc.
+    /// Per-edge: a package that is *also* an RDEPEND is still pulled (next test).
+    #[test]
+    fn host_installed_satisfies_bdepend() {
+        let mut repo = InMemoryRepository::new();
+        // b is a pure build tool (BDEPEND of a), present on the host.
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                bdepend: DepEntry::parse("dev-build/b").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
+        // b-1.0 is present on BROOT (the host).
+        provider.add_host_installed(
+            PortagePackage::slotted(Cpn::parse("dev-build/b").unwrap(), Interned::intern("0")),
+            Version::parse("1.0").unwrap(),
+        );
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        assert!(
+            solution
+                .iter()
+                .all(|(p, _)| p.cpn().package.as_str() != "b"),
+            "b is satisfied by host BROOT and must not be built into the plan"
+        );
+        assert!(
+            solution
+                .iter()
+                .any(|(p, _)| p.cpn().package.as_str() == "a")
+        );
+    }
+
+    /// Per-edge BDEPEND filtering: when `b` is *both* a's BDEPEND (host-provided)
+    /// and c's RDEPEND, the host satisfies the build edge but c still needs b at
+    /// runtime — so b must be built. Confirms filtering is edge-class-scoped.
+    #[test]
+    fn bdepend_filtering_is_per_edge_not_per_package() {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+        // a BDEPENDs b; c RDEPENDs b.
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                bdepend: DepEntry::parse("dev-build/b").unwrap(),
+                ..empty_deps()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/c-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                rdepend: DepEntry::parse("dev-build/b").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
+        provider.add_host_installed(
+            PortagePackage::slotted(Cpn::parse("dev-build/b").unwrap(), Interned::intern("0")),
+            Version::parse("1.0").unwrap(),
+        );
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let c = PortagePackage::slotted(Cpn::parse("app-misc/c").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![
+                (a, PortageVersionSet::any()),
+                (c, PortageVersionSet::any()),
+            ])
+            .unwrap();
+
+        // c's runtime need pulls b even though a's build edge was host-satisfied.
+        assert!(
+            solution
+                .iter()
+                .any(|(p, _)| p.cpn().package.as_str() == "b"),
+            "b is c's RDEPEND, so it must be built despite a's BDEPEND being host-satisfied"
         );
     }
 }
