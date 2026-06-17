@@ -103,13 +103,16 @@ impl DependencyProvider for PortageDependencyProvider {
         }
 
         // For OR-group / slot-choice packages, prefer branches that lead to
-        // an already-installed package.
-        if !self.rebuild_tree && package.is_virtual() && !self.installed_cpns.is_empty() {
+        // an already-installed package.  Independent of `rebuild_tree`: emptytree
+        // rebuilds every listed package but `gcc:*` must still bind to the
+        // installed/newest slot.  SlotChoice nodes number slots i+1 (newest slot
+        // last/highest); Choice nodes use n-i (first-listed highest).
+        if package.is_virtual() && !self.installed_cpns.is_empty() {
             // Check each candidate directly against self.installed.
             // deps_reach_installed only checks CPNs, which produces false positives
             // for multi-slot packages (every slot appears "installed" if any slot
             // is), causing the heuristic to never fire and the solver to fall
-            // back to picking the highest synthetic version (= oldest slot).
+            // back to the default max() pick.
             let direct_installed: Vec<bool> = candidates
                 .iter()
                 .map(|&ver| {
@@ -125,21 +128,6 @@ impl DependencyProvider for PortageDependencyProvider {
             let directly_installed_count = direct_installed.iter().filter(|&&x| x).count();
 
             if directly_installed_count > 0 {
-                if matches!(package, PortagePackage::SlotChoice { .. }) {
-                    // Slot choices use n-i version numbering: first (oldest) slot gets
-                    // the highest synthetic version.  Use min() to pick the newest
-                    // installed slot regardless of how many are installed.
-                    let best = candidates
-                        .iter()
-                        .copied()
-                        .zip(direct_installed.iter().copied())
-                        .filter(|(_, has)| *has)
-                        .map(|(v, _)| v)
-                        .min()
-                        .cloned();
-                    return Ok(best);
-                }
-
                 // For OR-group Choice packages: among the installed branches, prefer
                 // those that already satisfy all USE dep constraints.  A branch that
                 // is installed AND use-satisfied avoids unnecessary package rebuilds.

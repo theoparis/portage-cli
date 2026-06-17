@@ -13,7 +13,7 @@
 //! | `Root` | Synthetic root; its "deps" are the caller's resolve targets |
 //! | `UseDecision` | USE-flag decision node; version 1 = enabled, 0 = disabled |
 //! | `Choice` | OR-group (`||`, `^^`, `??`) node; each version is one alternative |
-//! | `SlotChoice` | Slot-choice node; each version selects one slot candidate |
+//! | `SlotChoice` | Slot-star (`:*`) node; synthetic versions rise with slot order |
 //!
 //! Virtual variants exist only inside the solver and are **always stripped**
 //! from [`PortageDependencyProvider::resolve_targets`] before the result is

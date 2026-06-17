@@ -411,13 +411,17 @@ impl ConvertCtx<'_> {
                 let id = next_choice_id();
                 let choice_pkg =
                     PortagePackage::slot_choice(Interned::intern(&format!("slot_{id}")));
-                let n = slots.len();
                 let gf = self.gating_flag;
+                // Unlike `||` Choice nodes (first-listed wins via n-i numbering),
+                // slot-star deps have no listed preference: number slots so the
+                // lex-last slot (typically newest for numeric slots like gcc:16)
+                // gets the highest synthetic version and `choose_version`'s max()
+                // picks it without a separate min() path.
                 let versions: Vec<(Version, Vec<Req>)> = slots
                     .iter()
                     .enumerate()
                     .map(|(i, (_, slot_pkg))| {
-                        let ver = Version::new(&[(n - i) as u64]);
+                        let ver = Version::new(&[(i + 1) as u64]);
                         (ver, vec![(slot_pkg.clone(), version_set.clone(), gf)])
                     })
                     .collect();
@@ -1170,6 +1174,39 @@ mod tests {
         );
         assert_eq!(result.virtual_choices.len(), 1);
         assert_eq!(result.virtual_choices[0].versions.len(), 2);
+    }
+
+    #[test]
+    fn slot_choice_numbers_lex_last_slot_highest() {
+        let config = UseConfig::new();
+        let entries = DepEntry::parse("sys-devel/gcc:*").unwrap();
+        let gcc_cpn = portage_atom::Cpn::parse("sys-devel/gcc").unwrap();
+        let mut slots = HashMap::new();
+        slots.insert(
+            gcc_cpn,
+            vec![
+                (
+                    Interned::intern("11"),
+                    PortagePackage::slotted(gcc_cpn, Interned::intern("11")),
+                ),
+                (
+                    Interned::intern("16"),
+                    PortagePackage::slotted(gcc_cpn, Interned::intern("16")),
+                ),
+            ],
+        );
+        let result = convert_deps(&entries, "test/pkg", &config, &slots);
+        let versions: Vec<_> = result.virtual_choices[0]
+            .versions
+            .iter()
+            .map(|(v, reqs)| (v.clone(), reqs[0].0.clone()))
+            .collect();
+        assert_eq!(versions[0].0, Version::new(&[1]));
+        assert_eq!(versions[1].0, Version::new(&[2]));
+        assert_eq!(
+            versions[1].1,
+            PortagePackage::slotted(gcc_cpn, Interned::intern("16"))
+        );
     }
 
     #[test]

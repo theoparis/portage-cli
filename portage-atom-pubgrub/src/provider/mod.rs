@@ -1410,6 +1410,78 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_tree_slot_star_prefers_installed_newest_slot() {
+        // Native `--emptytree`: every package is Rebuild, but `gcc:*` must still
+        // bind to the installed slot — not the oldest repo slot (gcc-11).
+        let mut repo = InMemoryRepository::new();
+
+        for (cpv, slot) in [("sys-devel/gcc-11.0", "11"), ("sys-devel/gcc-16.0", "16")] {
+            repo.add_version(
+                portage_atom::Cpv::parse(cpv).unwrap(),
+                Some(Interned::intern(slot)),
+                None,
+                empty_deps(),
+            );
+        }
+
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/consumer-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                depend: DepEntry::parse("sys-devel/gcc:*").unwrap(),
+                rdepend: vec![],
+                bdepend: vec![],
+                pdepend: vec![],
+                idepend: vec![],
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            PortageDependencyProvider::new(repo)
+        };
+        provider.set_rebuild_tree(true);
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::slotted(
+                Cpn::parse("sys-devel/gcc").unwrap(),
+                Interned::intern("16"),
+            ),
+            version: Version::parse("16.0").unwrap(),
+            policy: InstalledPolicy::Rebuild,
+            active_use: vec![],
+            iuse: vec![],
+        });
+
+        let consumer_pkg = PortagePackage::slotted(
+            Cpn::parse("app-misc/consumer").unwrap(),
+            Interned::intern("0"),
+        );
+        let solution = provider
+            .resolve_targets(vec![(consumer_pkg, PortageVersionSet::any())])
+            .unwrap();
+
+        assert_eq!(
+            solution.get(&PortagePackage::slotted(
+                Cpn::parse("sys-devel/gcc").unwrap(),
+                Interned::intern("16"),
+            )),
+            Some(&Version::parse("16.0").unwrap()),
+            "rebuild_tree must pick installed gcc:16, not oldest slot 11"
+        );
+        assert!(
+            solution
+                .get(&PortagePackage::slotted(
+                    Cpn::parse("sys-devel/gcc").unwrap(),
+                    Interned::intern("11"),
+                ))
+                .is_none(),
+            "oldest gcc slot must not be scheduled"
+        );
+    }
+
+    #[test]
     fn or_group_prefers_installed_with_slot_nesting() {
         // Mirrors the real-world case: || ( >=A-1.0:* >=B-1.0:* ) where A has
         // multiple slots (triggering the choice→slot→pkg two-level nesting) and
