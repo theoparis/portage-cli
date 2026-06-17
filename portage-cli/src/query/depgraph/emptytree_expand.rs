@@ -58,6 +58,14 @@
 //! `BDEPEND` → `nodejs`) still need their own `DEPEND`/`BDEPEND` closure scheduled on
 //! the correct root. Only re-listing **satisfied** atoms misses upgrades like
 //! `nodejs` → `>=dev-libs/simdjson-4.6.1` when the VDB still has an older slot.
+//!
+//! ## Pitfall: slot-agnostic atoms and `||` preference (Group B)
+//!
+//! Re-listing must target the same CPV emerge would add: `plan_satisfies_dep` is too
+//! coarse when an atom omits `:slot` but the newest installed match is slot 22 while
+//! the plan only has slot 21 (`clang-common` → `clang-runtime`). For satisfied `||`
+//! groups with both `dev-lang/rust-bin` and `dev-lang/rust` branches, emerge prefers
+//! source `rust` (dep_zapdeps), not the leftmost `rust-bin` branch.
 
 use std::collections::HashSet;
 
@@ -108,9 +116,6 @@ pub fn expand_satisfied_rebuilds(
             .map(|(p, v)| Cpv::new(*p.cpn(), v.clone()))
             .collect();
         for (dep, root) in satisfied_deps {
-            if plan_satisfies_dep(&order, &dep) {
-                continue;
-            }
             let installed = match root {
                 SatisfyRoot::Broot => &host,
                 SatisfyRoot::Target => &target,
@@ -118,7 +123,14 @@ pub fn expand_satisfied_rebuilds(
             if !installed.atom_satisfied(&dep) {
                 continue;
             }
-            let _ = prepend_candidate(ctx, &dep, &mut seen, &mut prepend);
+            let Some((pkg, ver)) = best_matching_version(ctx, &dep) else {
+                continue;
+            };
+            let cpv = Cpv::new(*pkg.cpn(), ver.clone());
+            if !seen.insert(cpv) {
+                continue;
+            }
+            prepend.push((pkg, ver));
         }
         for (dep, root) in build_deps {
             if plan_satisfies_dep(&order, &dep) {
@@ -141,8 +153,8 @@ pub fn expand_satisfied_rebuilds(
     }
 
     order = drop_superseded_build_deps(order, ctx, &host, &target);
-    // Idempotent when the solver already picked source `dev-lang/rust`.
     order = trim_rust_bin_when_source_present(order);
+    order = trim_superseded_rust_sources(order, ctx);
     order
 }
 
@@ -260,6 +272,45 @@ fn prepend_candidate(
     true
 }
 
+/// Pick the `||` branch emerge would recurse into when several are satisfied.
+fn pick_satisfied_or_branch<'a>(children: &'a [DepEntry], avail: &Avail) -> Option<&'a DepEntry> {
+    let satisfied: Vec<&DepEntry> = children
+        .iter()
+        .filter(|c| entry_satisfied(c, avail))
+        .collect();
+    match satisfied.len() {
+        0 => None,
+        1 => satisfied.first().copied(),
+        _ => prefer_or_branch(satisfied),
+    }
+}
+
+fn prefer_or_branch(branches: Vec<&DepEntry>) -> Option<&DepEntry> {
+    let rust = Cpn::parse("dev-lang/rust").ok();
+    let rust_bin = Cpn::parse("dev-lang/rust-bin").ok();
+    let mut first = None;
+    let mut src = None;
+    let mut bin = None;
+    for branch in branches {
+        if first.is_none() {
+            first = Some(branch);
+        }
+        let DepEntry::Atom(dep) = branch else {
+            continue;
+        };
+        if rust.as_ref().is_some_and(|cpn| dep.cpn == *cpn) {
+            src = Some(branch);
+        }
+        if rust_bin.as_ref().is_some_and(|cpn| dep.cpn == *cpn) {
+            bin = Some(branch);
+        }
+    }
+    if src.is_some() && bin.is_some() {
+        return src;
+    }
+    first
+}
+
 fn collect_atoms_from_entries(
     entries: &[DepEntry],
     root: SatisfyRoot,
@@ -274,11 +325,8 @@ fn collect_atoms_from_entries(
             }
             // Emerge lists one satisfied alternative, not every installed branch.
             DepEntry::AnyOf(c) | DepEntry::ExactlyOneOf(c) | DepEntry::AtMostOneOf(c) => {
-                for child in c {
-                    if entry_satisfied(child, avail) {
-                        collect_atoms_from_entries(std::slice::from_ref(child), root, avail, out);
-                        break;
-                    }
+                if let Some(child) = pick_satisfied_or_branch(c, avail) {
+                    collect_atoms_from_entries(std::slice::from_ref(child), root, avail, out);
                 }
             }
             _ => {}
@@ -442,6 +490,52 @@ fn is_superseded(
     })
 }
 
+/// Drop older `dev-lang/rust` per `llvm_slot_*` when expand re-added several satisfied
+/// `||` targets; emerge keeps the newest source rust for each LLVM slot.
+fn trim_superseded_rust_sources(
+    order: Vec<(PortagePackage, Version)>,
+    ctx: &ExpandCtx<'_>,
+) -> Vec<(PortagePackage, Version)> {
+    let rust = match Cpn::parse("dev-lang/rust") {
+        Ok(c) => c,
+        Err(_) => return order,
+    };
+    let mut best_per_llvm_slot: std::collections::HashMap<u32, Version> =
+        std::collections::HashMap::new();
+    for (pkg, ver) in &order {
+        if pkg.cpn() != &rust {
+            continue;
+        }
+        let Some(slot) = rust_llvm_slot(pkg, ver, ctx) else {
+            continue;
+        };
+        if best_per_llvm_slot
+            .get(&slot)
+            .is_none_or(|best| ver > best)
+        {
+            best_per_llvm_slot.insert(slot, ver.clone());
+        }
+    }
+    if best_per_llvm_slot.is_empty() {
+        return order;
+    }
+    let keep: HashSet<Cpv> = best_per_llvm_slot
+        .into_values()
+        .map(|ver| Cpv::new(rust, ver))
+        .collect();
+    order
+        .into_iter()
+        .filter(|(p, ver)| p.cpn() != &rust || keep.contains(&Cpv::new(*p.cpn(), ver.clone())))
+        .collect()
+}
+
+fn rust_llvm_slot(pkg: &PortagePackage, ver: &Version, ctx: &ExpandCtx<'_>) -> Option<u32> {
+    let flags = active_flags(pkg, ver, ctx);
+    flags
+        .iter()
+        .find_map(|f| f.strip_prefix("llvm_slot_").and_then(|n| n.parse().ok()))
+}
+
 /// Emerge builds `dev-lang/rust` from source; drop stale `rust-bin` slots when source is planned.
 fn trim_rust_bin_when_source_present(
     order: Vec<(PortagePackage, Version)>,
@@ -514,6 +608,24 @@ mod tests {
             !out.iter().any(|(d, _)| d.cpn == libbsd),
             "leftmost satisfied || branch wins; do not fan out into libbsd"
         );
+    }
+
+    #[test]
+    fn or_prefers_rust_source_over_rust_bin_when_both_satisfied() {
+        let rust = Cpn::parse("dev-lang/rust").unwrap();
+        let rust_bin = Cpn::parse("dev-lang/rust-bin").unwrap();
+        let entries = DepEntry::parse(
+            "|| ( >=dev-lang/rust-bin-1.93.0:* >=dev-lang/rust-1.93.0:* )",
+        )
+        .unwrap();
+        let avail = Avail::from_cpvs(vec![
+            (Cpv::new(rust_bin, Version::parse("1.93.1").unwrap()), None),
+            (Cpv::new(rust, Version::parse("1.95.0").unwrap()), None),
+        ]);
+        let mut out = Vec::new();
+        collect_atoms_from_entries(&entries, SatisfyRoot::Broot, &avail, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.cpn, rust);
     }
 
     #[test]
