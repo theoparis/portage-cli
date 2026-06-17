@@ -17,6 +17,7 @@
 use std::collections::HashSet;
 
 use anyhow::{Result, bail};
+use portage_atom::interner::Interned;
 use portage_atom::{Cpv, DepEntry};
 
 use crate::bdepend_avail::{Avail, collect_unsatisfied};
@@ -35,11 +36,9 @@ pub fn check(plan: &[PlannedMerge], roots: &Roots) -> Result<()> {
 
     let mut problems: Vec<String> = Vec::new();
     for planned in plan {
-        let active: HashSet<&str> = planned.use_flags.iter().map(String::as_str).collect();
-        let is_active = |f: &str| active.contains(f);
-
-        let depend = DepEntry::evaluate_use(&planned.depend, is_active);
-        let bdepend = DepEntry::evaluate_use(&planned.bdepend, is_active);
+        let active: HashSet<Interned<_>> = planned.use_flags.iter().copied().collect();
+        let depend = DepEntry::evaluate_use(&planned.depend, &active);
+        let bdepend = DepEntry::evaluate_use(&planned.bdepend, &active);
 
         let mut missing: Vec<String> = Vec::new();
         collect_unsatisfied(&depend, &depend_avail, &mut missing);

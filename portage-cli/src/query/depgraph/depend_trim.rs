@@ -8,15 +8,13 @@
 //! checks `DEPEND` against the sysroot VDB only — within-run target merges do
 //! not satisfy build-time `DEPEND` on a foreign sysroot.
 
-use std::collections::HashSet;
-
-use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, DepEntry, Version};
 use portage_atom_pubgrub::PortagePackage;
 
 use crate::bdepend_avail::Avail;
 
 use super::bdepend_trim::TrimCtx;
+use super::effective_use;
 use super::repo;
 
 /// Drop entries only needed for `DEPEND` edges already satisfied on the
@@ -53,27 +51,6 @@ pub fn trim_sysroot_satisfied_depend(
     }
 
     kept
-}
-
-fn active_flags(pkg: &PortagePackage, ver: &Version, ctx: &TrimCtx<'_>) -> HashSet<String> {
-    let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-    let effective =
-        portage_atom_pubgrub::apply_package_use(ctx.use_config, &cpv, pkg.slot(), ctx.package_use);
-    let mut flags: HashSet<String> = effective
-        .enabled_flags()
-        .iter()
-        .map(|f| f.as_str().to_string())
-        .collect();
-    if let Some(cache) = repo::find_cache(ctx.data, pkg, ver) {
-        for iuse in &cache.metadata.iuse {
-            if iuse.is_enabled_default()
-                && effective.get_opt(&Interned::intern(iuse.name())).is_none()
-            {
-                flags.insert(iuse.name().to_string());
-            }
-        }
-    }
-    flags
 }
 
 struct TrimCandidate<'a, 'b> {
@@ -121,9 +98,14 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
         let Some(cache) = repo::find_cache(cand.ctx.data, consumer, consumer_ver) else {
             continue;
         };
-        let active = active_flags(consumer, consumer_ver, cand.ctx);
-        let is_active = |f: &str| active.contains(f);
-        let depend = DepEntry::evaluate_use(&cache.metadata.depend, is_active);
+        let effective = effective_use::effective_use(
+            cand.ctx.use_config,
+            cand.ctx.package_use,
+            consumer,
+            consumer_ver,
+            cache,
+        );
+        let depend = DepEntry::evaluate_use(&cache.metadata.depend, &effective);
         if cand
             .sysroot_avail
             .has_unsatisfied_atom_for_cpn(&depend, cpn)
@@ -132,9 +114,9 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
         }
 
         let runtime_avail = target_avail_for_consumer(j, cand.kept, cand.kept_indices);
-        let rdepend = DepEntry::evaluate_use(&cache.metadata.rdepend, is_active);
-        let pdepend = DepEntry::evaluate_use(&cache.metadata.pdepend, is_active);
-        let idepend = DepEntry::evaluate_use(&cache.metadata.idepend, is_active);
+        let rdepend = DepEntry::evaluate_use(&cache.metadata.rdepend, &effective);
+        let pdepend = DepEntry::evaluate_use(&cache.metadata.pdepend, &effective);
+        let idepend = DepEntry::evaluate_use(&cache.metadata.idepend, &effective);
         if runtime_avail.has_unsatisfied_atom_for_cpn(&rdepend, cpn)
             || runtime_avail.has_unsatisfied_atom_for_cpn(&pdepend, cpn)
             || runtime_avail.has_unsatisfied_atom_for_cpn(&idepend, cpn)

@@ -134,7 +134,7 @@ pub async fn run(
 #[allow(clippy::too_many_arguments)]
 pub async fn build_and_merge(
     ebuild_path: &Utf8Path,
-    use_flags: &[String],
+    use_flags: &[portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>],
     work_base: &Utf8Path,
     root: &Utf8Path,
     distdir: Option<&Utf8Path>,
@@ -189,7 +189,7 @@ async fn run_inner(
     work_dir: Option<&Utf8Path>,
     repo_override: Option<&str>,
     root: &Utf8Path,
-    use_flags: Option<&[String]>,
+    use_flags: Option<&[portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>]>,
     distdir: Option<&Utf8Path>,
     phase_log: Option<(Utf8PathBuf, bool)>,
     config_root: Option<&Utf8Path>,
@@ -251,7 +251,7 @@ async fn run_inner(
     if let Some(flags) = use_flags {
         // The resolved plan's effective USE for this package overrides the
         // profile-resolved set (the sourced environment stays).
-        let refs: Vec<&str> = flags.iter().map(String::as_str).collect();
+        let refs: Vec<&str> = flags.iter().map(|f| f.as_str()).collect();
         shell.set_use_flags(&refs).context("setting USE flags")?;
     } else if let Ok(Some(entry)) = repo.cache_entry(ebuild.cpv()) {
         // Standalone `em ebuild` (no resolved plan): apply the ebuild's own IUSE

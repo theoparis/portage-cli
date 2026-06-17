@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Dep, DepEntry, Operator, Version};
 use portage_atom_pubgrub::PortageVersionSet;
 
@@ -28,10 +29,9 @@ pub(super) fn find_conflicts(
     let mut conflicts = Vec::new();
 
     for entry in installed {
-        let active_flags: std::collections::HashSet<&str> =
-            entry.active_use.iter().map(|f| f.as_str()).collect();
+        let active_flags: HashSet<Interned<_>> = entry.active_use.iter().copied().collect();
 
-        let evaluated = DepEntry::evaluate_use(&entry.deps, |f| active_flags.contains(f));
+        let evaluated = DepEntry::evaluate_use(&entry.deps, &active_flags);
 
         collect_violations(&evaluated, entry, proposed, &mut conflicts);
     }

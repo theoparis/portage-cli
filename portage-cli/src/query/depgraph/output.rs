@@ -364,7 +364,7 @@ fn format_flags(
         let iuse_default_enabled =
             matches!(f.default, Some(portage_metadata::IUseDefault::Enabled));
         let interned = Interned::intern(name);
-        let mut enabled = match use_config.get_opt(&interned) {
+        let mut enabled = match use_config.get_opt(interned) {
             Some(UseFlagState::Enabled) => true,
             Some(_) => false,
             None => iuse_default_enabled,

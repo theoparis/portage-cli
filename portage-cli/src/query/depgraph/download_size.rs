@@ -48,7 +48,7 @@ pub(super) fn compute(
         let effective = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
         let enabled = |flag: &str| -> bool {
             let interned = Interned::intern(flag);
-            match effective.get_opt(&interned) {
+            match effective.get_opt(interned) {
                 Some(UseFlagState::Enabled) => true,
                 Some(_) => false,
                 None => cache

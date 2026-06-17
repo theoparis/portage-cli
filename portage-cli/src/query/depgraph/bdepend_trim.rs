@@ -3,13 +3,13 @@
 
 use std::collections::HashSet;
 
-use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, DepEntry, Version};
 use portage_atom_pubgrub::{PortagePackage, UseConfig};
 
 use crate::bdepend_avail::Avail;
 use crate::cli::Roots;
 
+use super::effective_use;
 use super::repo::{self, RepoData};
 
 /// Context for [`trim_within_run_bdepend`].
@@ -66,15 +66,15 @@ fn runtime_required_cpns(order: &[(PortagePackage, Version)], ctx: &TrimCtx<'_>)
         let Some(cache) = repo::find_cache(ctx.data, pkg, ver) else {
             continue;
         };
-        let active = active_flags(pkg, ver, ctx);
-        let is_active = |f: &str| active.contains(f);
+        let effective =
+            effective_use::effective_use(ctx.use_config, ctx.package_use, pkg, ver, cache);
         for field in [
             &cache.metadata.depend,
             &cache.metadata.rdepend,
             &cache.metadata.pdepend,
             &cache.metadata.idepend,
         ] {
-            collect_cpns_from_entries(&DepEntry::evaluate_use(field, is_active), &mut out);
+            collect_cpns_from_entries(&DepEntry::evaluate_use(field, &effective), &mut out);
         }
     }
     out
@@ -93,27 +93,6 @@ fn collect_cpns_from_entries(entries: &[DepEntry], out: &mut HashSet<Cpn>) {
             _ => {}
         }
     }
-}
-
-fn active_flags(pkg: &PortagePackage, ver: &Version, ctx: &TrimCtx<'_>) -> HashSet<String> {
-    let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-    let effective =
-        portage_atom_pubgrub::apply_package_use(ctx.use_config, &cpv, pkg.slot(), ctx.package_use);
-    let mut flags: HashSet<String> = effective
-        .enabled_flags()
-        .iter()
-        .map(|f| f.as_str().to_string())
-        .collect();
-    if let Some(cache) = repo::find_cache(ctx.data, pkg, ver) {
-        for iuse in &cache.metadata.iuse {
-            if iuse.is_enabled_default()
-                && effective.get_opt(&Interned::intern(iuse.name())).is_none()
-            {
-                flags.insert(iuse.name().to_string());
-            }
-        }
-    }
-    flags
 }
 
 struct TrimCandidate<'a, 'b> {
@@ -143,9 +122,14 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
         let Some(cache) = repo::find_cache(cand.ctx.data, consumer, consumer_ver) else {
             continue;
         };
-        let active = active_flags(consumer, consumer_ver, cand.ctx);
-        let is_active = |f: &str| active.contains(f);
-        let bdepend = DepEntry::evaluate_use(&cache.metadata.bdepend, is_active);
+        let effective = effective_use::effective_use(
+            cand.ctx.use_config,
+            cand.ctx.package_use,
+            consumer,
+            consumer_ver,
+            cache,
+        );
+        let bdepend = DepEntry::evaluate_use(&cache.metadata.bdepend, &effective);
         if avail.has_unsatisfied_atom_for_cpn(&bdepend, cpn) {
             return true;
         }

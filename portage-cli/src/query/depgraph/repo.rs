@@ -204,8 +204,8 @@ fn apply_iuse_defaults(
 ) {
     use portage_atom_pubgrub::UseFlagState;
     for iu in &m.iuse {
-        let flag = Interned::intern(iu.name());
-        if cfg.get_opt(&flag).is_none()
+        let flag = iu.interned();
+        if cfg.get_opt(flag).is_none()
             && let Some(def) = iu.default
         {
             cfg.set(
@@ -260,8 +260,7 @@ impl Adapter<'_> {
         let Some(ru) = &m.required_use else {
             return;
         };
-        let enabled =
-            |flag: &str| matches!(cfg.get(&Interned::intern(flag)), UseFlagState::Enabled);
+        let enabled = |flag: &str| matches!(cfg.get(Interned::intern(flag)), UseFlagState::Enabled);
         if ru.unsatisfied(&enabled).is_empty() {
             return;
         }
@@ -281,12 +280,12 @@ impl Adapter<'_> {
             // Only cede real flags the user has not pinned or the profile has not
             // forced/masked.
             if !iuse.contains(name.as_str())
-                || pins.get_opt(&flag).is_some()
+                || pins.get_opt(flag).is_some()
                 || forced_masked.contains(name.as_str())
             {
                 continue;
             }
-            let prefer = matches!(cfg.get(&flag), UseFlagState::Enabled);
+            let prefer = matches!(cfg.get(flag), UseFlagState::Enabled);
             cfg.solver_decide(flag, prefer);
         }
     }
@@ -799,12 +798,12 @@ mod tests {
 
         let desired = adapter.desired_use(&cpv);
         assert!(
-            matches!(desired.get(&Interned::intern("a")), UseFlagState::Enabled),
+            matches!(desired.get(Interned::intern("a")), UseFlagState::Enabled),
             "forced flag a must stay fixed-enabled, not ceded"
         );
         assert!(
             matches!(
-                desired.get(&Interned::intern("b")),
+                desired.get(Interned::intern("b")),
                 UseFlagState::SolverDecided { .. }
             ),
             "non-forced flag b should be ceded to satisfy the violated ?? ( a b )"
@@ -842,7 +841,7 @@ mod tests {
         for f in ["a", "b"] {
             assert!(
                 matches!(
-                    desired.get(&Interned::intern(f)),
+                    desired.get(Interned::intern(f)),
                     UseFlagState::SolverDecided { .. }
                 ),
                 "flag {f} should be ceded when nothing pins it"
@@ -880,7 +879,7 @@ mod tests {
         for f in ["a", "b"] {
             assert!(
                 !matches!(
-                    desired.get(&Interned::intern(f)),
+                    desired.get(Interned::intern(f)),
                     UseFlagState::SolverDecided { .. }
                 ),
                 "flag {f} must not be ceded when REQUIRED_USE already holds"
@@ -921,12 +920,12 @@ mod tests {
 
         let desired = adapter.desired_use(&cpv);
         assert_eq!(
-            desired.get(&Interned::intern("multilib")),
+            desired.get(Interned::intern("multilib")),
             UseFlagState::Enabled,
             "package.use.force must enable multilib"
         );
         assert_eq!(
-            desired.get(&Interned::intern("cet")),
+            desired.get(Interned::intern("cet")),
             UseFlagState::Disabled,
             "package.use.mask must beat the user's enable of cet"
         );

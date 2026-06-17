@@ -1,6 +1,7 @@
 mod autounmask;
 mod bdepend_trim;
 mod depend_trim;
+mod effective_use;
 mod emptytree_expand;
 mod root_aware;
 
@@ -23,7 +24,7 @@ use std::collections::HashMap;
 
 use camino::Utf8Path;
 use gentoo_core::Arch;
-use portage_atom::interner::Interned;
+use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, Operator, Version};
 use portage_atom_pubgrub::{
     DepClass, InstalledPackage as SolverInstalledPackage, InstalledPolicy,
@@ -46,7 +47,7 @@ pub struct PlannedMerge {
     /// per-package overrides resolved per the displayed plan (including
     /// profile-injected implicit flags like `elibc_glibc`/`kernel_linux`,
     /// which USE conditionals test).
-    pub use_flags: Vec<String>,
+    pub use_flags: Vec<Interned<DefaultInterner>>,
     /// `DEPEND` (build-against-sysroot), pre-USE-evaluation, for the pre-flight
     /// build-dependency check (see `preflight`). Empty when no cache entry.
     pub depend: Vec<portage_atom::DepEntry>,
@@ -786,32 +787,24 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             let ver = &entry.version;
             let cpn = pkg.cpn();
             let cpv = Cpv::new(*cpn, ver.clone());
-            let effective = portage_atom_pubgrub::apply_package_use(
-                &use_config,
-                &cpv,
-                pkg.slot(),
-                &package_use,
-            );
-            let mut flags: Vec<String> = effective
-                .enabled_flags()
-                .iter()
-                .map(|f| f.as_str().to_string())
-                .collect();
-            // IUSE defaults the config leaves unset are enabled at build time;
-            // capture DEPEND/BDEPEND for the pre-flight check while we have the
-            // cache entry in hand.
-            let (mut depend, mut bdepend) = (Vec::new(), Vec::new());
-            if let Some(cache) = repo::find_cache(&data, pkg, ver) {
-                for iuse in &cache.metadata.iuse {
-                    if iuse.is_enabled_default()
-                        && effective.get_opt(&Interned::intern(iuse.name())).is_none()
-                    {
-                        flags.push(iuse.name().to_string());
-                    }
-                }
-                depend = cache.metadata.depend.clone();
-                bdepend = cache.metadata.bdepend.clone();
-            }
+            let (depend, bdepend, mut flags) =
+                if let Some(cache) = repo::find_cache(&data, pkg, ver) {
+                    let effective =
+                        effective_use::effective_use(&use_config, &package_use, pkg, ver, cache);
+                    (
+                        cache.metadata.depend.clone(),
+                        cache.metadata.bdepend.clone(),
+                        effective.enabled_flags(),
+                    )
+                } else {
+                    let effective = portage_atom_pubgrub::apply_package_use(
+                        &use_config,
+                        &cpv,
+                        pkg.slot(),
+                        &package_use,
+                    );
+                    (Vec::new(), Vec::new(), effective.enabled_flags())
+                };
             flags.sort();
             flags.dedup();
             let ebuild_path = repo_path_of(&cpv)

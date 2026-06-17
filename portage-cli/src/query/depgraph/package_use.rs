@@ -69,12 +69,12 @@ pub(super) fn build_entries(
         let eff = apply_package_use(use_config, &cpv, req.package.slot(), package_use);
         let mut flags: Vec<String> = Vec::new();
         for f in &req.required_enabled {
-            if eff.get_opt(f) != Some(UseFlagState::Enabled) {
+            if eff.get_opt(*f) != Some(UseFlagState::Enabled) {
                 flags.push(f.as_str().to_string());
             }
         }
         for f in &req.required_disabled {
-            if eff.get_opt(f) != Some(UseFlagState::Disabled) {
+            if eff.get_opt(*f) != Some(UseFlagState::Disabled) {
                 flags.push(format!("-{}", f.as_str()));
             }
         }

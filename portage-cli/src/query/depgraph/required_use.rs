@@ -46,7 +46,7 @@ pub(super) fn find_violations(
         // if set, otherwise its IUSE default (`+flag`).
         let enabled = |flag: &str| -> bool {
             let interned = Interned::intern(flag);
-            match effective.get_opt(&interned) {
+            match effective.get_opt(interned) {
                 Some(UseFlagState::Enabled) => true,
                 Some(_) => false,
                 None => cache

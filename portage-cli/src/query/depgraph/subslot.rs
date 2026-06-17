@@ -70,8 +70,8 @@ pub(super) fn find_rebuilds(
         if in_plan.contains(&entry.cpn) {
             continue;
         }
-        let active: HashSet<&str> = entry.active_use.iter().map(|f| f.as_str()).collect();
-        let evaluated = DepEntry::evaluate_use(&entry.deps, |f| active.contains(f));
+        let active: HashSet<Interned<DefaultInterner>> = entry.active_use.iter().copied().collect();
+        let evaluated = DepEntry::evaluate_use(&entry.deps, &active);
         let mut atoms = Vec::new();
         collect_bound_atoms(&evaluated, &mut atoms);
 

@@ -210,12 +210,9 @@ mod tests {
         let mut cfg = UseConfig::new();
         cfg.enable(Interned::intern("cet")); // user tried to enable a masked flag
         fm.apply(&mut cfg, &c, false);
-        assert_eq!(
-            cfg.get(&Interned::intern("multilib")),
-            UseFlagState::Enabled
-        );
-        assert_eq!(cfg.get(&Interned::intern("cet")), UseFlagState::Disabled);
-        assert_eq!(cfg.get(&Interned::intern("shared")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(Interned::intern("multilib")), UseFlagState::Enabled);
+        assert_eq!(cfg.get(Interned::intern("cet")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(Interned::intern("shared")), UseFlagState::Disabled);
     }
 
     #[test]
