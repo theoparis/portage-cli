@@ -85,17 +85,32 @@ impl DepEntry {
     /// assert_eq!(resolved.len(), 1);
     /// ```
     pub fn evaluate_use(entries: &[Self], is_active: impl Fn(&str) -> bool) -> Vec<Self> {
-        Self::eval_entries(entries, &is_active)
+        Self::evaluate_use_interned(entries, |f| is_active(f.as_str()))
     }
 
-    fn eval_entries(entries: &[Self], is_active: &dyn Fn(&str) -> bool) -> Vec<Self> {
+    /// Like [`Self::evaluate_use`], but the predicate receives the interned flag
+    /// already stored on each [`DepEntry::UseConditional`] node.
+    pub fn evaluate_use_interned(
+        entries: &[Self],
+        is_active: impl Fn(&Interned<DefaultInterner>) -> bool,
+    ) -> Vec<Self> {
+        Self::eval_entries_interned(entries, &is_active)
+    }
+
+    fn eval_entries_interned(
+        entries: &[Self],
+        is_active: &dyn Fn(&Interned<DefaultInterner>) -> bool,
+    ) -> Vec<Self> {
         entries
             .iter()
-            .flat_map(|e| e.eval_use_one(is_active))
+            .flat_map(|e| e.eval_use_one_interned(is_active))
             .collect()
     }
 
-    fn eval_use_one(&self, is_active: &dyn Fn(&str) -> bool) -> Vec<Self> {
+    fn eval_use_one_interned(
+        &self,
+        is_active: &dyn Fn(&Interned<DefaultInterner>) -> bool,
+    ) -> Vec<Self> {
         match self {
             DepEntry::Atom(_) => vec![self.clone()],
             DepEntry::UseConditional {
@@ -103,15 +118,15 @@ impl DepEntry {
                 negate,
                 children,
             } => {
-                let active = is_active(flag.as_str());
+                let active = is_active(flag);
                 if active != *negate {
-                    Self::eval_entries(children, is_active)
+                    Self::eval_entries_interned(children, is_active)
                 } else {
                     vec![]
                 }
             }
             DepEntry::AllOf(children) => {
-                let ev = Self::eval_entries(children, is_active);
+                let ev = Self::eval_entries_interned(children, is_active);
                 if ev.is_empty() {
                     vec![]
                 } else {
@@ -119,7 +134,7 @@ impl DepEntry {
                 }
             }
             DepEntry::AnyOf(children) => {
-                let ev = Self::eval_entries(children, is_active);
+                let ev = Self::eval_entries_interned(children, is_active);
                 if ev.is_empty() {
                     vec![]
                 } else {
@@ -127,7 +142,7 @@ impl DepEntry {
                 }
             }
             DepEntry::ExactlyOneOf(children) => {
-                let ev = Self::eval_entries(children, is_active);
+                let ev = Self::eval_entries_interned(children, is_active);
                 if ev.is_empty() {
                     vec![]
                 } else {
@@ -135,7 +150,7 @@ impl DepEntry {
                 }
             }
             DepEntry::AtMostOneOf(children) => {
-                let ev = Self::eval_entries(children, is_active);
+                let ev = Self::eval_entries_interned(children, is_active);
                 if ev.is_empty() {
                     vec![]
                 } else {
@@ -1100,6 +1115,16 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert!(matches!(&result[0], DepEntry::Atom(d) if d.package() == "rust"));
         assert!(matches!(&result[1], DepEntry::Atom(d) if d.package() == "bar"));
+    }
+
+    #[test]
+    fn evaluate_use_interned_matches_by_key() {
+        let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
+        let ssl = Interned::intern("ssl");
+        let result = DepEntry::evaluate_use_interned(&entries, |f| *f == ssl);
+        assert_eq!(result.len(), 1);
+        let result = DepEntry::evaluate_use_interned(&entries, |f| *f != ssl);
+        assert!(result.is_empty());
     }
 
     #[test]

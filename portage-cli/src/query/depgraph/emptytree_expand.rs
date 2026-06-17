@@ -67,8 +67,7 @@
 //! groups with both `dev-lang/rust-bin` and `dev-lang/rust` branches, emerge prefers
 //! source `rust` (dep_zapdeps), not the leftmost `rust-bin` branch.
 
-use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, DepEntry, Version};
@@ -212,10 +211,11 @@ fn collect_plan_dep_atoms(
         let Some(cache) = repo::find_cache(ctx.data, pkg, ver) else {
             continue;
         };
-        let effective = effective_use(pkg, ver, ctx);
-        let is_active = |f: &str| is_flag_active(&effective, Some(cache), f);
+        let effective = effective_use(pkg, ver, ctx, cache);
+        let is_active = |f: &Interned<DefaultInterner>| is_flag_active(&effective, f);
         for &(class, root) in DEP_CLASS_WALKS {
-            let entries = DepEntry::evaluate_use(dep_entries_for_class(cache, class), is_active);
+            let entries =
+                DepEntry::evaluate_use_interned(dep_entries_for_class(cache, class), is_active);
             let avail = match root {
                 SatisfyRoot::Broot => &host,
                 SatisfyRoot::Target => &target,
@@ -242,10 +242,11 @@ fn collect_plan_build_dep_atoms(
         let Some(cache) = repo::find_cache(ctx.data, pkg, ver) else {
             continue;
         };
-        let effective = effective_use(pkg, ver, ctx);
-        let is_active = |f: &str| is_flag_active(&effective, Some(cache), f);
+        let effective = effective_use(pkg, ver, ctx, cache);
+        let is_active = |f: &Interned<DefaultInterner>| is_flag_active(&effective, f);
         for &(class, root) in DEP_CLASS_BUILD {
-            let entries = DepEntry::evaluate_use(dep_entries_for_class(cache, class), is_active);
+            let entries =
+                DepEntry::evaluate_use_interned(dep_entries_for_class(cache, class), is_active);
             let avail = match root {
                 SatisfyRoot::Broot => &host,
                 SatisfyRoot::Target => &target,
@@ -371,31 +372,36 @@ fn collect_build_atoms_from_entries(
     }
 }
 
-fn effective_use<'a>(
-    pkg: &PortagePackage,
-    ver: &Version,
-    ctx: &'a ExpandCtx<'_>,
-) -> Cow<'a, UseConfig> {
+fn effective_use(pkg: &PortagePackage, ver: &Version, ctx: &ExpandCtx<'_>, cache: &CacheEntry) -> UseConfig {
     let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-    portage_atom_pubgrub::apply_package_use(ctx.use_config, &cpv, pkg.slot(), ctx.package_use)
+    let mut cfg =
+        portage_atom_pubgrub::apply_package_use(ctx.use_config, &cpv, pkg.slot(), ctx.package_use)
+            .into_owned();
+    cfg.fold_iuse_defaults(&iuse_defaults(cache));
+    cfg
 }
 
-fn is_flag_active(effective: &UseConfig, cache: Option<&CacheEntry>, flag: &str) -> bool {
-    let iuse_default = cache.and_then(|c| {
-        c.metadata
-            .iuse
-            .iter()
-            .find(|i| i.name() == flag)
-            .and_then(|i| i.default)
-            .map(|d| match d {
-                portage_metadata::IUseDefault::Enabled => IUseDefault::Enabled,
-                portage_metadata::IUseDefault::Disabled => IUseDefault::Disabled,
+fn iuse_defaults(cache: &CacheEntry) -> HashMap<Interned<DefaultInterner>, IUseDefault> {
+    cache
+        .metadata
+        .iuse
+        .iter()
+        .filter_map(|i| {
+            i.default.map(|d| {
+                (
+                    Interned::intern(i.name()),
+                    match d {
+                        portage_metadata::IUseDefault::Enabled => IUseDefault::Enabled,
+                        portage_metadata::IUseDefault::Disabled => IUseDefault::Disabled,
+                    },
+                )
             })
-    });
-    matches!(
-        effective.get_with_iuse_default(&Interned::intern(flag), iuse_default),
-        UseFlagState::Enabled
-    )
+        })
+        .collect()
+}
+
+fn is_flag_active(effective: &UseConfig, flag: &Interned<DefaultInterner>) -> bool {
+    matches!(effective.get(flag), UseFlagState::Enabled)
 }
 
 fn plan_satisfies_dep(order: &[(PortagePackage, Version)], dep: &Dep) -> bool {
@@ -538,13 +544,13 @@ fn trim_superseded_rust_sources(
 
 fn rust_llvm_slot(pkg: &PortagePackage, ver: &Version, ctx: &ExpandCtx<'_>) -> Option<u32> {
     let cache = repo::find_cache(ctx.data, pkg, ver)?;
-    let effective = effective_use(pkg, ver, ctx);
+    let effective = effective_use(pkg, ver, ctx, cache);
     for iuse in &cache.metadata.iuse {
         let name = iuse.name();
         let Some(n) = name.strip_prefix("llvm_slot_") else {
             continue;
         };
-        if is_flag_active(&effective, Some(cache), name) {
+        if is_flag_active(&effective, &Interned::intern(name)) {
             return n.parse().ok();
         }
     }
