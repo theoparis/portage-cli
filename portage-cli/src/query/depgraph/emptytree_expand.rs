@@ -67,11 +67,12 @@
 //! groups with both `dev-lang/rust-bin` and `dev-lang/rust` branches, emerge prefers
 //! source `rust` (dep_zapdeps), not the leftmost `rust-bin` branch.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, DepEntry, Version};
-use portage_atom_pubgrub::{PortagePackage, UseConfig};
+use portage_atom_pubgrub::{IUseDefault, PortagePackage, UseConfig, UseFlagState};
 use portage_metadata::CacheEntry;
 
 use gentoo_core::Arch;
@@ -211,8 +212,8 @@ fn collect_plan_dep_atoms(
         let Some(cache) = repo::find_cache(ctx.data, pkg, ver) else {
             continue;
         };
-        let active = active_flags(pkg, ver, ctx);
-        let is_active = |f: &str| active.contains(f);
+        let effective = effective_use(pkg, ver, ctx);
+        let is_active = |f: &str| is_flag_active(&effective, Some(cache), f);
         for &(class, root) in DEP_CLASS_WALKS {
             let entries = DepEntry::evaluate_use(dep_entries_for_class(cache, class), is_active);
             let avail = match root {
@@ -241,8 +242,8 @@ fn collect_plan_build_dep_atoms(
         let Some(cache) = repo::find_cache(ctx.data, pkg, ver) else {
             continue;
         };
-        let active = active_flags(pkg, ver, ctx);
-        let is_active = |f: &str| active.contains(f);
+        let effective = effective_use(pkg, ver, ctx);
+        let is_active = |f: &str| is_flag_active(&effective, Some(cache), f);
         for &(class, root) in DEP_CLASS_BUILD {
             let entries = DepEntry::evaluate_use(dep_entries_for_class(cache, class), is_active);
             let avail = match root {
@@ -370,25 +371,31 @@ fn collect_build_atoms_from_entries(
     }
 }
 
-fn active_flags(pkg: &PortagePackage, ver: &Version, ctx: &ExpandCtx<'_>) -> HashSet<String> {
+fn effective_use<'a>(
+    pkg: &PortagePackage,
+    ver: &Version,
+    ctx: &'a ExpandCtx<'_>,
+) -> Cow<'a, UseConfig> {
     let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-    let effective =
-        portage_atom_pubgrub::apply_package_use(ctx.use_config, &cpv, pkg.slot(), ctx.package_use);
-    let mut flags: HashSet<String> = effective
-        .enabled_flags()
-        .iter()
-        .map(|f| f.as_str().to_string())
-        .collect();
-    if let Some(cache) = repo::find_cache(ctx.data, pkg, ver) {
-        for iuse in &cache.metadata.iuse {
-            if iuse.is_enabled_default()
-                && effective.get_opt(&Interned::intern(iuse.name())).is_none()
-            {
-                flags.insert(iuse.name().to_string());
-            }
-        }
-    }
-    flags
+    portage_atom_pubgrub::apply_package_use(ctx.use_config, &cpv, pkg.slot(), ctx.package_use)
+}
+
+fn is_flag_active(effective: &UseConfig, cache: Option<&CacheEntry>, flag: &str) -> bool {
+    let iuse_default = cache.and_then(|c| {
+        c.metadata
+            .iuse
+            .iter()
+            .find(|i| i.name() == flag)
+            .and_then(|i| i.default)
+            .map(|d| match d {
+                portage_metadata::IUseDefault::Enabled => IUseDefault::Enabled,
+                portage_metadata::IUseDefault::Disabled => IUseDefault::Disabled,
+            })
+    });
+    matches!(
+        effective.get_with_iuse_default(&Interned::intern(flag), iuse_default),
+        UseFlagState::Enabled
+    )
 }
 
 fn plan_satisfies_dep(order: &[(PortagePackage, Version)], dep: &Dep) -> bool {
@@ -530,10 +537,18 @@ fn trim_superseded_rust_sources(
 }
 
 fn rust_llvm_slot(pkg: &PortagePackage, ver: &Version, ctx: &ExpandCtx<'_>) -> Option<u32> {
-    let flags = active_flags(pkg, ver, ctx);
-    flags
-        .iter()
-        .find_map(|f| f.strip_prefix("llvm_slot_").and_then(|n| n.parse().ok()))
+    let cache = repo::find_cache(ctx.data, pkg, ver)?;
+    let effective = effective_use(pkg, ver, ctx);
+    for iuse in &cache.metadata.iuse {
+        let name = iuse.name();
+        let Some(n) = name.strip_prefix("llvm_slot_") else {
+            continue;
+        };
+        if is_flag_active(&effective, Some(cache), name) {
+            return n.parse().ok();
+        }
+    }
+    None
 }
 
 /// Emerge builds `dev-lang/rust` from source; drop stale `rust-bin` slots when source is planned.
