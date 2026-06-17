@@ -45,10 +45,16 @@
 //!
 //! Regression anchor: `firefox -pe` should include `List-MoreUtils-XS` when emerge
 //! does (~396/400 CPV shared on a typical host).
+//!
+//! ## Pitfall: `||` groups
+//!
+//! When collecting atoms for re-listing, walk only the **first satisfied** branch of
+//! `AnyOf` (portage picks one `||` alternative, not every branch that happens to be
+//! installed). `AllOf` is walked only when every child is satisfied.
 
 use std::collections::HashSet;
 
-use portage_atom::interner::Interned;
+use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, DepEntry, Version};
 use portage_atom_pubgrub::{PortagePackage, UseConfig};
 use portage_metadata::CacheEntry;
@@ -56,7 +62,7 @@ use portage_metadata::CacheEntry;
 use gentoo_core::Arch;
 use portage_repo::AcceptLicense;
 
-use crate::bdepend_avail::Avail;
+use crate::bdepend_avail::{Avail, entry_satisfied};
 use crate::cli::Roots;
 
 use super::repo::{self, RepoData, is_masked, keyword_accepts, license_accepted};
@@ -87,7 +93,7 @@ pub fn expand_satisfied_rebuilds(
     let target = Avail::initial_depend(ctx.roots);
     let mut order = order;
     loop {
-        let deps = collect_plan_dep_atoms(&order, ctx);
+        let deps = collect_plan_dep_atoms(&order, ctx, &host, &target);
         let mut prepend: Vec<(PortagePackage, Version)> = Vec::new();
         let mut seen: HashSet<Cpv> = order
             .iter()
@@ -120,8 +126,9 @@ pub fn expand_satisfied_rebuilds(
         order = prepend;
     }
 
-    order = drop_superseded_build_deps(order, ctx);
-    order = trim_bootstrap_toolchain(order);
+    order = drop_superseded_build_deps(order, ctx, &host, &target);
+    // Idempotent when the solver already picked source `dev-lang/rust`.
+    order = trim_rust_bin_when_source_present(order);
     order
 }
 
@@ -158,6 +165,8 @@ fn dep_entries_for_class<'a>(cache: &'a CacheEntry, class: &str) -> &'a [DepEntr
 fn collect_plan_dep_atoms(
     order: &[(PortagePackage, Version)],
     ctx: &ExpandCtx<'_>,
+    host: &Avail,
+    target: &Avail,
 ) -> Vec<(Dep, SatisfyRoot)> {
     let mut out: Vec<(Dep, SatisfyRoot)> = Vec::new();
     for (pkg, ver) in order {
@@ -172,7 +181,11 @@ fn collect_plan_dep_atoms(
         let is_active = |f: &str| active.contains(f);
         for &(class, root) in DEP_CLASS_WALKS {
             let entries = DepEntry::evaluate_use(dep_entries_for_class(cache, class), is_active);
-            collect_atoms_from_entries(&entries, root, &mut out);
+            let avail = match root {
+                SatisfyRoot::Broot => &host,
+                SatisfyRoot::Target => &target,
+            };
+            collect_atoms_from_entries(&entries, root, avail, &mut out);
         }
     }
     out
@@ -181,14 +194,23 @@ fn collect_plan_dep_atoms(
 fn collect_atoms_from_entries(
     entries: &[DepEntry],
     root: SatisfyRoot,
+    avail: &Avail,
     out: &mut Vec<(Dep, SatisfyRoot)>,
 ) {
     for e in entries {
         match e {
             DepEntry::Atom(dep) if dep.blocker.is_none() => out.push((dep.clone(), root)),
-            DepEntry::AllOf(c) | DepEntry::AnyOf(c) => collect_atoms_from_entries(c, root, out),
-            DepEntry::ExactlyOneOf(c) | DepEntry::AtMostOneOf(c) => {
-                collect_atoms_from_entries(c, root, out);
+            DepEntry::AllOf(c) if c.iter().all(|child| entry_satisfied(child, avail)) => {
+                collect_atoms_from_entries(c, root, avail, out);
+            }
+            // Emerge lists one satisfied alternative, not every installed branch.
+            DepEntry::AnyOf(c) | DepEntry::ExactlyOneOf(c) | DepEntry::AtMostOneOf(c) => {
+                for child in c {
+                    if entry_satisfied(child, avail) {
+                        collect_atoms_from_entries(std::slice::from_ref(child), root, avail, out);
+                        break;
+                    }
+                }
             }
             _ => {}
         }
@@ -218,8 +240,11 @@ fn active_flags(pkg: &PortagePackage, ver: &Version, ctx: &ExpandCtx<'_>) -> Has
 
 fn plan_satisfies_dep(order: &[(PortagePackage, Version)], dep: &Dep) -> bool {
     order.iter().any(|(pkg, ver)| {
-        let slot = pkg.slot().map(|s| s.as_str().to_string());
-        dep.matches_cpv(&Cpv::new(*pkg.cpn(), ver.clone()), slot.as_deref())
+        let slot = pkg.slot();
+        dep.matches_cpv(
+            &Cpv::new(*pkg.cpn(), ver.clone()),
+            slot.as_ref().map(|s| s.as_str()),
+        )
     })
 }
 
@@ -240,25 +265,29 @@ fn version_accepted(ctx: &ExpandCtx<'_>, cpv: &Cpv, cache: &portage_metadata::Ca
 /// Newest accepted repository CPV matching `dep` (upgrade when the host satisfied an older build).
 fn best_matching_version(ctx: &ExpandCtx<'_>, dep: &Dep) -> Option<(PortagePackage, Version)> {
     let entries = ctx.data.versions.get(&dep.cpn)?;
-    let mut best: Option<(Cpv, String)> = None;
+    let mut best: Option<(Cpv, Interned<DefaultInterner>)> = None;
     for (cpv, cache) in entries {
         if !version_accepted(ctx, cpv, cache) {
             continue;
         }
-        let slot = cache.metadata.slot.slot.as_str();
-        let slot_opt = if slot.is_empty() { None } else { Some(slot) };
+        let slot = cache.metadata.slot.slot;
+        let slot_opt = if slot.as_str().is_empty() {
+            None
+        } else {
+            Some(slot.as_str())
+        };
         if !dep.matches_cpv(cpv, slot_opt) {
             continue;
         }
         if best.as_ref().is_none_or(|(b, _)| cpv.version > b.version) {
-            best = Some((cpv.clone(), slot.to_string()));
+            best = Some((cpv.clone(), slot));
         }
     }
     let (cpv, slot) = best?;
-    let pkg = if slot.is_empty() {
+    let pkg = if slot.as_str().is_empty() {
         PortagePackage::unslotted(cpv.cpn)
     } else {
-        PortagePackage::slotted(cpv.cpn, Interned::intern(&slot))
+        PortagePackage::slotted(cpv.cpn, slot)
     };
     Some((pkg, cpv.version))
 }
@@ -266,8 +295,10 @@ fn best_matching_version(ctx: &ExpandCtx<'_>, dep: &Dep) -> Option<(PortagePacka
 fn drop_superseded_build_deps(
     order: Vec<(PortagePackage, Version)>,
     ctx: &ExpandCtx<'_>,
+    host: &Avail,
+    target: &Avail,
 ) -> Vec<(PortagePackage, Version)> {
-    let deps: Vec<Dep> = collect_plan_dep_atoms(&order, ctx)
+    let deps: Vec<Dep> = collect_plan_dep_atoms(&order, ctx, host, target)
         .into_iter()
         .map(|(d, _)| d)
         .collect();
@@ -285,10 +316,10 @@ fn is_superseded(
     deps: &[Dep],
 ) -> bool {
     let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-    let slot = pkg.slot().map(|s| s.as_str().to_string());
+    let slot = pkg.slot();
     let matching: Vec<&Dep> = deps
         .iter()
-        .filter(|d| d.matches_cpv(&cpv, slot.as_deref()))
+        .filter(|d| d.matches_cpv(&cpv, slot.as_ref().map(|s| s.as_str())))
         .collect();
     if matching.is_empty() {
         return false;
@@ -298,54 +329,11 @@ fn is_superseded(
             return false;
         }
         let other_cpv = Cpv::new(*other_pkg.cpn(), other_ver.clone());
-        let other_slot = other_pkg.slot().map(|s| s.as_str().to_string());
+        let other_slot = other_pkg.slot();
         matching
             .iter()
-            .all(|d| d.matches_cpv(&other_cpv, other_slot.as_deref()))
+            .all(|d| d.matches_cpv(&other_cpv, other_slot.as_ref().map(|s| s.as_str())))
     })
-}
-
-/// Keep a single newest toolchain slot when older bootstrap copies leaked in.
-fn trim_bootstrap_toolchain(
-    order: Vec<(PortagePackage, Version)>,
-) -> Vec<(PortagePackage, Version)> {
-    let mut order = order;
-    for cpn in ["sys-devel/gcc", "sys-devel/binutils"] {
-        order = trim_max_toolchain_cpn(order, cpn);
-    }
-    order = trim_rust_bin_when_source_present(order);
-    order
-}
-
-fn trim_max_toolchain_cpn(
-    order: Vec<(PortagePackage, Version)>,
-    cpn_str: &str,
-) -> Vec<(PortagePackage, Version)> {
-    let cpn = match Cpn::parse(cpn_str) {
-        Ok(c) => c,
-        Err(_) => return order,
-    };
-    let plan_max = order
-        .iter()
-        .filter(|(p, _)| p.cpn() == &cpn)
-        .map(|(_, v)| v)
-        .max()
-        .cloned();
-    let host_max = crate::bdepend_avail::vdb_cpvs(None)
-        .into_iter()
-        .filter(|(cpv, _)| cpv.cpn == cpn)
-        .map(|(cpv, _)| cpv.version)
-        .max();
-    let keep = match (plan_max, host_max) {
-        (Some(p), Some(h)) => p.max(h),
-        (Some(p), None) => p,
-        (None, Some(h)) => h,
-        (None, None) => return order,
-    };
-    order
-        .into_iter()
-        .filter(|(p, ver)| p.cpn() != &cpn || *ver == keep)
-        .collect()
 }
 
 /// Emerge builds `dev-lang/rust` from source; drop stale `rust-bin` slots when source is planned.
@@ -395,20 +383,30 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_gcc_drops_older_slot() {
-        let gcc = Cpn::parse("sys-devel/gcc").unwrap();
-        let order = vec![
-            (
-                PortagePackage::unslotted(gcc),
-                Version::parse("16.1.1_p20260606").unwrap(),
-            ),
-            (
-                PortagePackage::unslotted(gcc),
-                Version::parse("11.5.0").unwrap(),
-            ),
-        ];
-        let out = trim_max_toolchain_cpn(order, "sys-devel/gcc");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].1.to_string(), "16.1.1_p20260606");
+    fn any_of_collects_first_satisfied_branch_only() {
+        let glibc = Cpn::parse("sys-libs/glibc").unwrap();
+        let libbsd = Cpn::parse("dev-libs/libbsd").unwrap();
+        let entries = DepEntry::parse("|| ( >=sys-libs/glibc-2.36 dev-libs/libbsd )").unwrap();
+
+        let glibc_only = Avail::from_cpvs(vec![(
+            Cpv::new(glibc, Version::parse("2.43-r2").unwrap()),
+            None,
+        )]);
+        let mut out = Vec::new();
+        collect_atoms_from_entries(&entries, SatisfyRoot::Target, &glibc_only, &mut out);
+        assert!(out.iter().any(|(d, _)| d.cpn == glibc));
+        assert!(!out.iter().any(|(d, _)| d.cpn == libbsd));
+
+        let both = Avail::from_cpvs(vec![
+            (Cpv::new(glibc, Version::parse("2.43-r2").unwrap()), None),
+            (Cpv::new(libbsd, Version::parse("0.11.8").unwrap()), None),
+        ]);
+        let mut out = Vec::new();
+        collect_atoms_from_entries(&entries, SatisfyRoot::Target, &both, &mut out);
+        assert!(out.iter().any(|(d, _)| d.cpn == glibc));
+        assert!(
+            !out.iter().any(|(d, _)| d.cpn == libbsd),
+            "leftmost satisfied || branch wins; do not fan out into libbsd"
+        );
     }
 }

@@ -118,7 +118,8 @@ fn group_satisfied(entries: &[DepEntry], avail: &Avail) -> bool {
     entries.iter().any(|e| entry_satisfied(e, avail))
 }
 
-fn entry_satisfied(e: &DepEntry, avail: &Avail) -> bool {
+/// Whether `e` is satisfied on `avail` (blockers count as satisfied).
+pub(crate) fn entry_satisfied(e: &DepEntry, avail: &Avail) -> bool {
     match e {
         DepEntry::Atom(dep) => dep.blocker.is_some() || avail.atom_satisfied(dep),
         DepEntry::AllOf(c) => c.iter().all(|e| entry_satisfied(e, avail)),
