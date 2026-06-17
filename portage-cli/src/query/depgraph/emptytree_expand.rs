@@ -51,6 +51,13 @@
 //! When collecting atoms for re-listing, walk only the **first satisfied** branch of
 //! `AnyOf` (portage picks one `||` alternative, not every branch that happens to be
 //! installed). `AllOf` is walked only when every child is satisfied.
+//!
+//! ## Pitfall: expand-added build deps (Group A)
+//!
+//! Packages re-added because BROOT already satisfies their atom (e.g. `firefox`
+//! `BDEPEND` → `nodejs`) still need their own `DEPEND`/`BDEPEND` closure scheduled on
+//! the correct root. Only re-listing **satisfied** atoms misses upgrades like
+//! `nodejs` → `>=dev-libs/simdjson-4.6.1` when the VDB still has an older slot.
 
 use std::collections::HashSet;
 
@@ -93,13 +100,14 @@ pub fn expand_satisfied_rebuilds(
     let target = Avail::initial_depend(ctx.roots);
     let mut order = order;
     loop {
-        let deps = collect_plan_dep_atoms(&order, ctx, &host, &target);
+        let satisfied_deps = collect_plan_dep_atoms(&order, ctx, &host, &target);
+        let build_deps = collect_plan_build_dep_atoms(&order, ctx, &host, &target);
         let mut prepend: Vec<(PortagePackage, Version)> = Vec::new();
         let mut seen: HashSet<Cpv> = order
             .iter()
             .map(|(p, v)| Cpv::new(*p.cpn(), v.clone()))
             .collect();
-        for (dep, root) in deps {
+        for (dep, root) in satisfied_deps {
             if plan_satisfies_dep(&order, &dep) {
                 continue;
             }
@@ -110,14 +118,20 @@ pub fn expand_satisfied_rebuilds(
             if !installed.atom_satisfied(&dep) {
                 continue;
             }
-            let Some((pkg, ver)) = best_matching_version(ctx, &dep) else {
-                continue;
-            };
-            let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-            if !seen.insert(cpv) {
+            let _ = prepend_candidate(ctx, &dep, &mut seen, &mut prepend);
+        }
+        for (dep, root) in build_deps {
+            if plan_satisfies_dep(&order, &dep) {
                 continue;
             }
-            prepend.push((pkg, ver));
+            let installed = match root {
+                SatisfyRoot::Broot => &host,
+                SatisfyRoot::Target => &target,
+            };
+            if installed.atom_satisfied(&dep) {
+                continue;
+            }
+            let _ = prepend_candidate(ctx, &dep, &mut seen, &mut prepend);
         }
         if prepend.is_empty() {
             break;
@@ -148,6 +162,14 @@ const DEP_CLASS_WALKS: &[(&str, SatisfyRoot)] = &[
     ("DEPEND", SatisfyRoot::Target),
     ("RDEPEND", SatisfyRoot::Target),
     ("PDEPEND", SatisfyRoot::Target),
+];
+
+/// Build-time fields whose unsatisfied atoms must be scheduled when a parent lands in
+/// the plan via expand (not only re-listed when already satisfied on that root).
+const DEP_CLASS_BUILD: &[(&str, SatisfyRoot)] = &[
+    ("BDEPEND", SatisfyRoot::Broot),
+    ("IDEPEND", SatisfyRoot::Broot),
+    ("DEPEND", SatisfyRoot::Target),
 ];
 
 fn dep_entries_for_class<'a>(cache: &'a CacheEntry, class: &str) -> &'a [DepEntry] {
@@ -191,6 +213,53 @@ fn collect_plan_dep_atoms(
     out
 }
 
+/// Collect build-time atoms from packages already in the plan, including deps not yet
+/// satisfied on the correct root (for expand-added parents like host-satisfied `nodejs`).
+fn collect_plan_build_dep_atoms(
+    order: &[(PortagePackage, Version)],
+    ctx: &ExpandCtx<'_>,
+    host: &Avail,
+    target: &Avail,
+) -> Vec<(Dep, SatisfyRoot)> {
+    let mut out: Vec<(Dep, SatisfyRoot)> = Vec::new();
+    for (pkg, ver) in order {
+        if pkg.is_virtual() {
+            continue;
+        }
+        let Some(cache) = repo::find_cache(ctx.data, pkg, ver) else {
+            continue;
+        };
+        let active = active_flags(pkg, ver, ctx);
+        let is_active = |f: &str| active.contains(f);
+        for &(class, root) in DEP_CLASS_BUILD {
+            let entries = DepEntry::evaluate_use(dep_entries_for_class(cache, class), is_active);
+            let avail = match root {
+                SatisfyRoot::Broot => &host,
+                SatisfyRoot::Target => &target,
+            };
+            collect_build_atoms_from_entries(&entries, root, avail, &mut out);
+        }
+    }
+    out
+}
+
+fn prepend_candidate(
+    ctx: &ExpandCtx<'_>,
+    dep: &Dep,
+    seen: &mut HashSet<Cpv>,
+    prepend: &mut Vec<(PortagePackage, Version)>,
+) -> bool {
+    let Some((pkg, ver)) = best_matching_version(ctx, dep) else {
+        return false;
+    };
+    let cpv = Cpv::new(*pkg.cpn(), ver.clone());
+    if !seen.insert(cpv) {
+        return false;
+    }
+    prepend.push((pkg, ver));
+    true
+}
+
 fn collect_atoms_from_entries(
     entries: &[DepEntry],
     root: SatisfyRoot,
@@ -210,6 +279,42 @@ fn collect_atoms_from_entries(
                         collect_atoms_from_entries(std::slice::from_ref(child), root, avail, out);
                         break;
                     }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collect atoms required to build parents in the plan. Unlike
+/// [`collect_atoms_from_entries`], walks every `AllOf` child and, for `||` groups
+/// with no satisfied branch yet, takes the first listed alternative to schedule.
+fn collect_build_atoms_from_entries(
+    entries: &[DepEntry],
+    root: SatisfyRoot,
+    avail: &Avail,
+    out: &mut Vec<(Dep, SatisfyRoot)>,
+) {
+    for e in entries {
+        match e {
+            DepEntry::Atom(dep) if dep.blocker.is_none() => out.push((dep.clone(), root)),
+            DepEntry::AllOf(c) => collect_build_atoms_from_entries(c, root, avail, out),
+            DepEntry::AnyOf(c) | DepEntry::ExactlyOneOf(c) | DepEntry::AtMostOneOf(c) => {
+                let mut picked = false;
+                for child in c {
+                    if entry_satisfied(child, avail) {
+                        collect_build_atoms_from_entries(
+                            std::slice::from_ref(child),
+                            root,
+                            avail,
+                            out,
+                        );
+                        picked = true;
+                        break;
+                    }
+                }
+                if !picked && let Some(first) = c.first() {
+                    collect_build_atoms_from_entries(std::slice::from_ref(first), root, avail, out);
                 }
             }
             _ => {}
@@ -300,6 +405,7 @@ fn drop_superseded_build_deps(
 ) -> Vec<(PortagePackage, Version)> {
     let deps: Vec<Dep> = collect_plan_dep_atoms(&order, ctx, host, target)
         .into_iter()
+        .chain(collect_plan_build_dep_atoms(&order, ctx, host, target))
         .map(|(d, _)| d)
         .collect();
     let snapshot = order.clone();
@@ -408,5 +514,32 @@ mod tests {
             !out.iter().any(|(d, _)| d.cpn == libbsd),
             "leftmost satisfied || branch wins; do not fan out into libbsd"
         );
+    }
+
+    #[test]
+    fn build_collects_unsatisfied_atoms() {
+        let simdjson = Cpn::parse("dev-libs/simdjson").unwrap();
+        let entries = DepEntry::parse(">=dev-libs/simdjson-4.6.1").unwrap();
+        let avail = Avail::from_cpvs(vec![(
+            Cpv::new(simdjson, Version::parse("4.3.0").unwrap()),
+            None,
+        )]);
+        let mut out = Vec::new();
+        collect_build_atoms_from_entries(&entries, SatisfyRoot::Target, &avail, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.cpn, simdjson);
+    }
+
+    #[test]
+    fn build_any_of_falls_back_to_first_branch_when_unsatisfied() {
+        let gcc = Cpn::parse("sys-devel/gcc").unwrap();
+        let stub = Cpn::parse("llvm-runtimes/libatomic-stub").unwrap();
+        let entries =
+            DepEntry::parse("|| ( sys-devel/gcc:* llvm-runtimes/libatomic-stub )").unwrap();
+        let avail = Avail::default();
+        let mut out = Vec::new();
+        collect_build_atoms_from_entries(&entries, SatisfyRoot::Target, &avail, &mut out);
+        assert!(out.iter().any(|(d, _)| d.cpn == gcc));
+        assert!(!out.iter().any(|(d, _)| d.cpn == stub));
     }
 }
