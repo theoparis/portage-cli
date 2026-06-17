@@ -7,6 +7,7 @@ use winnow::error::StrContext;
 use winnow::prelude::*;
 use winnow::token::any;
 
+use crate::UseFlagLookup;
 use crate::dep::{Dep, parse_dep};
 use crate::error::{Error, Result};
 use crate::parsers::parse_ident_with_at;
@@ -73,44 +74,32 @@ impl DepEntry {
     /// the others are dropped. All other node types keep their structure with
     /// children recursively evaluated. Empty groups after evaluation are dropped.
     ///
-    /// The predicate receives flag names as `&str` and returns `true` if active:
+    /// `active` is any [`UseFlagLookup`] — typically a `HashSet` of interned
+    /// flags, a `&[&str]` slice, or a folded [`UseConfig`](portage_atom_pubgrub::UseConfig).
     ///
     /// ```
     /// use portage_atom::DepEntry;
+    /// use portage_atom::interner::Interned;
     /// use std::collections::HashSet;
     ///
     /// let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
-    /// let active: HashSet<&str> = ["ssl"].into();
-    /// let resolved = DepEntry::evaluate_use(&entries, |f| active.contains(f));
+    /// let ssl = Interned::intern("ssl");
+    /// let active: HashSet<Interned<_>> = [ssl].into();
+    /// let resolved = DepEntry::evaluate_use(&entries, &active);
     /// assert_eq!(resolved.len(), 1);
     /// ```
-    pub fn evaluate_use(entries: &[Self], is_active: impl Fn(&str) -> bool) -> Vec<Self> {
-        Self::evaluate_use_interned(entries, |f| is_active(f.as_str()))
+    pub fn evaluate_use<A: UseFlagLookup + ?Sized>(entries: &[Self], active: &A) -> Vec<Self> {
+        Self::eval_entries(entries, active)
     }
 
-    /// Like [`Self::evaluate_use`], but the predicate receives the interned flag
-    /// already stored on each [`DepEntry::UseConditional`] node.
-    pub fn evaluate_use_interned(
-        entries: &[Self],
-        is_active: impl Fn(&Interned<DefaultInterner>) -> bool,
-    ) -> Vec<Self> {
-        Self::eval_entries_interned(entries, &is_active)
-    }
-
-    fn eval_entries_interned(
-        entries: &[Self],
-        is_active: &dyn Fn(&Interned<DefaultInterner>) -> bool,
-    ) -> Vec<Self> {
+    fn eval_entries<A: UseFlagLookup + ?Sized>(entries: &[Self], active: &A) -> Vec<Self> {
         entries
             .iter()
-            .flat_map(|e| e.eval_use_one_interned(is_active))
+            .flat_map(|e| e.eval_use_one(active))
             .collect()
     }
 
-    fn eval_use_one_interned(
-        &self,
-        is_active: &dyn Fn(&Interned<DefaultInterner>) -> bool,
-    ) -> Vec<Self> {
+    fn eval_use_one<A: UseFlagLookup + ?Sized>(&self, active: &A) -> Vec<Self> {
         match self {
             DepEntry::Atom(_) => vec![self.clone()],
             DepEntry::UseConditional {
@@ -118,15 +107,15 @@ impl DepEntry {
                 negate,
                 children,
             } => {
-                let active = is_active(flag);
-                if active != *negate {
-                    Self::eval_entries_interned(children, is_active)
+                let flag_active = active.use_flag_active(*flag);
+                if flag_active != *negate {
+                    Self::eval_entries(children, active)
                 } else {
                     vec![]
                 }
             }
             DepEntry::AllOf(children) => {
-                let ev = Self::eval_entries_interned(children, is_active);
+                let ev = Self::eval_entries(children, active);
                 if ev.is_empty() {
                     vec![]
                 } else {
@@ -134,7 +123,7 @@ impl DepEntry {
                 }
             }
             DepEntry::AnyOf(children) => {
-                let ev = Self::eval_entries_interned(children, is_active);
+                let ev = Self::eval_entries(children, active);
                 if ev.is_empty() {
                     vec![]
                 } else {
@@ -142,7 +131,7 @@ impl DepEntry {
                 }
             }
             DepEntry::ExactlyOneOf(children) => {
-                let ev = Self::eval_entries_interned(children, is_active);
+                let ev = Self::eval_entries(children, active);
                 if ev.is_empty() {
                     vec![]
                 } else {
@@ -150,7 +139,7 @@ impl DepEntry {
                 }
             }
             DepEntry::AtMostOneOf(children) => {
-                let ev = Self::eval_entries_interned(children, is_active);
+                let ev = Self::eval_entries(children, active);
                 if ev.is_empty() {
                     vec![]
                 } else {
@@ -358,6 +347,8 @@ fn parse_all_of(input: &mut &str) -> ModalResult<DepEntry> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::dep::Blocker;
     use crate::use_dep::{UseDefault, UseDepKind};
@@ -1050,14 +1041,10 @@ mod tests {
 
     // --- evaluate_use tests ---
 
-    fn is_active<'a>(s: &'a [&str]) -> impl Fn(&str) -> bool + 'a {
-        |f| s.contains(&f)
-    }
-
     #[test]
     fn evaluate_use_active_conditional_included() {
         let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
-        let result = DepEntry::evaluate_use(&entries, is_active(&["ssl"]));
+        let result = DepEntry::evaluate_use(&entries, &["ssl"]);
         assert_eq!(result.len(), 1);
         assert!(matches!(&result[0], DepEntry::Atom(d) if d.package() == "openssl"));
     }
@@ -1065,21 +1052,21 @@ mod tests {
     #[test]
     fn evaluate_use_inactive_conditional_dropped() {
         let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
-        let result = DepEntry::evaluate_use(&entries, is_active(&[]));
+        let result = DepEntry::evaluate_use(&entries, &[] as &[&str]);
         assert!(result.is_empty());
     }
 
     #[test]
     fn evaluate_use_negated_active_dropped() {
         let entries = DepEntry::parse("!debug? ( dev-libs/bar )").unwrap();
-        let result = DepEntry::evaluate_use(&entries, is_active(&["debug"]));
+        let result = DepEntry::evaluate_use(&entries, &["debug"]);
         assert!(result.is_empty());
     }
 
     #[test]
     fn evaluate_use_negated_inactive_included() {
         let entries = DepEntry::parse("!debug? ( dev-libs/bar )").unwrap();
-        let result = DepEntry::evaluate_use(&entries, is_active(&[]));
+        let result = DepEntry::evaluate_use(&entries, &[] as &[&str]);
         assert_eq!(result.len(), 1);
         assert!(matches!(&result[0], DepEntry::Atom(d) if d.package() == "bar"));
     }
@@ -1088,7 +1075,7 @@ mod tests {
     fn evaluate_use_inside_any_of() {
         // ssl active: AnyOf collapses to just openssl inside it
         let entries = DepEntry::parse("|| ( ssl? ( dev-libs/openssl ) dev-libs/gnutls )").unwrap();
-        let result = DepEntry::evaluate_use(&entries, is_active(&["ssl"]));
+        let result = DepEntry::evaluate_use(&entries, &["ssl"]);
         assert_eq!(result.len(), 1);
         match &result[0] {
             DepEntry::AnyOf(children) => {
@@ -1104,26 +1091,28 @@ mod tests {
     fn evaluate_use_empty_any_of_dropped() {
         // ssl inactive: the whole AnyOf collapses to nothing
         let entries = DepEntry::parse("|| ( ssl? ( dev-libs/openssl ) )").unwrap();
-        let result = DepEntry::evaluate_use(&entries, is_active(&[]));
+        let result = DepEntry::evaluate_use(&entries, &[] as &[&str]);
         assert!(result.is_empty());
     }
 
     #[test]
     fn evaluate_use_atoms_pass_through() {
         let entries = DepEntry::parse("dev-lang/rust dev-libs/bar").unwrap();
-        let result = DepEntry::evaluate_use(&entries, is_active(&["ssl"]));
+        let result = DepEntry::evaluate_use(&entries, &["ssl"]);
         assert_eq!(result.len(), 2);
         assert!(matches!(&result[0], DepEntry::Atom(d) if d.package() == "rust"));
         assert!(matches!(&result[1], DepEntry::Atom(d) if d.package() == "bar"));
     }
 
     #[test]
-    fn evaluate_use_interned_matches_by_key() {
+    fn evaluate_use_matches_by_interned_key() {
         let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
         let ssl = Interned::intern("ssl");
-        let result = DepEntry::evaluate_use_interned(&entries, |f| *f == ssl);
+        let active: std::collections::HashSet<_> = [ssl].into();
+        let result = DepEntry::evaluate_use(&entries, &active);
         assert_eq!(result.len(), 1);
-        let result = DepEntry::evaluate_use_interned(&entries, |f| *f != ssl);
+        let inactive: std::collections::HashSet<Interned<_>> = HashSet::new();
+        let result = DepEntry::evaluate_use(&entries, &inactive);
         assert!(result.is_empty());
     }
 

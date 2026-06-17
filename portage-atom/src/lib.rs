@@ -43,6 +43,7 @@ mod parsers;
 mod pf;
 mod slot;
 mod use_dep;
+mod use_flag_lookup;
 mod version;
 
 pub use gentoo_interner as interner;
@@ -56,6 +57,7 @@ pub use error::{Error, Result};
 pub use pf::Pf;
 pub use slot::{Slot, SlotDep, SlotOperator};
 pub use use_dep::{UseDefault, UseDep, UseDepKind};
+pub use use_flag_lookup::UseFlagLookup;
 pub use version::{Operator, Revision, Suffix, SuffixKind, Version};
 
 // Re-export bon-derived builders when the feature is enabled
