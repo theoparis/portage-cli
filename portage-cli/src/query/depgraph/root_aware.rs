@@ -72,15 +72,6 @@ pub fn detect(roots: &Roots) -> CrossContext {
     }
 }
 
-/// Planner base root: sysroot under cross, else `--root`.
-pub fn planner_base<'a>(roots: &'a Roots, cross: &'a CrossContext) -> Option<&'a Utf8Path> {
-    if cross.active {
-        Some(cross.sysroot.as_path())
-    } else {
-        roots.base()
-    }
-}
-
 /// One line of the merge list with an explicit merge destination.
 #[derive(Debug, Clone)]
 pub struct PlanEntry {

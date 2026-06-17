@@ -98,12 +98,13 @@ impl DependencyProvider for PortageDependencyProvider {
                         return Ok(Some(installed_ver.clone()));
                     }
                 }
+                InstalledPolicy::Rebuild => {}
             }
         }
 
         // For OR-group / slot-choice packages, prefer branches that lead to
         // an already-installed package.
-        if package.is_virtual() && !self.installed_cpns.is_empty() {
+        if !self.rebuild_tree && package.is_virtual() && !self.installed_cpns.is_empty() {
             // Check each candidate directly against self.installed.
             // deps_reach_installed only checks CPNs, which produces false positives
             // for multi-slot packages (every slot appears "installed" if any slot
@@ -242,11 +243,18 @@ impl DependencyProvider for PortageDependencyProvider {
         // built; re-solving its build deps would drag in bootstrap toolchain
         // packages (old gcc to build new gcc, etc.) that portage never shows.
         // Only RDEPEND (1), PDEPEND (3), and IDEPEND (4) matter at install time.
-        if self
-            .installed
-            .get(package)
-            .is_some_and(|(inst, _)| inst == version)
-        {
+        // `--emptytree` (`InstalledPolicy::Rebuild`) always expands the full
+        // build-time closure even when the selected version matches the VDB.
+        if self.installed.get(package).is_some_and(|(inst, policy)| {
+            inst == version && !matches!(policy, InstalledPolicy::Rebuild)
+        }) {
+            if self.cross_active && package.merge_root() == MergeRoot::Target {
+                return Ok(Dependencies::Available(cross_target_runtime_deps(
+                    vd,
+                    &self.host_installed,
+                    &self.sysroot_installed,
+                )));
+            }
             let runtime: DependencyConstraints<PortagePackage, PortageVersionSet> = vd.by_class[1]
                 .iter() // RDEPEND
                 .chain(vd.by_class[3].iter()) // PDEPEND
@@ -265,6 +273,7 @@ impl DependencyProvider for PortageDependencyProvider {
             return Ok(Dependencies::Available(cross_target_runtime_deps(
                 vd,
                 &self.host_installed,
+                &self.sysroot_installed,
             )));
         }
         if self.cross_active && package.merge_root() == MergeRoot::Host && self.with_bdeps {
@@ -309,6 +318,7 @@ fn stamp_root(p: &PortagePackage, root: MergeRoot) -> PortagePackage {
 fn cross_target_runtime_deps(
     vd: &VersionData,
     host_installed: &HashMap<PortagePackage, Version>,
+    _sysroot_installed: &HashMap<PortagePackage, Version>,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
     let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
         .iter()

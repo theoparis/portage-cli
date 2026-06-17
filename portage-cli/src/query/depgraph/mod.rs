@@ -1,5 +1,7 @@
 mod autounmask;
 mod bdepend_trim;
+mod depend_trim;
+mod emptytree_expand;
 mod root_aware;
 
 pub use portage_atom_pubgrub::MergeRoot;
@@ -109,8 +111,11 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     } = opts;
     let cross = root_aware::detect(roots);
     let config_root = roots.config();
-    let base_root = root_aware::planner_base(roots, &cross).or(roots.base());
-    let target_root = roots.target();
+    let host_config_stage = cross.active && cross.sysroot.as_str() != cross.target.as_str();
+    // Native `emerge -pe`: pretend nothing merged on TARGET, but BROOT still
+    // satisfies BDEPEND (emerge sets `bdeps=auto` unless overridden).
+    let emptytree_native = empty && !host_config_stage && !cross.active;
+    let solve_with_bdeps = with_bdeps || emptytree_native;
     let repo = Repository::open(repo_path)
         .map_err(|e| anyhow::anyhow!("failed to open repo at {repo_path}: {e}"))?;
 
@@ -148,9 +153,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         Vec::new()
     };
 
-    let (data, installed_entries, host_installed, use_env_result) = tokio::join!(
+    let (data, target_installed, host_installed, use_env_result) = tokio::join!(
         repo::load_repos(&repo, &overlays),
-        async { installed::load_installed(base_root, target_root) },
+        async { installed::load_target_installed(roots) },
         async { installed::load_host_installed() },
         use_env::build_use_env(&repo, config_root, roots.config_overlay()),
     );
@@ -168,13 +173,27 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         distdir,
     } = use_env;
 
-    let installed_cpvs: std::collections::HashSet<Cpv> = installed_entries
+    let target_installed_cpvs: std::collections::HashSet<Cpv> = target_installed
         .iter()
         .map(|e| Cpv::new(e.cpn, e.version.clone()))
         .collect();
+    // Under `--emptytree` the solver treats target packages as rebuilds (not
+    // "already installed" for cede/ingest), while action tags still use the
+    // real VDB via `target_installed_cpvs`.
+    let empty_solver_cpvs = std::collections::HashSet::new();
+    let solver_installed_cpvs: &std::collections::HashSet<Cpv> = if emptytree_native {
+        &empty_solver_cpvs
+    } else {
+        &target_installed_cpvs
+    };
+    let installed_policy = if emptytree_native {
+        InstalledPolicy::Rebuild
+    } else {
+        InstalledPolicy::Favor
+    };
 
     let mut installed: HashMap<Cpn, HashMap<String, Version>> = HashMap::new();
-    for e in &installed_entries {
+    for e in &target_installed {
         let slot_key = e.slot.clone().unwrap_or_default();
         installed
             .entry(e.cpn)
@@ -216,7 +235,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     // Build a provider (with the given cede policy) and run the solve. Factored
     // so a failed --autosolve-use attempt can fall back to a fixed-USE (Level A)
     // solve instead of erroring — matching the doc invariant.
-    let no_installed: std::collections::HashSet<Cpv> = Default::default();
     let build_and_solve = |autosolve_use: bool, pkg_use: &[(Dep, Vec<String>)]| {
         let adapter = repo::Adapter {
             data: &data,
@@ -228,11 +246,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             use_config: &use_config,
             package_use: pkg_use,
             force_mask: &force_mask,
-            installed_cpvs: if empty {
-                &no_installed
-            } else {
-                &installed_cpvs
-            },
+            installed_cpvs: solver_installed_cpvs,
             autosolve_use,
         };
         // Closure-seeded ingestion: only packages reachable from the targets
@@ -244,13 +258,14 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             .filter(|(pkg, _)| !pkg.is_virtual())
             .map(|(pkg, _)| *pkg.cpn())
             .collect();
-        if !empty {
-            seeds.extend(installed_entries.iter().map(|e| e.cpn));
+        if !emptytree_native {
+            seeds.extend(target_installed.iter().map(|e| e.cpn));
         }
         let mut provider =
-            PortageDependencyProvider::new_for_targets_with_bdeps(adapter, seeds, with_bdeps);
+            PortageDependencyProvider::new_for_targets_with_bdeps(adapter, seeds, solve_with_bdeps);
         provider.set_cross_active(cross.active);
-        if cross.active && !empty {
+        provider.set_rebuild_tree(emptytree_native);
+        if cross.active {
             for e in installed::load_sysroot_entries(cross.sysroot.as_path()) {
                 let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
                     Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
@@ -259,20 +274,18 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 provider.add_sysroot_installed(pkg, e.version.clone());
             }
         }
-        if !empty {
-            for e in &installed_entries {
-                let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
-                    Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
-                    None => PortagePackage::unslotted(e.cpn),
-                };
-                provider.add_installed(SolverInstalledPackage {
-                    package: pkg,
-                    version: e.version.clone(),
-                    policy: InstalledPolicy::Favor,
-                    active_use: e.active_use.clone(),
-                    iuse: e.iuse.clone(),
-                });
-            }
+        for e in &target_installed {
+            let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
+                Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
+                None => PortagePackage::unslotted(e.cpn),
+            };
+            provider.add_installed(SolverInstalledPackage {
+                package: pkg,
+                version: e.version.clone(),
+                policy: installed_policy,
+                active_use: e.active_use.clone(),
+                iuse: e.iuse.clone(),
+            });
         }
         // BROOT (the host) provides build tools: a BDEPEND already present there
         // is satisfied without building it into the plan (Half B wiring).
@@ -445,9 +458,10 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             //  - same-version USE rebuilds (reinstall_cpns), and
             //  - explicitly-requested targets, which emerge reinstalls by
             //    default ([ebuild R]) even when already at the best version.
-            !installed_cpvs.contains(&cpv)
+            !target_installed_cpvs.contains(&cpv)
                 || reinstall_cpns.contains(pkg.cpn())
                 || root_cpns.contains(pkg.cpn())
+                || emptytree_native
         })
         .map(|(pkg, ver)| {
             // Apply the favoured upgrade version if one was recorded.
@@ -473,18 +487,44 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         order.extend(to_reinstall);
     }
 
-    order = bdepend_trim::trim_within_run_bdepend(
-        order,
-        with_bdeps,
-        &bdepend_trim::TrimCtx {
+    // Host-config stage: pretend output lists target ROOT merges only (emerge -p).
+    if host_config_stage {
+        order.retain(|(pkg, _)| pkg.merge_root() == MergeRoot::Target);
+    }
+
+    let trim_ctx = bdepend_trim::TrimCtx {
+        roots,
+        data: &data,
+        use_config: &use_config,
+        package_use: &package_use,
+        root_cpns: &root_cpns,
+        reinstall_cpns: &reinstall_cpns,
+    };
+    if host_config_stage {
+        order = depend_trim::trim_sysroot_satisfied_depend(
+            order,
+            roots.sysroot(),
+            cross.target.as_path(),
+            &trim_ctx,
+        );
+    }
+
+    if emptytree_native {
+        let expand_ctx = emptytree_expand::ExpandCtx {
             roots,
             data: &data,
+            arch,
+            accept_keywords: &accept_keywords,
+            package_mask: &package_mask,
+            package_unmask: &package_unmask,
+            accept_license: &accept_license,
             use_config: &use_config,
             package_use: &package_use,
-            root_cpns: &root_cpns,
-            reinstall_cpns: &reinstall_cpns,
-        },
-    );
+        };
+        order = emptytree_expand::expand_satisfied_rebuilds(order, &expand_ctx);
+    } else {
+        order = bdepend_trim::trim_within_run_bdepend(order, with_bdeps, &trim_ctx);
+    }
 
     let edges: Vec<_> = provider
         .dependency_graph(&solution)
@@ -532,7 +572,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         }
         let in_plan: std::collections::HashSet<Cpn> =
             order.iter().map(|(pkg, _)| *pkg.cpn()).collect();
-        for rb in subslot::find_rebuilds(&installed_entries, &planned_slots, &in_plan) {
+        for rb in subslot::find_rebuilds(&target_installed, &planned_slots, &in_plan) {
             let pos = order
                 .iter()
                 .rposition(|(pkg, _)| rb.triggers.contains(pkg.cpn()))
@@ -611,11 +651,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         use_config: &use_config,
         package_use: &package_use,
         force_mask: &force_mask,
-        installed_cpvs: if empty {
-            &no_installed
-        } else {
-            &installed_cpvs
-        },
+        installed_cpvs: solver_installed_cpvs,
         autosolve_use: false,
     };
     let plan_entries = root_aware::build_plan(order.clone());
@@ -640,7 +676,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 &data,
                 &plan_entries,
                 &installed,
-                &installed_entries,
+                &target_installed,
                 &use_config,
                 &package_use,
                 &use_expand,
@@ -672,7 +708,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                     ver.map(|v| (pkg.clone(), v))
                 })
                 .collect();
-            output::print_tree(&roots, &edges, &installed_cpvs)
+            output::print_tree(&roots, &edges, &target_installed_cpvs)
         }
     }
 
@@ -692,7 +728,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             .filter(|(pkg, _)| !pkg.is_virtual())
             .map(|(pkg, ver)| (*pkg.cpn(), ver.clone()))
             .collect();
-        let dep_conflicts = conflicts::find_conflicts(&installed_entries, &proposed);
+        let dep_conflicts = conflicts::find_conflicts(&target_installed, &proposed);
         if !dep_conflicts.is_empty() {
             output::report_conflicts(&dep_conflicts);
         }

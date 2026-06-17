@@ -1,0 +1,212 @@
+//! Post-solve trim: drop plan entries only pulled for `DEPEND` already
+//! satisfied on the sysroot (`ESYSROOT`).
+//!
+//! Host-config stage (`--config-root / --root <empty>`) and prefix overlays
+//! (`--prefix`) stamp `DEPEND` onto the target merge root in the solver, which
+//! can over-pull bootstrap packages (e.g. `sys-devel/gcc-11.5.0`) that the
+//! host sysroot already provides. This pass mirrors [`super::bdepend_trim`] but
+//! checks `DEPEND` against the sysroot VDB only — within-run target merges do
+//! not satisfy build-time `DEPEND` on a foreign sysroot.
+
+use std::collections::HashSet;
+
+use portage_atom::interner::Interned;
+use portage_atom::{Cpn, Cpv, DepEntry, Version};
+use portage_atom_pubgrub::PortagePackage;
+
+use crate::bdepend_avail::Avail;
+
+use super::bdepend_trim::TrimCtx;
+use super::repo;
+
+/// Drop entries only needed for `DEPEND` edges already satisfied on the
+/// sysroot. No-op when `sysroot == target` (full offset / crossdev sysroot).
+pub fn trim_sysroot_satisfied_depend(
+    order: Vec<(PortagePackage, Version)>,
+    sysroot: Option<&camino::Utf8Path>,
+    target: &camino::Utf8Path,
+    ctx: &TrimCtx<'_>,
+) -> Vec<(PortagePackage, Version)> {
+    if order.is_empty() || sysroot == Some(target) {
+        return order;
+    }
+
+    let mut kept: Vec<(PortagePackage, Version)> = Vec::with_capacity(order.len());
+    let mut kept_indices: Vec<usize> = Vec::with_capacity(order.len());
+    let sysroot_avail = Avail::initial_sysroot_depend(sysroot);
+
+    for (i, (pkg, ver)) in order.iter().enumerate() {
+        let cand = TrimCandidate {
+            index: i,
+            pkg,
+            ver,
+            order: &order,
+            kept: &kept,
+            kept_indices: &kept_indices,
+            ctx,
+            sysroot_avail: &sysroot_avail,
+        };
+        if should_keep(&cand) {
+            kept.push((pkg.clone(), ver.clone()));
+            kept_indices.push(i);
+        }
+    }
+
+    kept
+}
+
+fn active_flags(pkg: &PortagePackage, ver: &Version, ctx: &TrimCtx<'_>) -> HashSet<String> {
+    let cpv = Cpv::new(*pkg.cpn(), ver.clone());
+    let effective =
+        portage_atom_pubgrub::apply_package_use(ctx.use_config, &cpv, pkg.slot(), ctx.package_use);
+    let mut flags: HashSet<String> = effective
+        .enabled_flags()
+        .iter()
+        .map(|f| f.as_str().to_string())
+        .collect();
+    if let Some(cache) = repo::find_cache(ctx.data, pkg, ver) {
+        for iuse in &cache.metadata.iuse {
+            if iuse.is_enabled_default()
+                && effective.get_opt(&Interned::intern(iuse.name())).is_none()
+            {
+                flags.insert(iuse.name().to_string());
+            }
+        }
+    }
+    flags
+}
+
+struct TrimCandidate<'a, 'b> {
+    index: usize,
+    pkg: &'a PortagePackage,
+    ver: &'a Version,
+    order: &'a [(PortagePackage, Version)],
+    kept: &'a [(PortagePackage, Version)],
+    kept_indices: &'a [usize],
+    ctx: &'a TrimCtx<'b>,
+    sysroot_avail: &'a Avail,
+}
+
+fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
+    let cpn = *cand.pkg.cpn();
+    let same_cpn: Vec<&Version> = cand
+        .order
+        .iter()
+        .filter(|(p, _)| p.cpn() == &cpn)
+        .map(|(_, v)| v)
+        .collect();
+    if same_cpn.len() > 1 {
+        // Parallel PYTHON_TARGETS installs (3.13 + 3.14) must all stay.
+        if cpn == Cpn::parse("dev-lang/python").expect("cpn") {
+            return true;
+        }
+        // Bootstrap gcc (11.x) after the real toolchain (16.x) is DEPEND-only noise.
+        // Run before the `@system` root_cpn guard: expanded sets list `sys-devel/gcc`
+        // once but must not pin every resolved slot/version.
+        if cpn == Cpn::parse("sys-devel/gcc").expect("cpn") {
+            return same_cpn.iter().max().is_some_and(|max| cand.ver == *max);
+        }
+    }
+
+    if cand.ctx.root_cpns.contains(&cpn) || cand.ctx.reinstall_cpns.contains(&cpn) {
+        return true;
+    }
+
+    // DEPEND providers can appear after their consumer in install order (e.g.
+    // bootstrap `gcc-11` after `gcc-16`), so every other plan entry is checked.
+    for (j, (consumer, consumer_ver)) in cand.order.iter().enumerate() {
+        if j == cand.index || consumer.is_virtual() {
+            continue;
+        }
+        let Some(cache) = repo::find_cache(cand.ctx.data, consumer, consumer_ver) else {
+            continue;
+        };
+        let active = active_flags(consumer, consumer_ver, cand.ctx);
+        let is_active = |f: &str| active.contains(f);
+        let depend = DepEntry::evaluate_use(&cache.metadata.depend, is_active);
+        if cand
+            .sysroot_avail
+            .has_unsatisfied_atom_for_cpn(&depend, cpn)
+        {
+            return true;
+        }
+
+        let runtime_avail = target_avail_for_consumer(j, cand.kept, cand.kept_indices);
+        let rdepend = DepEntry::evaluate_use(&cache.metadata.rdepend, is_active);
+        let pdepend = DepEntry::evaluate_use(&cache.metadata.pdepend, is_active);
+        let idepend = DepEntry::evaluate_use(&cache.metadata.idepend, is_active);
+        if runtime_avail.has_unsatisfied_atom_for_cpn(&rdepend, cpn)
+            || runtime_avail.has_unsatisfied_atom_for_cpn(&pdepend, cpn)
+            || runtime_avail.has_unsatisfied_atom_for_cpn(&idepend, cpn)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn target_avail_for_consumer(
+    consumer_index: usize,
+    kept: &[(PortagePackage, Version)],
+    kept_indices: &[usize],
+) -> Avail {
+    let mut out = Vec::new();
+    for (k, (pkg, ver)) in kept.iter().enumerate() {
+        if kept_indices[k] < consumer_index {
+            out.push((Cpv::new(*pkg.cpn(), ver.clone()), None));
+        }
+    }
+    Avail::from_cpvs(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use portage_atom_pubgrub::UseConfig;
+
+    use super::repo::RepoData;
+    use super::*;
+    use crate::cli::Roots;
+
+    fn empty_roots() -> Roots {
+        Roots::default()
+    }
+
+    #[test]
+    fn gcc_bootstrap_version_orders_below_current() {
+        let v11 = Version::parse("11.5.0").unwrap();
+        let v16 = Version::parse("16.1.1_p20260606").unwrap();
+        assert!(v16 > v11);
+        assert_eq!([&v11, &v16].into_iter().max(), Some(&v16));
+    }
+
+    #[test]
+    fn no_op_when_sysroot_equals_target() {
+        let pkg = PortagePackage::unslotted(Cpn::parse("app-misc/a").unwrap());
+        let ver = Version::parse("1.0").unwrap();
+        let order = vec![(pkg, ver)];
+        let data = RepoData {
+            cpns: Vec::new(),
+            versions: HashMap::new(),
+            repo_name: "gentoo".into(),
+            repo_of: HashMap::new(),
+        };
+        let use_config = UseConfig::new();
+        let root_cpns = HashSet::new();
+        let reinstall = HashSet::new();
+        let roots = empty_roots();
+        let ctx = TrimCtx {
+            roots: &roots,
+            data: &data,
+            use_config: &use_config,
+            package_use: &[],
+            root_cpns: &root_cpns,
+            reinstall_cpns: &reinstall,
+        };
+        let target = camino::Utf8Path::new("/tmp/stage");
+        let out = trim_sysroot_satisfied_depend(order.clone(), Some(target), target, &ctx);
+        assert_eq!(out.len(), order.len());
+    }
+}

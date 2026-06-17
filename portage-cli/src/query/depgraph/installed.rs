@@ -16,10 +16,25 @@ pub(super) struct VdbEntry {
     pub(super) deps: Vec<DepEntry>,
 }
 
-/// The planner's "installed" view: `VDB(base) ∪ VDB(target)`, target shadowing
-/// base on a duplicate cpv (see docs/root-model.md). Target is loaded first so
-/// it wins; when `base == target` (full-offset / host) this collapses to one
-/// VDB. `None` means the host `/var/db/pkg`.
+/// Installed view for **ROOT** / RDEPEND / merge filtering / action tags.
+///
+/// See docs/root-model.md: host-config stage uses `VDB(target)` only; prefix
+/// overlay uses `VDB(base) ∪ VDB(target)`; host uses `VDB(/)`.
+///
+/// `--emptytree` does **not** clear this view — emerge still reads the VDB for
+/// action tags and post-solve checks; only package *selection* changes (see
+/// `InstalledPolicy::Rebuild` in the solver).
+pub(super) fn load_target_installed(roots: &crate::cli::Roots) -> Vec<VdbEntry> {
+    let base = roots.base();
+    let target = roots.target();
+    if base != target {
+        return load_installed(base, target);
+    }
+    load_one(target.or(base))
+}
+
+/// Union of two VDB roots with target shadowing base (prefix / general overlay).
+/// `None` means the host `/var/db/pkg`.
 pub(super) fn load_installed(
     base: Option<&camino::Utf8Path>,
     target: Option<&camino::Utf8Path>,

@@ -26,6 +26,10 @@ pub enum InstalledPolicy {
     /// The installed version must not change — only that exact version
     /// is acceptable.
     Lock,
+    /// Present in the VDB for action tags and post-solve checks, but must be
+    /// rebuilt from the repository: never favored in version selection and
+    /// always expanded with full build-time deps (`emerge --emptytree`).
+    Rebuild,
 }
 
 /// All solver-relevant data for one package version.
@@ -211,6 +215,9 @@ pub struct PortageDependencyProvider {
     /// being built (assumed provided by BROOT). When true, BDEPEND are included
     /// but filtered by `host_installed`.
     pub(crate) with_bdeps: bool,
+    /// `--emptytree`: do not prefer installed virtual/OR branches; full deep
+    /// closure from repository candidates.
+    pub(crate) rebuild_tree: bool,
     /// Preferred version (`0`/`1`) for each `UseDecision` node, i.e. the value
     /// the caller's policy would have given the ceded flag.  `choose_version`
     /// biases toward it so a `SolverDecided` flag only flips when a constraint
@@ -509,6 +516,7 @@ impl PortageDependencyProvider {
             upgrade_pins: HashMap::new(),
             root_targets: std::collections::HashSet::new(),
             with_bdeps,
+            rebuild_tree: false,
             use_decision_prefer,
             use_decision_meta,
             solved_use_decisions: HashMap::new(),
@@ -579,6 +587,12 @@ impl PortageDependencyProvider {
         if active {
             self.ensure_host_instances();
         }
+    }
+
+    /// `--emptytree`: rebuild the full deep closure; skip installed-branch
+    /// heuristics and never favor target VDB versions during selection.
+    pub fn set_rebuild_tree(&mut self, active: bool) {
+        self.rebuild_tree = active;
     }
 
     fn ensure_host_instances(&mut self) {

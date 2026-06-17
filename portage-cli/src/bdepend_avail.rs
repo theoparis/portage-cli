@@ -34,6 +34,17 @@ impl Avail {
         Self(out)
     }
 
+    /// `DEPEND` availability against a fixed sysroot (`ESYSROOT`). `None` is
+    /// the host `/var/db/pkg`.
+    pub fn initial_sysroot_depend(sysroot: Option<&camino::Utf8Path>) -> Self {
+        Self(vdb_cpvs(sysroot))
+    }
+
+    /// Target `ROOT` visibility from an explicit set of installed CPVs.
+    pub fn from_cpvs(cpvs: Vec<(Cpv, Option<String>)>) -> Self {
+        Self(cpvs)
+    }
+
     /// Record a host merge visible to later `BDEPEND` checks.
     pub fn record_merge_bdepend(&mut self, cpv: Cpv) {
         self.0.push((cpv, None));
