@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::interner::{DefaultInterner, Interner};
+use crate::interner::{DefaultInterner, Interned, Interner};
 
 use crate::error::{Error, Result};
 
@@ -43,6 +43,11 @@ fn is_valid_use_flag_name(name: &str) -> bool {
 }
 
 impl<I: Interner> IUse<I> {
+    /// The interned USE flag name (without `+`/`-` prefix).
+    pub fn flag(&self) -> &<I as Interner>::Key {
+        &self.name
+    }
+
     /// The USE flag name.
     pub fn name(&self) -> &str {
         I::resolve(&self.name)
@@ -90,6 +95,11 @@ impl<I: Interner> IUse<I> {
 }
 
 impl IUse<DefaultInterner> {
+    /// The flag as an [`Interned`] handle (wraps the key stored at parse time).
+    pub fn interned(&self) -> Interned<DefaultInterner> {
+        Interned::from_key(self.name)
+    }
+
     /// Parse a space-separated `IUSE` line into a list of flags.
     ///
     /// # Examples

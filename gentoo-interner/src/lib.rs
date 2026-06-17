@@ -278,8 +278,13 @@ impl<I: Interner> std::fmt::Debug for Interned<I> {
 impl<I: Interner> Interned<I> {
     /// Intern a string, returning a new `Interned<I>`.
     pub fn intern(s: &str) -> Self {
+        Self::from_key(I::get_or_intern(s))
+    }
+
+    /// Wrap an existing interner key without re-interning.
+    pub fn from_key(key: <I as Interner>::Key) -> Self {
         Self {
-            key: I::get_or_intern(s),
+            key,
             _marker: PhantomData,
         }
     }
