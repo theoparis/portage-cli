@@ -349,7 +349,7 @@ impl PortageDependencyProvider {
                 // flag so `choose_version` can bias its `UseDecision` node toward
                 // the caller's configured value (greedy keep-configured).
                 for flag in cpv_use_cfg.solver_decided_flags() {
-                    if let UseFlagState::SolverDecided { prefer } = cpv_use_cfg.get(&flag) {
+                    if let UseFlagState::SolverDecided { prefer } = cpv_use_cfg.get(flag) {
                         let node = convert::use_decision_package(&cpn_str, &flag);
                         let ver = Version::new(&[u64::from(prefer)]);
                         use_decision_prefer.insert(node.clone(), ver);

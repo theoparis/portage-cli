@@ -83,12 +83,7 @@ impl PortageDependencyProvider {
                                 constraint.parent_cpn_str.replace('/', "_"),
                                 ud.flag.as_str()
                             );
-                            resolve_parent_flag(
-                                &ud.flag,
-                                &parent_virtual_name,
-                                use_config,
-                                solution,
-                            )
+                            resolve_parent_flag(ud.flag, &parent_virtual_name, use_config, solution)
                         }
                         _ => UseFlagState::Disabled,
                     };
@@ -228,7 +223,7 @@ impl PortageDependencyProvider {
                         None => true,
                         Some(use_deps) => use_deps.iter().all(|ud| {
                             let eff =
-                                self.effective_flag_new(sol_pkg, sol_ver, &ud.flag, ud.default);
+                                self.effective_flag_new(sol_pkg, sol_ver, ud.flag, ud.default);
                             match ud.kind {
                                 UseDepKind::Enabled => eff,
                                 UseDepKind::Disabled => !eff,
@@ -380,7 +375,7 @@ pub(crate) fn resolve_flag_state(
 ) -> UseFlagState {
     let flag_defined = target_iuse.iter().any(|f| f.as_str() == ud.flag.as_str());
     if flag_defined {
-        use_config.get(&ud.flag)
+        use_config.get(ud.flag)
     } else {
         match ud.default {
             Some(portage_atom::UseDefault::Enabled) => UseFlagState::Enabled,
@@ -397,7 +392,7 @@ pub(crate) fn resolve_flag_state(
 /// if already known; otherwise reads version 1 (enabled) or 0 (disabled)
 /// from the solution.
 pub(crate) fn resolve_parent_flag(
-    flag: &Interned<DefaultInterner>,
+    flag: Interned<DefaultInterner>,
     virtual_name: &str,
     use_config: &UseConfig,
     solution: &pubgrub::SelectedDependencies<PortagePackage, Version>,

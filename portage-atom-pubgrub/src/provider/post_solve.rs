@@ -113,7 +113,7 @@ impl PortageDependencyProvider {
                             .get(parent)
                             .is_some_and(|(_, e, _, _)| e.contains(&ud.flag))
                 } else {
-                    self.effective_flag_new(parent, parent_ver, &ud.flag, None)
+                    self.effective_flag_new(parent, parent_ver, ud.flag, None)
                 };
 
                 let dep_effective_enabled = if is_installed {
@@ -140,7 +140,7 @@ impl PortageDependencyProvider {
                         matches!(ud.default, Some(UseDefault::Enabled))
                     }
                 } else {
-                    self.effective_flag_new(target_pkg, target_ver, &ud.flag, ud.default)
+                    self.effective_flag_new(target_pkg, target_ver, ud.flag, ud.default)
                 };
 
                 // Account for a decision already made for this target in this pass:
@@ -339,11 +339,11 @@ impl PortageDependencyProvider {
         &self,
         pkg: &PortagePackage,
         ver: &Version,
-        flag: &Interned<DefaultInterner>,
+        flag: Interned<DefaultInterner>,
         dep_default: Option<UseDefault>,
     ) -> bool {
         let vd = self.packages.get(pkg).and_then(|d| d.versions.get(ver));
-        let in_iuse = vd.is_some_and(|v| v.iuse.contains(flag));
+        let in_iuse = vd.is_some_and(|v| v.iuse.contains(&flag));
         if !in_iuse {
             return matches!(dep_default, Some(UseDefault::Enabled));
         }
@@ -370,11 +370,11 @@ impl PortageDependencyProvider {
                 // Desired final state of the target's flag: active now, or the
                 // version's desired set will enable it on rebuild.
                 let dep_effective_enabled = active.contains(&ud.flag)
-                    || self.effective_flag_new(target_pkg, inst_ver, &ud.flag, ud.default);
+                    || self.effective_flag_new(target_pkg, inst_ver, ud.flag, ud.default);
                 // Parent flag (only used by Conditional/Equal kinds, rare in OR
                 // groups): approximate with the target's desired state.
                 let parent_flag_enabled =
-                    self.effective_flag_new(target_pkg, inst_ver, &ud.flag, ud.default);
+                    self.effective_flag_new(target_pkg, inst_ver, ud.flag, ud.default);
                 // A violated constraint means this branch is not satisfiable.
                 if eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled)
                     .is_some()

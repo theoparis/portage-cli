@@ -195,7 +195,7 @@ impl ConvertCtx<'_> {
             } => {
                 // `use_config` is the caller-resolved desired set, with IUSE
                 // defaults already folded in, so a plain lookup is authoritative.
-                let state = self.use_config.get(flag);
+                let state = self.use_config.get(*flag);
                 match state {
                     UseFlagState::Enabled => {
                         if !negate {
@@ -593,7 +593,7 @@ impl RuBuilder<'_> {
 
     /// Classify a `Flag { name, negated }` operand against the desired config.
     fn operand(&self, name: &Interned<DefaultInterner>, negated: bool) -> Operand {
-        match self.desired.get(name) {
+        match self.desired.get(*name) {
             UseFlagState::SolverDecided { prefer } => Operand::Free {
                 node: use_decision_package(self.cpn_str, name),
                 sat_ver: if negated { Self::OFF } else { Self::ON },
@@ -763,7 +763,7 @@ impl RuBuilder<'_> {
         negated: bool,
         entries: &[RequiredUse],
     ) {
-        match self.desired.get(flag) {
+        match self.desired.get(*flag) {
             UseFlagState::SolverDecided { prefer } => {
                 // Gate every consequent behind the guard: the context literal is
                 // the guard's *escape* (its inactive value) — a clause holds when
@@ -864,7 +864,7 @@ impl RuBuilder<'_> {
                 flag,
                 negated,
                 entries,
-            } => match self.desired.get(flag) {
+            } => match self.desired.get(*flag) {
                 UseFlagState::SolverDecided { prefer } => {
                     let node = use_decision_package(self.cpn_str, flag);
                     let active_ver = if *negated { Self::OFF } else { Self::ON };

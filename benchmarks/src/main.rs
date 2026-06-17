@@ -122,7 +122,7 @@ mod pubgrub_solver {
             {
                 for iu in &cache.metadata.iuse {
                     let flag = Interned::intern(iu.name());
-                    if cfg.get_opt(&flag).is_none()
+                    if cfg.get_opt(flag).is_none()
                         && let Some(def) = iu.default
                     {
                         cfg.set(

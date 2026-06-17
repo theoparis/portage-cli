@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpv, Dep};
+use portage_atom::{Cpv, Dep, UseFlagLookup};
 
 use crate::repository::IUseDefault;
 
@@ -59,16 +59,16 @@ impl UseConfig {
     }
 
     /// Get the state of a flag. Unset flags default to `Disabled`.
-    pub fn get(&self, flag: &Interned<DefaultInterner>) -> UseFlagState {
+    pub fn get(&self, flag: Interned<DefaultInterner>) -> UseFlagState {
         self.flags
-            .get(flag)
+            .get(&flag)
             .copied()
             .unwrap_or(UseFlagState::Disabled)
     }
 
     /// Return `Some(state)` if the flag is explicitly set, `None` if absent.
-    pub fn get_opt(&self, flag: &Interned<DefaultInterner>) -> Option<UseFlagState> {
-        self.flags.get(flag).copied()
+    pub fn get_opt(&self, flag: Interned<DefaultInterner>) -> Option<UseFlagState> {
+        self.flags.get(&flag).copied()
     }
 
     /// Get the state of a flag, falling back to an IUSE default if the flag
@@ -79,10 +79,10 @@ impl UseConfig {
     /// Otherwise returns `Disabled`.
     pub fn get_with_iuse_default(
         &self,
-        flag: &Interned<DefaultInterner>,
+        flag: Interned<DefaultInterner>,
         iuse_default: Option<IUseDefault>,
     ) -> UseFlagState {
-        match self.flags.get(flag) {
+        match self.flags.get(&flag) {
             Some(&state) => state,
             None => match iuse_default {
                 Some(IUseDefault::Enabled) => UseFlagState::Enabled,
@@ -135,6 +135,12 @@ impl UseConfig {
     }
 }
 
+impl UseFlagLookup for UseConfig {
+    fn use_flag_active(&self, flag: Interned<DefaultInterner>) -> bool {
+        matches!(self.get(flag), UseFlagState::Enabled)
+    }
+}
+
 /// Apply per-package USE flag overrides on top of a base [`UseConfig`].
 ///
 /// Scans `package_use` in order and applies any entries whose atom matches
@@ -174,7 +180,7 @@ mod tests {
     fn unset_defaults_to_disabled() {
         let config = UseConfig::new();
         let flag = Interned::intern("ssl");
-        assert_eq!(config.get(&flag), UseFlagState::Disabled);
+        assert_eq!(config.get(flag), UseFlagState::Disabled);
     }
 
     #[test]
@@ -182,9 +188,9 @@ mod tests {
         let mut config = UseConfig::new();
         let flag = Interned::intern("ssl");
         config.enable(flag);
-        assert_eq!(config.get(&flag), UseFlagState::Enabled);
+        assert_eq!(config.get(flag), UseFlagState::Enabled);
         config.disable(flag);
-        assert_eq!(config.get(&flag), UseFlagState::Disabled);
+        assert_eq!(config.get(flag), UseFlagState::Disabled);
     }
 
     #[test]
@@ -205,10 +211,10 @@ mod tests {
         let mut config = UseConfig::new();
         let flag = Interned::intern("ssl");
         config.set(flag, UseFlagState::Enabled);
-        assert_eq!(config.get(&flag), UseFlagState::Enabled);
+        assert_eq!(config.get(flag), UseFlagState::Enabled);
         config.set(flag, UseFlagState::SolverDecided { prefer: false });
         assert_eq!(
-            config.get(&flag),
+            config.get(flag),
             UseFlagState::SolverDecided { prefer: false }
         );
     }
@@ -218,7 +224,7 @@ mod tests {
         let config = UseConfig::new();
         let flag = Interned::intern("ssl");
         assert_eq!(
-            config.get_with_iuse_default(&flag, None),
+            config.get_with_iuse_default(flag, None),
             UseFlagState::Disabled
         );
     }
@@ -228,7 +234,7 @@ mod tests {
         let config = UseConfig::new();
         let flag = Interned::intern("ssl");
         assert_eq!(
-            config.get_with_iuse_default(&flag, Some(IUseDefault::Disabled)),
+            config.get_with_iuse_default(flag, Some(IUseDefault::Disabled)),
             UseFlagState::Disabled
         );
     }
@@ -239,7 +245,7 @@ mod tests {
         let flag = Interned::intern("ssl");
         config.disable(flag);
         assert_eq!(
-            config.get_with_iuse_default(&flag, Some(IUseDefault::Enabled)),
+            config.get_with_iuse_default(flag, Some(IUseDefault::Enabled)),
             UseFlagState::Disabled
         );
     }
