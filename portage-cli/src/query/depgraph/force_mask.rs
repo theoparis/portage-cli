@@ -90,6 +90,13 @@ impl ForceMask {
     ) -> (BTreeSet<String>, BTreeSet<String>) {
         let mut forced = BTreeSet::new();
         let mut masked = BTreeSet::new();
+        // Global `use.mask` must force a flag *off* per package, overriding the
+        // ebuild's IUSE default — `config` only excludes masked flags from the
+        // globally-enabled set, which a `+flag` IUSE default (e.g.
+        // `llvm-runtimes/compiler-rt-sanitizers`'s `+abi_x86_32`, masked on
+        // arm64 by `arch/base/use.mask`) would otherwise re-enable. Added before
+        // the per-package rules so `package.use.mask -flag` can unmask it.
+        masked.extend(self.use_mask.iter().cloned());
         accumulate(&self.pkg_force, cpv, &mut forced);
         accumulate(&self.pkg_mask, cpv, &mut masked);
         if stable {

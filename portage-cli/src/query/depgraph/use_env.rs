@@ -138,10 +138,12 @@ async fn compute_use_env(
     package_mask.extend(load_dep_list(portage_dir.join("package.mask").as_str()));
     let package_unmask = load_dep_list(portage_dir.join("package.unmask").as_str());
 
-    // Profile USE force/mask. Global use.force/use.mask are already folded into
-    // `config` by resolve_use_flags; we keep them here for the Level-C cede gate.
-    // The package-level and *.stable.* sets are applied per package (force_mask.rs);
-    // they carry raw `-flag` tokens so unforce/unmask is resolved per package.
+    // Profile USE force/mask. Global use.force is folded into `config` by
+    // resolve_use_flags (enabled set); global use.mask must additionally be
+    // applied per package (force_mask.rs) so it overrides a package's `+flag`
+    // IUSE default rather than merely being absent from the enabled set. The
+    // package-level and *.stable.* sets are also per package; they carry raw
+    // `-flag` tokens so unforce/unmask is resolved per package.
     let force_mask = ForceMask {
         use_force: stack.use_force().unwrap_or_default(),
         use_mask: stack.use_mask().unwrap_or_default(),
