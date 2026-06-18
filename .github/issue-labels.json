@@ -1,0 +1,62 @@
+[
+  {
+    "name": "crate: benchmarks",
+    "color": "b60206",
+    "description": "Issues related to the benchmarks crate"
+  },
+  {
+    "name": "crate: gentoo-core",
+    "color": "b60206",
+    "description": "Issues related to the gentoo-core crate"
+  },
+  {
+    "name": "crate: gentoo-interner",
+    "color": "b60206",
+    "description": "Issues related to the gentoo-interner crate"
+  },
+  {
+    "name": "crate: gentoo-stages",
+    "color": "b60206",
+    "description": "Issues related to the gentoo-stages crate"
+  },
+  {
+    "name": "crate: portage-atom",
+    "color": "b60206",
+    "description": "Issues related to the portage-atom crate"
+  },
+  {
+    "name": "crate: portage-atom-pubgrub",
+    "color": "b60206",
+    "description": "Issues related to the portage-atom-pubgrub crate"
+  },
+  {
+    "name": "crate: portage-atom-resolvo",
+    "color": "b60206",
+    "description": "Issues related to the portage-atom-resolvo crate"
+  },
+  {
+    "name": "crate: portage-cli",
+    "color": "b60206",
+    "description": "Issues related to the portage-cli crate (em binary)"
+  },
+  {
+    "name": "crate: portage-distfiles",
+    "color": "b60206",
+    "description": "Issues related to the portage-distfiles crate"
+  },
+  {
+    "name": "crate: portage-metadata",
+    "color": "b60206",
+    "description": "Issues related to the portage-metadata crate"
+  },
+  {
+    "name": "crate: portage-repo",
+    "color": "b60206",
+    "description": "Issues related to the portage-repo crate"
+  },
+  {
+    "name": "crate: portage-vdb",
+    "color": "b60206",
+    "description": "Issues related to the portage-vdb crate"
+  }
+]
