@@ -61,6 +61,7 @@ pub use provider::{
 };
 pub use repository::{
     IUseDefault, InMemoryRepository, PackageDeps, PackageRepository, PackageVersions,
+    rank_slots_by_version,
 };
 pub use required_use::RequiredUse;
 pub use use_config::{UseConfig, UseFlagState, apply_package_use};

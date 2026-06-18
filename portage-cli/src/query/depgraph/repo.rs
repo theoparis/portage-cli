@@ -448,24 +448,29 @@ impl PackageRepository for Adapter<'_> {
     }
 
     fn slots_for(&self, cpn: &Cpn) -> Vec<Interned<DefaultInterner>> {
-        let mut slots: Vec<Interned<DefaultInterner>> = self
-            .data
-            .versions
-            .get(cpn)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter(|(cpv, cache)| self.version_accepted(cpv, cache))
-                    .filter_map(|(_, cache)| {
-                        let s = cache.metadata.slot.slot;
-                        if s.as_str().is_empty() { None } else { Some(s) }
+        // Best (newest) version per slot, then ordered by version (ascending) so
+        // the `SlotChoice` numbering ranks slots by version, not slot name — see
+        // `portage_atom_pubgrub::rank_slots_by_version`. Mirrors portage's
+        // version-descending `:*` selection (e.g. `app-shells/bash:0` (5.3)
+        // beats the `:5.1` compat slot).
+        let mut best: HashMap<Interned<DefaultInterner>, Version> = HashMap::new();
+        if let Some(entries) = self.data.versions.get(cpn) {
+            for (cpv, cache) in entries {
+                if !self.version_accepted(cpv, cache) {
+                    continue;
+                }
+                // SLOT is mandatory in md5-cache (`CacheEntry::parse` rejects a
+                // missing/empty SLOT), so every stored version has a real slot.
+                best.entry(cache.metadata.slot.slot)
+                    .and_modify(|v| {
+                        if cpv.version > *v {
+                            *v = cpv.version.clone();
+                        }
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
-        slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        slots.dedup();
-        slots
+                    .or_insert_with(|| cpv.version.clone());
+            }
+        }
+        portage_atom_pubgrub::rank_slots_by_version(best)
     }
 
     fn versions_for(&self, cpn: &Cpn) -> Vec<(Cpv, PackageVersions)> {

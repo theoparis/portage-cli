@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Cpv};
+use portage_atom::{Cpn, Cpv, Version};
 
 use crate::required_use::RequiredUse;
 use crate::use_config::UseConfig;
@@ -68,20 +68,32 @@ pub trait PackageRepository {
     /// Return all versions for a given CPN, with their metadata.
     fn versions_for(&self, cpn: &Cpn) -> Vec<(Cpv, PackageVersions)>;
 
-    /// The slots of `cpn`'s (filtered) versions — a cheap projection used to
-    /// build the unslotted-dep slot map for the *whole* repository without
-    /// converting dependencies. Implementations whose `versions_for` is
-    /// expensive (clones dep trees, resolves USE policy) should override this
-    /// with a direct metadata read applying the same version filters.
+    /// The slots of `cpn`'s (filtered) versions, **ordered by each slot's best
+    /// (newest) available version, ascending** — so the slot holding the newest
+    /// version sorts last. The `SlotChoice` numbering gives the last slot the
+    /// highest synthetic version, so the solver's `max()` pick lands on the
+    /// newest-*version* slot. Ordering by slot *name* instead would, for compat
+    /// slots like `app-shells/bash:5.1` vs `:0`, put the lexicographically-last
+    /// (`5.1`, older code) last — picking an older version. This mirrors
+    /// portage's version-descending selection for `:*` deps. A cheap projection
+    /// used to build the unslotted-dep slot map for the *whole* repository
+    /// without converting dependencies; implementations whose `versions_for` is
+    /// expensive should override with a direct metadata read applying the same
+    /// version filters.
     fn slots_for(&self, cpn: &Cpn) -> Vec<Interned<DefaultInterner>> {
-        let mut slots: Vec<Interned<DefaultInterner>> = self
-            .versions_for(cpn)
-            .iter()
-            .filter_map(|(_, meta)| meta.slot)
-            .collect();
-        slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        slots.dedup();
-        slots
+        let mut best: HashMap<Interned<DefaultInterner>, Version> = HashMap::new();
+        for (cpv, meta) in self.versions_for(cpn) {
+            if let Some(slot) = meta.slot {
+                best.entry(slot)
+                    .and_modify(|v| {
+                        if cpv.version > *v {
+                            *v = cpv.version.clone();
+                        }
+                    })
+                    .or_insert(cpv.version);
+            }
+        }
+        rank_slots_by_version(best)
     }
 
     /// The resolved **desired** USE state for a specific version.
@@ -91,6 +103,19 @@ pub trait PackageRepository {
     /// folded into one config.  The solver consumes this; it never resolves
     /// policy itself.  See `docs/use-and-solver-boundary.md`.
     fn desired_use(&self, cpv: &Cpv) -> UseConfig;
+}
+
+/// Order slots by their best version (ascending; the newest-version slot sorts
+/// last). Shared by `slots_for` impls so the `SlotChoice` numbering ranks slots
+/// by version rather than slot name. The comparison is total without a
+/// tie-break: each cpv is unique and lives in exactly one slot, so two distinct
+/// slots can never share a best `Version`.
+pub fn rank_slots_by_version(
+    best: HashMap<Interned<DefaultInterner>, Version>,
+) -> Vec<Interned<DefaultInterner>> {
+    let mut slots: Vec<(Interned<DefaultInterner>, Version)> = best.into_iter().collect();
+    slots.sort_by(|a, b| a.1.cmp(&b.1));
+    slots.into_iter().map(|(s, _)| s).collect()
 }
 
 /// A simple in-memory repository for testing.
