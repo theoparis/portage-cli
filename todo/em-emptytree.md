@@ -4,6 +4,78 @@ Tracking emerge parity for `em -pe` / `em -e`. Updated 2026-06-17 after
 rejecting the `grok-broke-emptytree` approach (`prepend_host_build_pretend`,
 `trim_bootstrap_gcc`, skip-`host_installed` hacks).
 
+> **2026-06-18 — AGREED REDESIGN below supersedes the `broot_filter` + expand-pass
+> implementation.** Everything from "## Implementation plan" down documents the old
+> (crap) approach and the investigation that led here; keep for history but do not
+> treat it as the target. `emptytree_expand.rs` and the rust/gcc hardcodes are being
+> deleted.
+
+## AGREED REDESIGN: the simple solution (2026-06-18)
+
+### Two concerns the old code fused
+
+| concern | correct source | old code (wrong) |
+|---|---|---|
+| **plan membership** (what to list/build) | the full deep closure — every dep class, nothing pruned | `broot_filtered` deletes host-satisfied BDEPEND, then `expand_satisfied_rebuilds` re-adds it from incomplete info |
+| **action tags** (`N`/`R`/`U`) | post-solve lookup in the **destination VDB** | mixed into membership |
+
+### Why the old path is crap
+
+It **prunes the closure during the solve (`broot_filtered`) then reconstructs it
+post-solve** (`emptytree_expand.rs`, ~640 lines, with hardcoded `dev-lang/rust` /
+`sys-devel/gcc` slot trims). The reconstruction is lossy (re-added nodes carry no
+real edges → "orphan" nodes → name-matched heuristics that broke parity as 399 /
+402 / orphan). Dropping the expand pass proves the re-listing is load-bearing:
+`em -pe firefox` falls 400 → 269, losing exactly the 132 host-satisfied build tools
+(autoconf, cmake, perl tail, docbook, `rust-1.95`, …).
+
+### Why the simple solution was "ignored": historical accident
+
+`broot_filtered` was built for **offset/stage** (`--root <empty> --config-root /`)
+and `--with-bdeps`, where pruning host-provided build tools is *correct*. `--emptytree`
+was then wired in by **reusing that path** (`solve_with_bdeps = with_bdeps ||
+emptytree_native`), inheriting the prune — exactly wrong for emptytree — and the
+expand pass was bolted on to undo it. (`InstalledPolicy::Rebuild` is even dead under
+emptytree: the solver's installed set is empty, so its branch never fires.)
+
+### The redesign
+
+1. **Planner installed view = the stage1 seed only** (BROOT = host `/`), used **only**
+   to resolve bootstrap version choices and break build-order cycles — **never to
+   prune membership**.
+2. **Solve the full deep closure, no `broot_filtered`** → the solver yields all ~400
+   nodes *with real edges* directly (already demonstrated in the stage3 chroot, where
+   minimal `host_installed` gave 371 ≈ emerge 396).
+3. **Tags are a post-solve destination-VDB lookup** (`N`/`R`/`U`) — display only.
+4. Delete `emptytree_expand.rs` and every rust/gcc hardcode.
+
+### `broot_filter` becomes mode-aware (the broot redesign)
+
+| mode | BDEPEND handling |
+|---|---|
+| normal native `/` install | host satisfies — prune (don't rebuild host tools) |
+| **native `--emptytree`** | **no prune** — list full closure; seed for bootstrap/ordering only |
+| offset / stage (`--root <empty>`) | prune host-satisfied — *keep current* |
+| cross | dual-root scheduling (BDEPEND→BROOT `/`, RDEPEND→target) |
+
+The emptytree fix and the broot redesign are the same move from two angles: **stop
+routing emptytree through the pruning path.**
+
+### Open questions (being resolved during implementation)
+
+- **Cyclic deps?** Yes — the full closure reintroduces hard build cycles
+  (gcc↔binutils, glibc↔gcc) that `broot_filter` used to hide. `install_order` already
+  does Tarjan SCC + breaks cycles on **soft** edges; the plan is that under native
+  emptytree the host-satisfied BDEPEND/DEPEND edges become **soft for ordering** (the
+  host provides those tools during the rebuild, so a build tool need not be built
+  before its consumer), which breaks the cycles while keeping the nodes listed. To
+  verify empirically.
+- **Stage1 set?** For native emptytree (ROOT=/) and offset, the seed is just **BROOT
+  = host `/`** — always present, no enumeration needed. It is used for bootstrap
+  version choice + cycle-breaking + (for tags) the destination VDB. The canonical
+  minimal seed is the profile `@system` closure, but we only need it if we ever build
+  into an empty BROOT, which we don't (BROOT is always the host).
+
 ## What emerge does
 
 User-facing semantics (`emerge -h`):
@@ -257,6 +329,97 @@ remaining gap is **toolchain upgrade scheduling** (emerge upgrades host
 **Likely fix direction** (not implemented): smarter toolchain slot collapse
 and host-upgrade selection under `rebuild_tree` (without reverting
 `broot_filter` during solve or bringing back `prepend_host_build_pretend`).
+
+### The `dev-lang/rust` hardcodes vs the principled rule (2026-06-18)
+
+`emptytree_expand.rs` matches `dev-lang/rust` / `dev-lang/rust-bin` by name in
+three places: `prefer_or_branch` (pick source rust for a satisfied `||`),
+`trim_rust_bin_when_source_present`, `trim_superseded_rust_sources`. They exist to
+reproduce emerge's host output. An attempt to replace them with the principled
+**"prefer the `||` branch already in the plan"** rule (emerge `dep_zapdeps`
+"already in graph") was made and reverted — it does not reach emerge **parity**
+(it produces a *smaller* plan, which — see the stage3 finding below — is actually
+*more correct*):
+
+- Re-list path only (in-graph preference, both trims removed): `firefox -pe`
+  **399 vs 400** — drops source `dev-lang/rust-1.95.0` (LLVM slot 22).
+- Re-list + build path both in-graph: **402** — fixpoint cascade. Once any
+  `rust-bin` slot enters the plan it is itself "in-plan", so the build `||`
+  then prefers `rust-bin` and fans out every installed slot (1.94.0/1.94.1/1.95.0).
+
+### Stage3 chroot — keyword confound, then the real answer (2026-06-18)
+
+A first **stage3 chroot** (`emerge -pe firefox`, stable) looked like emerge was
+over-pulling: firefox-140.11.0, **382 pkgs, slot-21 only**, no slot-22 at all. That
+was a **keyword artifact** — `llvm-22`/`clang-22`/`rust-1.95` are `~arm64`, so a
+*stable* stage3 cannot see them.
+
+Re-running the same chroot with `ACCEPT_KEYWORDS="~arm64"` (the host's actual
+config) **reverses it**: firefox-151.0.4, **396 pkgs**, and the closure pulls **both
+slots** — `llvm-21`+`llvm-22`, `clang-21`+`clang-22`, and `dev-lang/rust-bin-1.95.0`
+as **`NS`** (new slot, dependency-driven — *not* an installed re-list) with
+`LLVM_SLOT="22"`. Essentially the host's 400.
+
+**So emerge is NOT over-pulling. The slot-22 chain is a real dependency on `~arm64`.**
+A clean install genuinely gets two rust slots: firefox (`RUST_NEEDS_LLVM`,
+`LLVM_COMPAT` → slot 21) binds slot-21 rust, while the slotless
+`|| ( >=dev-lang/rust-bin-MIN:* >=dev-lang/rust-MIN:* )` consumers (no max) resolve
+to the **newest** rust = `rust-1.95` (slot 22), which drags in `llvm-22`. emerge does
+**not** consolidate the slotless dep onto the in-graph slot-21 rust; it takes newest.
+
+Corrections this forces:
+- The earlier "divergence is correct / drop the orphan" plan is **wrong** — it would
+  drop `rust-1.95`+`llvm-22`, which a clean `~arm64` install actually installs. The
+  "399 in-graph result" was a **genuine regression**, not an improvement.
+- The "orphan, zero incoming edges" in em's JSON graph is a **graph-completeness
+  gap**: the expand pass adds `rust-1.95` without drawing the slotless-dep edge that
+  justifies it. The edge logically exists.
+- **Keep emerge parity (slot-22 included).** The `dev-lang/rust` hardcodes reproduce
+  the correct clean-install behaviour; do **not** remove them by dropping slot-22.
+  Any generalization must *preserve* slot-22 (slotless `||` → newest rust, prefer
+  source when installed), which is exactly what the current trims approximate.
+
+Re-validation assets: stable plan `/tmp/stage3_ff_clean_plan.txt`; `~arm64` plan
+`/tmp/stage3_ff_arm64_plan.txt`; chroot at `/var/tmp/ff-stage3` (binds unmounted,
+`ACCEPT_KEYWORDS="~arm64"` left in its make.conf).
+
+## Reconsider the whole `emptytree_expand` approach (2026-06-18)
+
+Running **em inside a clean stage3 `~arm64` chroot** (binary copied in, `sudo chroot`,
+run as root — the correct way to test, not host-`em --root`) changes how we should
+think about `--emptytree`:
+
+- em's **solver alone** reproduces emerge's slot picture there — firefox-151, both
+  LLVM slots, `rust-bin-1.95.0` pulled as `NS` via the slotless `>=rust:*` → newest.
+  **No expand pass, no `dev-lang/rust` hardcodes were needed** (rust-1.95 is not
+  installed in the chroot, so nothing re-lists it; the solver pulls it directly).
+- So the current host design — *solve with `broot_filter`, then post-solve re-list
+  installed packages and trim with hardcoded rust/gcc rules* — is the fragile part.
+  The expand pass + trims exist only to approximate emerge on the **host**, where
+  installed source rust/llvm get re-listed under emptytree. They are not the solver.
+
+**Direction to evaluate:** implement native `--emptytree` as *"solve the target's
+real dependency closure against an empty installed set, then mark every node a
+rebuild"* — i.e. let the solver produce the closure (as it already does correctly in
+the chroot) and derive `R`/`U`/`N` tags from the real VDB afterward, instead of
+solving normally and then re-listing installed packages via `expand_satisfied_rebuilds`.
+If that holds, `emptytree_expand.rs` and the rust/gcc hardcodes can be deleted.
+
+Validation harness (reusable): clean stage3 chroot at `/var/tmp/ff-stage3`
+(`ACCEPT_KEYWORDS="~arm64"`, base `arm64/23.0` profile, em copied to
+`/usr/local/bin/em`). Saved comparison: `/var/tmp/em-vs-emerge-firefox-chroot/`
+(`emerge_firefox_pe.txt`, `em_firefox_e.txt`, `emerge_only.txt`, `em_only.txt`).
+
+### em-vs-emerge gap in the chroot (to analyze later)
+
+Identical on-disk config, both `rc=0`: **emerge 396, em 371**. `em_only` is **empty**
+(em is a strict subset). `emerge_only` (25) is **not toolchain** — an
+`acct-group/*`+udev cluster: 15 `acct-group/*`, `virtual/udev`, `virtual/libudev`,
+`sys-apps/systemd-utils`, `sys-fs/udev-init-scripts`, `sys-apps/kmod`, plus
+`media-video/ffmpeg-8.1.1`, `media-libs/libass`, `app-text/scdoc`,
+`dev-util/patchelf`, `app-text/docbook-xml-dtd-4.5-r2`. Looks like em misses a
+udev → systemd-utils → `acct-group/*` edge (a dependency-following gap, separate
+from emptytree). See also [[autounmask-convergence]].
 
 ## Open / deferred
 

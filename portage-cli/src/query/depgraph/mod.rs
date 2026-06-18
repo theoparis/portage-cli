@@ -2,7 +2,6 @@ mod autounmask;
 mod bdepend_trim;
 mod depend_trim;
 mod effective_use;
-mod emptytree_expand;
 mod root_aware;
 
 pub use portage_atom_pubgrub::MergeRoot;
@@ -510,22 +509,12 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         );
     }
 
-    if emptytree_native {
-        let expand_ctx = emptytree_expand::ExpandCtx {
-            roots,
-            data: &data,
-            arch,
-            accept_keywords: &accept_keywords,
-            package_mask: &package_mask,
-            package_unmask: &package_unmask,
-            accept_license: &accept_license,
-            use_config: &use_config,
-            package_use: &package_use,
-        };
-        order = emptytree_expand::expand_satisfied_rebuilds(order, &expand_ctx);
-    } else {
+    if !emptytree_native {
         order = bdepend_trim::trim_within_run_bdepend(order, with_bdeps, &trim_ctx);
     }
+    // Native --emptytree lists the full deep closure straight from the solve
+    // (the provider returns un-pruned deps under `rebuild_tree`); no post-solve
+    // re-list. See todo/em-emptytree.md "AGREED REDESIGN".
 
     let edges: Vec<_> = provider
         .dependency_graph(&solution)
@@ -724,10 +713,14 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     //    does not model;
     //  - REQUIRED_USE, evaluated per-package against its effective USE.
     {
-        let proposed: HashMap<Cpn, Version> = order
+        let proposed: Vec<conflicts::ProposedPkg> = order
             .iter()
             .filter(|(pkg, _)| !pkg.is_virtual())
-            .map(|(pkg, ver)| (*pkg.cpn(), ver.clone()))
+            .map(|(pkg, ver)| conflicts::ProposedPkg {
+                cpn: *pkg.cpn(),
+                slot: pkg.slot(),
+                version: ver.clone(),
+            })
             .collect();
         let dep_conflicts = conflicts::find_conflicts(&target_installed, &proposed);
         if !dep_conflicts.is_empty() {

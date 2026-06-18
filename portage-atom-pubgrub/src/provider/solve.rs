@@ -252,6 +252,15 @@ impl DependencyProvider for PortageDependencyProvider {
             return Ok(Dependencies::Available(runtime));
         }
 
+        // Native `--emptytree` (`rebuild_tree`): list the **full deep closure** with
+        // real edges. Do NOT broot-prune host-satisfied build deps — under emptytree
+        // the host (BROOT) seed is for bootstrap version choice, ordering/cycle-break
+        // and action tags, never for membership. `emptytree_native` is `!cross.active`,
+        // so this precedes the cross paths. See todo/em-emptytree.md "AGREED REDESIGN".
+        if self.rebuild_tree {
+            return Ok(vd.merged.clone());
+        }
+
         // A package being *built* (not at its installed version):
         if self.cross_active && package.merge_root() == MergeRoot::Target {
             // Cross `-p` never expands BDEPEND onto ROOT (emerge lists the same
