@@ -135,19 +135,34 @@ impl AcceptLicense {
     }
 
     /// Whether a `LICENSE` expression is fully covered by this accept list.
-    pub fn accepts_expr(&self, expr: &LicenseExpr) -> bool {
+    ///
+    /// `enabled` reports whether a USE flag is active for the package: a
+    /// `flag? ( … )` / `!flag? ( … )` branch only contributes licenses when it
+    /// is active, so a non-FREE license behind a disabled flag (e.g. ffmpeg's
+    /// `fdk? ( all-rights-reserved )`) imposes no requirement. Pass a predicate
+    /// that always returns `false` only when the expression has no conditionals.
+    pub fn accepts_expr(&self, expr: &LicenseExpr, enabled: &dyn Fn(&str) -> bool) -> bool {
         match expr {
             LicenseExpr::License(name) => self.accepts(name),
-            LicenseExpr::AnyOf(children) => children.iter().any(|c| self.accepts_expr(c)),
-            LicenseExpr::All(children) => children.iter().all(|c| self.accepts_expr(c)),
-            LicenseExpr::UseConditional { entries, .. } => {
-                entries.iter().all(|e| self.accepts_expr(e))
+            LicenseExpr::AnyOf(children) => children.iter().any(|c| self.accepts_expr(c, enabled)),
+            LicenseExpr::All(children) => children.iter().all(|c| self.accepts_expr(c, enabled)),
+            LicenseExpr::UseConditional {
+                flag,
+                negated,
+                entries,
+            } => {
+                // Inactive branch imposes no license requirement.
+                if enabled(flag) == *negated {
+                    return true;
+                }
+                entries.iter().all(|e| self.accepts_expr(e, enabled))
             }
         }
     }
 
     /// Collect license names from `expr` not covered by this accept list.
-    pub fn licenses_needed(&self, expr: &LicenseExpr) -> Vec<String> {
+    /// Conditional branches are evaluated against `enabled` (see `accepts_expr`).
+    pub fn licenses_needed(&self, expr: &LicenseExpr, enabled: &dyn Fn(&str) -> bool) -> Vec<String> {
         if self.allow_all && self.denied.is_empty() {
             return Vec::new();
         }
@@ -160,23 +175,33 @@ impl AcceptLicense {
                 }
             }
             LicenseExpr::AnyOf(children) => {
-                if children.iter().any(|c| self.accepts_expr(c)) {
+                if children.iter().any(|c| self.accepts_expr(c, enabled)) {
                     Vec::new()
                 } else {
                     children
                         .first()
-                        .map(|c| self.licenses_needed(c))
+                        .map(|c| self.licenses_needed(c, enabled))
                         .unwrap_or_default()
                 }
             }
             LicenseExpr::All(children) => children
                 .iter()
-                .flat_map(|c| self.licenses_needed(c))
+                .flat_map(|c| self.licenses_needed(c, enabled))
                 .collect(),
-            LicenseExpr::UseConditional { entries, .. } => entries
-                .iter()
-                .flat_map(|e| self.licenses_needed(e))
-                .collect(),
+            LicenseExpr::UseConditional {
+                flag,
+                negated,
+                entries,
+            } => {
+                // Inactive branch contributes nothing to unmask.
+                if enabled(flag) == *negated {
+                    return Vec::new();
+                }
+                entries
+                    .iter()
+                    .flat_map(|e| self.licenses_needed(e, enabled))
+                    .collect()
+            }
         }
     }
 }
@@ -217,5 +242,39 @@ OSI Apache-2.0
         let acc = AcceptLicense::from_tokens(&["*".into(), "-MIT".into()], &reg);
         assert!(acc.accepts("GPL-2"));
         assert!(!acc.accepts("MIT"));
+    }
+
+    /// Regression: a conditional `LICENSE` must be evaluated with the package's
+    /// effective USE. ffmpeg's `gpl? ( GPL-2+ fdk? ( all-rights-reserved ) )
+    /// !gpl? ( LGPL-2.1+ )` is FREE with `gpl` on / `fdk` off, even though the
+    /// disabled `fdk` branch names a non-FREE license. Walking every branch
+    /// (USE-blind) wrongly rejected it under ACCEPT_LICENSE="@FREE".
+    #[test]
+    fn conditional_license_respects_use() {
+        let reg = LicenseGroupRegistry::default();
+        // Only the free licenses are accepted (stand-in for @FREE).
+        let acc = AcceptLicense::from_tokens(&["GPL-2+".into(), "LGPL-2.1+".into()], &reg);
+        let expr = LicenseExpr::parse(
+            "gpl? ( GPL-2+ fdk? ( all-rights-reserved ) ) !gpl? ( LGPL-2.1+ )",
+        )
+        .unwrap();
+
+        // gpl on, fdk off → active license is GPL-2+ only → accepted.
+        let on_off = |f: &str| f == "gpl";
+        assert!(acc.accepts_expr(&expr, &on_off));
+        assert!(acc.licenses_needed(&expr, &on_off).is_empty());
+
+        // gpl on, fdk on → the all-rights-reserved branch is active → rejected.
+        let on_on = |f: &str| matches!(f, "gpl" | "fdk");
+        assert!(!acc.accepts_expr(&expr, &on_on));
+        assert_eq!(
+            acc.licenses_needed(&expr, &on_on),
+            vec!["all-rights-reserved".to_string()]
+        );
+
+        // gpl off → only the !gpl branch (LGPL-2.1+) is active → accepted.
+        let off = |_: &str| false;
+        assert!(acc.accepts_expr(&expr, &off));
+        assert!(acc.licenses_needed(&expr, &off).is_empty());
     }
 }

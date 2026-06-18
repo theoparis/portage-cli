@@ -1,0 +1,90 @@
+# License filter ignores USE conditionals → silent dep drop
+
+STATUS: FIXED 2026-06-18 (both bugs). Clean-slate `em -pe firefox` went 357 → 382
+(emerge 383); the only remaining gap is the pre-existing slotless-rust
+`|| ( rust-bin rust )` preference (emerge picks `rust-bin-1.94.1`, em picks
+source `rust`) — unrelated to this bug.
+
+
+Discovered 2026-06-18 via the clean-slate stage3 chroot test (crossdev-stages
+aarch64 sandbox, `ACCEPT_LICENSE="@FREE"`, the Gentoo default for that profile).
+
+## Symptom
+
+`em -pe www-client/firefox` in the clean sandbox produced **357** packages vs
+emerge's **383** — em a strict subset, missing **26** packages, all hanging off
+one cut edge:
+
+```
+firefox → media-video/ffmpeg → virtual/libudev → virtual/udev → systemd-utils
+                              ↘ media-libs/libass        → acct-group/*, kmod, udev-init-scripts
+```
+
+`em -p media-video/ffmpeg` (and `=media-video/ffmpeg-8.1.1`) fails with raw
+`NoVersions` — em sees **zero** versions of ffmpeg, although the md5-cache has
+them and ffmpeg-8.1.1 is stable arm64.
+
+## Root cause
+
+NOT the `@GROUP` set expansion — that is present and correct. `AcceptLicense::
+from_tokens` expands `@FREE` via the group registry into `allowed`, and
+`accepts(name)` checks it; `cairo` (LGPL-2.1) passes `@FREE` in the sandbox,
+proving expansion works. The bug is one level up, in the LICENSE-*expression*
+evaluator against USE. Both `AcceptLicense` methods in
+`portage-repo/src/repo/license_groups.rs` share it:
+
+```rust
+// licenses_needed:
+LicenseExpr::UseConditional { entries, .. } =>
+    entries.iter().flat_map(|e| self.licenses_needed(e)).collect(),
+// accepts_expr:
+LicenseExpr::UseConditional { entries, .. } =>
+    entries.iter().all(|e| self.accepts_expr(e)),
+```
+
+Both drop the USE flag (`..`) and walk **every** conditional branch as if
+always-active. ffmpeg's LICENSE:
+
+```
+gpl? ( GPL-2+ ... fdk? ( all-rights-reserved ) ) !gpl? ( LGPL-2.1+ ... )
+```
+
+With default USE (`gpl` on, `fdk` off) the active license is `GPL-2+` (in
+`@FREE`). But em collects `all-rights-reserved` (behind disabled `fdk`) plus the
+`!gpl?` branch, so under `@FREE` every ffmpeg version is license-filtered →
+`data.versions` has no ffmpeg → `NoVersions`.
+
+Permissive `ACCEPT_LICENSE="* -@EULA"` (host default) hides the bug because
+everything is accepted regardless. Reproduced on the host with:
+
+```
+ACCEPT_LICENSE="@FREE" em -p =media-video/ffmpeg-8.1.1   # → NoVersions
+```
+
+## Two bugs, really — both fixed
+
+1. **License eval was USE-blind.** FIXED. `AcceptLicense::{accepts_expr,
+   licenses_needed}` (`portage-repo/.../license_groups.rs`) now take an
+   `enabled: &dyn Fn(&str) -> bool` predicate and skip inactive
+   `flag?`/`!flag?` branches. The version filter (`Adapter::license_ok`),
+   `target_package`, and `find_autounmask_candidates`
+   (`query/depgraph/repo.rs`) compute the version's effective USE via the new
+   `effective_use_config`/`license_ok_for` helpers — but only when the LICENSE
+   actually has conditionals (`license_has_conditional` hot-path shortcut).
+   Regression test: `license_groups::tests::conditional_license_respects_use`.
+
+2. **Silent drop of an unsatisfiable unconditional dep.** FIXED. The autounmask
+   candidate report (the keyword/mask/license "necessary changes" block) is now
+   shown **unconditionally** when a required, no-`||`-alternative dep was dropped
+   for lack of an installable version — previously gated behind the opt-in
+   `--autounmask` flag (default off). `--autounmask-write` still gates *writing*.
+   `DepgraphOutcome::exit_code` is also non-zero when such candidates exist
+   (`query/depgraph/mod.rs`), so an incomplete plan never exits 0 silently.
+   The vestigial `DepgraphOpts::autounmask` field was removed.
+
+## Note on the test harness
+
+The 26-pkg gap is NOT an emptytree bug — it reproduces in normal mode too
+(`em -p firefox` also drops ffmpeg). The emptytree/​slot-conflict rewrite
+(commit 2999e46) is unaffected; this is an independent, pre-existing bug the
+clean-slate test surfaced.

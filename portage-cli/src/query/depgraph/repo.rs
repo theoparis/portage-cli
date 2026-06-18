@@ -85,14 +85,107 @@ fn keyword_needed(keywords: &[Keyword], arch: &str, accept_keywords: &[String]) 
     })
 }
 
-/// Returns true if the license expression is fully covered by `accept`.
-pub(super) fn license_accepted(expr: &LicenseExpr, accept: &portage_repo::AcceptLicense) -> bool {
-    accept.accepts_expr(expr)
+/// Returns true if the license expression is fully covered by `accept`,
+/// evaluating `use? ( … )` branches against `enabled` (a package's effective
+/// USE). For an expression with no conditionals, `enabled` is never consulted.
+pub(super) fn license_accepted(
+    expr: &LicenseExpr,
+    accept: &portage_repo::AcceptLicense,
+    enabled: &dyn Fn(&str) -> bool,
+) -> bool {
+    accept.accepts_expr(expr, enabled)
 }
 
-/// Collects the license names that are NOT covered by `accept`.
-fn licenses_needed(expr: &LicenseExpr, accept: &portage_repo::AcceptLicense) -> Vec<String> {
-    accept.licenses_needed(expr)
+/// Collects the license names NOT covered by `accept`, evaluating conditionals
+/// against `enabled` (see [`license_accepted`]).
+fn licenses_needed(
+    expr: &LicenseExpr,
+    accept: &portage_repo::AcceptLicense,
+    enabled: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    accept.licenses_needed(expr, enabled)
+}
+
+/// True if a `LICENSE` expression contains any `use? ( … )` conditional. When
+/// false, license acceptance is USE-independent and the effective USE need not
+/// be computed (a hot-path shortcut for the common non-conditional case).
+fn license_has_conditional(expr: &LicenseExpr) -> bool {
+    match expr {
+        LicenseExpr::License(_) => false,
+        LicenseExpr::AnyOf(c) | LicenseExpr::All(c) => c.iter().any(license_has_conditional),
+        LicenseExpr::UseConditional { .. } => true,
+    }
+}
+
+/// Build the effective USE config for `cpv` from the resolved global USE,
+/// per-version `package.use`, the ebuild's IUSE defaults and the profile
+/// force/mask sets — the same layering `Adapter::desired_use` does, minus the
+/// Level-C cede. Used to evaluate USE-conditional `LICENSE` expressions both in
+/// the version filter and the autounmask reasons (which have no `Adapter`).
+#[allow(clippy::too_many_arguments)]
+fn effective_use_config(
+    use_config: &portage_atom_pubgrub::UseConfig,
+    package_use: &[(Dep, Vec<String>)],
+    force_mask: &super::force_mask::ForceMask,
+    arch: &str,
+    accept_keywords: &[String],
+    cpv: &Cpv,
+    meta: &portage_metadata::EbuildMetadata,
+    slot: Option<Interned<DefaultInterner>>,
+) -> portage_atom_pubgrub::UseConfig {
+    use portage_atom_pubgrub::apply_package_use;
+
+    let mut cfg = apply_package_use(use_config, cpv, slot, package_use).into_owned();
+    apply_iuse_defaults(&mut cfg, meta);
+    if !force_mask.is_empty() {
+        let stable = super::force_mask::is_stable(&meta.keywords, arch, accept_keywords);
+        force_mask.apply(&mut cfg, cpv, stable);
+    }
+    cfg
+}
+
+/// A USE-flag predicate (`enabled`) over an effective `UseConfig`.
+fn use_predicate(cfg: &portage_atom_pubgrub::UseConfig) -> impl Fn(&str) -> bool + '_ {
+    use portage_atom_pubgrub::UseFlagState;
+    move |flag: &str| matches!(cfg.get(Interned::intern(flag)), UseFlagState::Enabled)
+}
+
+/// Whether `meta`'s `LICENSE` is accepted for version `cpv`, evaluating any
+/// `use? ( … )` branch against the version's effective USE. Effective USE is
+/// computed only when the expression has conditionals.
+#[allow(clippy::too_many_arguments)]
+fn license_ok_for(
+    cpv: &Cpv,
+    meta: &portage_metadata::EbuildMetadata,
+    accept_license: &portage_repo::AcceptLicense,
+    use_config: &portage_atom_pubgrub::UseConfig,
+    package_use: &[(Dep, Vec<String>)],
+    force_mask: &super::force_mask::ForceMask,
+    arch: &str,
+    accept_keywords: &[String],
+) -> bool {
+    let Some(lic) = &meta.license else {
+        return true;
+    };
+    if !license_has_conditional(lic) {
+        return license_accepted(lic, accept_license, &|_| false);
+    }
+    let slot = if meta.slot.slot.as_str().is_empty() {
+        None
+    } else {
+        Some(meta.slot.slot)
+    };
+    let cfg = effective_use_config(
+        use_config,
+        package_use,
+        force_mask,
+        arch,
+        accept_keywords,
+        cpv,
+        meta,
+        slot,
+    );
+    license_accepted(lic, accept_license, &use_predicate(&cfg))
 }
 
 /// Check whether `mask_dep` matches the given `cpv` (version + CPN, no slot check).
@@ -227,10 +320,23 @@ impl Adapter<'_> {
         let meta = &cache.metadata;
         keyword_accepts(&meta.keywords, self.arch.as_str(), self.accept_keywords)
             && !is_masked(self.package_mask, self.package_unmask, cpv, &meta.slot)
-            && meta
-                .license
-                .as_ref()
-                .is_none_or(|lic| license_accepted(lic, self.accept_license))
+            && self.license_ok(cpv, meta)
+    }
+
+    /// License acceptance for a version, evaluating any `use? ( … )` LICENSE
+    /// branch against the version's effective USE (computed only when the
+    /// expression actually has conditionals).
+    fn license_ok(&self, cpv: &Cpv, meta: &portage_metadata::EbuildMetadata) -> bool {
+        license_ok_for(
+            cpv,
+            meta,
+            self.accept_license,
+            self.use_config,
+            self.package_use,
+            self.force_mask,
+            self.arch.as_str(),
+            self.accept_keywords,
+        )
     }
 
     /// Level-C cede: when `--autosolve-use` is on and the package's REQUIRED_USE
@@ -540,6 +646,7 @@ pub(super) async fn load_repos(
 }
 
 /// Map a dep atom to a `PortagePackage` for the solver.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn target_package(
     data: &RepoData,
     dep: &Dep,
@@ -548,6 +655,9 @@ pub(super) fn target_package(
     package_mask: &[Dep],
     package_unmask: &[Dep],
     accept_license: &portage_repo::AcceptLicense,
+    use_config: &portage_atom_pubgrub::UseConfig,
+    package_use: &[(Dep, Vec<String>)],
+    force_mask: &super::force_mask::ForceMask,
 ) -> portage_atom_pubgrub::PortagePackage {
     let entries = match data.versions.get(&dep.cpn) {
         Some(e) => e,
@@ -559,11 +669,16 @@ pub(super) fn target_package(
         .filter(|(cpv, cache)| {
             keyword_accepts(&cache.metadata.keywords, arch.as_str(), accept_keywords)
                 && !is_masked(package_mask, package_unmask, cpv, &cache.metadata.slot)
-                && cache
-                    .metadata
-                    .license
-                    .as_ref()
-                    .is_none_or(|l| license_accepted(l, accept_license))
+                && license_ok_for(
+                    cpv,
+                    &cache.metadata,
+                    accept_license,
+                    use_config,
+                    package_use,
+                    force_mask,
+                    arch.as_str(),
+                    accept_keywords,
+                )
         })
         .collect();
 
@@ -663,6 +778,7 @@ pub(super) fn find_cache<'a>(
 
 /// For each dropped dep, find versions in the unfiltered repo that match its
 /// version range and determine why they were excluded.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn find_autounmask_candidates(
     data: &RepoData,
     dropped: &[DroppedDep],
@@ -671,6 +787,9 @@ pub(super) fn find_autounmask_candidates(
     package_mask: &[Dep],
     package_unmask: &[Dep],
     accept_license: &portage_repo::AcceptLicense,
+    use_config: &portage_atom_pubgrub::UseConfig,
+    package_use: &[(Dep, Vec<String>)],
+    force_mask: &super::force_mask::ForceMask,
 ) -> Vec<AutounmaskCandidate> {
     let mut candidates = Vec::new();
 
@@ -708,7 +827,23 @@ pub(super) fn find_autounmask_candidates(
                 reasons.push(FilterReason::Masked);
             }
             if let Some(lic) = &meta.license {
-                let needed = licenses_needed(lic, accept_license);
+                // Evaluate `use? ( … )` branches against the version's effective
+                // USE so a non-FREE license behind a disabled flag is not flagged.
+                let needed = if license_has_conditional(lic) {
+                    let cfg = effective_use_config(
+                        use_config,
+                        package_use,
+                        force_mask,
+                        arch,
+                        accept_keywords,
+                        cpv,
+                        meta,
+                        slot,
+                    );
+                    licenses_needed(lic, accept_license, &use_predicate(&cfg))
+                } else {
+                    licenses_needed(lic, accept_license, &|_| false)
+                };
                 if !needed.is_empty() {
                     reasons.push(FilterReason::License(needed));
                 }

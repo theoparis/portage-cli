@@ -77,7 +77,6 @@ pub struct DepgraphOpts<'a> {
     pub format: DepgraphFormat,
     pub verbose: u8,
     pub empty: bool,
-    pub autounmask: bool,
     pub autounmask_write: bool,
     pub autosolve_use: bool,
     /// Load every repo from `repos.conf` (overlays sourced as needed). Off
@@ -101,7 +100,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         format,
         verbose,
         empty,
-        autounmask,
         autounmask_write,
         autosolve_use,
         multi_repo,
@@ -214,6 +212,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             &package_mask,
             &package_unmask,
             &accept_license,
+            &use_config,
+            &package_use,
+            &force_mask,
         );
         let vs = match &dep.version {
             Some(v) => {
@@ -412,6 +413,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         &package_mask,
         &package_unmask,
         &accept_license,
+        &use_config,
+        &package_use,
+        &force_mask,
     );
 
     let root_pkgs: Vec<PortagePackage> = root_deps.iter().map(|(p, _)| p.clone()).collect();
@@ -599,9 +603,14 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         .filter(|c| !solution_cpns.contains(&c.cpv.cpn) && new_needed_cpns.contains(&c.cpv.cpn))
         .collect();
 
-    // Report in order of severity: mask → keywords → USE → license.
-    // --autounmask: show; --autounmask-write: show + write.
-    if (autounmask || autounmask_write) && !autounmask_candidates.is_empty() {
+    // A required dependency was filtered out of *every* version (keyword / mask
+    // / license) and had no `||` alternative, so the solver dropped it and the
+    // printed plan is silently incomplete. Surface these unconditionally — like
+    // emerge, an unsatisfiable requirement must never be hidden, regardless of
+    // `--autounmask`. The flag now only governs *writing* the fix:
+    // `--autounmask-write` persists the keyword/mask/license changes.
+    // Report in order of severity: mask → keywords → license.
+    if !autounmask_candidates.is_empty() {
         autounmask::report(&autounmask_candidates);
         if autounmask_write {
             autounmask::write(&autounmask_candidates, &portage_dir)?;
@@ -847,7 +856,15 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     }
 
     Ok(DepgraphOutcome {
-        exit_code: if use_change_entries.is_empty() { 0 } else { 1 },
+        // Non-zero when the displayed plan needs config changes to be realised:
+        // either USE changes (co-solve fixpoint) or unmask/keyword/license
+        // changes for a required dep the solver had to drop. Either way the plan
+        // as printed is not directly installable — emerge exits non-zero too.
+        exit_code: if use_change_entries.is_empty() && autounmask_candidates.is_empty() {
+            0
+        } else {
+            1
+        },
         plan,
         build_blockers,
     })
