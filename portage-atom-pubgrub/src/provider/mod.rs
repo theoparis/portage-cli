@@ -218,6 +218,13 @@ pub struct PortageDependencyProvider {
     /// `--emptytree`: do not prefer installed virtual/OR branches; full deep
     /// closure from repository candidates.
     pub(crate) rebuild_tree: bool,
+    /// `--deep` (and native `--emptytree`): for a `:*` any-slot dep
+    /// (`SlotChoice`), bump to the newest slot instead of keeping the installed
+    /// slot that already satisfies `>=MIN` — matching `emerge -uD`/`-e`. `max()`
+    /// over a `SlotChoice` picks the newest-*version* slot (slots are ranked by
+    /// version, see `rank_slots_by_version`). Off by default so plain `-p`/`-up`
+    /// stays minimal.
+    pub(crate) prefer_newest_slot: bool,
     /// Preferred version (`0`/`1`) for each `UseDecision` node, i.e. the value
     /// the caller's policy would have given the ceded flag.  `choose_version`
     /// biases toward it so a `SolverDecided` flag only flips when a constraint
@@ -517,6 +524,7 @@ impl PortageDependencyProvider {
             root_targets: std::collections::HashSet::new(),
             with_bdeps,
             rebuild_tree: false,
+            prefer_newest_slot: false,
             use_decision_prefer,
             use_decision_meta,
             solved_use_decisions: HashMap::new(),
@@ -593,6 +601,12 @@ impl PortageDependencyProvider {
     /// heuristics and never favor target VDB versions during selection.
     pub fn set_rebuild_tree(&mut self, active: bool) {
         self.rebuild_tree = active;
+    }
+
+    /// `--deep` / native `--emptytree`: bump `:*` any-slot deps (`SlotChoice`)
+    /// to the newest slot rather than keeping a satisfying installed slot.
+    pub fn set_prefer_newest_slot(&mut self, active: bool) {
+        self.prefer_newest_slot = active;
     }
 
     fn ensure_host_instances(&mut self) {

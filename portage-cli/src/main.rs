@@ -184,6 +184,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         roots: &roots,
         onlydeps: cli.onlydeps,
         with_bdeps: cli.with_bdeps,
+        deep: cli.deep,
     })
     .await?;
 
@@ -739,6 +740,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 roots: &roots,
                 onlydeps: globals.onlydeps,
                 with_bdeps: globals.with_bdeps,
+                deep: globals.deep,
             })
             .await?;
             if outcome.exit_code != 0 {

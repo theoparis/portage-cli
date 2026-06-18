@@ -90,6 +90,10 @@ pub struct DepgraphOpts<'a> {
     /// Include BDEPEND in resolution (emerge's `--with-bdeps`). Default false
     /// (exclude BDEPEND) to match emerge's default.
     pub with_bdeps: bool,
+    /// `--deep`: re-examine transitive deps for updates. Used here to bump a
+    /// `:*` any-slot dep to the newest slot (like `emerge -uD`) rather than
+    /// keeping a satisfying installed slot.
+    pub deep: bool,
 }
 
 pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome> {
@@ -106,6 +110,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         roots,
         onlydeps,
         with_bdeps,
+        deep,
     } = opts;
     let cross = root_aware::detect(roots);
     let config_root = roots.config();
@@ -266,6 +271,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             PortageDependencyProvider::new_for_targets_with_bdeps(adapter, seeds, solve_with_bdeps);
         provider.set_cross_active(cross.active);
         provider.set_rebuild_tree(emptytree_native);
+        // `--deep` and native emptytree bump `:*` deps to the newest slot.
+        provider.set_prefer_newest_slot(deep || emptytree_native);
         if cross.active {
             for e in installed::load_sysroot_entries(cross.sysroot.as_path()) {
                 let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {

@@ -102,12 +102,23 @@ impl DependencyProvider for PortageDependencyProvider {
             }
         }
 
+        // `--deep` / native emptytree: for a `:*` any-slot dep (`SlotChoice`),
+        // bump to the newest slot instead of keeping a satisfying installed slot
+        // — matching `emerge -uD`/`-e` (e.g. firefox pulling the newest
+        // `dev-lang/rust-bin` slot). Slots are version-ranked, so the `max()`
+        // pick below is the newest-*version* slot (never an older compat slot
+        // like `app-shells/bash:5.1`). Scoped to `SlotChoice` only: `Choice`
+        // (provider OR-groups) keeps the installed-branch / USE-dep preference so
+        // we don't gratuitously re-pick providers (e.g. rust-bin vs source rust).
+        let bump_slot =
+            self.prefer_newest_slot && matches!(package, PortagePackage::SlotChoice { .. });
+
         // For OR-group / slot-choice packages, prefer branches that lead to
         // an already-installed package.  Independent of `rebuild_tree`: emptytree
         // rebuilds every listed package but `gcc:*` must still bind to the
         // installed/newest slot.  SlotChoice nodes number slots i+1 (newest slot
         // last/highest); Choice nodes use n-i (first-listed highest).
-        if package.is_virtual() && !self.installed_cpns.is_empty() {
+        if !bump_slot && package.is_virtual() && !self.installed_cpns.is_empty() {
             // Check each candidate directly against self.installed.
             // deps_reach_installed only checks CPNs, which produces false positives
             // for multi-slot packages (every slot appears "installed" if any slot
