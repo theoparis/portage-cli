@@ -10,10 +10,12 @@ REMAINING (+1 over-pull, em 126 vs emerge 125):
   `use.mask` was not forcing flags off over a `+flag` IUSE default, so
   compiler-rt-sanitizers's `+abi_x86_32` stayed on (arm64) and its multilib
   `virtual/libcrypt[abi_x86_32(-)?]` dep pulled 32-bit libcrypt. em -p 128 -> 126.
-- `dev-build/cmake` (U, revbump): em updates an installed build tool where emerge
-  keeps the satisfied installed one — BDEPEND version-favoring (a BDEPEND on
-  BROOT should favor the host-installed version, not bump to a newer revision).
-  This is the lone remaining em-p-vs-emerge-p firefox difference.
+- ~~`dev-build/cmake` (U, revbump)~~ FIXED 2026-06-18 (`installed-revbump-update-on-prune.md`):
+  `em` updated an installed build tool where emerge keeps the satisfied installed
+  one. Cause was the `installed_missing_from_repo` set making `Favor` fall through
+  to the newest repo version (update-on-prune). The field is removed; under
+  `Favor` any satisfying installed cpv is kept even when pruned from the tree.
+  `em -p firefox` is now 0 diffs vs emerge.
 - Also re-verify the offset `@system` 182-parity on a real `--root <empty>` setup
   (host provides the toolchain, so broot filtering should still drop it — not
   reproducible in the native sandbox).
