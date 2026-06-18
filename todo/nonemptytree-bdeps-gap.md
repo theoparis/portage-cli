@@ -5,14 +5,15 @@ STATUS: built-package BDEPEND fixed 2026-06-18 (commit a56690d). `em -p firefox`
 packages always pull BDEPEND (`broot_filtered`); the within-run trim always runs.
 `em -pe` still 383; tests pass.
 
-REMAINING (+3 over-pull, em 128 vs emerge 125):
-- `sys-libs/libxcrypt` + `virtual/libcrypt` (R): pulled with **`abi_x86_32`** — a
-  32-bit x86 multilib ABI that is meaningless on **arm64**. Distinct multilib /
-  `ABI_X86` USE_EXPAND bug: em activates the `abi_x86_32?` conditional dep where
-  the arm64 profile would not. Surfaced via the now-included BDEPEND chain.
+REMAINING (+1 over-pull, em 126 vs emerge 125):
+- ~~libxcrypt/libcrypt abi_x86_32~~ FIXED 2026-06-18 (commit 74d1643): global
+  `use.mask` was not forcing flags off over a `+flag` IUSE default, so
+  compiler-rt-sanitizers's `+abi_x86_32` stayed on (arm64) and its multilib
+  `virtual/libcrypt[abi_x86_32(-)?]` dep pulled 32-bit libcrypt. em -p 128 -> 126.
 - `dev-build/cmake` (U, revbump): em updates an installed build tool where emerge
   keeps the satisfied installed one — BDEPEND version-favoring (a BDEPEND on
   BROOT should favor the host-installed version, not bump to a newer revision).
+  This is the lone remaining em-p-vs-emerge-p firefox difference.
 - Also re-verify the offset `@system` 182-parity on a real `--root <empty>` setup
   (host provides the toolchain, so broot filtering should still drop it — not
   reproducible in the native sandbox).
