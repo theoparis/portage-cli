@@ -1,5 +1,25 @@
 # Non-emptytree `-p` gap is BDEPEND, not `--deep` traversal
 
+STATUS: built-package BDEPEND fixed 2026-06-18 (commit a56690d). `em -p firefox`
+82 -> 128, now includes everything emerge's 125 does (nothing missing). Built
+packages always pull BDEPEND (`broot_filtered`); the within-run trim always runs.
+`em -pe` still 383; tests pass.
+
+REMAINING (+3 over-pull, em 128 vs emerge 125):
+- `sys-libs/libxcrypt` + `virtual/libcrypt` (R): pulled with **`abi_x86_32`** — a
+  32-bit x86 multilib ABI that is meaningless on **arm64**. Distinct multilib /
+  `ABI_X86` USE_EXPAND bug: em activates the `abi_x86_32?` conditional dep where
+  the arm64 profile would not. Surfaced via the now-included BDEPEND chain.
+- `dev-build/cmake` (U, revbump): em updates an installed build tool where emerge
+  keeps the satisfied installed one — BDEPEND version-favoring (a BDEPEND on
+  BROOT should favor the host-installed version, not bump to a newer revision).
+- Also re-verify the offset `@system` 182-parity on a real `--root <empty>` setup
+  (host provides the toolchain, so broot filtering should still drop it — not
+  reproducible in the native sandbox).
+
+---
+
+
 Discovered 2026-06-18 while chasing the "em --deep traversal gap" (sandbox
 aarch64, 305 pkgs installed, `www-client/firefox`).
 
