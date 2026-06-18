@@ -170,11 +170,7 @@ fn license_ok_for(
     if !license_has_conditional(lic) {
         return license_accepted(lic, accept_license, &|_| false);
     }
-    let slot = if meta.slot.slot.as_str().is_empty() {
-        None
-    } else {
-        Some(meta.slot.slot)
-    };
+    let slot = Some(meta.slot.slot);
     let cfg = effective_use_config(
         use_config,
         package_use,
@@ -412,10 +408,7 @@ impl PackageRepository for Adapter<'_> {
             .and_then(|entries| entries.iter().find(|(c, _)| c.version == cpv.version))
             .map(|(_, cache)| &cache.metadata);
 
-        let slot = meta.and_then(|m| {
-            let s = m.slot.slot;
-            if s.as_str().is_empty() { None } else { Some(s) }
-        });
+        let slot = meta.map(|m| m.slot.slot);
 
         // Caller-resolved policy: package.use over global USE, then the ebuild's
         // IUSE defaults for anything still unset → the authoritative desired set.
@@ -483,11 +476,7 @@ impl PackageRepository for Adapter<'_> {
                     .filter(|(cpv, cache)| self.version_accepted(cpv, cache))
                     .map(|(cpv, cache)| {
                         let meta = &cache.metadata;
-                        let slot = if meta.slot.slot.as_str().is_empty() {
-                            None
-                        } else {
-                            Some(meta.slot.slot)
-                        };
+                        let slot = Some(meta.slot.slot);
                         let subslot = meta.slot.subslot;
                         let repo = Some(Interned::<DefaultInterner>::intern(repo_name_of(
                             self.data, cpv,
@@ -693,14 +682,7 @@ pub(super) fn target_package(
 
     let mut slots: Vec<_> = arch_entries
         .iter()
-        .filter_map(|(_, cache)| {
-            let s = &cache.metadata.slot.slot;
-            if s.as_str().is_empty() {
-                None
-            } else {
-                Some(*s)
-            }
-        })
+        .map(|(_, cache)| cache.metadata.slot.slot)
         .collect();
     slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     slots.dedup();
@@ -711,14 +693,7 @@ pub(super) fn target_package(
         _ => {
             let best = arch_entries
                 .iter()
-                .filter_map(|(cpv, cache)| {
-                    let s = &cache.metadata.slot.slot;
-                    if s.as_str().is_empty() {
-                        None
-                    } else {
-                        Some((cpv.version.clone(), *s))
-                    }
-                })
+                .map(|(cpv, cache)| (cpv.version.clone(), cache.metadata.slot.slot))
                 .max_by(|a, b| a.0.cmp(&b.0))
                 .map(|(_, s)| s)
                 .unwrap();
@@ -817,11 +792,7 @@ pub(super) fn find_autounmask_candidates(
                 continue;
             }
             let meta = &cache.metadata;
-            let slot = if meta.slot.slot.as_str().is_empty() {
-                None
-            } else {
-                Some(meta.slot.slot)
-            };
+            let slot = Some(meta.slot.slot);
 
             let mut reasons = Vec::new();
 
