@@ -38,7 +38,7 @@ portage (`NS` = new in new slot; em does not yet distinguish slot-update install
 
 136/137 extra packages in em's output were already installed on the system.
 
-**Implementation** (in `portage-cli/src/depgraph.rs` + `portage-atom-pubgrub/src/provider.rs`):
+**Implementation** (in `portage-cli/src/query/depgraph/` + `portage-atom-pubgrub/src/provider.rs`):
 
 1. **Load VDB** via `Vdb::open_default()` into `Vec<VdbEntry>` (cpn, slot, version).
 2. **Exact-CPV filter**: build `HashSet<Cpv>` from VDB; after `install_order()`,
@@ -56,10 +56,11 @@ portage (`NS` = new in new slot; em does not yet distinguish slot-update install
    its installed version, only RDEPEND (1), PDEPEND (3), and IDEPEND (4) are
    returned; DEPEND (0) and BDEPEND (2) are dropped.
 
-7. **`--with-bdeps` / BDEPEND filtering [partial, 2026-06]:** default-off
+7. **`--with-bdeps` / BDEPEND filtering [native parity, 2026-06]:** default-off
    `BDEPEND` exclusion plus per-edge `host_installed` filtering when
-   `--with-bdeps` is set. Closes most of the native offset `@system` over-pull
-   (316 → ~197 vs emerge's ~183). Crossdev dual-root scheduling (`BDEPEND` merge
+   `--with-bdeps` is set. Closes the native offset `@system` over-pull
+   (was 316 → now **182**, exact parity with `emerge --with-bdeps=n` = 182,
+   verified 2026-06-18). Crossdev dual-root scheduling (`BDEPEND` merge
    to `/`, `RDEPEND` merge to `ROOT`, same CPV twice) is **not** implemented —
    see [root-model.md § BDEPEND / crossdev](./root-model.md#bdepend-rdepend-and-with-bdeps).
 

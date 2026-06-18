@@ -295,7 +295,12 @@ compile once overnight when configure is clean.)
 - [ ] `-K`/`--usepkg`: install from binpkg, skipping build phases
 - [ ] `em -C` unmerge (the slot-occupant unmerge logic already exists —
       expose it standalone)
-- [ ] `@world`/`@system` set resolution + `--update --deep` semantics
+- [x] `@world`/`@system` set resolution — `expand_sets` (`90803fb`) resolves
+      `@system`/`@profile` from the config-root profile and
+      `@world`/`@selected`/user sets from the merge target.
+- [~] `--update --deep --newuse` semantics — `--update` wired
+      (`ResolveMode::PreferInstalled`); `--deep`/`--newuse` flags are parsed in
+      `cli.rs` but **not yet consumed** by the resolver.
 - [ ] `--fetchonly`
 
 ## M6 — Prefix polish
@@ -308,7 +313,7 @@ compile once overnight when configure is clean.)
 
 ## Standing items (not milestone-gated)
 
-- [ ] Push master to origin (43+ commits ahead)
+- [ ] Push master to origin (local `master` runs ahead of `origin/master`)
 - [ ] Run `benchmarks/bench-em-vs-emerge.sh` after each milestone; parity
       regressions block
 - [ ] brush upstream: `todo/checkpoint.md` (checkpoint/restore API)

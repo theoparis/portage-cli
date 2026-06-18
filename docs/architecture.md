@@ -208,7 +208,10 @@ Stages, in order:
    `UseConfig`, `package.use`, `USE_EXPAND` groups, masks, `ACCEPT_KEYWORDS`,
    `ACCEPT_LICENSE`.
 3. **Load installed set** (`installed.rs`) — the VDB, used for `InstalledPolicy`
-   (`Favor`/`Lock`), action tags (`N`/`R`/`U`/`D`), and reverse-dep checks.
+   (`Favor`/`Lock`, or `Rebuild` under native `--emptytree`), action tags
+   (`N`/`R`/`U`/`D`), and reverse-dep checks. Under `--emptytree` the real VDB
+   stays loaded (for tags/display) but the solver sees an empty installed set so
+   target packages are re-selected as rebuilds.
 4. **Build the provider** (`PortageDependencyProvider::new_for_targets(adapter, seeds)`)
    — the cli `Adapter` implements `PackageRepository`, handing the solver each
    version's facts (`versions_for`) and its resolved **desired** USE (`desired_use`).
@@ -226,6 +229,12 @@ Stages, in order:
    lexicographic Kahn; hard (DEPEND/BDEPEND) edges before soft (RDEPEND); cycles
    broken on soft edges. Explicitly-requested targets are listed last when
    nothing depends on them (emerge convention).
+8b. **Post-order rewrite** — for everything except native `--emptytree`,
+    `--with-bdeps` triggers the within-run BDEPEND trim (`bdepend_trim.rs`),
+    dropping edges already satisfied on BROOT or by earlier plan entries. Native
+    `--emptytree` skips the trim: the provider returns the full deep closure
+    straight from the solve (`rebuild_tree` ⇒ un-pruned `vd.merged`), so there is
+    no post-solve re-list (see `todo/em-emptytree.md`).
 9. **Render** (`output.rs`) — `pretty` (emerge `-p`/`-pv`), `json`, or `tree`.
    Verbose `-pv` also shows per-package download size and a "Size of downloads"
    total (`download_size.rs`): distfiles from each package's `Manifest`,
