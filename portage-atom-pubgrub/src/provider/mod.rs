@@ -186,12 +186,6 @@ pub struct PortageDependencyProvider {
     pub(crate) cross_active: bool,
     /// Host `@host` instances alias target package data (no duplicate ingest).
     pub(crate) host_aliases: HashMap<PortagePackage, PortagePackage>,
-    /// Installed packages whose installed version is **not in the repository**
-    /// (it was pruned from the tree). Populated by [`add_installed`](Self::add_installed)
-    /// when it has to synthesize the version. `choose_version` does not favour
-    /// these: there is nothing to keep — portage would update to the newest
-    /// available in-slot version instead.
-    pub(crate) installed_missing_from_repo: HashSet<PortagePackage>,
     pub(crate) dropped_deps: Vec<DroppedDep>,
     /// USE flag requirements collected by the post-solve validation pass.
     ///
@@ -513,7 +507,6 @@ impl PortageDependencyProvider {
             installed_cpns: HashSet::new(),
             installed_use: HashMap::new(),
             installed_iuse: HashMap::new(),
-            installed_missing_from_repo: HashSet::new(),
             host_installed: HashMap::new(),
             sysroot_installed: HashMap::new(),
             cross_active: false,
@@ -537,12 +530,14 @@ impl PortageDependencyProvider {
     /// upgraded if a dependency requires it. **Locked** packages are pinned to
     /// their exact installed version.
     ///
-    /// If the installed version is not present in the repository (e.g. an older
-    /// version was removed from the tree), it is registered with empty
-    /// dependencies so PubGrub can select it.  Without this, PubGrub would
-    /// call `get_dependencies` for the installed version, receive `Unavailable`,
-    /// and fall back to the newest repository version — defeating the Favor
-    /// policy.
+    /// If the installed version is not present in the repository (e.g. a revbump
+    /// `4.3.3` -> `4.3.3-r1` superseded it, or an older version was removed), it
+    /// is registered with empty dependencies so PubGrub can select it.  Without
+    /// this, PubGrub would call `get_dependencies` for the installed version,
+    /// receive `Unavailable`, and fall back to the newest repository version.
+    /// Under `Favor` (non-update) `choose_version` keeps this installed stub
+    /// when it satisfies the constraint, matching emerge (a revbump is not
+    /// pulled without `--update`).
     pub fn add_installed(&mut self, installed: InstalledPackage) {
         self.installed_cpns.insert(*installed.package.cpn());
 
@@ -553,12 +548,6 @@ impl PortageDependencyProvider {
         {
             let vd = VersionData::from_by_class(vec![vec![], vec![], vec![], vec![], vec![]]);
             pkg_data.versions.insert(installed.version.clone(), vd);
-            // Record that the installed version is gone from the repo so the
-            // Favor policy does not pin a stale build: there is nothing to
-            // keep, so the solver should pick the newest available in-slot
-            // version (portage's update-on-prune behaviour).
-            self.installed_missing_from_repo
-                .insert(installed.package.clone());
         }
 
         if !installed.active_use.is_empty() {
@@ -2722,10 +2711,14 @@ mod tests {
     }
 
     /// Same scenario as above, but `b` is reached *transitively* (not a root
-    /// target) — the actual `dev-lang/python:3.13` case, where python is
-    /// pulled in by something else, not named on the command line.
+    /// target). Under `Favor` (no `--update`/`--deep`) emerge keeps the
+    /// installed version even when its exact cpv was pruned from the tree (e.g.
+    /// a revbump `4.3.3` -> `4.3.3-r1` superseding the installed build): it
+    /// satisfies the plain dep, and a revbump is not pulled without `--update`.
+    /// The empty-deps installed stub is fine since the package is satisfying a
+    /// dep, not being rebuilt.
     #[test]
-    fn installed_version_removed_from_repo_upgrades_transitive() {
+    fn installed_version_removed_from_repo_kept_when_satisfying() {
         let mut repo = InMemoryRepository::new();
 
         repo.add_version(
@@ -2775,9 +2768,9 @@ mod tests {
             .map(|(_, v)| v.clone());
         assert_eq!(
             b_ver,
-            Some(Version::parse("2.0").unwrap()),
-            "transitive installed dep whose installed version was removed from \
-             the repo must upgrade to the newer in-slot version"
+            Some(Version::parse("1.0").unwrap()),
+            "transitive installed dep whose version was removed from the repo \
+             must be kept under Favor when it satisfies the dep (no --update)"
         );
     }
 

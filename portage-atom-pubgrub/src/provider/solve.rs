@@ -87,14 +87,15 @@ impl DependencyProvider for PortageDependencyProvider {
                 InstalledPolicy::Favor => {
                     // Explicit targets are not favored: a named argument pulls
                     // the best accepted version (emerge argument semantics).
-                    // Nor is a package whose installed version is no longer in
-                    // the repo: there is nothing to keep, so fall through to the
-                    // newest candidate (portage updates an installed package
-                    // whose version was pruned from the tree).
-                    if !self.root_targets.contains(package)
-                        && !self.installed_missing_from_repo.contains(package)
-                        && range.contains(installed_ver)
-                    {
+                    // Otherwise keep the installed version whenever it satisfies
+                    // the constraint — including when its exact cpv was pruned
+                    // from the tree (e.g. a revbump `4.3.3` -> `4.3.3-r1`). Under
+                    // Favor (non-update) emerge keeps such an installed dep
+                    // rather than pulling the newer build; the empty-deps
+                    // installed stub is fine since the package is satisfying a
+                    // dep, not being rebuilt. Update/rebuild modes (`Rebuild`,
+                    // `--deep`) take the newest via the fall-through instead.
+                    if !self.root_targets.contains(package) && range.contains(installed_ver) {
                         return Ok(Some(installed_ver.clone()));
                     }
                 }
