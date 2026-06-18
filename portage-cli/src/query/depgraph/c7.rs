@@ -102,7 +102,18 @@ fn solve_with(data: &RepoData, targets: &[&str], pu: &[(Dep, Vec<String>)]) -> O
         .iter()
         .map(|t| {
             let dep = Dep::parse(t).unwrap();
-            let pkg = target_package(data, &dep, &arch, &accept, &[], &[], &lic, &use_config, pu, &fm);
+            let pkg = target_package(
+                data,
+                &dep,
+                &arch,
+                &accept,
+                &[],
+                &[],
+                &lic,
+                &use_config,
+                pu,
+                &fm,
+            );
             (pkg, PortageVersionSet::any())
         })
         .collect();
