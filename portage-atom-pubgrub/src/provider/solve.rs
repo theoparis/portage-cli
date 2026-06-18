@@ -4,16 +4,18 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
-use portage_atom::Version;
+use portage_atom::{UseDefault, Version};
 use pubgrub::{
     Dependencies, DependencyConstraints, DependencyProvider, PackageResolutionStatistics,
 };
 
 use crate::error::Error;
 use crate::package::{MergeRoot, PortagePackage};
+use crate::use_config::UseFlagState;
 use crate::version_set::PortageVersionSet;
 
-use super::{InstalledPolicy, PortageDependencyProvider, VersionData};
+use super::post_solve::eval_violated_use_dep;
+use super::{HostEntry, InstalledPolicy, PortageDependencyProvider, VersionData};
 
 impl DependencyProvider for PortageDependencyProvider {
     type P = PortagePackage;
@@ -322,7 +324,7 @@ fn stamp_root(p: &PortagePackage, root: MergeRoot) -> PortagePackage {
 
 fn cross_target_runtime_deps(
     vd: &VersionData,
-    host_installed: &HashMap<PortagePackage, Version>,
+    host_installed: &HashMap<PortagePackage, HostEntry>,
     _sysroot_installed: &HashMap<PortagePackage, Version>,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
     let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
@@ -331,14 +333,20 @@ fn cross_target_runtime_deps(
         .chain(vd.by_class[3].iter())
         .map(|(p, vs, _)| (stamp_root(p, MergeRoot::Target), vs.clone()))
         .collect();
-    append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Host);
+    append_unsatisfied_broot(
+        &mut out,
+        &vd.by_class[4],
+        host_installed,
+        vd,
+        MergeRoot::Host,
+    );
     out.into_iter().collect()
 }
 
 /// Host-root native build (BDEPEND front-matter): all deps target the host instance.
 fn host_native_deps(
     vd: &VersionData,
-    host_installed: &HashMap<PortagePackage, Version>,
+    host_installed: &HashMap<PortagePackage, HostEntry>,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
     let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
         .iter()
@@ -346,8 +354,20 @@ fn host_native_deps(
         .chain(vd.by_class[3].iter())
         .map(|(p, vs, _)| (stamp_root(p, MergeRoot::Host), vs.clone()))
         .collect();
-    append_unsatisfied_broot(&mut out, &vd.by_class[2], host_installed, MergeRoot::Host);
-    append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Host);
+    append_unsatisfied_broot(
+        &mut out,
+        &vd.by_class[2],
+        host_installed,
+        vd,
+        MergeRoot::Host,
+    );
+    append_unsatisfied_broot(
+        &mut out,
+        &vd.by_class[4],
+        host_installed,
+        vd,
+        MergeRoot::Host,
+    );
     out.into_iter().collect()
 }
 
@@ -355,7 +375,7 @@ fn host_native_deps(
 /// BDEPEND and IDEPEND (both resolve on BROOT per PMS table 8.2).
 fn broot_filtered(
     vd: &VersionData,
-    host_installed: &HashMap<PortagePackage, Version>,
+    host_installed: &HashMap<PortagePackage, HostEntry>,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
     let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
         .iter()
@@ -363,28 +383,75 @@ fn broot_filtered(
         .chain(vd.by_class[3].iter())
         .map(|(p, vs, _)| (p.clone(), vs.clone()))
         .collect();
-    append_unsatisfied_broot(&mut out, &vd.by_class[2], host_installed, MergeRoot::Target);
-    append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Target);
+    append_unsatisfied_broot(
+        &mut out,
+        &vd.by_class[2],
+        host_installed,
+        vd,
+        MergeRoot::Target,
+    );
+    append_unsatisfied_broot(
+        &mut out,
+        &vd.by_class[4],
+        host_installed,
+        vd,
+        MergeRoot::Target,
+    );
     out.into_iter().collect()
 }
 
+/// Whether the host (BROOT) satisfies a `BDEPEND`/`IDEPEND` edge `(p, vs)`: the
+/// host instance must accept the version **and** its current USE must satisfy
+/// every atom USE-dependency on that edge. A `[flag]` the host lacks is not
+/// satisfied — portage rebuilds the package with the new USE, pulling its
+/// re-evaluated USE-conditional closure (PMS §8.3 atom USE-deps). The parent
+/// (`vd`) supplies the parent-flag state for `[flag?]`/`[flag=]` kinds.
 fn host_satisfied_on_broot(
-    host_installed: &HashMap<PortagePackage, Version>,
+    host_installed: &HashMap<PortagePackage, HostEntry>,
+    vd: &VersionData,
     p: &PortagePackage,
     vs: &PortageVersionSet,
 ) -> bool {
     let hp = stamp_root(p, MergeRoot::Host);
-    host_installed.get(&hp).is_some_and(|hv| vs.contains(hv))
+    let Some(entry) = host_installed.get(&hp) else {
+        return false;
+    };
+    if !vs.contains(&entry.version) {
+        return false;
+    }
+    vd.use_deps
+        .iter()
+        .filter(|c| c.target.0 == *p)
+        .flat_map(|c| c.use_deps.iter())
+        .all(|ud| host_use_dep_satisfied(vd, entry, ud))
+}
+
+/// Whether a single atom USE-dep is satisfied by the host instance's current
+/// USE (the host is not rebuilt, so only its active USE — plus the atom's
+/// `(+)`/`(-)` default for flags absent from IUSE — counts). Reuses the solver's
+/// own violation predicate so the host check matches post-solve validation.
+fn host_use_dep_satisfied(vd: &VersionData, entry: &HostEntry, ud: &portage_atom::UseDep) -> bool {
+    let flag_in_host_iuse = entry.iuse.contains(&ud.flag);
+    let dep_effective_enabled = if flag_in_host_iuse {
+        entry.active_use.contains(&ud.flag)
+    } else {
+        // Flag absent from host IUSE: honour the atom's (+)/(-) default; with no
+        // default a `[flag]` is a PMS error — treat as unmet so the edge is kept.
+        matches!(ud.default, Some(UseDefault::Enabled))
+    };
+    let parent_flag_enabled = matches!(vd.desired.get(ud.flag), UseFlagState::Enabled);
+    eval_violated_use_dep(ud.kind, dep_effective_enabled, parent_flag_enabled).is_none()
 }
 
 fn append_unsatisfied_broot(
     out: &mut Vec<(PortagePackage, PortageVersionSet)>,
     edges: &[crate::convert::Req],
-    host_installed: &HashMap<PortagePackage, Version>,
+    host_installed: &HashMap<PortagePackage, HostEntry>,
+    vd: &VersionData,
     unsatisfied_root: MergeRoot,
 ) {
     for (p, vs, _) in edges {
-        if !host_satisfied_on_broot(host_installed, p, vs) {
+        if !host_satisfied_on_broot(host_installed, vd, p, vs) {
             out.push((stamp_root(p, unsatisfied_root), vs.clone()));
         }
     }

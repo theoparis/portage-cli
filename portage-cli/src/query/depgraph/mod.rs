@@ -296,9 +296,16 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             });
         }
         // BROOT (the host) provides build tools: a BDEPEND already present there
-        // is satisfied without building it into the plan (Half B wiring).
-        for (pkg, ver) in &host_installed {
-            provider.add_host_installed(pkg.clone(), ver.clone());
+        // is satisfied without building it into the plan — unless a USE-dep on
+        // that edge demands a flag the host lacks, in which case the package is
+        // rebuilt (the host entry carries USE/IUSE for that check).
+        for e in &host_installed {
+            provider.add_host_installed(
+                e.package.clone(),
+                e.version.clone(),
+                e.active_use.clone(),
+                e.iuse.clone(),
+            );
         }
         let result = provider.resolve_targets(root_deps.clone());
         (provider, result)

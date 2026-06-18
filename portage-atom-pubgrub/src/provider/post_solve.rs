@@ -23,7 +23,7 @@ type TargetAcc = (
     BTreeSet<String>,
 );
 
-fn eval_violated_use_dep(
+pub(crate) fn eval_violated_use_dep(
     kind: UseDepKind,
     dep_effective_enabled: bool,
     parent_flag_enabled: bool,

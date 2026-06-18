@@ -177,7 +177,7 @@ pub struct PortageDependencyProvider {
     /// many roots contributed (it may be `VDB(host)` alone, or a union with
     /// other BROOTs / within-run merges). Always "present" (Lock-equivalent):
     /// the solver never re-chooses these, it just checks satisfaction.
-    pub(crate) host_installed: HashMap<PortagePackage, Version>,
+    pub(crate) host_installed: HashMap<PortagePackage, HostEntry>,
     /// Packages present in the cross **sysroot** (`ESYSROOT`), used to satisfy
     /// `DEPEND` edges for target-root instances when [`cross_active`](Self::cross_active).
     pub(crate) sysroot_installed: HashMap<PortagePackage, Version>,
@@ -244,6 +244,23 @@ pub struct CededFlag {
     /// `true` when the chosen value differs from the caller's preference, i.e.
     /// the solver flipped it to satisfy a constraint.
     pub flipped: bool,
+}
+
+/// A package present on the build host (BROOT). Used to satisfy `BDEPEND` /
+/// `IDEPEND` edges without building them into the plan. Carries the host
+/// instance's active USE and IUSE so a host-satisfied edge can be checked
+/// against its atom USE-dependencies: a `[flag]` the host lacks is **not**
+/// satisfied — the package must be rebuilt (portage's USE-change rebuild),
+/// which pulls its re-evaluated USE-conditional closure (PMS §8.3 atom
+/// USE-dependencies, §8.2.2 USE-conditional deps).
+#[derive(Debug, Clone)]
+pub(crate) struct HostEntry {
+    /// Installed version on BROOT.
+    pub version: Version,
+    /// The host instance's active USE flags (VDB `USE`).
+    pub active_use: Vec<Interned<DefaultInterner>>,
+    /// The host instance's `IUSE` (VDB `IUSE`), stripped of `+`/`-` defaults.
+    pub iuse: Vec<Interned<DefaultInterner>>,
 }
 
 impl PortageDependencyProvider {
@@ -566,9 +583,26 @@ impl PortageDependencyProvider {
     /// `BDEPEND` and `IDEPEND` edges can be satisfied without building it into
     /// the plan. Always "present" — there is no policy to re-choose it; this
     /// only feeds the host-satisfaction check in `get_dependencies`.
-    pub fn add_host_installed(&mut self, package: PortagePackage, version: Version) {
-        self.host_installed
-            .insert(package.at_merge_root(MergeRoot::Host), version);
+    ///
+    /// `active_use` / `iuse` are the host instance's VDB USE / IUSE, used to
+    /// check an edge's atom USE-deps: a `[flag]` the host lacks is unsatisfied
+    /// and the edge is kept (rebuilt). Pass empty vecs when USE-dep awareness
+    /// is irrelevant (e.g. tests of plain version-satisfaction).
+    pub fn add_host_installed(
+        &mut self,
+        package: PortagePackage,
+        version: Version,
+        active_use: Vec<Interned<DefaultInterner>>,
+        iuse: Vec<Interned<DefaultInterner>>,
+    ) {
+        self.host_installed.insert(
+            package.at_merge_root(MergeRoot::Host),
+            HostEntry {
+                version,
+                active_use,
+                iuse,
+            },
+        );
     }
 
     /// Record a package as present in the cross sysroot (`ESYSROOT`) for `DEPEND`
@@ -2809,6 +2843,8 @@ mod tests {
         provider.add_host_installed(
             PortagePackage::slotted(Cpn::parse("dev-build/b").unwrap(), Interned::intern("0")),
             Version::parse("1.0").unwrap(),
+            vec![],
+            vec![],
         );
 
         let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
@@ -2869,6 +2905,8 @@ mod tests {
         provider.add_host_installed(
             PortagePackage::slotted(Cpn::parse("dev-build/b").unwrap(), Interned::intern("0")),
             Version::parse("1.0").unwrap(),
+            vec![],
+            vec![],
         );
 
         let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
@@ -2917,6 +2955,8 @@ mod tests {
         provider.add_host_installed(
             PortagePackage::unslotted(Cpn::parse("sys-apps/locale-gen").unwrap()),
             Version::parse("1.0").unwrap(),
+            vec![],
+            vec![],
         );
 
         let glibc =
@@ -2964,6 +3004,8 @@ mod tests {
         provider.add_host_installed(
             PortagePackage::unslotted(Cpn::parse("sys-apps/locale-gen").unwrap()),
             Version::parse("1.0").unwrap(),
+            vec![],
+            vec![],
         );
 
         let glibc =
@@ -2982,6 +3024,139 @@ mod tests {
             solution
                 .iter()
                 .any(|(p, _)| p.cpn().package.as_str() == "glibc")
+        );
+    }
+
+    /// A host-satisfied BDEPEND edge whose atom USE-dep is **not** met by the
+    /// host instance's active USE is rebuilt rather than pruned: `b[text(+)]`
+    /// with the host `b` built `text`-off fails the USE-dep, so `b` enters the
+    /// plan (and its `text?` conditional would re-expand on rebuild). Mirrors
+    /// portage's USE-change rebuild — e.g. `app-text/xmlto[text(+)]` pulling
+    /// `virtual/w3m` when the host xmlto lacks `text`.
+    #[test]
+    fn host_installed_bdepend_with_unmet_use_dep_is_rebuilt() {
+        let text = Interned::intern("text");
+        let slot0 = Interned::intern("0");
+
+        let mut repo = InMemoryRepository::new();
+        // b is a build tool with IUSE=text and a text-gated runtime dep on c.
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-build/b-1.0").unwrap(),
+            Some(slot0),
+            None,
+            vec![text],
+            PackageDeps {
+                rdepend: DepEntry::parse("text? ( dev-build/c )").unwrap(),
+                ..empty_deps()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/c-1.0").unwrap(),
+            Some(slot0),
+            None,
+            empty_deps(),
+        );
+        // a BDEPENDs b with a [text(+)] USE-dep the host lacks.
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(slot0),
+            None,
+            PackageDeps {
+                bdepend: DepEntry::parse("dev-build/b[text(+)]").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        let mut provider = {
+            let mut cfg = UseConfig::new();
+            // b is rebuilt with text on (the USE-dep's demand), so its text?
+            // conditional expands.
+            cfg.set(text, UseFlagState::Enabled);
+            repo.set_use_config(cfg);
+            let mut p = PortageDependencyProvider::new(repo);
+            p.set_with_bdeps(true);
+            p
+        };
+        // Host b has text OFF (iuse=text, active=[]) → [text(+)] unmet.
+        provider.add_host_installed(
+            PortagePackage::slotted(Cpn::parse("dev-build/b").unwrap(), slot0),
+            Version::parse("1.0").unwrap(),
+            vec![],
+            vec![text],
+        );
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), slot0);
+        let solution = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        assert!(
+            solution
+                .iter()
+                .any(|(p, _)| p.cpn().package.as_str() == "b"),
+            "a BDEPEND edge whose [flag] USE-dep the host lacks must keep b in \
+             the plan (rebuild), not prune it as host-satisfied"
+        );
+        assert!(
+            solution
+                .iter()
+                .any(|(p, _)| p.cpn().package.as_str() == "c"),
+            "b rebuilt with text on must pull its text? runtime dep c"
+        );
+    }
+
+    /// The satisfied counterpart: when the host instance *does* meet the
+    /// `[flag]` USE-dep (text active), the edge is pruned as before and b/c are
+    /// not pulled.
+    #[test]
+    fn host_installed_bdepend_with_met_use_dep_is_pruned() {
+        let text = Interned::intern("text");
+        let slot0 = Interned::intern("0");
+
+        let mut repo = InMemoryRepository::new();
+        repo.add_version_with_iuse(
+            portage_atom::Cpv::parse("dev-build/b-1.0").unwrap(),
+            Some(slot0),
+            None,
+            vec![text],
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(slot0),
+            None,
+            PackageDeps {
+                bdepend: DepEntry::parse("dev-build/b[text(+)]").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            let mut p = PortageDependencyProvider::new(repo);
+            p.set_with_bdeps(true);
+            p
+        };
+        // Host b has text ON → [text(+)] met → edge pruned.
+        provider.add_host_installed(
+            PortagePackage::slotted(Cpn::parse("dev-build/b").unwrap(), slot0),
+            Version::parse("1.0").unwrap(),
+            vec![text],
+            vec![text],
+        );
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), slot0);
+        let solution = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        assert!(
+            solution
+                .iter()
+                .all(|(p, _)| p.cpn().package.as_str() != "b"),
+            "a BDEPEND edge whose [flag] USE-dep the host meets is pruned as \
+             host-satisfied (no rebuild)"
         );
     }
 
@@ -3017,6 +3192,8 @@ mod tests {
         provider.add_host_installed(
             PortagePackage::slotted(Cpn::parse("dev-build/b").unwrap(), Interned::intern("0")),
             Version::parse("1.0").unwrap(),
+            vec![],
+            vec![],
         );
 
         let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));

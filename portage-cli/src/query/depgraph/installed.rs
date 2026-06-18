@@ -55,13 +55,23 @@ pub(super) fn load_installed(
     out
 }
 
+/// A package present on the build host (BROOT): the host instance's slot-resolved
+/// package, version, and VDB-recorded active USE / IUSE. The USE/IUSE let the
+/// solver check an edge's atom USE-deps against the host, so a `[flag]` the host
+/// lacks triggers a rebuild rather than being pruned as host-satisfied.
+pub(super) struct HostInstalledEntry {
+    pub package: PortagePackage,
+    pub version: Version,
+    pub active_use: Vec<Interned<DefaultInterner>>,
+    pub iuse: Vec<Interned<DefaultInterner>>,
+}
+
 /// Packages present on the **build host** (BROOT, always `/var/db/pkg`) for
 /// `host_installed` — a BDEPEND already present there is satisfied without
-/// building it. Only `(package, version)` is needed: the solver uses it purely
-/// as a BDEPEND-satisfaction source (no USE, no policy). Returns one entry per
-/// installed package; duplicates across slots of the same package are kept
-/// (each slot is a distinct `PortagePackage`).
-pub(super) fn load_host_installed() -> Vec<(PortagePackage, Version)> {
+/// building it, unless a USE-dep on that edge demands a flag the host lacks (in
+/// which case the package is rebuilt). Duplicates across slots of the same
+/// package are kept (each slot is a distinct `PortagePackage`).
+pub(super) fn load_host_installed() -> Vec<HostInstalledEntry> {
     let Ok(vdb) = Vdb::open_default() else {
         return Vec::new();
     };
@@ -69,11 +79,28 @@ pub(super) fn load_host_installed() -> Vec<(PortagePackage, Version)> {
         .into_iter()
         .map(|pkg| {
             let slot = pkg.slot_main().ok();
-            let p = match slot.as_deref().filter(|s| !s.is_empty()) {
+            let package = match slot.as_deref().filter(|s| !s.is_empty()) {
                 Some(s) => PortagePackage::slotted(*pkg.cpn(), Interned::intern(s)),
                 None => PortagePackage::unslotted(*pkg.cpn()),
             };
-            (p, pkg.cpv().version.clone())
+            let active_use = pkg
+                .use_flags()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|f| Interned::intern(&f))
+                .collect();
+            let iuse = pkg
+                .iuse()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|f| Interned::intern(f.trim_start_matches(['+', '-'])))
+                .collect();
+            HostInstalledEntry {
+                package,
+                version: pkg.cpv().version.clone(),
+                active_use,
+                iuse,
+            }
         })
         .collect()
 }
