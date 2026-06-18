@@ -521,7 +521,12 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     }
 
     if !emptytree_native {
-        order = bdepend_trim::trim_within_run_bdepend(order, with_bdeps, &trim_ctx);
+        // Built packages always carry their BDEPEND now (it's required to build
+        // them), so always run the within-run trim to drop entries only needed
+        // for BDEPEND already satisfied on BROOT or by an earlier kept entry —
+        // matching emerge, which trims a built package's redundant build tools
+        // regardless of `--with-bdeps`.
+        order = bdepend_trim::trim_within_run_bdepend(order, true, &trim_ctx);
     }
     // Native --emptytree lists the full deep closure straight from the solve
     // (the provider returns un-pruned deps under `rebuild_tree`); no post-solve

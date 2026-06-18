@@ -291,26 +291,22 @@ impl DependencyProvider for PortageDependencyProvider {
             )));
         }
 
-        if self.with_bdeps {
-            // BDEPEND and IDEPEND run on BROOT; drop each edge already satisfied on
-            // the host. This keeps an offset build (`--root <empty>`) from pulling
-            // host-provided build/install tools into the plan, matching portage.
-            // DEPEND/RDEPEND are unaffected.
-            if !self.host_installed.is_empty() {
-                return Ok(Dependencies::Available(broot_filtered(
-                    vd,
-                    &self.host_installed,
-                )));
-            }
-            Ok(vd.merged.clone())
-        } else {
-            // BDEPEND excluded entirely (emerge --with-bdeps=n default).
-            // DEPEND/RDEPEND/PDEPEND plus host-satisfied IDEPEND filtering.
-            Ok(Dependencies::Available(native_runtime_deps(
+        // A package being *built* always pulls its BDEPEND/IDEPEND, minus the
+        // edges already satisfied on BROOT (the host). Its build deps are
+        // strictly required to build it, so `--with-bdeps` does not gate them:
+        // emerge likewise pulls a built package's BDEPEND even under
+        // `--with-bdeps=n` (that flag governs only the BDEPEND of installed-and-
+        // *kept* packages, which the runtime-only branch above already excludes).
+        // Host-satisfied edges are dropped so an offset build (`--root <empty>`)
+        // does not re-pull host-provided build/install tools. DEPEND/RDEPEND are
+        // unaffected.
+        if !self.host_installed.is_empty() {
+            return Ok(Dependencies::Available(broot_filtered(
                 vd,
                 &self.host_installed,
-            )))
+            )));
         }
+        Ok(vd.merged.clone())
     }
 }
 
@@ -354,22 +350,7 @@ fn host_native_deps(
     out.into_iter().collect()
 }
 
-/// Native build with `--with-bdeps=n`: DEPEND/RDEPEND/PDEPEND plus host-filtered IDEPEND.
-fn native_runtime_deps(
-    vd: &VersionData,
-    host_installed: &HashMap<PortagePackage, Version>,
-) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
-    let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
-        .iter()
-        .chain(vd.by_class[1].iter())
-        .chain(vd.by_class[3].iter())
-        .map(|(p, vs, _)| (p.clone(), vs.clone()))
-        .collect();
-    append_unsatisfied_broot(&mut out, &vd.by_class[4], host_installed, MergeRoot::Target);
-    out.into_iter().collect()
-}
-
-/// Native build with `--with-bdeps`: keep DEPEND/RDEPEND/PDEPEND; drop host-satisfied
+/// Native build: keep DEPEND/RDEPEND/PDEPEND; drop host-satisfied
 /// BDEPEND and IDEPEND (both resolve on BROOT per PMS table 8.2).
 fn broot_filtered(
     vd: &VersionData,
