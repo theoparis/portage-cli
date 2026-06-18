@@ -1,5 +1,27 @@
 # `--deep` / emptytree: bump `:*` any-slot deps to the newest slot
 
+STATUS: DONE 2026-06-18 (commits 56e19a5 + b968a13). `em -pe www-client/firefox`
+now matches `emerge -pe` exactly — 383 packages, identical set and N/R/U/NS tags
+(5 U / 252 R / 123 N / 3 NS), ~11.6x faster (em ~0.62s vs emerge ~7.2s).
+
+Implemented in two parts:
+1. **Version-ranked slots** (`rank_slots_by_version`): `slots_for` orders slots
+   by best version, not slot name — fixes the lex-last assumption that would
+   otherwise pull bash's legacy `:5.1` compat slot under the bump. Mirrors
+   portage's version-descending `:*` selection (`_iter_match_pkgs_atom` reverses
+   `cp_list` → highest version first; the slot falls out). No ad-hoc filter in
+   portage. Behaviour-neutral in default mode.
+2. **`prefer_newest_slot` bump**: `choose_version` bypasses the installed-branch
+   preference for `SlotChoice` under `--deep`/emptytree → version-ranked max().
+
+Remaining (separate): `em --deep` in *non-emptytree* mode does not expand the
+closure for re-examination like `emerge -uD` (em -uD firefox stays at the shallow
+82 vs emerge 131) — that's the shallow-vs-deep *traversal* gap, distinct from the
+slot bump (the bump only acts on SlotChoices already in the graph).
+
+---
+
+
 ## emerge behaviour (sandbox aarch64, clean stage3 + rust-bin-1.93.1 installed, 2026-06-18)
 
 `www-client/firefox`, observing `dev-lang/rust-bin` (slotted by version;
