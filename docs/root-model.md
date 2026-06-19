@@ -34,7 +34,7 @@ base_vdb      = --vdb || R/var/db/pkg
 planner installed = VDB(R) ∪ VDB(P)                   # P shadows R; equal ⇒ just one
 merge into    = P
 sysroot search = [P, R]                                # ordered, P wins; equal ⇒ [R]
-broot         = /                                      # always host
+broot         = / (native/cross)  | prefix subset (Tier 3)   # see Sequencing below
 EPREFIX       = ""                                     # we use ROOT, not Gentoo-Prefix EPREFIX
 ```
 
@@ -363,3 +363,51 @@ never the root handling.
   Profile `ACCEPT_LICENSE` `@GROUP` tokens expanded via `profiles/license_groups`
   (`portage-repo::AcceptLicense`).
 - **Orthogonal — binpkg:** producer-only; plugs into the existing merge.
+
+## Sequencing: `--root` → crossdev → `--local`/`--prefix`
+
+Stages 1–2 above are the shared three-root plumbing (done). **Stage 3 is the
+multi-root *dep routing*, and it is staged by how much machinery each target
+needs — each tier reuses what the previous built, so they are not independent
+features and must land in this order.**
+
+### Tier 1 — `--root` for a Gentoo host (native offset, active)
+
+`em -p --root <empty> --config-root / <atoms>`. The simplest multi-root case
+and the foundation. Same arch throughout (`CBUILD == CHOST`), `BROOT = /`,
+`SYSROOT` collapses to `ROOT`. This is where per-class edge routing must become
+correct: each of `BDEPEND`/`DEPEND`/`RDEPEND`/`IDEPEND` checked against its own
+satisfaction root, including the rule the current open gap exposes — an
+**unsatisfied `BDEPEND`/`DEPEND` edge on `BROOT` must schedule a native merge
+to `/`** (a `MergeRoot::Host` entry), not be silently broot-filtered. The
+offset `@system` gap (em 177 vs emerge 180; the `nghttp2/nghttp3/ngtcp2`
+host-side build copies) is exactly this. Once the solver emits
+`(cpn, slot, MergeRoot::Host)` entries for native offsets, Tier 1 reaches
+parity. Tracked in `todo/em-root-characterization.md` and
+`todo/nonemptytree-bdeps-gap.md`.
+
+### Tier 2 — crossdev (`{target}-emerge`, `CBUILD ≠ CHOST`)
+
+Crossdev is Tier 1's dual-root model with one addition: the `Host` and
+`Target` entries are built by *different compilers* (native `gcc` vs the
+`<CHOST>-gcc` cross-toolchain). The **routing is identical** to what Tier 1
+made correct — `crossdev` already auto-activates dual-root scheduling and
+matches `riscv64-emerge -p gcc` (18 packages). Tier 1's Host-merge scheduling
+is the missing piece for the cross equivalent of the offset gap; once it
+exists, cross is "turn on the foreign `CHOST`" over the same
+`(cpn, slot, root)` plan entries. **Depends on Tier 1**: cross cannot schedule
+host-side build deps correctly before native offset can.
+
+### Tier 3 — `--local` / `--prefix` (non-Gentoo host; BROOT becomes the prefix)
+
+The most divergent, and last by design. On a Debian/Arch/Fedora host there is
+no portage VDB and no recorded toolchain, so **`BROOT ≠ /`**: it is a **stage1
+build-tool subset installed *into* the prefix** (compiler + core build tools,
+sharing the host **libc** — the Gentoo-Prefix "coexist with a foreign
+userland" property). It reuses Tier 1/2's dep-class routing and
+`(cpn, slot, root)` scheduling verbatim, but adds a *mutable BROOT* and the
+`--setup` ceremony that bootstraps the subset. Deferred because the "host is
+Gentoo and provides `BROOT=/`" assumption that makes Tiers 1–2 tractable does
+not hold here, so it is the most work and the least general. Today `--setup`
+*borrows* host tools via symlinks (`portage-cli/src/setup.rs`) rather than
+building a real subset; making the prefix self-hosting is this tier.

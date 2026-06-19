@@ -157,7 +157,9 @@ Goal: dependency chains build in order and failures are resumable.
 
 The root model (`--root` base vs `--prefix` install target, the three location
 roots, and the scenario matrix) is specified in [root-model.md](root-model.md);
-the items below are its Stage 1–2.
+the items below are its Stage 1–2. The post-Stage-2 ordering — `--root` (native
+host) → crossdev → `--local`/`--prefix`, each tier built on the previous — is
+specified there under **Sequencing**; Tier 1 is the active work.
 
 - [x] Pre-flight dependency check (`preflight.rs`): before the build loop, each
       plan entry's `DEPEND` (checked against `VDB(base) ∪ VDB(target)`) and

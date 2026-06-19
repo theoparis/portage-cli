@@ -91,6 +91,44 @@ pub fn vdb_cpvs(root: Option<&Utf8Path>) -> Vec<(Cpv, Option<String>)> {
         .collect()
 }
 
+/// The CPNs of every unsatisfied (non-blocker) atom in `entries`. An `AnyOf`
+/// (`||`) group contributes its branch CPNs only when the whole group is
+/// unsatisfied. `UseConditional`s are assumed already resolved by
+/// `evaluate_use`. Used to find build-dep edges a root lacks (e.g. the native
+/// offset host build-closure walk).
+pub fn unsatisfied_cpns(entries: &[DepEntry], avail: &Avail) -> Vec<Cpn> {
+    let mut out = Vec::new();
+    unsat_cpns_rec(entries, avail, &mut out);
+    out
+}
+
+fn unsat_cpns_rec(entries: &[DepEntry], avail: &Avail, out: &mut Vec<Cpn>) {
+    for e in entries {
+        match e {
+            DepEntry::Atom(dep) if dep.blocker.is_none() && !avail.atom_satisfied(dep) => {
+                out.push(dep.cpn);
+            }
+            DepEntry::AllOf(c) => unsat_cpns_rec(c, avail, out),
+            DepEntry::AnyOf(c) if !group_satisfied(c, avail) => {
+                for branch in c {
+                    cpns_of(branch, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collect every non-blocker atom CPN mentioned in `e` (for an unsatisfied
+/// `||`-group's branches).
+fn cpns_of(e: &DepEntry, out: &mut Vec<Cpn>) {
+    match e {
+        DepEntry::Atom(dep) if dep.blocker.is_none() => out.push(dep.cpn),
+        DepEntry::AllOf(c) | DepEntry::AnyOf(c) => c.iter().for_each(|b| cpns_of(b, out)),
+        _ => {}
+    }
+}
+
 /// Append the display form of each unsatisfied requirement in `entries` to
 /// `out`. `UseConditional`s are assumed already resolved by `evaluate_use`.
 pub fn collect_unsatisfied(entries: &[DepEntry], avail: &Avail, out: &mut Vec<String>) {
@@ -228,5 +266,33 @@ mod tests {
         let mut out = Vec::new();
         collect_unsatisfied(&parse("!dev-libs/foo"), &avail, &mut out);
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn unsatisfied_cpns_returns_missing() {
+        let avail = atoms(&["dev-libs/foo-1.2"]);
+        let cpns: Vec<String> = unsatisfied_cpns(&parse("dev-libs/foo dev-libs/bar"), &avail)
+            .into_iter()
+            .map(|c| c.to_string())
+            .collect();
+        assert_eq!(cpns, ["dev-libs/bar"]);
+    }
+
+    #[test]
+    fn unsatisfied_cpns_any_of_unsatisfied_lists_branches() {
+        // A fully-unsatisfied || group contributes every branch's CPN.
+        let avail = Avail::default();
+        let cpns: Vec<String> = unsatisfied_cpns(&parse("|| ( dev-libs/a dev-libs/b )"), &avail)
+            .into_iter()
+            .map(|c| c.to_string())
+            .collect();
+        assert_eq!(cpns, ["dev-libs/a", "dev-libs/b"]);
+    }
+
+    #[test]
+    fn unsatisfied_cpns_any_of_satisfied_is_empty() {
+        let avail = atoms(&["dev-libs/b-1"]);
+        let cpns = unsatisfied_cpns(&parse("|| ( dev-libs/a dev-libs/b )"), &avail);
+        assert!(cpns.is_empty());
     }
 }

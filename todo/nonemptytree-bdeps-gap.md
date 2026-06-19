@@ -16,29 +16,42 @@ REMAINING (+1 over-pull, em 126 vs emerge 125):
   to the newest repo version (update-on-prune). The field is removed; under
   `Favor` any satisfying installed cpv is kept even when pruned from the tree.
   `em -p firefox` is now 0 diffs vs emerge.
-- Offset `@system` `--root <empty>` — **REAL gap, root-caused 2026-06-19** in a
-  clean crossdev-stages stage3 ([[crossdev-stages-sandbox]]). With a truly empty
+- Offset `@system` `--root <empty>` — **FIXED 2026-06-19** in a clean
+  crossdev-stages stage3 ([[crossdev-stages-sandbox]]). With a truly empty
   target root (`em -p --root /eroot --config-root /` vs
   `PORTAGE_CONFIGROOT=/ emerge --root=/eroot -p`, all `[ebuild N]`, no
-  contamination): **em 177 vs emerge 180**, missing `net-libs/{nghttp2,nghttp3,
-  ngtcp2}`.
+  contamination): **em 177 → 180 == emerge 180**. Isolated `curl` repro:
+  **em 15 == emerge 15** (was em 12, missing the 3 host build-copies).
 
-  Same package *names*, same curl USE (`http2 http3 quic` on for both). The diff
-  is **host-side build-dep copies**: those three are `net-misc/curl`'s DEPEND +
-  BDEPEND (build) *and* RDEPEND (runtime), and they are **not installed on the
-  host**. Isolated on `curl` alone: emerge lists each twice — `… to /eroot/`
-  (RDEPEND, target) **and** `…` (no suffix → `/`, the build host) — while em
-  lists each only once (target). em's broot filter assumes the host provides all
-  build deps and drops the BDEPEND/DEPEND edge; when the host actually *lacks*
-  the lib, em never schedules the host-side build install, so its offset plan
-  would fail to build curl (nghttp2 absent at build time).
+  The gap was DEPEND, not BDEPEND: curl's nghttp2 BDEPEND is under `test?`
+  (off); `net-libs/{nghttp2,nghttp3,ngtcp2}` are curl's `DEPEND="${RDEPEND}"`
+  (`http2`/`http3`/`quic` on). A target package's build edges (`DEPEND`/
+  `BDEPEND`/`IDEPEND`) the host (`BROOT == ESYSROOT == /`) lacks must be merged
+  to `/` so the target can compile/link against them — emerge lists these
+  `to /` alongside the ROOT runtime copy.
 
-  Fix is architectural: in a native `--root` offset, an unsatisfied BDEPEND/DEPEND
-  must be scheduled as a **host/BROOT** merge, not silently broot-filtered. This
-  is the offset merge-root modeling that the `--prefix` overlay work shelved (see
-  [[overlay-merged-sysroot]]: prefer overlayfs + single ESYSROOT over env
-  injection). Not a quick fix; ties into that redesign. (`em -pe firefox` and the
-  native non-offset basket remain at parity — this is offset-only.)
+  **Fix: post-solve host build-closure walk** (`depgraph/host_copies.rs`).
+  After the Target solve (kept single-rooted, pristine), a BFS over the
+  finalized Target plan collects each entry's host-unsatisfied build-dep CPNs
+  (`bdepend_avail::unsatisfied_cpns` against the host VDB + earlier host
+  copies), resolves a version (Target plan's version when shared, else newest
+  repo), and emits `MergeRoot::Host` entries — recursing into each copy's own
+  build edges, bounded by the host VDB.
+
+  **Why post-solve, not in the solver:** the first attempt routed unsatisfied
+  BDEPEND+DEPEND to `MergeRoot::Host` inside `get_dependencies`, but
+  `ensure_host_instances` + `package_data_key` alias every Host package to its
+  Target `PackageData`, so introducing `pkg@Host` ballooned the Target solve
+  (curl 12 → ~120). Giving Host packages independent `PackageData` (true
+  dual-root scheduling per `root-model.md`) is the heavier fix the post-solve
+  walk defers — it keeps the Target solve unchanged and derives host copies
+  against the host VDB afterwards, exactly like `preflight` does.
+
+  **Cost: negligible.** Benchmarked in the stage3 sandbox (release, `time`
+  builtin, 5 runs): `@system` offset BASE 1.14s → NEW 1.09s; `@system` native
+  (walk is an early-return no-op) 0.79s → 0.81s; `curl` offset 0.65s → 0.66s.
+  All within run-to-run noise (±10%); the walk (in-memory BFS over ≤180 pkgs)
+  is dwarfed by the ~0.6–1.1s solve.
 
 ---
 

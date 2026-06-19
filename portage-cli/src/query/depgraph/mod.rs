@@ -2,6 +2,7 @@ mod autounmask;
 mod bdepend_trim;
 mod depend_trim;
 mod effective_use;
+mod host_copies;
 mod root_aware;
 
 pub use portage_atom_pubgrub::MergeRoot;
@@ -522,8 +523,10 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         order.extend(to_reinstall);
     }
 
-    // Host-config stage: pretend output lists target ROOT merges only (emerge -p).
-    if host_config_stage {
+    // Cross-arch host-config stage: pretend output lists target ROOT merges only
+    // (emerge -p). A native offset instead keeps the Host build-dep merges (the
+    // host-side installs needed to build the target packages), matching emerge.
+    if host_config_stage && cross.is_cross_arch() {
         order.retain(|(pkg, _)| pkg.merge_root() == MergeRoot::Target);
     }
 
@@ -615,6 +618,17 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             slot_op_cpns.insert(rb.cpn);
             slot_op_cpns.extend(rb.triggers.iter().copied());
         }
+    }
+
+    // Native offset (same-arch `--root`/`--prefix`): schedule host build-copies
+    // — a target package's build edges (`DEPEND`/`BDEPEND`/`IDEPEND`) the host
+    // lacks are merged to BROOT (`/`) so the target can build against them
+    // (emerge lists these `to /` alongside the ROOT runtime copy). Computed as a
+    // post-solve walk over the finalized Target plan, not in the solver, to keep
+    // the Target solve pristine (the dual-root aliasing balloons it otherwise).
+    let host_copies = host_copies::compute(&order, &data, &use_config, &package_use, &cross);
+    if !host_copies.is_empty() {
+        order.splice(0..0, host_copies);
     }
 
     let flag_reqs: HashMap<&PortagePackage, &UseFlagRequirement> = provider
