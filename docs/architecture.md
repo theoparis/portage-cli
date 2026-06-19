@@ -196,6 +196,62 @@ Stage3 tarball fetch and cache management.
 - `struct Client` / `ClientBuilder` — HTTP client for mirror listings
 - `struct Cache` — Local filesystem cache
 
+## Target derivation: argv → request
+
+A command's targets are lowered to a single canonical **request**: a synthetic
+`Root` package whose dependencies are the resolved target atoms, plus a **mode**.
+A single target is just the one-element case:
+
+| invocation        | request                                            |
+|-------------------|----------------------------------------------------|
+| `em -p gcc`       | `Root([sys-devel/gcc], Default)`                   |
+| `em -p gcc clang` | `Root([sys-devel/gcc, llvm-core/clang], Default)`  |
+| `em -up …`        | `Root([…], Update)`                                |
+| `em -ep …`        | `Root([…], EmptyTree)`                             |
+
+The request is resolved by **one joint solve** over Root's dependencies — not by
+solving each target separately. For independent targets the plan is the union of
+the per-target plans (verified for `-p` and `-up`); when targets share a dep with
+conflicting constraints the joint solve reconciles them. This matches emerge.
+
+Two stages produce and consume the request:
+
+- **input → request** (portage-cli, `portage-atom` types): expand `@sets`,
+  disambiguate each token to a canonical `Dep` (category + slot + version + USE),
+  resolve it to a precise package identity, attach the mode and per-target
+  disposition.
+- **request → resolver query** (`portage-atom-pubgrub`): Root's atoms go through
+  the *same* `convert_deps` as ebuild dependencies, so slot/version/USE-dep
+  semantics are identical to any other edge.
+
+Intended target semantics (all match emerge):
+
+- An **explicit target pulls the best in-slot version** even without `-u`
+  (`em -p gcc` → newest accepted `gcc:16`, listed `[U]`), and is reinstalled when
+  already at best (`[R]`). A *dependency* on the same atom instead favours the
+  installed version.
+- A **bare command-line target denotes the best accepted version** of the matched
+  set = its newest accepted slot (`em -p python` ≡ `em -p python:3.14`; `python:*`
+  likewise). Multi-slot is not an ambiguity; it is a deterministic best-slot pick.
+
+### Ambiguity and partial-failure policy (intentional divergences)
+
+- **Category ambiguity** — a bare name matching several categories (e.g. `clang`
+  → `dev-python/clang`, `llvm-core/clang`): install-type operations error and
+  list the candidates (`ResolveMode::Error`); update operations (`-u`) take the
+  installed candidate when exactly one is installed
+  (`ResolveMode::PreferInstalled`, with a warning). **emerge always errors** on an
+  ambiguous short name regardless of what is installed — em is deliberately more
+  lenient under `-u`.
+- **Multi-target with one unresolvable atom** — em drops the bad atom with a
+  warning and proceeds with the rest, erroring only when *all* fail. **emerge
+  aborts the whole command.**
+
+Slot/version-qualified targets (`em -p python:3.13`, `=python-3.13*`) honour the
+qualifier: `target_package` (`repo.rs`) resolves the target slot from the newest
+accepted version that `matches_cpv` the atom, so a bare name / `:*` picks the
+newest slot while `:slot` / `=…-ver*` pin the matching one.
+
 ## The `em -p` / `em query depgraph` pipeline
 
 `em -p` and `em query depgraph` share one path (`query/depgraph/mod.rs`).

@@ -55,37 +55,10 @@ em evaluates the blocker's USE condition but does not surface the blocker when
 the gating flag (`resolvconf`) is on. That is the concrete sub-gap if we want
 full blocker-report parity (separate from the Tier-2 replacement question).
 
-## B. `dev-lang/python` — 1 over-pull (NEW, needs trace)
+## B. `dev-lang/python` — over-pull → **diagnosed, moved**
 
-`em -p dev-lang/python` lists **two** python entries:
-- `dev-lang/python-3.13.12  [R]`   ← spurious rebuild
-- `dev-lang/python-3.14.6  [U] [3.14.5]`
-
-`emerge -p dev-lang/python` lists only `python-3.14.6 [3.14.5]` (the target is
-the newest slot, 3.14; 3.13/3.12 are untouched).
-
-### What it is NOT
-- NOT bare-name multi-slot targeting: `em -p dev-lang/python:3.14` (explicit
-  slot atom) **still** rebuilds 3.13. And `target_package`
-  (`portage-cli/src/query/depgraph/repo.rs:694-700`) already collapses a bare
-  name to the single newest slot.
-- NOT a version bump: 3.13 is `[R]` (same version 3.13.12, rebuild in place),
-  not `[U]`.
-
-### Open question (trace next)
-Why is the **3.13 slot** rebuilt when only `:3.14` is targeted? Candidates:
-1. A reverse dependency in the plan that `dev-lang/python:3.13` satisfies is
-   being rebuilt, pulling python:3.13 as a build/runtime dep — but emerge does
-   not, so check whether em is over-eagerly rebuilding something that pins 3.13.
-2. The installed-slot rebuild path (`InstalledPolicy`) re-emits a kept older
-   slot the target does not name. Compare with the `installed-revbump` Favor
-   fix (`todo/installed-revbump-update-on-prune.md`): a non-target installed
-   dep should be *kept*, not rebuilt.
-
-### Repro
-```bash
-em -p dev-lang/python          # shows python-3.13.12 [R] AND python-3.14.6 [U]
-em -p dev-lang/python:3.14     # STILL rebuilds 3.13 — so it's not name resolution
-emerge -p dev-lang/python      # only python-3.14.6 [U 3.14.5]
-```
-Installed: python-3.12.13_p1 (3.12), 3.13.12 (3.13), 3.14.5 (3.14).
+Root-caused 2026-06-19 to the CLI target-derivation path (two bugs: the sibling
+slot listed `[R]`, and slot/version qualifiers ignored entirely). Full diagnosis,
+emerge reference table, and fix plan now live in
+**`todo/target-derivation.md`**; intended behaviour is documented in
+`docs/architecture.md` §"Target derivation: argv → request".
