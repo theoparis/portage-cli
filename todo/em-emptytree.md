@@ -4,6 +4,16 @@ Tracking emerge parity for `em -pe` / `em -e`. Updated 2026-06-17 after
 rejecting the `grok-broke-emptytree` approach (`prepend_host_build_pretend`,
 `trim_bootstrap_gcc`, skip-`host_installed` hacks).
 
+> **PARITY REACHED 2026-06-19 (re-verified).** `em -pe www-client/firefox` in
+> the clean stage3 sandbox is **0 diffs** vs `emerge -pe` (both 383, identical
+> sets) — the chroot edge-follow gap (was em 371 vs emerge 396) and the
+> toolchain divergence (gcc-16/binutils upgrades, llvm-22, six rust-bin
+> bootstrap slots, gcc-11) are both gone. On the dev host the **only** residual
+> diff is the pre-existing slotless-rust `||` preference (`em` rust-bin vs
+> `emerge` source rust) — see `license-use-conditional-bug.md`. The sections
+> below remain as the investigation history; the "Open / deferred" polish list
+> at the bottom is the only live item set.
+
 > **2026-06-18 — AGREED REDESIGN below supersedes the `broot_filter` + expand-pass
 > implementation.** Everything from "## Implementation plan" down documents the old
 > (crap) approach and the investigation that led here; keep for history but do not
