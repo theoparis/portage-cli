@@ -118,6 +118,11 @@ pub struct Cli {
     #[arg(short = 't', long)]
     pub tree: bool,
 
+    /// Emit the depgraph as machine-parsable JSON instead of pretend text.
+    /// Takes precedence over `--tree`. Works with `-p` (including `-e`).
+    #[arg(long)]
+    pub json: bool,
+
     #[arg(short = 'O', long)]
     pub nodeps: bool,
 

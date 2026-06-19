@@ -166,7 +166,9 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     if atoms.is_empty() {
         bail!("em: no valid atoms");
     }
-    let format = if cli.tree {
+    let format = if cli.json {
+        cli::DepgraphFormat::Json
+    } else if cli.tree {
         cli::DepgraphFormat::Tree
     } else {
         cli::DepgraphFormat::Pretty
