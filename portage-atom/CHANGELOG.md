@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.10.0
+
+### Breaking changes
+
+- `DepEntry::evaluate_use` now takes `&impl UseFlagLookup` instead of a closure.
+  `UseFlagLookup` is implemented for `HashSet<Interned>` and `&[&str]`, so
+  callers pass a flag set directly with no per-call-site closure, and lookups
+  use interned flag keys.
+
+### Features
+
+- Add the `Pf` struct and `Cpv::from_parts`.
+
+### Documentation
+
+- Document all public items and enable `#![warn(missing_docs)]`.
+- Fix broken intra-doc links so the crate builds under `-D warnings`.
+
+### Other
+
+- Raise MSRV to 1.92.
+
 ## 0.7.0
 
 ### Performance
