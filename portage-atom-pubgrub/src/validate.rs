@@ -200,41 +200,22 @@ impl PortageDependencyProvider {
                 continue;
             };
             for blocker in &vd.blockers {
-                let matches = solution.iter().any(|(sol_pkg, sol_ver)| {
-                    if !blocker_cpn_slot_matches(sol_pkg, blocker) {
-                        return false;
-                    }
-                    let version_ok = match &blocker.version {
-                        None => true,
-                        Some(v) => {
-                            let op = blocker.op.unwrap_or(portage_atom::Operator::Equal);
-                            version_matches_operator(sol_ver, op, blocker.glob, v)
-                        }
-                    };
-                    if !version_ok {
-                        return false;
-                    }
-                    // A conditional blocker (`!foo[bar]`) only applies when the
-                    // matched package actually satisfies the USE condition.
-                    // Without this, packages whose blocked flag is off (e.g.
-                    // `!sys-libs/glibc[crypt(-)]` when glibc lacks `crypt`) are
-                    // reported as false conflicts.
-                    match &blocker.use_deps {
-                        None => true,
-                        Some(use_deps) => use_deps.iter().all(|ud| {
-                            let eff =
-                                self.effective_flag_new(sol_pkg, sol_ver, ud.flag, ud.default);
-                            match ud.kind {
-                                UseDepKind::Enabled => eff,
-                                UseDepKind::Disabled => !eff,
-                                // Conditional/Equal forms don't occur on blockers in
-                                // practice; treat as applying so a real one isn't missed.
-                                _ => true,
-                            }
-                        }),
-                    }
-                });
-                if matches {
+                // A blocker is violated when the blocked atom is satisfied by a
+                // package present after the plan — both freshly-solved members and
+                // installed packages the plan leaves in place. emerge reports a
+                // blocker against a retained installed package (e.g.
+                // `systemd[resolvconf]` soft-blocking an installed
+                // `net-dns/openresolv` that nothing pulls into the solve), which a
+                // solution-only search misses.
+                let hit_solution = solution
+                    .iter()
+                    .any(|(p, v)| self.blocker_satisfied_by(blocker, p, v, false));
+                let hit_installed = !hit_solution
+                    && self.installed.iter().any(|(p, (v, _))| {
+                        !self.replaced_by_solution(p, solution)
+                            && self.blocker_satisfied_by(blocker, p, v, true)
+                    });
+                if hit_solution || hit_installed {
                     let strength = match blocker.blocker {
                         Some(portage_atom::Blocker::Strong) => "strong(!!)",
                         _ => "weak(!)",
@@ -252,6 +233,61 @@ impl PortageDependencyProvider {
             }
         }
         conflicts
+    }
+
+    /// Whether `blocker`'s atom (cpn/slot, version, and any USE-dep) is satisfied
+    /// by candidate `(cand_pkg, cand_ver)`. `from_installed` selects the USE
+    /// source: the VDB-recorded active flags for an installed candidate, or the
+    /// freshly-resolved USE for a solved one. A conditional blocker (`!foo[bar]`)
+    /// only fires when the candidate actually satisfies the USE condition — so
+    /// `!sys-libs/glibc[crypt(-)]` does not flag a glibc built without `crypt`.
+    fn blocker_satisfied_by(
+        &self,
+        blocker: &Dep,
+        cand_pkg: &PortagePackage,
+        cand_ver: &Version,
+        from_installed: bool,
+    ) -> bool {
+        if !blocker_cpn_slot_matches(cand_pkg, blocker) {
+            return false;
+        }
+        if let Some(v) = &blocker.version {
+            let op = blocker.op.unwrap_or(portage_atom::Operator::Equal);
+            if !version_matches_operator(cand_ver, op, blocker.glob, v) {
+                return false;
+            }
+        }
+        match &blocker.use_deps {
+            None => true,
+            Some(use_deps) => use_deps.iter().all(|ud| {
+                let eff = if from_installed {
+                    self.installed_use
+                        .get(cand_pkg)
+                        .is_some_and(|u| u.contains(&ud.flag))
+                } else {
+                    self.effective_flag_new(cand_pkg, cand_ver, ud.flag, ud.default)
+                };
+                match ud.kind {
+                    UseDepKind::Enabled => eff,
+                    UseDepKind::Disabled => !eff,
+                    // Conditional/Equal forms don't occur on blockers in practice;
+                    // treat as applying so a real one isn't missed.
+                    _ => true,
+                }
+            }),
+        }
+    }
+
+    /// True when the solution installs into the same `(cpn, slot)` as `inst`, so
+    /// the plan replaces this installed package (it is not "retained").
+    fn replaced_by_solution(
+        &self,
+        inst: &PortagePackage,
+        solution: &pubgrub::SelectedDependencies<PortagePackage, Version>,
+    ) -> bool {
+        solution
+            .iter()
+            .any(|(sp, _)| sp.cpn() == inst.cpn() && sp.slot() == inst.slot())
     }
 
     /// Resolve slot-operator bindings from a solution.
@@ -600,6 +636,61 @@ mod tests {
         assert!(
             provider.check_blockers(&solution).is_empty(),
             "conditional blocker must not fire when libressl's `foo` is off"
+        );
+    }
+
+    // A blocker on a solved package fires against a package that is only
+    // *installed* (retained, never pulled into the solve) — mirrors
+    // `sys-apps/systemd[resolvconf]` soft-blocking an installed
+    // `net-dns/openresolv` that nothing in the graph depends on.
+    #[test]
+    fn check_blockers_fires_against_retained_installed() {
+        let mut repo = InMemoryRepository::new();
+        let empty = || PackageDeps {
+            depend: vec![],
+            rdepend: vec![],
+            bdepend: vec![],
+            pdepend: vec![],
+            idepend: vec![],
+        };
+        repo.add_version(
+            portage_atom::Cpv::parse("sys-apps/systemd-260.2").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                rdepend: vec![DepEntry::Atom(Dep::parse("!net-dns/openresolv").unwrap())],
+                ..empty()
+            },
+        );
+
+        let mut provider = PortageDependencyProvider::new(repo);
+        // openresolv is installed but nothing pulls it into the solve.
+        provider.add_installed(crate::provider::InstalledPackage {
+            package: PortagePackage::unslotted(Cpn::parse("net-dns/openresolv").unwrap()),
+            version: Version::parse("3.17.4").unwrap(),
+            policy: crate::provider::InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
+        });
+
+        let solution = provider
+            .resolve_targets(vec![(
+                PortagePackage::unslotted(Cpn::parse("sys-apps/systemd").unwrap()),
+                PortageVersionSet::any(),
+            )])
+            .unwrap();
+        assert!(
+            solution
+                .get(&PortagePackage::unslotted(
+                    Cpn::parse("net-dns/openresolv").unwrap()
+                ))
+                .is_none(),
+            "openresolv must not be in the solution (nothing depends on it)"
+        );
+        assert_eq!(
+            provider.check_blockers(&solution).len(),
+            1,
+            "blocker against the retained installed openresolv must still fire"
         );
     }
 
