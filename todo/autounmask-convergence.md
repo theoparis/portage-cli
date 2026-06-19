@@ -1,5 +1,24 @@
 # `--autounmask-write` must converge in a single invocation
 
+STATUS: **NOT A BUG — resolved 2026-06-19** (the `-p` artifact the caveat below
+suspected). Verified in a clean crossdev-stages stage3 sandbox
+([[crossdev-stages-sandbox]], profile `default/linux/arm64/23.0`) from an empty
+autounmask state, target `www-client/firefox`:
+
+- `em -p --autounmask` reports the **complete** USE-change set in ONE call
+  (`freetype harfbuzz`, `libglvnd X`, `libvpx postproc`, `cairo X`) and a plan
+  that fully reaches `firefox-140.11.0` — the cosolve fixpoint applies the
+  changes in-memory and re-solves, so there is no per-run single layer.
+- That set is **identical to emerge**'s (`emerge -p --autounmask --autounmask-use=y`).
+- Applying the 4 changes and re-running → `rc=0`, zero "necessary to proceed"
+  advisories: converged.
+- `em -p --autounmask-write` does **not** write (`package.use` hash unchanged),
+  exactly like `emerge -p` — pretend suppresses the write, so a `-p` loop never
+  converges for *either* tool. That was the whole of the original observation.
+
+No code change needed. (A non-`-p` write pass is a separate "does em merge after
+writing" question, not a convergence bug.)
+
 ## Bug (2026-06-18)
 
 `em --autounmask --autounmask-write` only discovers **one layer** of required
