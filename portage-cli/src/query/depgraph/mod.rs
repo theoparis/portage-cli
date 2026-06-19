@@ -156,9 +156,18 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         Vec::new()
     };
 
-    let (data, target_installed, host_installed, use_env_result) = tokio::join!(
+    let (data, (target_installed, installed_blockers), host_installed, use_env_result) = tokio::join!(
         repo::load_repos(&repo, &overlays),
-        async { installed::load_target_installed(roots) },
+        // Load the installed set and, on the same task, precompute each package's
+        // active blocker atoms (for `check_blockers`' installed-side reports). The
+        // walk depends only on the VDB, so it overlaps the concurrent repo/use-env
+        // loads here instead of running serially on the hot path afterwards.
+        async {
+            let ti = installed::load_target_installed(roots);
+            let blockers: Vec<Vec<Dep>> =
+                ti.iter().map(conflicts::installed_blocker_atoms).collect();
+            (ti, blockers)
+        },
         async { installed::load_host_installed() },
         use_env::build_use_env(&repo, config_root, roots.config_overlay()),
     );
@@ -238,15 +247,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         root_deps.push((pkg, vs));
     }
 
-    // Installed packages' active blocker atoms, evaluated once (they depend only
-    // on the VDB + recorded USE, not on the co-solved `package.use`). The
-    // provider is rebuilt every fixpoint iteration, so feeding a precomputed
-    // clone keeps the per-iteration cost to a cheap copy instead of re-walking
-    // the whole VDB's dep trees each time.
-    let installed_blockers: Vec<Vec<Dep>> = target_installed
-        .iter()
-        .map(conflicts::installed_blocker_atoms)
-        .collect();
+    // `installed_blockers` (precomputed above on the VDB-load task) is fed to the
+    // provider each fixpoint iteration as a cheap clone, rather than re-walking
+    // the whole VDB's dep trees per iteration.
 
     // Build a provider (with the given cede policy) and run the solve. Factored
     // so a failed --autosolve-use attempt can fall back to a fixed-USE (Level A)
