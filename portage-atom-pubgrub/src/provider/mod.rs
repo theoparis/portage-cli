@@ -883,6 +883,84 @@ impl PortageDependencyProvider {
         }
         false
     }
+
+    /// The newest installed version reachable (one level) through a virtual
+    /// `||`-Choice branch — i.e. the newest version of the branch's target
+    /// package (e.g. rust / rust-bin) that is present in `self.installed`.
+    /// `None` when the branch reaches no installed package. Used by the
+    /// `choose_version` installed-preference heuristic to break ties when every
+    /// branch of a provider `||` group is installed at some version: the branch
+    /// with the newer installed version wins (matching emerge's `dep_zapdeps`),
+    /// avoiding a needless `[NS]` of the first-listed provider's newest slot.
+    pub(crate) fn branch_best_installed(&self, pkg: &PortagePackage) -> Option<Version> {
+        let data = self.packages.get(pkg)?;
+        let mut best: Option<Version> = None;
+        for vd in data.versions.values() {
+            if let Dependencies::Available(ref cs) = vd.merged {
+                for (dep_pkg, _) in cs.iter() {
+                    if !dep_pkg.is_virtual()
+                        && let Some((ver, _policy)) = self.installed.get(dep_pkg)
+                        && best.as_ref().is_none_or(|b| *b < *ver)
+                    {
+                        best = Some(ver.clone());
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// For an all-branches-installed provider `||` Choice, return the candidate
+    /// branch whose reachable installed version is newest — emerge's
+    /// `dep_zapdeps` tie-break, which keeps the newer provider and avoids a
+    /// needless `[NS]` of the first-listed provider's newest slot
+    /// (e.g. `|| ( rust-bin:* rust:* )` with installed source rust-1.95.0 >
+    /// rust-bin-1.93.1 keeps source rust). Branches may be nested `:*`
+    /// SlotChoice virtuals (resolved one level via [`Self::branch_best_installed`])
+    /// or direct real packages (looked up in `self.installed`). Returns `None`
+    /// when no candidate exposes an installed version, so the caller falls back
+    /// to the default `max()` (= first-listed) pick.
+    pub(crate) fn newest_installed_choice_branch<'a>(
+        &self,
+        data: &PackageData,
+        candidates: &[&'a Version],
+    ) -> Option<&'a Version> {
+        let mut best: Option<&'a Version> = None;
+        let mut best_inst_ver: Option<Version> = None;
+        for &ver in candidates {
+            let Some(vd) = data.versions.get(ver) else {
+                continue;
+            };
+            let inst_ver = if let Dependencies::Available(ref cs) = vd.merged {
+                cs.iter()
+                    .filter_map(|(p, _)| {
+                        if p.is_virtual() {
+                            self.branch_best_installed(p)
+                        } else {
+                            self.installed.get(p).map(|(v, _)| v.clone())
+                        }
+                    })
+                    .max()
+            } else {
+                None
+            };
+            if let Some(iv) = inst_ver {
+                // Prefer a strictly-newer reachable installed version; on a tie
+                // keep the higher choice version (= first-listed alternative),
+                // matching emerge's `dep_zapdeps`, which only re-picks the
+                // provider when the other branch is genuinely newer.
+                let better = match best_inst_ver {
+                    None => true,
+                    Some(ref b) => iv > *b || (iv == *b && best.is_some_and(|bv| ver > bv)),
+                };
+                if better {
+                    best_inst_ver = Some(iv);
+                    best = Some(ver);
+                }
+            }
+        }
+        best
+    }
 }
 
 /// Evaluate a single USE dep given the dep's effective state and the parent's

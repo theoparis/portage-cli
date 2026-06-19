@@ -191,8 +191,15 @@ impl DependencyProvider for PortageDependencyProvider {
                         .cloned();
                     return Ok(best);
                 }
-                // All branches installed: fall through to default max() pick
-                // (= first listed alternative, stable behaviour).
+                // All direct (non-virtual) branches installed: prefer the branch
+                // whose installed version is newest (emerge `dep_zapdeps`
+                // tie-break) before falling to the default max() (= first listed).
+                if matches!(package, PortagePackage::Choice { .. })
+                    && let Some(ver) = self.newest_installed_choice_branch(data, &candidates)
+                {
+                    return Ok(Some(ver.clone()));
+                }
+                // Fall through to default max() pick (= first listed alternative).
             }
 
             // No directly-installed branch found; fall back to CPN-level
@@ -206,15 +213,29 @@ impl DependencyProvider for PortageDependencyProvider {
                 })
                 .collect();
             let installed_count = has_installed.iter().filter(|&&x| x).count();
-            if installed_count > 0 && installed_count < candidates.len() {
-                let best = candidates
-                    .into_iter()
-                    .zip(has_installed)
-                    .filter(|(_, has)| *has)
-                    .map(|(v, _)| v)
-                    .max()
-                    .cloned();
-                return Ok(best);
+            if installed_count > 0 {
+                if installed_count < candidates.len() {
+                    let best = candidates
+                        .iter()
+                        .copied()
+                        .zip(has_installed)
+                        .filter(|(_, has)| *has)
+                        .map(|(v, _)| v)
+                        .max()
+                        .cloned();
+                    return Ok(best);
+                }
+                // All branches reach an installed package (e.g. the host has both
+                // rust and rust-bin, so `|| ( rust-bin:* rust:* )` — a Choice over
+                // nested `:*` SlotChoice virtuals — has every branch installed).
+                // Don't fall to blind max() (= first listed → rust-bin [NS]); use
+                // emerge's `dep_zapdeps` version-aware tie-break and keep the
+                // branch reaching the newer installed version (source rust-1.95.0).
+                if matches!(package, PortagePackage::Choice { .. })
+                    && let Some(ver) = self.newest_installed_choice_branch(data, &candidates)
+                {
+                    return Ok(Some(ver.clone()));
+                }
             }
         }
 

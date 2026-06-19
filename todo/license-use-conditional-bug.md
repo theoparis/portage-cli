@@ -1,8 +1,8 @@
 # License filter ignores USE conditionals → silent dep drop
 
 STATUS: FIXED 2026-06-18 (both bugs). Clean-slate `em -pe firefox` went 357 → 382
-(emerge 383); the only remaining gap is the pre-existing slotless-rust
-`|| ( rust-bin rust )` preference — **root-caused 2026-06-19, see below**.
+(emerge 383). The pre-existing slotless-rust `|| ( rust-bin rust )` preference
+gap is also **FIXED 2026-06-19** — see the section at the bottom.
 
 
 Discovered 2026-06-18 via the clean-slate stage3 chroot test (crossdev-stages
@@ -88,23 +88,29 @@ The 26-pkg gap is NOT an emptytree bug — it reproduces in normal mode too
 (commit 2999e46) is unaffected; this is an independent, pre-existing bug the
 clean-slate test surfaced.
 
-## Slotless-rust `||` preference — root cause (2026-06-19)
+## Slotless-rust `||` preference — FIXED 2026-06-19
 
-Under `-pe`, em picks `rust-bin-1.95.0 [NS]` where emerge keeps installed
-source `rust-1.95.0 [R]`. Emptytree-only; normal `-p` matches (both keep the
+Under `-pe`, em picked `rust-bin-1.95.0 [NS]` where emerge keeps installed
+source `rust-1.95.0 [R]`. Emptytree-only; normal `-p` matched (both keep the
 installed provider). Edges pulling rust-bin-1.95 (via `--json`): cbindgen,
 cargo-c, librsvg, maturin, ast-serialize, firefox-151, and rust self-bootstrap —
 all declaring `|| ( >=rust-bin-1.74.1:* >=rust-1.74.1:* )` (rust-bin first,
 `:*` any-slot).
 
-**Mechanism (all-branches-installed fall-through):** the `:*` form produces a
-Choice (the `||`) whose two branches are each a nested SlotChoice virtual
-(rust-bin's slots / rust's slots). In `choose_version`'s installed-preference
-heuristic (`solve.rs` ~line 132), `direct_installed` checks each branch against
-`self.installed`. The host has **both** rust (1.93.1/1.94.0/1.95.0) and rust-bin
-(1.93.1) installed, so **both** branches report installed →
-`directly_installed_count == candidates.len()` → line 214 "All branches
-installed: fall through to default max()" → `max()` → first-listed → **rust-bin**.
+**Mechanism (corrected — the all-branches-installed fall-through is the
+*CPN-level* arm, not the direct one):** the `:*` form produces a Choice (the
+`||`) whose two branches are each a nested SlotChoice virtual (rust-bin's slots /
+rust's slots). In `choose_version`'s installed-preference heuristic, the
+`direct_installed` check (`self.installed.contains_key(pkg)`) is **always false**
+for these branches — the branch's merged dep is the nested SlotChoice *virtual*,
+which is never in `self.installed` → `directly_installed_count == 0`, so the
+whole directly-installed block is **skipped** (confirmed via `EM_DBG_CHOICE`
+instrumentation: `direct_inst=0`). Execution reaches the **CPN-level** arm, whose
+`deps_reach_installed(vd, 2)` *does* traverse virtuals and reports **both**
+branches as reaching an installed package → `installed_count == candidates.len()`
+→ the old `< candidates.len()` guard failed → fall to `max()` → first-listed →
+**rust-bin**. (The earlier note pinning this on the `directly_installed_count ==
+candidates.len()` arm was wrong; that arm never fires for virtual branches.)
 
 emerge's `dep_zapdeps` instead prefers the branch whose installed version is
 **newer** (source rust-1.95.0 > rust-bin-1.93.1), avoiding a needless `[NS]`.
@@ -112,13 +118,22 @@ emerge's `dep_zapdeps` instead prefers the branch whose installed version is
 **Why firefox's own rust BDEPEND works:** it uses **specific slots**
 (`rust-bin:1.94.1[llvm_slot_21]`), so the Choice branches are direct real
 packages (not virtuals), and `direct_installed` sees rust-1.94.0 installed but
-rust-bin-1.94.0 NOT → `directly_installed_count < candidates.len()` → correctly
-picks the installed source-rust branch.
+rust-bin-1.94.0 NOT → `directly_installed_count < candidates.len()` → the
+some-not-all arm correctly picks the installed source-rust branch.
 
-**Fix direction:** when all branches of a provider `||` Choice are "installed,"
-don't fall to blind `max()`/first-listed — compare the **newest installed
-version** reachable through each branch's SlotChoice virtual and prefer the
-branch with the newer installed version (source rust-1.95.0 > rust-bin-1.93.1).
-Needs `branch_reaches_installed` to return the best installed version, not just
-a bool, so the all-installed tie-break is version-aware. Narrow, localized to
-the `directly_installed_count == candidates.len()` arm in `choose_version`.
+**Fix (landed):** new `PortageDependencyProvider::newest_installed_choice_branch`
+(`provider/mod.rs`) returns, for an all-installed provider `||` Choice, the
+candidate branch reaching the **newest** installed version — resolving each
+branch one level (virtual → `branch_best_installed`, else direct
+`self.installed`). Tie-break is emerge-faithful: only re-pick on a *strictly
+newer* version; on a tie keep the first-listed alternative. Called from **both**
+all-installed arms in `choose_version` — the direct one and, decisively, the
+**CPN-level** `installed_count == candidates.len()` case where the rust Choice
+actually lands. Regression test: `or_group_no_preference_when_both_installed`
+(equal installed versions still pick first-listed). Verified: `em -pe cbindgen`
+and `em -pe firefox` now keep `rust-1.95.0 [R]`; normal `-p` unchanged; full
+pubgrub suite 141 passed.
+
+**Caveat:** the version comparison is cross-package (rust-bin vs rust) and only
+meaningful because they share upstream versioning — not a general mechanism, but
+matches how `dep_zapdeps` treats this exact provider pair.
