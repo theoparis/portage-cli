@@ -159,11 +159,29 @@ fn collect_violations(
 /// `!sys-apps/systemd[resolvconf]`) — the owner is never in the solve graph, so
 /// its blockers would otherwise be invisible.
 pub(super) fn installed_blocker_atoms(entry: &VdbEntry) -> Vec<Dep> {
+    // The vast majority of installed packages declare no blockers; a cheap
+    // structural pre-scan (no USE lookup, no cloning) lets us skip the
+    // `evaluate_use` pass for them, keeping this whole-VDB walk near-free.
+    if !has_blocker_atom(&entry.deps) {
+        return Vec::new();
+    }
     let active: HashSet<Interned<DefaultInterner>> = entry.active_use.iter().copied().collect();
     let evaluated = DepEntry::evaluate_use(&entry.deps, &active);
     let mut out = Vec::new();
     collect_blocker_atoms(&evaluated, &mut out);
     out
+}
+
+/// Whether any atom anywhere in the (unevaluated) dep tree is a blocker.
+fn has_blocker_atom(entries: &[DepEntry]) -> bool {
+    entries.iter().any(|entry| match entry {
+        DepEntry::Atom(dep) => dep.blocker.is_some(),
+        DepEntry::UseConditional { children, .. }
+        | DepEntry::AllOf(children)
+        | DepEntry::AnyOf(children)
+        | DepEntry::ExactlyOneOf(children)
+        | DepEntry::AtMostOneOf(children) => has_blocker_atom(children),
+    })
 }
 
 fn collect_blocker_atoms(entries: &[DepEntry], out: &mut Vec<Dep>) {

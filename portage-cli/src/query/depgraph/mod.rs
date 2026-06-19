@@ -238,6 +238,16 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         root_deps.push((pkg, vs));
     }
 
+    // Installed packages' active blocker atoms, evaluated once (they depend only
+    // on the VDB + recorded USE, not on the co-solved `package.use`). The
+    // provider is rebuilt every fixpoint iteration, so feeding a precomputed
+    // clone keeps the per-iteration cost to a cheap copy instead of re-walking
+    // the whole VDB's dep trees each time.
+    let installed_blockers: Vec<Vec<Dep>> = target_installed
+        .iter()
+        .map(conflicts::installed_blocker_atoms)
+        .collect();
+
     // Build a provider (with the given cede policy) and run the solve. Factored
     // so a failed --autosolve-use attempt can fall back to a fixed-USE (Level A)
     // solve instead of erroring — matching the doc invariant.
@@ -282,13 +292,14 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 provider.add_sysroot_installed(pkg, e.version.clone());
             }
         }
-        for e in &target_installed {
+        for (e, blockers) in target_installed.iter().zip(&installed_blockers) {
             let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
                 Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
                 None => PortagePackage::unslotted(e.cpn),
             };
-            let blockers = conflicts::installed_blocker_atoms(e);
-            provider.add_installed_blockers(pkg.clone(), blockers);
+            if !blockers.is_empty() {
+                provider.add_installed_blockers(pkg.clone(), blockers.clone());
+            }
             provider.add_installed(SolverInstalledPackage {
                 package: pkg,
                 version: e.version.clone(),

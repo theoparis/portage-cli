@@ -195,6 +195,14 @@ impl PortageDependencyProvider {
         let mut conflicts = Vec::new();
         let mut seen: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
+        // `(cpn, slot)` pairs the solution installs into. An installed package
+        // whose key is *not* here is retained after the merge (and so can still
+        // satisfy — or declare — a blocker); the lookup is O(1), avoiding a
+        // per-candidate scan of the whole solution.
+        let solution_keys: std::collections::HashSet<_> =
+            solution.iter().map(|(p, _)| (p.cpn(), p.slot())).collect();
+        let retained = |p: &PortagePackage| !solution_keys.contains(&(p.cpn(), p.slot()));
+
         for (pkg, version) in solution.iter() {
             let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
@@ -212,8 +220,7 @@ impl PortageDependencyProvider {
                     .any(|(p, v)| self.blocker_satisfied_by(blocker, p, v, false));
                 let hit_installed = !hit_solution
                     && self.installed.iter().any(|(p, (v, _))| {
-                        !self.replaced_by_solution(p, solution)
-                            && self.blocker_satisfied_by(blocker, p, v, true)
+                        retained(p) && self.blocker_satisfied_by(blocker, p, v, true)
                     });
                 if hit_solution || hit_installed {
                     let strength = match blocker.blocker {
@@ -240,7 +247,7 @@ impl PortageDependencyProvider {
         // (already USE-evaluated on the owner side); the blocked target's USE is
         // taken from the shared predicate, exactly as for solution-owned blockers.
         for (owner, blockers) in &self.installed_blockers {
-            if self.replaced_by_solution(owner, solution) {
+            if !retained(owner) {
                 continue;
             }
             let Some((owner_ver, _)) = self.installed.get(owner) else {
@@ -251,9 +258,7 @@ impl PortageDependencyProvider {
                     .iter()
                     .any(|(p, v)| self.blocker_satisfied_by(blocker, p, v, false))
                     || self.installed.iter().any(|(p, (v, _))| {
-                        p != owner
-                            && !self.replaced_by_solution(p, solution)
-                            && self.blocker_satisfied_by(blocker, p, v, true)
+                        p != owner && retained(p) && self.blocker_satisfied_by(blocker, p, v, true)
                     });
                 if hit {
                     let strength = match blocker.blocker {
@@ -317,18 +322,6 @@ impl PortageDependencyProvider {
                 }
             }),
         }
-    }
-
-    /// True when the solution installs into the same `(cpn, slot)` as `inst`, so
-    /// the plan replaces this installed package (it is not "retained").
-    fn replaced_by_solution(
-        &self,
-        inst: &PortagePackage,
-        solution: &pubgrub::SelectedDependencies<PortagePackage, Version>,
-    ) -> bool {
-        solution
-            .iter()
-            .any(|(sp, _)| sp.cpn() == inst.cpn() && sp.slot() == inst.slot())
     }
 
     /// Resolve slot-operator bindings from a solution.
