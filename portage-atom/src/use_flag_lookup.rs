@@ -6,9 +6,9 @@ use crate::interner::{DefaultInterner, Interned};
 
 /// Answers whether a USE flag is active.
 ///
-/// [`DepEntry::evaluate_use`] takes `&impl UseFlagLookup` so callers pass a flag
-/// set (or [`portage_atom_pubgrub::UseConfig`]) directly — no per-call-site
-/// closure. [`Interned`] is [`Copy`]; lookups take it by value.
+/// [`crate::DepEntry::evaluate_use`] takes `&impl UseFlagLookup` so callers pass
+/// a flag set (or `portage-atom-pubgrub`'s `UseConfig`) directly — no
+/// per-call-site closure. [`Interned`] is [`Copy`]; lookups take it by value.
 pub trait UseFlagLookup {
     /// Returns `true` when `flag` is enabled for dependency evaluation.
     fn use_flag_active(&self, flag: Interned<DefaultInterner>) -> bool;

@@ -75,7 +75,8 @@ impl DepEntry {
     /// children recursively evaluated. Empty groups after evaluation are dropped.
     ///
     /// `active` is any [`UseFlagLookup`] — typically a `HashSet` of interned
-    /// flags, a `&[&str]` slice, or a folded [`UseConfig`](portage_atom_pubgrub::UseConfig).
+    /// flags, a `&[&str]` slice, or a folded `UseConfig` (from the
+    /// `portage-atom-pubgrub` crate).
     ///
     /// ```
     /// use portage_atom::DepEntry;
