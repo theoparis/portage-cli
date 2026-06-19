@@ -757,7 +757,7 @@ mod tests {
             active_use: vec![],
             iuse: vec![],
         });
-        provider.add_installed_blockers(openresolv, vec![Dep::parse("!sys-apps/systemd").unwrap()]);
+        provider.add_installed_blockers(&openresolv, &[Dep::parse("!sys-apps/systemd").unwrap()]);
 
         let solution = provider
             .resolve_targets(vec![(

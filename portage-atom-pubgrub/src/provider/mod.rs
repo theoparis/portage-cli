@@ -548,9 +548,10 @@ impl PortageDependencyProvider {
 
     /// Record an installed package's pre-evaluated blocker atoms for
     /// [`check_blockers`](Self::check_blockers)' reciprocal pass. No-op when empty.
-    pub fn add_installed_blockers(&mut self, package: PortagePackage, blockers: Vec<Dep>) {
+    pub fn add_installed_blockers(&mut self, package: &PortagePackage, blockers: &[Dep]) {
         if !blockers.is_empty() {
-            self.installed_blockers.insert(package, blockers);
+            self.installed_blockers
+                .insert(package.clone(), blockers.to_vec());
         }
     }
 
@@ -884,6 +885,25 @@ impl PortageDependencyProvider {
         false
     }
 
+    /// Newest installed version reachable one level out of a single version's
+    /// merged constraints: a direct dep is looked up in `self.installed`, a
+    /// nested virtual branch (e.g. a `:*` SlotChoice) is resolved via
+    /// [`Self::branch_best_installed`]. `None` when nothing is installed.
+    fn branch_installed_ver(&self, vd: &VersionData) -> Option<Version> {
+        let Dependencies::Available(ref cs) = vd.merged else {
+            return None;
+        };
+        cs.iter()
+            .filter_map(|(p, _)| {
+                if p.is_virtual() {
+                    self.branch_best_installed(p)
+                } else {
+                    self.installed.get(p).map(|(v, _)| v.clone())
+                }
+            })
+            .max()
+    }
+
     /// The newest installed version reachable (one level) through a virtual
     /// `||`-Choice branch — i.e. the newest version of the branch's target
     /// package (e.g. rust / rust-bin) that is present in `self.installed`.
@@ -894,20 +914,10 @@ impl PortageDependencyProvider {
     /// avoiding a needless `[NS]` of the first-listed provider's newest slot.
     pub(crate) fn branch_best_installed(&self, pkg: &PortagePackage) -> Option<Version> {
         let data = self.packages.get(pkg)?;
-        let mut best: Option<Version> = None;
-        for vd in data.versions.values() {
-            if let Dependencies::Available(ref cs) = vd.merged {
-                for (dep_pkg, _) in cs.iter() {
-                    if !dep_pkg.is_virtual()
-                        && let Some((ver, _policy)) = self.installed.get(dep_pkg)
-                        && best.as_ref().is_none_or(|b| *b < *ver)
-                    {
-                        best = Some(ver.clone());
-                    }
-                }
-            }
-        }
-        best
+        data.versions
+            .values()
+            .filter_map(|vd| self.branch_installed_ver(vd))
+            .max()
     }
 
     /// For an all-branches-installed provider `||` Choice, return the candidate
@@ -931,20 +941,7 @@ impl PortageDependencyProvider {
             let Some(vd) = data.versions.get(ver) else {
                 continue;
             };
-            let inst_ver = if let Dependencies::Available(ref cs) = vd.merged {
-                cs.iter()
-                    .filter_map(|(p, _)| {
-                        if p.is_virtual() {
-                            self.branch_best_installed(p)
-                        } else {
-                            self.installed.get(p).map(|(v, _)| v.clone())
-                        }
-                    })
-                    .max()
-            } else {
-                None
-            };
-            if let Some(iv) = inst_ver {
+            if let Some(iv) = self.branch_installed_ver(vd) {
                 // Prefer a strictly-newer reachable installed version; on a tie
                 // keep the higher choice version (= first-listed alternative),
                 // matching emerge's `dep_zapdeps`, which only re-picks the

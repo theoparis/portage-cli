@@ -296,9 +296,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
                 None => PortagePackage::unslotted(e.cpn),
             };
-            if !blockers.is_empty() {
-                provider.add_installed_blockers(pkg.clone(), blockers.clone());
-            }
+            provider.add_installed_blockers(&pkg, blockers);
             provider.add_installed(SolverInstalledPackage {
                 package: pkg,
                 version: e.version.clone(),
