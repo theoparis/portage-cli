@@ -168,11 +168,9 @@ pub struct PortageDependencyProvider {
     pub(crate) installed_cpns: HashSet<Cpn>,
     pub(crate) installed_use: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
     pub(crate) installed_iuse: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
-    /// Blocker atoms declared by installed packages, already USE-evaluated
-    /// against the VDB-recorded flags. Lets [`check_blockers`](Self::check_blockers)
-    /// report a blocker an installed package leaves pointing at the plan (the
-    /// reciprocal of a solution package blocking an installed one) even though
-    /// the installed owner is never ingested into the solve.
+    /// Blocker atoms declared by installed packages (pre-USE-evaluated), so
+    /// [`check_blockers`](Self::check_blockers) can report ones a retained
+    /// installed owner points at the plan — the owner is never in the solve.
     pub(crate) installed_blockers: HashMap<PortagePackage, Vec<Dep>>,
     /// Packages present on the **build host** (BROOT), used only to satisfy
     /// `BDEPEND` edges — a BDEPEND that the host already provides is dropped in
@@ -548,11 +546,8 @@ impl PortageDependencyProvider {
         }
     }
 
-    /// Record an installed package's active blocker atoms (already USE-evaluated
-    /// against the VDB-recorded flags), so [`check_blockers`](Self::check_blockers)
-    /// can report a blocker the installed owner points at the post-plan set — the
-    /// reciprocal of a solution package blocking an installed one. No-op for an
-    /// owner with no blockers.
+    /// Record an installed package's pre-evaluated blocker atoms for
+    /// [`check_blockers`](Self::check_blockers)' reciprocal pass. No-op when empty.
     pub fn add_installed_blockers(&mut self, package: PortagePackage, blockers: Vec<Dep>) {
         if !blockers.is_empty() {
             self.installed_blockers.insert(package, blockers);

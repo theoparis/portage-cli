@@ -193,59 +193,35 @@ impl PortageDependencyProvider {
         solution: &pubgrub::SelectedDependencies<PortagePackage, Version>,
     ) -> Vec<Error> {
         let mut conflicts = Vec::new();
-        let mut seen: std::collections::HashSet<(String, String)> =
-            std::collections::HashSet::new();
-        // `(cpn, slot)` pairs the solution installs into. An installed package
-        // whose key is *not* here is retained after the merge (and so can still
-        // satisfy — or declare — a blocker); the lookup is O(1), avoiding a
-        // per-candidate scan of the whole solution.
+        let mut seen = std::collections::HashSet::new();
+        // `(cpn, slot)` the plan installs into; an installed package absent here
+        // is retained after the merge. O(1) vs scanning the whole solution.
         let solution_keys: std::collections::HashSet<_> =
             solution.iter().map(|(p, _)| (p.cpn(), p.slot())).collect();
         let retained = |p: &PortagePackage| !solution_keys.contains(&(p.cpn(), p.slot()));
 
+        // A blocker fires when its atom is satisfied by a package present after
+        // the plan: a solution member or a retained installed one. The installed
+        // side matters for e.g. `systemd[resolvconf]` blocking an installed
+        // net-dns/openresolv that nothing pulls into the solve.
         for (pkg, version) in solution.iter() {
             let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
             };
             for blocker in &vd.blockers {
-                // A blocker is violated when the blocked atom is satisfied by a
-                // package present after the plan — both freshly-solved members and
-                // installed packages the plan leaves in place. emerge reports a
-                // blocker against a retained installed package (e.g.
-                // `systemd[resolvconf]` soft-blocking an installed
-                // `net-dns/openresolv` that nothing pulls into the solve), which a
-                // solution-only search misses.
-                let hit_solution = solution
-                    .iter()
-                    .any(|(p, v)| self.blocker_satisfied_by(blocker, p, v, false));
-                let hit_installed = !hit_solution
-                    && self.installed.iter().any(|(p, (v, _))| {
-                        retained(p) && self.blocker_satisfied_by(blocker, p, v, true)
-                    });
-                if hit_solution || hit_installed {
-                    let strength = match blocker.blocker {
-                        Some(portage_atom::Blocker::Strong) => "strong(!!)",
-                        _ => "weak(!)",
-                    };
-                    let pkg_str = format!("{}-{}", pkg, version);
-                    let blocker_str = blocker.to_string();
-                    if seen.insert((pkg_str.clone(), blocker_str.clone())) {
-                        conflicts.push(Error::BlockerConflict {
-                            pkg: pkg_str,
-                            blocker: blocker_str,
-                            strength,
-                        });
-                    }
+                if self.blocker_hit(blocker, solution, &retained) {
+                    record_blocker(
+                        &mut conflicts,
+                        &mut seen,
+                        format!("{}-{}", pkg, version),
+                        blocker,
+                    );
                 }
             }
         }
 
-        // Reciprocal direction: a blocker declared by a *retained installed*
-        // package (e.g. net-dns/openresolv's `!sys-apps/systemd[resolvconf]`)
-        // pointing at a package present after the plan. The installed owner is
-        // never ingested into the solve, so its blockers are fed in separately
-        // (already USE-evaluated on the owner side); the blocked target's USE is
-        // taken from the shared predicate, exactly as for solution-owned blockers.
+        // Reciprocal: a blocker declared by a retained installed package (fed in
+        // pre-evaluated, since its owner is never in the solve) against the plan.
         for (owner, blockers) in &self.installed_blockers {
             if !retained(owner) {
                 continue;
@@ -254,26 +230,13 @@ impl PortageDependencyProvider {
                 continue;
             };
             for blocker in blockers {
-                let hit = solution
-                    .iter()
-                    .any(|(p, v)| self.blocker_satisfied_by(blocker, p, v, false))
-                    || self.installed.iter().any(|(p, (v, _))| {
-                        p != owner && retained(p) && self.blocker_satisfied_by(blocker, p, v, true)
-                    });
-                if hit {
-                    let strength = match blocker.blocker {
-                        Some(portage_atom::Blocker::Strong) => "strong(!!)",
-                        _ => "weak(!)",
-                    };
-                    let pkg_str = format!("{}-{}", owner, owner_ver);
-                    let blocker_str = blocker.to_string();
-                    if seen.insert((pkg_str.clone(), blocker_str.clone())) {
-                        conflicts.push(Error::BlockerConflict {
-                            pkg: pkg_str,
-                            blocker: blocker_str,
-                            strength,
-                        });
-                    }
+                if self.blocker_hit(blocker, solution, &retained) {
+                    record_blocker(
+                        &mut conflicts,
+                        &mut seen,
+                        format!("{}-{}", owner, owner_ver),
+                        blocker,
+                    );
                 }
             }
         }
@@ -281,12 +244,28 @@ impl PortageDependencyProvider {
         conflicts
     }
 
+    /// Whether `blocker`'s atom is satisfied by any package present after the
+    /// plan — a solution member, or an installed one `retained` keeps in place.
+    fn blocker_hit(
+        &self,
+        blocker: &Dep,
+        solution: &pubgrub::SelectedDependencies<PortagePackage, Version>,
+        retained: &impl Fn(&PortagePackage) -> bool,
+    ) -> bool {
+        solution
+            .iter()
+            .any(|(p, v)| self.blocker_satisfied_by(blocker, p, v, false))
+            || self
+                .installed
+                .iter()
+                .any(|(p, (v, _))| retained(p) && self.blocker_satisfied_by(blocker, p, v, true))
+    }
+
     /// Whether `blocker`'s atom (cpn/slot, version, and any USE-dep) is satisfied
-    /// by candidate `(cand_pkg, cand_ver)`. `from_installed` selects the USE
-    /// source: the VDB-recorded active flags for an installed candidate, or the
-    /// freshly-resolved USE for a solved one. A conditional blocker (`!foo[bar]`)
-    /// only fires when the candidate actually satisfies the USE condition — so
-    /// `!sys-libs/glibc[crypt(-)]` does not flag a glibc built without `crypt`.
+    /// by `(cand_pkg, cand_ver)`. `from_installed` picks the USE source: VDB
+    /// flags for an installed candidate, freshly-resolved USE otherwise. A
+    /// `!foo[bar]` blocker fires only when the candidate has the flag (so
+    /// `!glibc[crypt(-)]` ignores a glibc built without `crypt`).
     fn blocker_satisfied_by(
         &self,
         blocker: &Dep,
@@ -367,6 +346,27 @@ impl PortageDependencyProvider {
             }
         }
         bindings
+    }
+}
+
+/// Push a deduplicated blocker conflict; `owner` is the cpv string declaring it.
+fn record_blocker(
+    conflicts: &mut Vec<Error>,
+    seen: &mut std::collections::HashSet<(String, String)>,
+    owner: String,
+    blocker: &Dep,
+) {
+    let blocker_str = blocker.to_string();
+    if seen.insert((owner.clone(), blocker_str.clone())) {
+        let strength = match blocker.blocker {
+            Some(portage_atom::Blocker::Strong) => "strong(!!)",
+            _ => "weak(!)",
+        };
+        conflicts.push(Error::BlockerConflict {
+            pkg: owner,
+            blocker: blocker_str,
+            strength,
+        });
     }
 }
 

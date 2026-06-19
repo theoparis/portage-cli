@@ -151,17 +151,13 @@ fn collect_violations(
     }
 }
 
-/// The blocker atoms an installed package actively declares, with USE
-/// conditionals resolved against its VDB-recorded active flags.
-///
-/// Fed to the solver so `check_blockers` can report a blocker a retained
-/// installed package leaves pointing at the plan (e.g. `net-dns/openresolv`'s
-/// `!sys-apps/systemd[resolvconf]`) — the owner is never in the solve graph, so
-/// its blockers would otherwise be invisible.
+/// An installed package's active blocker atoms (USE conditionals resolved
+/// against its VDB flags). Fed to the solver so `check_blockers` can report a
+/// blocker a retained installed owner points at the plan — the owner is never
+/// in the solve graph, so its blockers are otherwise invisible.
 pub(super) fn installed_blocker_atoms(entry: &VdbEntry) -> Vec<Dep> {
-    // The vast majority of installed packages declare no blockers; a cheap
-    // structural pre-scan (no USE lookup, no cloning) lets us skip the
-    // `evaluate_use` pass for them, keeping this whole-VDB walk near-free.
+    // Most installed packages declare no blockers; a cheap structural pre-scan
+    // skips the evaluate_use + clone for them, keeping this whole-VDB walk cheap.
     if !has_blocker_atom(&entry.deps) {
         return Vec::new();
     }

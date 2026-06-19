@@ -158,10 +158,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
 
     let (data, (target_installed, installed_blockers), host_installed, use_env_result) = tokio::join!(
         repo::load_repos(&repo, &overlays),
-        // Load the installed set and, on the same task, precompute each package's
-        // active blocker atoms (for `check_blockers`' installed-side reports). The
-        // walk depends only on the VDB, so it overlaps the concurrent repo/use-env
-        // loads here instead of running serially on the hot path afterwards.
+        // Also precompute each installed package's blocker atoms on this task
+        // (for `check_blockers`): the walk only needs the VDB, so it overlaps the
+        // other concurrent loads instead of running serially before the solve.
         async {
             let ti = installed::load_target_installed(roots);
             let blockers: Vec<Vec<Dep>> =
@@ -246,10 +245,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         }
         root_deps.push((pkg, vs));
     }
-
-    // `installed_blockers` (precomputed above on the VDB-load task) is fed to the
-    // provider each fixpoint iteration as a cheap clone, rather than re-walking
-    // the whole VDB's dep trees per iteration.
 
     // Build a provider (with the given cede policy) and run the solve. Factored
     // so a failed --autosolve-use attempt can fall back to a fixed-USE (Level A)
