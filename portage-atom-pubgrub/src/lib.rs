@@ -39,6 +39,7 @@
 //! *values*), encoding, and phasing live in `docs/required-use-level-c.md`
 //! and `docs/use-and-solver-boundary.md`. Global minimal-flip optimisation is
 //! out of scope — the preference is greedy, per flag.
+#![warn(missing_docs)]
 
 mod convert;
 mod error;

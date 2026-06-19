@@ -6,7 +6,7 @@ rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Bridge between portage-atom and the PubGrub dependency solver"
-repository = "https://github.com/lu-zero/portage-atom-pubgrub"
+repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "portage", "pubgrub", "dependency", "solver"]
 categories = ["algorithms", "development-tools"]
 

@@ -30,6 +30,7 @@
 //! assert_eq!(entry.metadata.description, "Example package");
 //! assert_eq!(entry.metadata.eapi.to_string(), "7");
 //! ```
+#![warn(missing_docs)]
 
 mod cache;
 mod eapi;

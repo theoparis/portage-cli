@@ -135,6 +135,7 @@ impl Default for InMemoryRepository {
 }
 
 impl InMemoryRepository {
+    /// Create an empty repository with a default (empty) USE configuration.
     pub fn new() -> Self {
         Self {
             packages: HashMap::new(),
@@ -148,6 +149,10 @@ impl InMemoryRepository {
         self.use_config = config;
     }
 
+    /// Add a package version with the given slot/subslot and dependencies.
+    ///
+    /// Convenience wrapper over [`Self::add_version_full`] with no IUSE and no
+    /// `REQUIRED_USE`.
     pub fn add_version(
         &mut self,
         cpv: Cpv,
@@ -158,6 +163,9 @@ impl InMemoryRepository {
         self.add_version_full(cpv, slot, subslot, None, vec![], deps);
     }
 
+    /// Add a package version that also declares an IUSE set.
+    ///
+    /// Like [`Self::add_version`] but records the version's `IUSE` flags.
     pub fn add_version_with_iuse(
         &mut self,
         cpv: Cpv,

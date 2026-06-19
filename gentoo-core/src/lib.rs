@@ -26,6 +26,7 @@
 //! processing many instances (e.g., parsing an entire ebuild repository).
 //! With the default `interner` feature, identical strings share a single
 //! allocation via a process-global interners.
+#![warn(missing_docs)]
 
 pub mod arch;
 mod error;

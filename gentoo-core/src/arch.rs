@@ -50,23 +50,41 @@ use gentoo_interner::{DefaultInterner, Interned, Interner};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum KnownArch {
+    /// 32-bit ARM (keyword `arm`).
     Arm,
+    /// 64-bit ARM / AArch64 (keyword `arm64`).
     AArch64,
+    /// 32-bit x86 (keyword `x86`).
     X86,
+    /// 64-bit x86 / x86-64 (keyword `amd64`).
     X86_64,
+    /// 32-bit RISC-V (keyword `riscv`).
     Riscv32,
+    /// 64-bit RISC-V (keyword `riscv`).
     Riscv64,
+    /// 32-bit PowerPC (keyword `ppc`).
     Powerpc,
+    /// 64-bit PowerPC (keyword `ppc64`).
     Powerpc64,
+    /// 32-bit MIPS (keyword `mips`).
     Mips,
+    /// 64-bit MIPS (keyword `mips`).
     Mips64,
+    /// 32-bit SPARC (keyword `sparc`).
     Sparc,
+    /// 64-bit SPARC (keyword `sparc`).
     Sparc64,
+    /// 64-bit IBM Z / s390x (keyword `s390`).
     S390x,
+    /// Motorola 68000 series (keyword `m68k`).
     M68k,
+    /// 64-bit LoongArch (keyword `loong`).
     LoongArch64,
+    /// DEC Alpha (keyword `alpha`).
     Alpha,
+    /// HP PA-RISC (keyword `hppa`).
     Hppa,
+    /// Intel Itanium / IA-64 (keyword `ia64`).
     Ia64,
 }
 

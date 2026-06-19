@@ -6,7 +6,7 @@ rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Core Gentoo types and utilities for Rust applications"
-repository = "https://github.com/lu-zero/gentoo-core"
+repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "core", "arch", "target"]
 categories = ["development-tools", "os::unix-apis"]
 

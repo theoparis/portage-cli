@@ -6,7 +6,9 @@ rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Bridge between portage-atom and the resolvo dependency solver"
-repository = "https://github.com/lu-zero/portage-atom"
+repository = "https://github.com/lu-zero/portage-cli"
+keywords = ["gentoo", "portage", "resolvo", "dependency", "solver"]
+categories = ["algorithms", "development-tools"]
 
 [features]
 lasso = ["portage-atom/lasso"]

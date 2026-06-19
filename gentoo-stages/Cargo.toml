@@ -6,7 +6,7 @@ rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Gentoo stage3 image support"
-repository = "https://github.com/lu-zero/gentoo-stages"
+repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "stages", "stage3", "cross-compilation"]
 categories = ["development-tools"]
 

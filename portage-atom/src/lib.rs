@@ -33,6 +33,7 @@
 //! assert!(dep.slot_dep.is_some());
 //! assert!(dep.use_deps.is_some());
 //! ```
+#![warn(missing_docs)]
 
 mod cpn;
 mod cpv;

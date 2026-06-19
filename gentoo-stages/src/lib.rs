@@ -2,6 +2,7 @@
 //!
 //! This crate provides functionality for fetching, parsing, and managing
 //! Gentoo Linux stage3 images.
+#![warn(missing_docs)]
 
 mod cache;
 mod client;

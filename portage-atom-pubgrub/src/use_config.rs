@@ -20,7 +20,11 @@ pub enum UseFlagState {
     /// constraints (Level-C `REQUIRED_USE`).  `prefer` is the value the caller's
     /// policy would have produced; `choose_version` biases toward it so a ceded
     /// flag only flips when a constraint forces it (greedy keep-configured).
-    SolverDecided { prefer: bool },
+    SolverDecided {
+        /// Value the caller's policy would have produced; the solver biases
+        /// toward it and only flips the flag when a constraint forces it.
+        prefer: bool,
+    },
 }
 
 /// Configuration for USE flag evaluation during dependency conversion.

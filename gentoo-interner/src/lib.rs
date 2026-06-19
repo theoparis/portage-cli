@@ -39,6 +39,7 @@
 //! let interned = Interned::<DefaultInterner>::intern("amd64");
 //! assert_eq!(interned.resolve(), "amd64");
 //! ```
+#![warn(missing_docs)]
 
 use std::fmt::Debug;
 use std::marker::PhantomData;

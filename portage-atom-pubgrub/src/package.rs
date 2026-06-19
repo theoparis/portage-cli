@@ -51,7 +51,9 @@ pub enum MergeRoot {
 pub enum PortagePackage {
     /// A real Gentoo package, identified by CPN + optional slot.
     Real {
+        /// Category/package name.
         cpn: Cpn,
+        /// Bound slot, or `None` for a slot-agnostic node.
         slot: Option<Interned<DefaultInterner>>,
         /// Merge destination; defaults to [`MergeRoot::Target`].
         merge_root: MergeRoot,
@@ -59,11 +61,20 @@ pub enum PortagePackage {
     /// Synthetic root node for the solver.
     Root,
     /// USE-flag decision node.  Version 1 = enabled, 0 = disabled.
-    UseDecision { name: Interned<DefaultInterner> },
+    UseDecision {
+        /// Interned identifier of the decision node (`cpn` + flag).
+        name: Interned<DefaultInterner>,
+    },
     /// OR-group choice node.  Each version is one alternative.
-    Choice { name: Interned<DefaultInterner> },
+    Choice {
+        /// Interned identifier of the synthetic choice group.
+        name: Interned<DefaultInterner>,
+    },
     /// Slot-choice node.  Each version selects one slot candidate.
-    SlotChoice { name: Interned<DefaultInterner> },
+    SlotChoice {
+        /// Interned identifier of the synthetic slot-choice group.
+        name: Interned<DefaultInterner>,
+    },
 }
 
 impl PortagePackage {

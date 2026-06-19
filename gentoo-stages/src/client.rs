@@ -23,6 +23,11 @@ impl Client {
         Client::builder().build()
     }
 
+    /// Build a [`Client`] with explicit settings via [`Client::builder`].
+    ///
+    /// Each argument falls back to the same defaults as [`Client::new`] when
+    /// left unset: the <https://distfiles.gentoo.org> mirror, the host
+    /// architecture, and a temporary cache directory.
     #[builder(builder_type = "ClientBuilder")]
     pub fn new(
         mirror_url: Option<&str>,

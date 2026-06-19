@@ -6,7 +6,7 @@ rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "String interning for Gentoo-related crates"
-repository = "https://github.com/lu-zero/gentoo-interner"
+repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "interner", "string"]
 categories = ["data-structures", "memory-management"]
 

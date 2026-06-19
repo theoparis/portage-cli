@@ -45,8 +45,11 @@ pub struct DepEdge {
 ///   (conservative: resolvo conditions have no NOT operator).
 #[derive(Debug, Clone, Default)]
 pub struct UseConfig {
+    /// Flags forced ON: `use? ( deps )` active, `!use? ( deps )` skipped.
     pub enabled: HashSet<Interned<DefaultInterner>>,
+    /// Flags forced OFF: `use? ( deps )` skipped, `!use? ( deps )` active.
     pub disabled: HashSet<Interned<DefaultInterner>>,
+    /// Flags left for the SAT solver to decide (via a `virtual/USE_<flag>`).
     pub solver_decided: HashSet<Interned<DefaultInterner>>,
 }
 
@@ -67,7 +70,9 @@ impl From<HashSet<Interned<DefaultInterner>>> for UseConfig {
 /// as independent names by the solver.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PackageName {
+    /// Category/package name.
     pub cpn: Cpn,
+    /// Slot encoded into the name axis, or `None` when slot-agnostic.
     pub slot: Option<Interned<DefaultInterner>>,
 }
 
@@ -81,14 +86,22 @@ impl std::fmt::Display for PackageName {
     }
 }
 
+/// A single candidate version and the metadata resolvo needs to solve it.
 #[derive(Debug, Clone)]
 pub struct PackageMetadata {
+    /// Category/package/version of this candidate.
     pub cpv: Cpv,
+    /// Declared slot, if any.
     pub slot: Option<Interned<DefaultInterner>>,
+    /// Declared subslot, if any.
     pub subslot: Option<Interned<DefaultInterner>>,
+    /// Flags declared in `IUSE`.
     pub iuse: Vec<Interned<DefaultInterner>>,
+    /// Flags effectively enabled for this candidate.
     pub use_flags: HashSet<Interned<DefaultInterner>>,
+    /// Originating repository, if known.
     pub repo: Option<Interned<DefaultInterner>>,
+    /// Dependencies separated by PMS dependency class.
     pub dependencies: PackageDeps,
 }
 
@@ -183,14 +196,24 @@ impl std::fmt::Display for DepClass {
 /// evaluation logic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VersionConstraint {
+    /// Category/package the constraint applies to.
     pub cpn: Cpn,
+    /// Comparison operator (`=`, `>=`, `~`, …).
     pub operator: Operator,
+    /// Version operand the operator compares against.
     pub version: Version,
+    /// Whether the version operand is a `=*` glob (`=foo-1.2*`).
     pub glob: bool,
+    /// Required slot, if the atom pins one.
     pub slot: Option<Interned<DefaultInterner>>,
+    /// Required subslot, if the atom pins one.
     pub subslot: Option<Interned<DefaultInterner>>,
+    /// Required `::repo`, if the atom pins one.
     pub repo: Option<Interned<DefaultInterner>>,
+    /// USE constraints `[flag]`/`[-flag]` as `(flag, enabled)` pairs.
     pub use_constraints: Vec<(Interned<DefaultInterner>, bool)>,
+    /// When `true`, the match result is flipped before resolvo applies its own
+    /// `inverse` flag — used to express blockers (see the type docs).
     pub inverted: bool,
 }
 

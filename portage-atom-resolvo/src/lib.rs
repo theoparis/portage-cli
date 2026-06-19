@@ -3,6 +3,7 @@
 //! This crate maps Portage package atoms, versions, and dependency trees onto
 //! resolvo's generic solver interface, enabling SAT-based dependency resolution
 //! for Gentoo-style package managers.
+#![warn(missing_docs)]
 
 mod pool;
 mod provider;

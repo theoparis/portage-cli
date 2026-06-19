@@ -6,7 +6,7 @@ rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Gentoo ebuild repository layout reader based on PMS"
-repository = "https://github.com/lu-zero/portage-repo"
+repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "portage", "repository", "pms"]
 categories = ["parser-implementations", "development-tools"]
 
