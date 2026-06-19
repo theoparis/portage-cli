@@ -16,9 +16,29 @@ REMAINING (+1 over-pull, em 126 vs emerge 125):
   to the newest repo version (update-on-prune). The field is removed; under
   `Favor` any satisfying installed cpv is kept even when pruned from the tree.
   `em -p firefox` is now 0 diffs vs emerge.
-- Also re-verify the offset `@system` 182-parity on a real `--root <empty>` setup
-  (host provides the toolchain, so broot filtering should still drop it — not
-  reproducible in the native sandbox).
+- Offset `@system` `--root <empty>` — **REAL gap, root-caused 2026-06-19** in a
+  clean crossdev-stages stage3 ([[crossdev-stages-sandbox]]). With a truly empty
+  target root (`em -p --root /eroot --config-root /` vs
+  `PORTAGE_CONFIGROOT=/ emerge --root=/eroot -p`, all `[ebuild N]`, no
+  contamination): **em 177 vs emerge 180**, missing `net-libs/{nghttp2,nghttp3,
+  ngtcp2}`.
+
+  Same package *names*, same curl USE (`http2 http3 quic` on for both). The diff
+  is **host-side build-dep copies**: those three are `net-misc/curl`'s DEPEND +
+  BDEPEND (build) *and* RDEPEND (runtime), and they are **not installed on the
+  host**. Isolated on `curl` alone: emerge lists each twice — `… to /eroot/`
+  (RDEPEND, target) **and** `…` (no suffix → `/`, the build host) — while em
+  lists each only once (target). em's broot filter assumes the host provides all
+  build deps and drops the BDEPEND/DEPEND edge; when the host actually *lacks*
+  the lib, em never schedules the host-side build install, so its offset plan
+  would fail to build curl (nghttp2 absent at build time).
+
+  Fix is architectural: in a native `--root` offset, an unsatisfied BDEPEND/DEPEND
+  must be scheduled as a **host/BROOT** merge, not silently broot-filtered. This
+  is the offset merge-root modeling that the `--prefix` overlay work shelved (see
+  [[overlay-merged-sysroot]]: prefer overlayfs + single ESYSROOT over env
+  injection). Not a quick fix; ties into that redesign. (`em -pe firefox` and the
+  native non-offset basket remain at parity — this is offset-only.)
 
 ---
 
