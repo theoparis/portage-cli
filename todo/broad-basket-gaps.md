@@ -47,18 +47,30 @@ beyond confirming em emits the matching `blocks B` report; closing it would
 require promoting blockers to exclusion/replacement (a known Tier-2 → Tier-1
 promotion item, see architecture §"Known divergences").
 
-### Blocker advisory coverage (verified 2026-06-18)
-em **does** emit a blocker advisory for this plan:
+### Blocker advisory coverage (3/4 as of 2026-06-19)
+em's blocker advisory now reads:
 ```
 !!! Blocker conflict(s) detected:
+  sys-apps/systemd:0-260.2-r1 blocks !net-dns/openresolv (weak(!))
   sys-apps/systemd-utils:0-255.18 blocks !sys-apps/gentoo-systemd-integration (weak(!))
   sys-apps/systemd-utils:0-255.18 blocks !sys-apps/systemd (weak(!))
 ```
-It covers 2 of emerge's 4 `blocks B` edges. **Missing:** the
-`resolvconf? ( !net-dns/openresolv )` pair — the **USE-conditional** blocker.
-em evaluates the blocker's USE condition but does not surface the blocker when
-the gating flag (`resolvconf`) is on. That is the concrete sub-gap if we want
-full blocker-report parity (separate from the Tier-2 replacement question).
+The `systemd[resolvconf]` → `!net-dns/openresolv` edge (the USE-conditional
+blocker) is now surfaced — commit "feat(blockers): report blockers against
+retained installed packages" extended `check_blockers` to match a blocked atom
+against installed packages the plan leaves in place, not just solution members.
+Earlier framing ("em evaluates the USE condition but doesn't surface it") was
+wrong: the blocker WAS evaluated, but openresolv is installed-only (nothing
+pulls it into the solve), so a solution-only search never found it.
+
+**Remaining (1 of 4): the reciprocal `net-dns/openresolv` → `systemd-260.2-r1`
+edge.** This is openresolv's *own* blocker (`RDEPEND !sys-apps/systemd[…]`); since
+openresolv is never ingested into the solve, its blocker atoms aren't available
+to the provider's `check_blockers`. Closing it needs a CLI-side pass that walks
+installed packages' `VdbEntry.deps` blockers against the post-plan set (the
+`conflicts.rs` machinery already has the installed deps + the present set) and
+feeds the blocker advisory. Reciprocal/duplicate of the edge now reported, so
+the conflict is no longer silent — full 4/4 parity is the only thing left.
 
 ## B. `dev-lang/python` — over-pull → **diagnosed, moved**
 
