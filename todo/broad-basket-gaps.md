@@ -47,30 +47,39 @@ beyond confirming em emits the matching `blocks B` report; closing it would
 require promoting blockers to exclusion/replacement (a known Tier-2 → Tier-1
 promotion item, see architecture §"Known divergences").
 
-### Blocker advisory coverage (3/4 as of 2026-06-19)
-em's blocker advisory now reads:
+### Blocker advisory coverage — FIXED 4/4 (2026-06-19)
+em's blocker advisory now matches emerge's four `blocks B` edges:
 ```
 !!! Blocker conflict(s) detected:
   sys-apps/systemd:0-260.2-r1 blocks !net-dns/openresolv (weak(!))
   sys-apps/systemd-utils:0-255.18 blocks !sys-apps/gentoo-systemd-integration (weak(!))
   sys-apps/systemd-utils:0-255.18 blocks !sys-apps/systemd (weak(!))
+  net-dns/openresolv:0-3.17.4 blocks !sys-apps/systemd[resolvconf] (weak(!))
 ```
-The `systemd[resolvconf]` → `!net-dns/openresolv` edge (the USE-conditional
-blocker) is now surfaced — commit "feat(blockers): report blockers against
-retained installed packages" extended `check_blockers` to match a blocked atom
-against installed packages the plan leaves in place, not just solution members.
-Earlier framing ("em evaluates the USE condition but doesn't surface it") was
-wrong: the blocker WAS evaluated, but openresolv is installed-only (nothing
-pulls it into the solve), so a solution-only search never found it.
+The earlier framing ("em evaluates the USE condition but doesn't surface it") was
+wrong: the blocker WAS evaluated; the blocked package was just installed-only
+(nothing pulls it into the solve), so a solution-only search missed it. Fixed in
+two directions, both keyed on packages the plan leaves in place:
 
-**Remaining (1 of 4): the reciprocal `net-dns/openresolv` → `systemd-260.2-r1`
-edge.** This is openresolv's *own* blocker (`RDEPEND !sys-apps/systemd[…]`); since
-openresolv is never ingested into the solve, its blocker atoms aren't available
-to the provider's `check_blockers`. Closing it needs a CLI-side pass that walks
-installed packages' `VdbEntry.deps` blockers against the post-plan set (the
-`conflicts.rs` machinery already has the installed deps + the present set) and
-feeds the blocker advisory. Reciprocal/duplicate of the edge now reported, so
-the conflict is no longer silent — full 4/4 parity is the only thing left.
+- **forward** (`feat(blockers): report blockers against retained installed
+  packages`) — `check_blockers` matches a solution package's blocker against
+  retained installed packages, not just solution members → surfaces
+  `systemd[resolvconf]` → `!openresolv`.
+- **reciprocal** (`feat(blockers): report blockers declared by retained
+  installed packages`) — the CLI extracts installed packages' active blocker
+  atoms (`conflicts::installed_blocker_atoms`) and feeds them to the provider;
+  `check_blockers` reports the ones a retained installed owner points at the plan
+  → surfaces `openresolv` → `!systemd[resolvconf]`.
+- **perf** (`perf(blockers): keep installed-blocker checks off the hot path`) —
+  precompute the solution `(cpn, slot)` set for an O(1) retained check, hoist the
+  extraction out of the solve fixpoint, and pre-scan to skip `evaluate_use` for
+  packages with no blockers. Net `em -p` regression ~2-4% (was 6-8%).
+
+This is the documented Tier-2 "blockers reported, not enforced" stance, now with
+full *report* parity. The remaining (separate, deliberate) item is promoting
+blockers to exclusion/replacement (Tier-2 → Tier-1) — i.e. actually uninstalling
+openresolv as emerge does — which is the architecture-level decision, not a
+report gap.
 
 ## B. `dev-lang/python` — over-pull → **diagnosed, moved**
 
