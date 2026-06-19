@@ -1,12 +1,17 @@
 # Two `-p` divergences found 2026-06-18 (broad basket sweep)
 
-STATUS: **open** (characterized, not fixed). After the broot USE-dep fix
-(`todo/broot-filter-use-dep.md`, commit 5359c30) the full parity basket is
-`RESULT: parity OK` on the standard targets. A wider sweep over 20 targets
-found these two remaining diffs; both are categorised, one is expected, one is
-new and needs a root-cause trace.
+STATUS: **B fixed; A narrowed to a report-coverage sub-gap.** B (the
+`dev-lang/python` over-pull) was root-caused and fixed — see
+`todo/target-derivation.md`. A is no longer a *plan* divergence: re-checked
+2026-06-19, `em -p sys-apps/systemd` and `emerge -p` now list the **same 30
+packages** (the earlier 30-vs-33 gap reflected a since-changed box state). What
+remains is purely **blocker-advisory coverage** (Tier-2 reporting), below.
 
-## A. `sys-apps/systemd` — 3 under-pulls (EXPECTED, Tier-2 blockers)
+## A. `sys-apps/systemd` — blocker-report coverage (plan AT PARITY)
+
+Re-verified 2026-06-19: package set matches emerge (30 == 30). The residual gap
+is that em's blocker advisory surfaces **2 of emerge's 4** `blocks B` edges; the
+prose below documents the original 30-vs-33 state for context.
 
 **Context:** the test box is a **systemd-less** profile
 (`default/linux/arm64/23.0`, OpenRC base — no `systemd` USE, no systemd
