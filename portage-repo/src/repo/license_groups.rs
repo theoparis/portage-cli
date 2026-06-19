@@ -162,7 +162,11 @@ impl AcceptLicense {
 
     /// Collect license names from `expr` not covered by this accept list.
     /// Conditional branches are evaluated against `enabled` (see `accepts_expr`).
-    pub fn licenses_needed(&self, expr: &LicenseExpr, enabled: &dyn Fn(&str) -> bool) -> Vec<String> {
+    pub fn licenses_needed(
+        &self,
+        expr: &LicenseExpr,
+        enabled: &dyn Fn(&str) -> bool,
+    ) -> Vec<String> {
         if self.allow_all && self.denied.is_empty() {
             return Vec::new();
         }
@@ -254,10 +258,9 @@ OSI Apache-2.0
         let reg = LicenseGroupRegistry::default();
         // Only the free licenses are accepted (stand-in for @FREE).
         let acc = AcceptLicense::from_tokens(&["GPL-2+".into(), "LGPL-2.1+".into()], &reg);
-        let expr = LicenseExpr::parse(
-            "gpl? ( GPL-2+ fdk? ( all-rights-reserved ) ) !gpl? ( LGPL-2.1+ )",
-        )
-        .unwrap();
+        let expr =
+            LicenseExpr::parse("gpl? ( GPL-2+ fdk? ( all-rights-reserved ) ) !gpl? ( LGPL-2.1+ )")
+                .unwrap();
 
         // gpl on, fdk off → active license is GPL-2+ only → accepted.
         let on_off = |f: &str| f == "gpl";
