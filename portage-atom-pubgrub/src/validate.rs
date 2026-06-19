@@ -232,6 +232,47 @@ impl PortageDependencyProvider {
                 }
             }
         }
+
+        // Reciprocal direction: a blocker declared by a *retained installed*
+        // package (e.g. net-dns/openresolv's `!sys-apps/systemd[resolvconf]`)
+        // pointing at a package present after the plan. The installed owner is
+        // never ingested into the solve, so its blockers are fed in separately
+        // (already USE-evaluated on the owner side); the blocked target's USE is
+        // taken from the shared predicate, exactly as for solution-owned blockers.
+        for (owner, blockers) in &self.installed_blockers {
+            if self.replaced_by_solution(owner, solution) {
+                continue;
+            }
+            let Some((owner_ver, _)) = self.installed.get(owner) else {
+                continue;
+            };
+            for blocker in blockers {
+                let hit = solution
+                    .iter()
+                    .any(|(p, v)| self.blocker_satisfied_by(blocker, p, v, false))
+                    || self.installed.iter().any(|(p, (v, _))| {
+                        p != owner
+                            && !self.replaced_by_solution(p, solution)
+                            && self.blocker_satisfied_by(blocker, p, v, true)
+                    });
+                if hit {
+                    let strength = match blocker.blocker {
+                        Some(portage_atom::Blocker::Strong) => "strong(!!)",
+                        _ => "weak(!)",
+                    };
+                    let pkg_str = format!("{}-{}", owner, owner_ver);
+                    let blocker_str = blocker.to_string();
+                    if seen.insert((pkg_str.clone(), blocker_str.clone())) {
+                        conflicts.push(Error::BlockerConflict {
+                            pkg: pkg_str,
+                            blocker: blocker_str,
+                            strength,
+                        });
+                    }
+                }
+            }
+        }
+
         conflicts
     }
 
@@ -691,6 +732,50 @@ mod tests {
             provider.check_blockers(&solution).len(),
             1,
             "blocker against the retained installed openresolv must still fire"
+        );
+    }
+
+    // Reciprocal of the above: a blocker declared by a retained *installed*
+    // package fires against a solved target — mirrors `net-dns/openresolv`'s
+    // `!sys-apps/systemd` against a systemd in the plan. The owner is never in
+    // the solve, so its blockers are fed via `add_installed_blockers`.
+    #[test]
+    fn check_blockers_fires_from_installed_owner() {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version(
+            portage_atom::Cpv::parse("sys-apps/systemd-260.2").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                depend: vec![],
+                rdepend: vec![],
+                bdepend: vec![],
+                pdepend: vec![],
+                idepend: vec![],
+            },
+        );
+
+        let mut provider = PortageDependencyProvider::new(repo);
+        let openresolv = PortagePackage::unslotted(Cpn::parse("net-dns/openresolv").unwrap());
+        provider.add_installed(crate::provider::InstalledPackage {
+            package: openresolv.clone(),
+            version: Version::parse("3.17.4").unwrap(),
+            policy: crate::provider::InstalledPolicy::Favor,
+            active_use: vec![],
+            iuse: vec![],
+        });
+        provider.add_installed_blockers(openresolv, vec![Dep::parse("!sys-apps/systemd").unwrap()]);
+
+        let solution = provider
+            .resolve_targets(vec![(
+                PortagePackage::unslotted(Cpn::parse("sys-apps/systemd").unwrap()),
+                PortageVersionSet::any(),
+            )])
+            .unwrap();
+        assert_eq!(
+            provider.check_blockers(&solution).len(),
+            1,
+            "installed openresolv's blocker against the solved systemd must fire"
         );
     }
 

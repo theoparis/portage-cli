@@ -151,6 +151,33 @@ fn collect_violations(
     }
 }
 
+/// The blocker atoms an installed package actively declares, with USE
+/// conditionals resolved against its VDB-recorded active flags.
+///
+/// Fed to the solver so `check_blockers` can report a blocker a retained
+/// installed package leaves pointing at the plan (e.g. `net-dns/openresolv`'s
+/// `!sys-apps/systemd[resolvconf]`) — the owner is never in the solve graph, so
+/// its blockers would otherwise be invisible.
+pub(super) fn installed_blocker_atoms(entry: &VdbEntry) -> Vec<Dep> {
+    let active: HashSet<Interned<DefaultInterner>> = entry.active_use.iter().copied().collect();
+    let evaluated = DepEntry::evaluate_use(&entry.deps, &active);
+    let mut out = Vec::new();
+    collect_blocker_atoms(&evaluated, &mut out);
+    out
+}
+
+fn collect_blocker_atoms(entries: &[DepEntry], out: &mut Vec<Dep>) {
+    for entry in entries {
+        match entry {
+            DepEntry::Atom(dep) if dep.blocker.is_some() => out.push(dep.clone()),
+            DepEntry::AllOf(children) | DepEntry::AnyOf(children) => {
+                collect_blocker_atoms(children, out)
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn dep_to_version_set(dep: &Dep) -> PortageVersionSet {
     match &dep.version {
         None => PortageVersionSet::any(),
