@@ -2,8 +2,7 @@
 
 STATUS: FIXED 2026-06-18 (both bugs). Clean-slate `em -pe firefox` went 357 → 382
 (emerge 383); the only remaining gap is the pre-existing slotless-rust
-`|| ( rust-bin rust )` preference (emerge picks `rust-bin-1.94.1`, em picks
-source `rust`) — unrelated to this bug.
+`|| ( rust-bin rust )` preference — **root-caused 2026-06-19, see below**.
 
 
 Discovered 2026-06-18 via the clean-slate stage3 chroot test (crossdev-stages
@@ -88,3 +87,38 @@ The 26-pkg gap is NOT an emptytree bug — it reproduces in normal mode too
 (`em -p firefox` also drops ffmpeg). The emptytree/​slot-conflict rewrite
 (commit 2999e46) is unaffected; this is an independent, pre-existing bug the
 clean-slate test surfaced.
+
+## Slotless-rust `||` preference — root cause (2026-06-19)
+
+Under `-pe`, em picks `rust-bin-1.95.0 [NS]` where emerge keeps installed
+source `rust-1.95.0 [R]`. Emptytree-only; normal `-p` matches (both keep the
+installed provider). Edges pulling rust-bin-1.95 (via `--json`): cbindgen,
+cargo-c, librsvg, maturin, ast-serialize, firefox-151, and rust self-bootstrap —
+all declaring `|| ( >=rust-bin-1.74.1:* >=rust-1.74.1:* )` (rust-bin first,
+`:*` any-slot).
+
+**Mechanism (all-branches-installed fall-through):** the `:*` form produces a
+Choice (the `||`) whose two branches are each a nested SlotChoice virtual
+(rust-bin's slots / rust's slots). In `choose_version`'s installed-preference
+heuristic (`solve.rs` ~line 132), `direct_installed` checks each branch against
+`self.installed`. The host has **both** rust (1.93.1/1.94.0/1.95.0) and rust-bin
+(1.93.1) installed, so **both** branches report installed →
+`directly_installed_count == candidates.len()` → line 214 "All branches
+installed: fall through to default max()" → `max()` → first-listed → **rust-bin**.
+
+emerge's `dep_zapdeps` instead prefers the branch whose installed version is
+**newer** (source rust-1.95.0 > rust-bin-1.93.1), avoiding a needless `[NS]`.
+
+**Why firefox's own rust BDEPEND works:** it uses **specific slots**
+(`rust-bin:1.94.1[llvm_slot_21]`), so the Choice branches are direct real
+packages (not virtuals), and `direct_installed` sees rust-1.94.0 installed but
+rust-bin-1.94.0 NOT → `directly_installed_count < candidates.len()` → correctly
+picks the installed source-rust branch.
+
+**Fix direction:** when all branches of a provider `||` Choice are "installed,"
+don't fall to blind `max()`/first-listed — compare the **newest installed
+version** reachable through each branch's SlotChoice virtual and prefer the
+branch with the newer installed version (source rust-1.95.0 > rust-bin-1.93.1).
+Needs `branch_reaches_installed` to return the best installed version, not just
+a bool, so the all-installed tie-break is version-aware. Narrow, localized to
+the `directly_installed_count == candidates.len()` arm in `choose_version`.
