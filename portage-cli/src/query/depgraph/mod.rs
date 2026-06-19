@@ -478,7 +478,13 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             //    default ([ebuild R]) even when already at the best version.
             !target_installed_cpvs.contains(&cpv)
                 || reinstall_cpns.contains(pkg.cpn())
-                || root_cpns.contains(pkg.cpn())
+                // Explicit target: reinstalled even at best version ([R]). Match
+                // the resolved target *slot*, not the bare CPN — a sibling slot
+                // merely pulled as a satisfied dep (e.g. python:3.13 under a
+                // `python` target) must not be re-listed.
+                || root_pkgs
+                    .iter()
+                    .any(|r| r.cpn() == pkg.cpn() && r.slot() == pkg.slot())
                 || emptytree_native
         })
         .map(|(pkg, ver)| {

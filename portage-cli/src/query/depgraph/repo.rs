@@ -658,10 +658,17 @@ pub(super) fn target_package(
         None => return portage_atom_pubgrub::PortagePackage::unslotted(dep.cpn),
     };
 
-    let arch_entries: Vec<_> = entries
+    // The target slot is the slot of the newest accepted version that satisfies
+    // the atom's slot operator and version constraint. `matches_cpv` applies the
+    // `:slot` dep and version op — a bare name (or `:*`) matches every accepted
+    // version, giving the newest slot; `cat/pkg:3.13` / `=cat/pkg-3.13*` pin the
+    // matching slot, as emerge does. The version-set is applied separately to the
+    // resolved package by the caller, so here we only pin the slot identity.
+    let target_slot = entries
         .iter()
         .filter(|(cpv, cache)| {
-            keyword_accepts(&cache.metadata.keywords, arch.as_str(), accept_keywords)
+            dep.matches_cpv(cpv, Some(cache.metadata.slot.slot.as_str()))
+                && keyword_accepts(&cache.metadata.keywords, arch.as_str(), accept_keywords)
                 && !is_masked(package_mask, package_unmask, cpv, &cache.metadata.slot)
                 && license_ok_for(
                     cpv,
@@ -674,31 +681,15 @@ pub(super) fn target_package(
                     accept_keywords,
                 )
         })
-        .collect();
+        .max_by(|a, b| a.0.version.cmp(&b.0.version))
+        .map(|(_, cache)| cache.metadata.slot.slot);
 
-    if arch_entries.is_empty() {
-        return portage_atom_pubgrub::PortagePackage::unslotted(dep.cpn);
-    }
-
-    let mut slots: Vec<_> = arch_entries
-        .iter()
-        .map(|(_, cache)| cache.metadata.slot.slot)
-        .collect();
-    slots.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    slots.dedup();
-
-    match slots.as_slice() {
-        [] => portage_atom_pubgrub::PortagePackage::unslotted(dep.cpn),
-        [sole] => portage_atom_pubgrub::PortagePackage::slotted(dep.cpn, *sole),
-        _ => {
-            let best = arch_entries
-                .iter()
-                .map(|(cpv, cache)| (cpv.version.clone(), cache.metadata.slot.slot))
-                .max_by(|a, b| a.0.cmp(&b.0))
-                .map(|(_, s)| s)
-                .unwrap();
-            portage_atom_pubgrub::PortagePackage::slotted(dep.cpn, best)
-        }
+    match target_slot {
+        Some(slot) => portage_atom_pubgrub::PortagePackage::slotted(dep.cpn, slot),
+        // Nothing accepted satisfies the qualifier: hand the solver an unslotted
+        // package so it fails to resolve (emerge: "no match") rather than
+        // silently retargeting another slot.
+        None => portage_atom_pubgrub::PortagePackage::unslotted(dep.cpn),
     }
 }
 
@@ -873,6 +864,67 @@ mod tests {
             },
             cpv,
         )
+    }
+
+    /// Build a multi-version `RepoData` from `(cpv, cache_text)` pairs (one CPN).
+    fn repo_with_many(entries: &[(&str, &str)]) -> RepoData {
+        let mut versions: HashMap<Cpn, Vec<(Cpv, CacheEntry)>> = HashMap::new();
+        let mut cpn = None;
+        for (cpv_s, cache_text) in entries {
+            let cpv = Cpv::parse(cpv_s).unwrap();
+            cpn = Some(cpv.cpn);
+            let entry = CacheEntry::parse(cache_text).unwrap();
+            versions.entry(cpv.cpn).or_default().push((cpv, entry));
+        }
+        RepoData {
+            repo_of: Default::default(),
+            cpns: vec![cpn.unwrap()],
+            versions,
+            repo_name: "test".into(),
+        }
+    }
+
+    // `target_package` resolves the slot identity from the atom's slot operator
+    // and version constraint (emerge semantics): a bare name / `:*` picks the
+    // newest slot, but `:slot` and `=…-ver*` pin the matching slot rather than
+    // collapsing to the newest. Regression for the python:3.13 / =python-3.13*
+    // gap (todo/target-derivation.md).
+    #[test]
+    fn target_package_honours_slot_and_version_qualifiers() {
+        let cache = |slot: &str| format!("EAPI=8\nSLOT={slot}\nKEYWORDS=amd64\nDESCRIPTION=t\n");
+        let data = repo_with_many(&[
+            ("dev-lang/python-3.13.12", &cache("3.13")),
+            ("dev-lang/python-3.13.14", &cache("3.13")),
+            ("dev-lang/python-3.14.5", &cache("3.14")),
+            ("dev-lang/python-3.14.6", &cache("3.14")),
+        ]);
+        let arch = Arch::intern("amd64");
+        let slot = |atom: &str| {
+            target_package(
+                &data,
+                &dep(atom),
+                &arch,
+                &["amd64".to_string()],
+                &[],
+                &[],
+                &accept_all_licenses(),
+                &UseConfig::new(),
+                &[],
+                &ForceMask::default(),
+            )
+            .slot()
+            .map(|s| s.as_str().to_string())
+        };
+
+        // bare name and `:*` → newest slot
+        assert_eq!(slot("dev-lang/python").as_deref(), Some("3.14"));
+        assert_eq!(slot("dev-lang/python:*").as_deref(), Some("3.14"));
+        // explicit slot honoured
+        assert_eq!(slot("dev-lang/python:3.13").as_deref(), Some("3.13"));
+        assert_eq!(slot("dev-lang/python:3.14").as_deref(), Some("3.14"));
+        // version glob picks the matching slot, not the newest
+        assert_eq!(slot("=dev-lang/python-3.13*").as_deref(), Some("3.13"));
+        assert_eq!(slot("=dev-lang/python-3.14*").as_deref(), Some("3.14"));
     }
 
     // A flag forced by use.force must not be ceded to the solver even when it is
