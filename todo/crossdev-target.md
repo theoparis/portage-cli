@@ -159,6 +159,36 @@ The Stages A–D below are the *implementation* increments; concerns 1/2/3 are t
 *architecture* they serve (2 = Stage A; 1 = a Target-root build reusing
 `--local`; 3 = Host-root builds via the existing `MergeRoot::Host` walk).
 
+## crossdev-bash behaviour, characterized (2026-06-20, `--show-target-cfg`)
+
+Tuple = `ARCH-VENDOR-OS-LIBC`; libc ∈ `gnu`(glibc)/`musl`/`newlib`(bare metal)/
+`uclibc`/`klibc`. `--show-target-cfg -t <tuple>` (safe, no writes) gives the
+package set; combined with the `doemerge` stage loop:
+
+| target | overlay **category** | libc | kernel | toolchain pkgs |
+|---|---|---|---|---|
+| `…-linux-gnu` (GCC) | `cross-<CTARGET>` | `sys-libs/glibc` | `sys-kernel/linux-headers` | binutils, gcc, linux-headers, glibc |
+| `…-linux-musl` **`-L`** | **`cross_llvm-<CTARGET>`** | `sys-libs/musl` | linux-headers | clang-crossdev-wrapper, compiler-rt, libunwind, libcxxabi, libcxx (+ musl) |
+| `…-elf` (bare metal) | `cross-<CTARGET>` | `sys-libs/newlib` | **none** (`kernel_category=`) | binutils, gcc, newlib |
+
+KEY behaviours to match:
+- **LLVM uses a different category prefix `cross_llvm-<CTARGET>`** (not
+  `cross-<CTARGET>`). em must resolve/route both.
+- **`-L` rejects glibc** — `crossdev -L … -linux-gnu` errors "LLVM/Clang cannot
+  currently compile glibc". LLVM ⇒ musl / newlib / llvm-libc only.
+- **bare-metal (`-elf`)** has **no kernel-headers** stage; libc = newlib.
+- This box has GCC targets installed (`cross-riscv64-unknown-linux-gnu`,
+  `cross-riscv64-unknown-elf`); `cross_llvm-*` (LLVM) is not yet set up here.
+
+### em finding from the same session (gap to chase, not now)
+`em -p --root /tmp/empty --config-root /usr/riscv64-unknown-linux-gnu
+cross-…/gcc` → **NoSolution** (`NoVersions(Real{…, merge_root: Target})`): the
+self-contained cross-into-empty-root path can't resolve yet (a Target-context
+package has no versions — likely the cross make.conf's `ROOT=/usr/${CHOST}/`
+fighting `--root`, or target-keyword/routing). The host-shared `--prefix`/
+`--local` path resolves fine. Investigate when implementing concern 1's
+self-contained mode.
+
 ## The two toolchain models (KEY: they are very different)
 
 ### GCC cross (`cross-<triple>/*`, crossdev's classic model)
