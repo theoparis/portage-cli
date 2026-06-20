@@ -83,20 +83,25 @@ fn list(globals: &Cli) -> Result<()> {
     let current = current_profile(globals, &repo);
     let mut out = anstream::stdout();
     for (i, d) in descs.iter().enumerate() {
-        // Path stays plain for legibility; only the status and the current
-        // marker are coloured.
+        // Path stays plain for legibility; only the status and — for the current
+        // profile — the list number and the `*` marker are coloured.
         let st = profile_status(d.status());
-        let mark = if current.as_deref() == Some(d.path()) {
+        let is_current = current.as_deref() == Some(d.path());
+        let num = if is_current {
+            format!("{C_STAR}[{}]{C_STAR:#}", i + 1)
+        } else {
+            format!("[{}]", i + 1)
+        };
+        let mark = if is_current {
             format!(" {C_STAR}*{C_STAR:#}")
         } else {
             String::new()
         };
         writeln!(
             out,
-            "  [{}]  {}  ({st}{}{st:#}){mark}",
-            i + 1,
+            "  {num}  {}  ({st}{}{st:#}){mark}",
             d.path(),
-            d.status(),
+            d.status()
         )
         .ok();
     }
