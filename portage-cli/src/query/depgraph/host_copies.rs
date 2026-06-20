@@ -25,7 +25,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use portage_atom::{Cpn, Cpv, Dep, DepEntry, Version};
-use portage_atom_pubgrub::{MergeRoot, PortagePackage};
+use portage_atom_pubgrub::{MergeRoot, PortagePackage, UseOverride};
 
 use crate::bdepend_avail::{Avail, unsatisfied_cpns, vdb_cpvs};
 
@@ -37,7 +37,7 @@ use super::root_aware::CrossContext;
 struct Ctx<'a> {
     data: &'a RepoData,
     use_config: &'a portage_atom_pubgrub::UseConfig,
-    package_use: &'a [(Dep, Vec<String>)],
+    package_use: &'a [(Dep, Vec<UseOverride>)],
     target_ver: &'a HashMap<Cpn, (Version, PortagePackage)>,
 }
 
@@ -57,7 +57,7 @@ pub fn compute(
     target_order: &[(PortagePackage, Version)],
     data: &RepoData,
     use_config: &portage_atom_pubgrub::UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
     cross: &CrossContext,
 ) -> Vec<(PortagePackage, Version)> {
     // Only a native offset (same-arch, target != host) schedules host

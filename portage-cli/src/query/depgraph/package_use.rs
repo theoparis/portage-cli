@@ -4,7 +4,7 @@ use std::io::Write as _;
 use camino::Utf8Path;
 use portage_atom::{Cpv, Dep, Version};
 use portage_atom_pubgrub::{
-    DepEdge, UseConfig, UseFlagRequirement, UseFlagState, apply_package_use,
+    DepEdge, UseConfig, UseFlagRequirement, UseFlagState, UseOverride, apply_package_use,
 };
 
 /// Entries to write into `/etc/portage/package.use`.
@@ -30,7 +30,7 @@ pub(super) fn build_entries(
     root_atoms: &[String],
     edges: &[DepEdge],
     use_config: &UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
 ) -> Vec<PackageUseEntry> {
     // Pre-compute once for all requirements.
     let adj = build_adjacency(edges);
@@ -109,7 +109,8 @@ fn ver_str(v: &Version) -> String {
 /// Result of [`cosolve_use_deps`]: the augmented `package.use`, the
 /// requirements that drove at least one applied flag, and the converged solve
 /// (if the fixpoint ended on a solve of the returned `package.use`).
-pub(super) type CosolveOutcome<T> = (Vec<(Dep, Vec<String>)>, Vec<UseFlagRequirement>, Option<T>);
+pub(super) type CosolveOutcome<T> =
+    (Vec<(Dep, Vec<UseOverride>)>, Vec<UseFlagRequirement>, Option<T>);
 
 /// Auto-apply cross-package `[flag]` USE-deps to a fixpoint (emerge's
 /// autounmask-preview dependency calculation).
@@ -135,13 +136,13 @@ pub(super) type CosolveOutcome<T> = (Vec<(Dep, Vec<String>)>, Vec<UseFlagRequire
 /// contradiction resolves to first-wins + advisory for the loser rather than
 /// oscillating; the bound is a backstop.
 pub(super) fn cosolve_use_deps<T, S, R>(
-    mut package_use: Vec<(Dep, Vec<String>)>,
+    mut package_use: Vec<(Dep, Vec<UseOverride>)>,
     data: &super::repo::RepoData,
     solve: S,
     reqs_of: R,
 ) -> CosolveOutcome<T>
 where
-    S: Fn(&[(Dep, Vec<String>)]) -> Option<T>,
+    S: Fn(&[(Dep, Vec<UseOverride>)]) -> Option<T>,
     R: Fn(&T) -> Vec<UseFlagRequirement>,
 {
     use portage_atom::Cpn;
@@ -151,11 +152,7 @@ where
     // never forced, matching emerge's refusal to override explicit config.
     let pinned: HashSet<(Cpn, Interned<DefaultInterner>)> = package_use
         .iter()
-        .flat_map(|(dep, flags)| {
-            flags
-                .iter()
-                .map(|f| (dep.cpn, Interned::intern(f.trim_start_matches('-'))))
-        })
+        .flat_map(|(dep, overrides)| overrides.iter().map(|o| (dep.cpn, o.flag)))
         .collect();
 
     let mut applied: HashMap<(Cpn, Interned<DefaultInterner>), bool> = HashMap::new();
@@ -164,7 +161,7 @@ where
         let Some(solved) = solve(&package_use) else {
             return (package_use, applied_reqs, None); // solve failed — caller must re-solve / fall back
         };
-        let mut new_by_cpn: HashMap<Cpn, Vec<String>> = HashMap::new();
+        let mut new_by_cpn: HashMap<Cpn, Vec<UseOverride>> = HashMap::new();
         for req in reqs_of(&solved) {
             let mut contributed = false;
             for (cpn, flag, enable) in req_targets(&req, data) {
@@ -173,12 +170,10 @@ where
                 }
                 applied.insert((cpn, flag), enable);
                 contributed = true;
-                let tok = if enable {
-                    flag.as_str().to_string()
-                } else {
-                    format!("-{}", flag.as_str())
-                };
-                new_by_cpn.entry(cpn).or_default().push(tok);
+                new_by_cpn
+                    .entry(cpn)
+                    .or_default()
+                    .push(UseOverride { flag, enable });
             }
             if contributed {
                 applied_reqs.push(req);

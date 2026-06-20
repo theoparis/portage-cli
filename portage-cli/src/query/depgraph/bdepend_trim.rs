@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use portage_atom::{Cpn, Cpv, DepEntry, Version};
-use portage_atom_pubgrub::{PortagePackage, UseConfig};
+use portage_atom_pubgrub::{PortagePackage, UseConfig, UseOverride};
 
 use crate::bdepend_avail::Avail;
 use crate::cli::Roots;
@@ -17,7 +17,7 @@ pub struct TrimCtx<'a> {
     pub roots: &'a Roots,
     pub data: &'a RepoData,
     pub use_config: &'a UseConfig,
-    pub package_use: &'a [(portage_atom::Dep, Vec<String>)],
+    pub package_use: &'a [(portage_atom::Dep, Vec<UseOverride>)],
     pub root_cpns: &'a HashSet<Cpn>,
     pub reinstall_cpns: &'a HashSet<Cpn>,
 }

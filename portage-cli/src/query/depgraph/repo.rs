@@ -6,6 +6,7 @@ use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, Operator, Version};
 use portage_atom_pubgrub::{
     DroppedDep, IUseDefault, PackageDeps, PackageRepository, PackageVersions, RequiredUse,
+    UseOverride,
 };
 use portage_metadata::{CacheEntry, Keyword, LicenseExpr, RequiredUseExpr, Stability};
 use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
@@ -321,7 +322,7 @@ fn license_has_conditional(expr: &LicenseExpr) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn effective_use_config(
     use_config: &portage_atom_pubgrub::UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
     force_mask: &super::force_mask::ForceMask,
     accept_keywords: &AcceptKeywords,
     cpv: &Cpv,
@@ -354,7 +355,7 @@ fn license_ok_for(
     meta: &portage_metadata::EbuildMetadata,
     accept_licenses: &AcceptLicenses,
     use_config: &portage_atom_pubgrub::UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
     force_mask: &super::force_mask::ForceMask,
     accept_keywords: &AcceptKeywords,
 ) -> bool {
@@ -463,7 +464,7 @@ pub(super) struct Adapter<'a> {
     /// Global desired USE (profile + make.conf), folded with per-version
     /// `package.use` + IUSE defaults by `desired_use`.
     pub(super) use_config: &'a portage_atom_pubgrub::UseConfig,
-    pub(super) package_use: &'a [(Dep, Vec<String>)],
+    pub(super) package_use: &'a [(Dep, Vec<UseOverride>)],
     /// Profile USE force/mask policy: applied to each version's effective USE and
     /// consulted by the Level-C cede gate (pinned flags are never ceded).
     pub(super) force_mask: &'a super::force_mask::ForceMask,
@@ -845,7 +846,7 @@ pub(super) fn target_package(
     package_unmask: &[Dep],
     accept_licenses: &AcceptLicenses,
     use_config: &portage_atom_pubgrub::UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
     force_mask: &super::force_mask::ForceMask,
 ) -> portage_atom_pubgrub::PortagePackage {
     let entries = match data.versions.get(&dep.cpn) {
@@ -953,7 +954,7 @@ pub(super) fn find_autounmask_candidates(
     package_unmask: &[Dep],
     accept_licenses: &AcceptLicenses,
     use_config: &portage_atom_pubgrub::UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
     force_mask: &super::force_mask::ForceMask,
 ) -> Vec<AutounmaskCandidate> {
     let mut candidates = Vec::new();

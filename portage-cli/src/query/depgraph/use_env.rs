@@ -1,6 +1,6 @@
 use camino::Utf8Path;
 use portage_atom::Dep;
-use portage_atom_pubgrub::{UseConfig, UseFlagState};
+use portage_atom_pubgrub::{UseConfig, UseFlagState, UseOverride};
 use portage_repo::{AcceptLicense, LicenseGroupRegistry, ProfileStack, Repository};
 
 use super::force_mask::{ForceMask, index_by_cpn};
@@ -16,7 +16,7 @@ pub(super) struct UseEnv {
     /// Keys from `USE_EXPAND_HIDDEN` — groups to suppress in display.
     pub expand_hidden: Vec<String>,
     /// Per-package USE flag overrides from the profile and `/etc/portage/package.use`.
-    pub package_use: Vec<(Dep, Vec<String>)>,
+    pub package_use: Vec<(Dep, Vec<UseOverride>)>,
     /// Masked packages: repo-global `profiles/package.mask`, the profile
     /// stack, and `/etc/portage/package.mask`.
     pub package_mask: Vec<Dep>,
@@ -171,7 +171,12 @@ async fn compute_use_env(
         config.set(flag, UseFlagState::Enabled);
     }
 
-    let mut package_use = stack.package_use().unwrap_or_default();
+    let mut package_use: Vec<(Dep, Vec<UseOverride>)> = stack
+        .package_use()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(dep, flags)| (dep, flags.iter().map(|f| UseOverride::parse(f)).collect()))
+        .collect();
     package_use.extend(load_package_use(portage_dir.join("package.use").as_str()));
     // User config overlay (e.g. `--local`'s ~/.gentoo/etc/portage), applied
     // last so it overrides per flag — lets an unprivileged user set package.use
@@ -244,7 +249,7 @@ fn effective_accept_keywords(
     parse(&[arch, testing])
 }
 
-fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {
+fn load_package_use(path: &str) -> Vec<(Dep, Vec<UseOverride>)> {
     let p = std::path::Path::new(path);
     if !p.exists() {
         return Vec::new();
@@ -278,7 +283,7 @@ fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {
             let Ok(dep) = Dep::parse(atom_str) else {
                 continue;
             };
-            let flags: Vec<String> = parts.map(String::from).collect();
+            let flags: Vec<UseOverride> = parts.map(UseOverride::parse).collect();
             if !flags.is_empty() {
                 result.push((dep, flags));
             }

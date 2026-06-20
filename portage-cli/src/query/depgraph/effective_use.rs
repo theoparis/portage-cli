@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpv, Dep, Version};
-use portage_atom_pubgrub::{IUseDefault, PortagePackage, UseConfig};
+use portage_atom_pubgrub::{IUseDefault, PortagePackage, UseConfig, UseOverride};
 use portage_metadata::{CacheEntry, IUseDefault as MetaIUseDefault};
 
 pub(super) fn iuse_defaults(cache: &CacheEntry) -> HashMap<Interned<DefaultInterner>, IUseDefault> {
@@ -28,7 +28,7 @@ pub(super) fn iuse_defaults(cache: &CacheEntry) -> HashMap<Interned<DefaultInter
 
 pub(super) fn effective_use(
     use_config: &UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
     pkg: &PortagePackage,
     ver: &Version,
     cache: &CacheEntry,

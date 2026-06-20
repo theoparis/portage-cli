@@ -28,7 +28,7 @@ use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, Operator, Version};
 use portage_atom_pubgrub::{
     DepClass, InstalledPackage as SolverInstalledPackage, InstalledPolicy,
-    PortageDependencyProvider, PortagePackage, PortageVersionSet, UseFlagRequirement,
+    PortageDependencyProvider, PortagePackage, PortageVersionSet, UseFlagRequirement, UseOverride,
 };
 use portage_repo::Repository;
 
@@ -258,7 +258,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     // Build a provider (with the given cede policy) and run the solve. Factored
     // so a failed --autosolve-use attempt can fall back to a fixed-USE (Level A)
     // solve instead of erroring — matching the doc invariant.
-    let build_and_solve = |autosolve_use: bool, pkg_use: &[(Dep, Vec<String>)]| {
+    let build_and_solve = |autosolve_use: bool, pkg_use: &[(Dep, Vec<UseOverride>)]| {
         let adapter = repo::Adapter {
             data: &data,
             accept_keywords: &accept_keywords,
@@ -381,7 +381,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     // and --autosolve-use off this is a no-op and `package_use` is unchanged
     // (parity preserved).
     let ceded = provider.solved_use_decisions();
-    let package_use: Vec<(Dep, Vec<String>)> = if ceded.is_empty() && force_mask.is_empty() {
+    let package_use: Vec<(Dep, Vec<UseOverride>)> = if ceded.is_empty() && force_mask.is_empty() {
         package_use
     } else {
         let mut by_cpn: HashMap<Cpn, Vec<&portage_atom_pubgrub::CededFlag>> = HashMap::new();
@@ -407,25 +407,31 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 let stable = accept_keywords.is_stable(keywords, &cpv, slot);
                 let (forced, masked) = force_mask.effective(&cpv, stable);
                 if !forced.is_empty() || !masked.is_empty() {
-                    let mut tokens: Vec<String> = forced.into_iter().collect();
-                    tokens.extend(masked.into_iter().map(|m| format!("-{m}")));
-                    combined.push((dep.clone(), tokens));
+                    let mut overrides: Vec<UseOverride> = forced
+                        .iter()
+                        .map(|f| UseOverride {
+                            flag: Interned::intern(f),
+                            enable: true,
+                        })
+                        .collect();
+                    overrides.extend(masked.iter().map(|m| UseOverride {
+                        flag: Interned::intern(m),
+                        enable: false,
+                    }));
+                    combined.push((dep.clone(), overrides));
                 }
             }
 
-            // Level-C: the solver's chosen ceded-flag values.
+            // Level-C: the solver's chosen ceded-flag values (already interned).
             if let Some(flags) = by_cpn.get(pkg.cpn()) {
-                let tokens = flags
+                let overrides = flags
                     .iter()
-                    .map(|c| {
-                        if c.value {
-                            c.flag.as_str().to_string()
-                        } else {
-                            format!("-{}", c.flag.as_str())
-                        }
+                    .map(|c| UseOverride {
+                        flag: c.flag,
+                        enable: c.value,
                     })
                     .collect();
-                combined.push((dep, tokens));
+                combined.push((dep, overrides));
             }
         }
         combined

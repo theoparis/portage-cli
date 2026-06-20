@@ -6,7 +6,7 @@ use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
     CededFlag, DepClass, DroppedDep, PortagePackage, UseConfig, UseFlagRequirement, UseFlagState,
-    apply_package_use,
+    UseOverride, apply_package_use,
 };
 use portage_metadata::CacheEntry;
 
@@ -601,7 +601,7 @@ pub(super) fn print_pretty_rooted(
     installed: &HashMap<Cpn, HashMap<String, Version>>,
     installed_entries: &[super::installed::VdbEntry],
     use_config: &UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
     use_expand: &[String],
     use_expand_hidden: &[String],
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
@@ -651,7 +651,7 @@ pub(super) fn print_pretty(
     installed: &HashMap<Cpn, HashMap<String, Version>>,
     installed_entries: &[super::installed::VdbEntry],
     use_config: &UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
     use_expand: &[String],
     use_expand_hidden: &[String],
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
@@ -699,7 +699,7 @@ fn print_pretty_with_roots(
     installed: &HashMap<Cpn, HashMap<String, Version>>,
     installed_entries: &[super::installed::VdbEntry],
     use_config: &UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
     use_expand: &[String],
     use_expand_hidden: &[String],
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,

@@ -1,6 +1,6 @@
 use portage_atom::interner::Interned;
 use portage_atom::{Cpv, Dep, Version};
-use portage_atom_pubgrub::{PortagePackage, UseConfig, UseFlagState, apply_package_use};
+use portage_atom_pubgrub::{PortagePackage, UseConfig, UseFlagState, UseOverride, apply_package_use};
 use portage_metadata::IUseDefault;
 
 use super::repo::{RepoData, find_cache};
@@ -25,7 +25,7 @@ pub(super) fn find_violations(
     data: &RepoData,
     order: &[(PortagePackage, Version)],
     use_config: &UseConfig,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
 ) -> Vec<RequiredUseViolation> {
     let mut out = Vec::new();
     for (pkg, ver) in order {
