@@ -200,6 +200,17 @@ impl Profile {
         parse_atom_flags_list(&self.path.join("package.use"))
     }
 
+    /// Parse `package.accept_keywords` (and legacy `package.keywords`).
+    ///
+    /// Returns `(dep, [keyword tokens...])` pairs; a bare atom (no tokens) is
+    /// kept with an empty token list, meaning "accept this package's testing
+    /// keyword for the configured arch".
+    pub fn package_accept_keywords(&self) -> Result<Vec<(Dep, Vec<String>)>> {
+        let mut out = parse_atom_flags_list(&self.path.join("package.accept_keywords"))?;
+        out.extend(parse_atom_flags_list(&self.path.join("package.keywords"))?);
+        Ok(out)
+    }
+
     /// Parse `use.force`.
     pub fn use_force(&self) -> Result<Vec<String>> {
         util::read_lines(self.path.join("use.force"))
@@ -408,6 +419,12 @@ impl ProfileStack {
     /// takes precedence.
     pub fn package_use(&self) -> Result<Vec<(Dep, Vec<String>)>> {
         collect_atom_flags(self.profiles.iter().map(|p| p.package_use()))
+    }
+
+    /// Accumulated `package.accept_keywords` entries from the full stack,
+    /// ancestors first. Bare atoms are preserved (empty token list).
+    pub fn package_accept_keywords(&self) -> Result<Vec<(Dep, Vec<String>)>> {
+        collect_atom_flags(self.profiles.iter().map(|p| p.package_accept_keywords()))
     }
 
     /// Accumulated `package.use.force` entries from the full stack.
