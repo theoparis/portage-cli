@@ -3,6 +3,7 @@ mod cli;
 mod ebuild;
 mod error;
 mod maint;
+mod package_env;
 mod pkg;
 mod postprocess;
 mod preflight;

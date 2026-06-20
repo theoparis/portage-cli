@@ -1620,6 +1620,26 @@ impl EbuildShell {
         Ok(())
     }
 
+    /// Source a per-package environment file (`/etc/portage/package.env` points
+    /// at files under `/etc/portage/env/`).
+    ///
+    /// The file is a bash fragment of variable assignments (with `${VAR}`
+    /// expansion, so `FEATURES="${FEATURES} ccache"` composes on top of the
+    /// already-configured environment) sourced on top of `make.conf` for the
+    /// package being built. Same evaluation as [`source_make_defaults`], named
+    /// for clarity at the call site.
+    ///
+    /// [`source_make_defaults`]: Self::source_make_defaults
+    pub async fn source_env_file(&mut self, path: &Path) -> Result<()> {
+        self.invalidate_baseline();
+        let params = self.shell.default_exec_params();
+        self.shell
+            .source_script(path, std::iter::empty::<&str>(), &params)
+            .await
+            .map_err(|e| Error::Shell(format!("sourcing env file {}: {e}", path.display())))?;
+        Ok(())
+    }
+
     /// Resolve the path of a named eclass by searching the configured eclass directories.
     pub fn eclass_path(&self, name: &str) -> Option<Utf8PathBuf> {
         let filename = format!("{name}.eclass");

@@ -239,6 +239,33 @@ async fn run_inner(
         );
     }
 
+    // Per-package build environment: `/etc/portage/package.env` maps this package
+    // to env files under `/etc/portage/env/`, sourced on top of `make.conf` so
+    // FEATURES, *FLAGS, MAKEOPTS, … take effect per package. Sourced before the
+    // resolved USE is applied (below) so the plan's USE wins — USE set by an env
+    // file is intentionally not reflected here (a resolver-side follow-up; see
+    // todo/package-env.md).
+    {
+        let base = config_root.unwrap_or_else(|| Utf8Path::new("/"));
+        let mut portage_dirs = vec![base.join("etc/portage").into_std_path_buf()];
+        if let Some(overlay) = config_overlay.as_deref() {
+            portage_dirs.push(overlay.as_std_path().to_path_buf());
+        }
+        let slot = repo
+            .cache_entry(ebuild.cpv())
+            .ok()
+            .flatten()
+            .map(|c| c.metadata.slot.slot.as_str().to_string());
+        for env_file in
+            crate::package_env::env_files_for(&portage_dirs, ebuild.cpv(), slot.as_deref())
+        {
+            shell
+                .source_env_file(&env_file)
+                .await
+                .with_context(|| format!("sourcing package.env file {}", env_file.display()))?;
+        }
+    }
+
     // Root model (docs/root-model.md): PORTAGE_CONFIGROOT = config_root, and
     // SYSROOT/ESYSROOT = the build-against base (only when it differs from the
     // install target, i.e. a --prefix overlay; otherwise SYSROOT = ROOT).

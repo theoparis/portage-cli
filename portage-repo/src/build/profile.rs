@@ -433,6 +433,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_env_file_composes_features_and_overrides_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let profile = make_profile(&dir, "test", &[]);
+        // Baseline make.conf-ish environment.
+        std::fs::write(
+            profile.join("make.defaults"),
+            "FEATURES=\"sandbox\"\nCFLAGS=\"-O2\"\n",
+        )
+        .unwrap();
+        let stack = ProfileStack::build(profile).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        configure_shell(&mut shell, &stack, &[]).await.unwrap();
+
+        // A package.env file sourced on top: FEATURES composes, CFLAGS replaces.
+        let env_file = dir.path().join("ccache");
+        std::fs::write(
+            &env_file,
+            "FEATURES=\"${FEATURES} ccache\"\nCFLAGS=\"-O3\"\n",
+        )
+        .unwrap();
+        shell.source_env_file(&env_file).await.unwrap();
+
+        let features_var = shell.get_var("FEATURES").unwrap_or_default();
+        let features: HashSet<&str> = features_var.split_whitespace().collect();
+        assert!(features.contains("sandbox"), "baseline FEATURES kept");
+        assert!(features.contains("ccache"), "env-file FEATURES composed in");
+        assert_eq!(
+            shell.get_var("CFLAGS").as_deref(),
+            Some("-O3"),
+            "CFLAGS replaced"
+        );
+    }
+
+    #[tokio::test]
     async fn configure_shell_applies_make_defaults_use() {
         let dir = tempfile::tempdir().unwrap();
         let repo = make_test_repo(&dir);
