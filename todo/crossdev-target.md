@@ -318,6 +318,36 @@ the foundation for (2). Stage C (the stage loop) is the (2) increment.
 `set_links`/`set_use_force`/`set_use_mask`/`set_metadata` (l.1416–1547, the
 overlay/symlink/config writers), `load_multilib_env` (l.1212).
 
+## First prerequisites — three Stage-0 setup tools (= `--init-target`, no build)
+
+The foundation to build FIRST (pure filesystem setup, independent of the
+resolver). They compose into a no-build `em crossdev --init-target` /
+concern-1+2 init:
+
+1. **Repo-management tool — create the crossdev overlay.** Lay down
+   `cross-<CTARGET>` (or `cross_llvm-<CTARGET>` for `-L`): per-package symlinks to
+   the real ebuild dirs (crossdev `set_links`), `metadata/layout.conf` +
+   `profiles/{repo_name,categories}` (`set_metadata`), and a `repos.conf` entry.
+   *em today:* `ReposConf` (repos_conf.rs) **reads** only — overlay **creation is
+   NEW** (symlinks + metadata + repos.conf write).
+2. **Confdir-creation tool — write the cross make.conf.** Write the special
+   `<sysroot>/etc/portage/make.conf` (`CHOST`, `CBUILD`, `ROOT=/usr/${CHOST}/`,
+   `CFLAGS`, …) — crossdev `set_metadata` / crossdev-stages `target.rs`.
+   *em today:* **mostly EXISTS** — `MakeConf::{set,save}` (make_conf.rs) +
+   `setup.rs::bootstrap` already write a prefix make.conf. Reuse for cross values.
+3. **Profile-management tool — link the profile in the confdir.** Symlink
+   `<sysroot>/etc/portage/make.profile` → `…/gentoo/profiles/<target-profile>`
+   **directly** (NOT `eselect profile` — fails cross-arch), plus the
+   tuple→profile mapping.
+   *em today:* reads `make.profile` everywhere; has symlink helpers
+   (`setup.rs::link_host_*`, `std::os::unix::fs::symlink`) + an `eselect` wrapper
+   (`select`) — but the **cross-arch direct `make.profile` symlink + tuple→profile
+   map are NEW**.
+
+Net: tool 2 ≈ done (reuse `MakeConf`+`setup.rs`); **tools 1 and 3 are the new
+build**, both pure FS setup ⇒ a clean, testable first slice with no resolver
+dependency. Sequencing: 1 → 2 → 3, then they wire into `em crossdev --init-target`.
+
 ## Implementation stages
 
 ### Stage A — cross entry point (`{target}-emerge` equivalent) — SMALL
