@@ -138,7 +138,7 @@ where
 fn mkdir_p_mode(dir: &Path, mode: u32) -> Result<(), String> {
     use rustix::fs::{Mode, chmod, mkdir};
     use rustix::io::Errno;
-    let mode = Mode::from_bits_truncate(mode);
+    let mode = Mode::from_bits_truncate(mode as _);
     let mut acc = PathBuf::new();
     for comp in dir.components() {
         acc.push(comp);
