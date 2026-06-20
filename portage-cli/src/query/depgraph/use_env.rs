@@ -1,5 +1,6 @@
 use camino::Utf8Path;
 use portage_atom::Dep;
+use portage_atom::interner::Interned;
 use portage_atom_pubgrub::{UseConfig, UseFlagState, UseOverride};
 use portage_repo::{AcceptLicense, LicenseGroupRegistry, ProfileStack, Repository};
 
@@ -114,13 +115,16 @@ async fn compute_use_env(
             (dep, parsed)
         })
         .collect();
-    package_accept_keywords
-        .extend(load_package_keywords(portage_dir.join("package.accept_keywords").as_str()));
-    package_accept_keywords
-        .extend(load_package_keywords(portage_dir.join("package.keywords").as_str()));
+    package_accept_keywords.extend(load_package_keywords(
+        portage_dir.join("package.accept_keywords").as_str(),
+    ));
+    package_accept_keywords.extend(load_package_keywords(
+        portage_dir.join("package.keywords").as_str(),
+    ));
     if let Some(overlay) = config_overlay {
-        package_accept_keywords
-            .extend(load_package_keywords(overlay.join("package.accept_keywords").as_str()));
+        package_accept_keywords.extend(load_package_keywords(
+            overlay.join("package.accept_keywords").as_str(),
+        ));
     }
     let license_groups = LicenseGroupRegistry::from_repo(repo)
         .map_err(|e| anyhow::anyhow!("failed to load license groups: {e}"))?;
@@ -200,11 +204,12 @@ async fn compute_use_env(
     // IUSE default rather than merely being absent from the enabled set. The
     // package-level and *.stable.* sets are also per package; they carry raw
     // `-flag` tokens so unforce/unmask is resolved per package.
+    let intern_flags = |v: Vec<String>| v.iter().map(|s| Interned::intern(s)).collect();
     let force_mask = ForceMask {
-        use_force: stack.use_force().unwrap_or_default(),
-        use_mask: stack.use_mask().unwrap_or_default(),
-        use_stable_force: stack.use_stable_force().unwrap_or_default(),
-        use_stable_mask: stack.use_stable_mask().unwrap_or_default(),
+        use_force: intern_flags(stack.use_force().unwrap_or_default()),
+        use_mask: intern_flags(stack.use_mask().unwrap_or_default()),
+        use_stable_force: intern_flags(stack.use_stable_force().unwrap_or_default()),
+        use_stable_mask: intern_flags(stack.use_stable_mask().unwrap_or_default()),
         pkg_force: index_by_cpn(stack.package_use_force().unwrap_or_default()),
         pkg_mask: index_by_cpn(stack.package_use_mask().unwrap_or_default()),
         pkg_stable_force: index_by_cpn(stack.package_use_stable_force().unwrap_or_default()),
@@ -342,10 +347,7 @@ fn load_package_keywords(path: &str) -> Vec<(Dep, Vec<AcceptToken>)> {
 /// directory. Each line's license tokens (`@GROUP`, `-deny`, `*`, names) are
 /// expanded against `groups` into a per-package [`AcceptLicense`] overlay now,
 /// so resolution never re-parses them.
-fn load_package_license(
-    path: &str,
-    groups: &LicenseGroupRegistry,
-) -> Vec<(Dep, AcceptLicense)> {
+fn load_package_license(path: &str, groups: &LicenseGroupRegistry) -> Vec<(Dep, AcceptLicense)> {
     let p = std::path::Path::new(path);
     if !p.exists() {
         return Vec::new();
