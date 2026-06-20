@@ -123,6 +123,15 @@ impl AcceptLicense {
         }
     }
 
+    /// Layer `other` on top of this list: union the allow/deny sets and OR the
+    /// `allow_all` flag. Used to fold per-package `package.license` over the
+    /// global `ACCEPT_LICENSE` (denials win, matching the existing model).
+    pub fn merge(&mut self, other: &AcceptLicense) {
+        self.allow_all |= other.allow_all;
+        self.allowed.extend(other.allowed.iter().copied());
+        self.denied.extend(other.denied.iter().copied());
+    }
+
     /// Whether a single license identifier is accepted.
     pub fn accepts(&self, name: &str) -> bool {
         if self.denied.contains(&Interned::intern(name)) {

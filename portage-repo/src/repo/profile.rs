@@ -211,6 +211,14 @@ impl Profile {
         Ok(out)
     }
 
+    /// Parse `package.license`.
+    ///
+    /// Returns `(dep, [license tokens...])` pairs — the tokens extend
+    /// `ACCEPT_LICENSE` for matching packages (`@GROUP`, `-deny`, `*`).
+    pub fn package_license(&self) -> Result<Vec<(Dep, Vec<String>)>> {
+        parse_atom_flags_list(&self.path.join("package.license"))
+    }
+
     /// Parse `use.force`.
     pub fn use_force(&self) -> Result<Vec<String>> {
         util::read_lines(self.path.join("use.force"))
@@ -425,6 +433,11 @@ impl ProfileStack {
     /// ancestors first. Bare atoms are preserved (empty token list).
     pub fn package_accept_keywords(&self) -> Result<Vec<(Dep, Vec<String>)>> {
         collect_atom_flags(self.profiles.iter().map(|p| p.package_accept_keywords()))
+    }
+
+    /// Accumulated `package.license` entries from the full stack, ancestors first.
+    pub fn package_license(&self) -> Result<Vec<(Dep, Vec<String>)>> {
+        collect_atom_flags(self.profiles.iter().map(|p| p.package_license()))
     }
 
     /// Accumulated `package.use.force` entries from the full stack.
