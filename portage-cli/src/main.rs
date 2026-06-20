@@ -10,6 +10,7 @@ mod preflight;
 mod query;
 mod regen;
 mod search;
+mod select;
 mod setup;
 mod use_flags;
 mod vdb;
@@ -640,10 +641,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             .await
         }
         Applet::Atom { atoms } => run_atom(atoms),
-        Applet::Select { module, args } => {
-            eprintln!("select: module={} args={:?}", module, args);
-            bail!("not implemented: select")
-        }
+        Applet::Select { module, args } => select::run(module, args, globals),
         Applet::Dispatch => {
             eprintln!("dispatch-conf");
             bail!("not implemented: dispatch-conf")
