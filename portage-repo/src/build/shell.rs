@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -18,6 +17,7 @@ use super::ver_funcs;
 use crate::error::{Error, Result};
 use crate::repo::ebuild::Ebuild;
 use crate::repo::repository::Repository;
+use crate::source::SourceContext;
 
 /// Metadata variables extracted from a sourced ebuild.
 ///
@@ -479,17 +479,16 @@ impl EbuildShell {
     /// `EXPORT_FUNCTIONS`, etc.) and sets up eclass directories from
     /// the repository's `eclass/` directory.
     pub async fn new(repo: &Repository) -> Result<Self> {
-        Self::new_with_cache(repo, Arc::new(papaya::HashMap::new())).await
+        Self::new_with_cache(repo, &SourceContext::new()).await
     }
 
     /// Create a new shell with a shared eclass AST cache.
     ///
-    /// When processing many ebuilds, pass the same `Arc<papaya::HashMap>` to
-    /// every shell so that each eclass is parsed at most once.
-    pub async fn new_with_cache(
-        repo: &Repository,
-        eclass_cache: Arc<papaya::HashMap<String, brush_parser::ast::Program>>,
-    ) -> Result<Self> {
+    /// When processing many ebuilds, pass the same [`SourceContext`] to every
+    /// shell so that each eclass is parsed at most once. The cache contents
+    /// (brush AST nodes) are an internal implementation detail.
+    pub async fn new_with_cache(repo: &Repository, ctx: &SourceContext) -> Result<Self> {
+        let eclass_cache = ctx.0.clone();
         let mut shell = Shell::builder()
             .do_not_inherit_env(true)
             .profile(ProfileLoadBehavior::Skip)
@@ -1945,9 +1944,9 @@ impl Repository {
     pub async fn shell_with_masters_and_cache(
         &self,
         masters: &[&Repository],
-        cache: Arc<papaya::HashMap<String, brush_parser::ast::Program>>,
+        ctx: &SourceContext,
     ) -> Result<EbuildShell> {
-        let mut shell = EbuildShell::new_with_cache(self, cache).await?;
+        let mut shell = EbuildShell::new_with_cache(self, ctx).await?;
         for master in masters.iter().rev() {
             let dir = master.path().join("eclass");
             if dir.is_dir() {

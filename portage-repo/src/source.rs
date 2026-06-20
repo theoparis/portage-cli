@@ -77,7 +77,7 @@ where
     let dedup = opts.dedup;
     let repo = Arc::new(repo.clone());
     let masters: Arc<Vec<Repository>> = Arc::new(masters.to_vec());
-    let ast_cache = ctx.0.clone();
+    let ctx = ctx.clone();
     let on_result = Arc::new(on_result);
 
     let (tx, rx) = flume::bounded::<Ebuild>(jobs * 2);
@@ -87,13 +87,13 @@ where
         let rx = rx.clone();
         let repo = Arc::clone(&repo);
         let masters = Arc::clone(&masters);
-        let ast_cache = Arc::clone(&ast_cache);
+        let ctx = ctx.clone();
         let on_result = Arc::clone(&on_result);
 
         handles.push(tokio::spawn(async move {
             let master_refs: Vec<&Repository> = masters.iter().collect();
             while let Ok(ebuild) = rx.recv_async().await {
-                let result = source_one(&repo, &master_refs, &ebuild, &ast_cache, dedup).await;
+                let result = source_one(&repo, &master_refs, &ebuild, &ctx, dedup).await;
                 on_result(ebuild, result);
             }
         }));
@@ -123,19 +123,17 @@ pub async fn source_single(
     ctx: &SourceContext,
 ) -> Result<SourcedEbuild> {
     let master_refs: Vec<&Repository> = masters.iter().collect();
-    source_one(repo, &master_refs, ebuild, &ctx.0, false).await
+    source_one(repo, &master_refs, ebuild, ctx, false).await
 }
 
 pub(crate) async fn source_one(
     repo: &Repository,
     masters: &[&Repository],
     ebuild: &Ebuild,
-    ast_cache: &AstCache,
+    ctx: &SourceContext,
     dedup: bool,
 ) -> Result<SourcedEbuild> {
-    let mut shell = repo
-        .shell_with_masters_and_cache(masters, Arc::clone(ast_cache))
-        .await?;
+    let mut shell = repo.shell_with_masters_and_cache(masters, ctx).await?;
     let mut sourced = shell.source_ebuild(ebuild).await?;
     if dedup {
         sourced.metadata = sourced.metadata.dedup();
