@@ -180,14 +180,43 @@ KEY behaviours to match:
 - This box has GCC targets installed (`cross-riscv64-unknown-linux-gnu`,
   `cross-riscv64-unknown-elf`); `cross_llvm-*` (LLVM) is not yet set up here.
 
-### em finding from the same session (gap to chase, not now)
-`em -p --root /tmp/empty --config-root /usr/riscv64-unknown-linux-gnu
-cross-…/gcc` → **NoSolution** (`NoVersions(Real{…, merge_root: Target})`): the
-self-contained cross-into-empty-root path can't resolve yet (a Target-context
-package has no versions — likely the cross make.conf's `ROOT=/usr/${CHOST}/`
-fighting `--root`, or target-keyword/routing). The host-shared `--prefix`/
-`--local` path resolves fine. Investigate when implementing concern 1's
-self-contained mode.
+### Host stage1 vs target sysroot — which config (clarified + validated)
+- **Host stage1 (concern 3, the cross compiler/tools)**: just use the **HOST
+  config**. `cross-<CTARGET>/{binutils,gcc}` are host-arch tools targeting
+  `<CTARGET>`; the eclass does cross via the *category*. Validated:
+  `em -p --root /tmp/e --config-root / cross-…/binutils` → from-scratch closure
+  (`virtual/libintl`, `libiconv`, `zlib`, … all `N`). No special config needed.
+- **Target sysroot (concern 1, libc/headers/runtimes)**: uses crossdev's
+  **special make.conf** (`CHOST/CBUILD`, `ROOT=/usr/${CHOST}/`) + a target
+  **profile link** (next item).
+- The earlier `--root` NoSolution was self-inflicted: I fed the *special cross*
+  make.conf (`--config-root /usr/riscv64…`, whose `ROOT=/usr/${CHOST}/` fought
+  `--root`) to a *host stage1* build. Host stage1 wants host config; the special
+  config belongs to the target-sysroot build.
+
+## Profile linking for the target sysroot — ITEM TO ADDRESS
+
+How crossdev-stages does it (the reference; `lib/sysroot.sh:84-93`,
+`crossdev-stages/src/target.rs:123-160`, `cross-stage.sh:45-99`):
+- **`eselect profile` CANNOT be used cross-arch** (host ARCH ≠ target ARCH) —
+  explicit comment in `lib/sysroot.sh:90`. So the profile is linked by a **direct
+  absolute symlink**:
+  ```
+  ln -s /var/db/repos/gentoo/profiles/<target-profile> <sysroot>/etc/portage/make.profile
+  ```
+- the target profile path is arch-specific, mapped from the tuple, e.g. riscv64 →
+  `default/linux/riscv/23.0/rv64/lp64d` (`common.sh:258` `gentoo_profile`,
+  `cross-stage.sh:45`).
+- the Rust `target.rs` copies both the `make.profile` symlink and the `profile/`
+  dir from the crossdev prefix (`/usr/<CHOST>/etc/portage`) into the target
+  sysroot's portage config.
+
+**em requirement:** concern-1 init/`--setup` for a cross target must (a) write the
+special make.conf (`CHOST/CBUILD`), and (b) **link `make.profile` directly to the
+target-arch profile in the repo — NOT via `eselect profile`** (which validates
+against the host arch and fails). Need a tuple→profile mapping (reuse
+crossdev-stages' `gentoo_profile`, or crossdev's `--show-target-cfg` arch). This
+is also the missing piece behind concern 1's self-contained `--root` path.
 
 ## The two toolchain models (KEY: they are very different)
 
