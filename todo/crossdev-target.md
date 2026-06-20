@@ -32,6 +32,49 @@ Authoritative design context: `docs/root-model.md` (§ Cross, § Sequencing),
 So **resolution/pretend for cross is essentially done**; everything below is past
 `-p`.
 
+## Decomposition: three orthogonal concerns (the planning frame)
+
+crossdev conflates three things into one stage loop. em should treat them as
+**separate concerns split by install root**, each mapping to an existing em
+primitive:
+
+### 1. Populate the `/usr/<CTARGET>` sysroot — *Target root, ≈ `--local --setup`*
+The target-arch artifacts: kernel-headers, libc (glibc/musl), and the runtimes
+(compiler-rt, libunwind, libc++/libc++abi). They install **into the sysroot**
+(`ROOT=/usr/<CTARGET>`), cross-built. This is em's ROOT-offset build of target
+packages — the `--root`/`--local` machinery — plus a `--setup`-style bootstrap to
+lay down the empty sysroot's base config (crossdev writes
+`/usr/<CTARGET>/etc/portage/{make.conf,package.*}`; em's `--local --setup`
+already bootstraps a prefix — reuse that path, see `setup.rs`).
+
+### 2. The `<CTARGET>-emerge` driver — *the wrapper / entry point*
+Recognise the cross invocation and set
+`CHOST/CBUILD, SYSROOT=ESYSROOT=/usr/<CTARGET>, BROOT=/, ROOT=/usr/<CTARGET>`
+(overridable), then run em's normal resolve+build with per-class root routing
+(already in place via Tier-1). Thin — config plumbing.
+
+### 3. Host-installed cross tooling — *Host root, the "cross compilers" / `--ex-pkg`*
+Things that install on the **host** (`ROOT=/`) but provide target capability:
+`cross-<CTARGET>/{binutils,gcc}` (the `<CTARGET>-gcc` binaries), the rust target
+std (`rust-std` / `RUST_TARGETS`), `clang-crossdev-wrapper`. Host builds of
+`cross-*` packages → `MergeRoot::Host` (the `host_copies.rs` machinery); the
+eclass builds them as cross-compilers targeting `<CTARGET>`. `--ex-pkg` just adds
+more of these on demand.
+
+**The stage loop is the dependency ordering that interleaves 1 and 3**
+(binutils→gcc1 [host] → headers→libc [sysroot] → gcc2 [host] → runtimes
+[sysroot]). em's resolver orders by deps; a thin stage driver supplies the
+per-stage `USE`.
+
+**LLVM (`-L`) collapses concern 3**: clang already cross-targets, so there is no
+per-target compiler to build host-side — concern 3 shrinks to
+`clang-crossdev-wrapper` (+ `/etc/clang/cross/<CTARGET>.cfg`), and the bulk is
+concern 1 (sysroot) + concern 2 (driver). This is why LLVM leads.
+
+The Stages A–D below are the *implementation* increments; concerns 1/2/3 are the
+*architecture* they serve (2 = Stage A; 1 = a Target-root build reusing
+`--local`; 3 = Host-root builds via the existing `MergeRoot::Host` walk).
+
 ## The two toolchain models (KEY: they are very different)
 
 ### GCC cross (`cross-<triple>/*`, crossdev's classic model)
