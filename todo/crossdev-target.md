@@ -320,6 +320,20 @@ overlay/symlink/config writers), `load_multilib_env` (l.1212).
 
 ## First prerequisites — three Stage-0 setup tools (= `--init-target`, no build)
 
+STATUS: **DONE (2026-06-20).** Shipped as the `em crossdev` subcommand
+(`src/crossdev/{mod,target}.rs`): `--show-target-cfg` (preview, no writes) and
+`--init-target` (lay down everything). `CrossTarget::parse` does the tuple →
+category / package-set / `gentoo_arch` / profile / `CFLAGS` derivation (glibc
+`gnu`, `musl`, bare-metal `-elf`/`-eabi` newlib; `-L` ⇒ `cross_llvm-*` and
+rejects glibc). Install root follows the em root model: sysroot =
+`<EROOT>/usr/<CTARGET>` (`/usr/<CTARGET>` default; `--local`/`--prefix`/`--root`
+retarget). All three tools below implemented + idempotent; verified against a
+sandboxed `--config-root`/`--root` (overlay symlinks/metadata/categories/
+repos.conf match the live crossdev overlay byte-for-byte; sysroot make.conf has
+`CBUILD`/`CHOST`/`CTARGET`/`ARCH`/keywords/`CFLAGS`; make.profile is a direct
+absolute symlink). 4 unit tests in `target.rs`. **Next: Stage B** (cross-build
+one target package end-to-end).
+
 The foundation to build FIRST (pure filesystem setup, independent of the
 resolver). They compose into a no-build `em crossdev --init-target` /
 concern-1+2 init:

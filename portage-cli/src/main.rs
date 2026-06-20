@@ -1,5 +1,6 @@
 mod bdepend_avail;
 mod cli;
+mod crossdev;
 mod ebuild;
 mod error;
 mod maint;
@@ -632,6 +633,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
         Applet::Atom { atoms } => run_atom(atoms),
         Applet::Select { command } => select::run(command, globals),
         Applet::Setup => setup::bootstrap(&globals.roots()),
+        Applet::Crossdev(args) => crossdev::run(args, globals),
         Applet::Dispatch => {
             eprintln!("dispatch-conf");
             bail!("not implemented: dispatch-conf")

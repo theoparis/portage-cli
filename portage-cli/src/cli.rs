@@ -502,6 +502,9 @@ pub enum Applet {
     #[command(about = "Bootstrap a prefix layout (use with --local or --prefix)")]
     Setup,
 
+    #[command(about = "Set up a cross-compilation target (sysroot + overlay) — crossdev workalike")]
+    Crossdev(CrossdevArgs),
+
     #[command(about = "Safe configuration file updates (dispatch-conf)")]
     Dispatch,
 
@@ -510,6 +513,29 @@ pub enum Applet {
 
     #[command(about = "Regenerate /etc/profile.env and ld.so cache")]
     Env,
+}
+
+/// `em crossdev` — cross-target setup, mirroring crossdev's option surface (the
+/// no-build subset for now; building the toolchain is future work).
+#[derive(clap::Args)]
+pub struct CrossdevArgs {
+    /// Target tuple ARCH-VENDOR-OS-LIBC (e.g. `riscv64-unknown-linux-gnu`,
+    /// `aarch64-unknown-linux-musl`, `riscv64-unknown-elf`).
+    #[arg(short = 't', long = "target", value_name = "TUPLE")]
+    pub target: String,
+
+    /// Use the LLVM/Clang model (`cross_llvm-*`: host clang cross-targets, no
+    /// per-target compiler). Rejects glibc — use musl or a bare-metal target.
+    #[arg(short = 'L', long)]
+    pub llvm: bool,
+
+    /// Lay down the overlay + sysroot config without building anything.
+    #[arg(long)]
+    pub init_target: bool,
+
+    /// Print the derived target configuration and exit (no writes).
+    #[arg(long)]
+    pub show_target_cfg: bool,
 }
 
 #[derive(Subcommand)]
