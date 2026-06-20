@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0
+
+### Breaking changes
+
+- `apply_package_use` now takes pre-parsed `&[(Dep, Vec<UseOverride>)]` instead
+  of `&[(Dep, Vec<String>)]`. Flags are parsed (`+flag`/`flag` → on, `-flag` →
+  off) and interned once at config-read time, so the per-version apply path does
+  no string work. New public `UseOverride { flag, enable }` with `parse`.
+
 ## 0.5.0
 
 This release covers the large body of work accumulated since 0.4.x; the public

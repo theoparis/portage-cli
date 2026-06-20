@@ -145,30 +145,61 @@ impl UseFlagLookup for UseConfig {
     }
 }
 
+/// A parsed `package.use` override: a USE flag and whether it is turned on.
+///
+/// Parsing (`+flag`/`flag` → on, `-flag` → off) and interning happen once at
+/// config-read time so the solver never re-parses a flag string. Cheap to copy
+/// (an interned `u32` plus a bool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UseOverride {
+    /// The interned flag name, with any `+`/`-` prefix stripped.
+    pub flag: Interned<DefaultInterner>,
+    /// `true` enables the flag, `false` disables it.
+    pub enable: bool,
+}
+
+impl UseOverride {
+    /// Parse a single `package.use` token: `flag`/`+flag` enables, `-flag`
+    /// disables.
+    pub fn parse(token: &str) -> Self {
+        let name = token.strip_prefix('+').unwrap_or(token);
+        match name.strip_prefix('-') {
+            Some(rest) => Self {
+                flag: Interned::intern(rest),
+                enable: false,
+            },
+            None => Self {
+                flag: Interned::intern(name),
+                enable: true,
+            },
+        }
+    }
+}
+
 /// Apply per-package USE flag overrides on top of a base [`UseConfig`].
 ///
 /// Scans `package_use` in order and applies any entries whose atom matches
 /// `cpv`.  Returns `Borrowed(base)` when no entries match to avoid a clone.
 /// This is policy resolution the *caller* performs to build the desired set;
-/// the solver itself never calls it.
+/// the solver itself never calls it. Overrides are pre-parsed
+/// [`UseOverride`]s, so this does no string work.
 pub fn apply_package_use<'a>(
     base: &'a UseConfig,
     cpv: &Cpv,
     slot: Option<Interned<DefaultInterner>>,
-    package_use: &[(Dep, Vec<String>)],
+    package_use: &[(Dep, Vec<UseOverride>)],
 ) -> Cow<'a, UseConfig> {
     if package_use.is_empty() {
         return Cow::Borrowed(base);
     }
     let mut cfg = base.clone();
-    for (dep, flags) in package_use {
+    for (dep, overrides) in package_use {
         if crate::validate::dep_matches_cpv(dep, cpv, slot) {
-            for flag in flags {
-                let name = flag.strip_prefix('+').unwrap_or(flag);
-                if let Some(stripped) = name.strip_prefix('-') {
-                    cfg.disable(Interned::intern(stripped));
+            for ov in overrides {
+                if ov.enable {
+                    cfg.enable(ov.flag);
                 } else {
-                    cfg.enable(Interned::intern(name));
+                    cfg.disable(ov.flag);
                 }
             }
         }
@@ -195,6 +226,38 @@ mod tests {
         assert_eq!(config.get(flag), UseFlagState::Enabled);
         config.disable(flag);
         assert_eq!(config.get(flag), UseFlagState::Disabled);
+    }
+
+    #[test]
+    fn use_override_parse() {
+        let on = UseOverride::parse("ssl");
+        assert_eq!(on.flag, Interned::intern("ssl"));
+        assert!(on.enable);
+        assert_eq!(UseOverride::parse("+ssl"), on, "`+flag` enables like `flag`");
+        let off = UseOverride::parse("-ssl");
+        assert_eq!(off.flag, Interned::intern("ssl"));
+        assert!(!off.enable);
+    }
+
+    #[test]
+    fn apply_package_use_applies_matching_overrides() {
+        let base = UseConfig::new();
+        let cpv = Cpv::parse("dev-libs/foo-1").unwrap();
+        let pu = vec![
+            (
+                Dep::parse("dev-libs/foo").unwrap(),
+                vec![UseOverride::parse("ssl"), UseOverride::parse("-debug")],
+            ),
+            // Non-matching atom must not apply.
+            (
+                Dep::parse("dev-libs/bar").unwrap(),
+                vec![UseOverride::parse("test")],
+            ),
+        ];
+        let cfg = apply_package_use(&base, &cpv, None, &pu);
+        assert_eq!(cfg.get(Interned::intern("ssl")), UseFlagState::Enabled);
+        assert_eq!(cfg.get(Interned::intern("debug")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(Interned::intern("test")), UseFlagState::Disabled);
     }
 
     #[test]
