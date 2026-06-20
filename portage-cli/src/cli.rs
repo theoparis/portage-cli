@@ -52,17 +52,13 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub repo: Option<String>,
 
-    /// Unprivileged offset: merge ROOT, the VDB, distfiles and build trees
-    /// all live under DIR. Configuration (profile, make.conf) still comes
-    /// from the host; use --root for a full config offset.
+    /// Unprivileged offset: ROOT/VDB/distfiles/build trees under DIR; config
+    /// still from the host (use --root for a config offset).
     #[arg(long, value_name = "DIR", global = true)]
     pub prefix: Option<String>,
 
-    /// Unprivileged in-place install into a Gentoo-Prefix at `~/.gentoo`
-    /// (`EPREFIX=~/.gentoo`): packages are configured for and installed to
-    /// `~/.gentoo/usr/...`, usable in place (add `~/.gentoo/usr/bin` to PATH).
-    /// Profile/make.conf come from the host; `~/.gentoo/etc/portage` overlays
-    /// `package.use`/`bashrc` (see `em setup`). Full XDG layout is issue #2.
+    /// Unprivileged in-place Gentoo-Prefix at ~/.gentoo (EPREFIX=~/.gentoo);
+    /// config from the host, overlaid by ~/.gentoo/etc/portage.
     #[arg(long, global = true)]
     pub local: bool,
 
