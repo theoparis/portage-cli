@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::Path;
 
-use anstyle::{AnsiColor, Effects, Style};
+use anstyle::Style;
 use anyhow::Result;
 use portage_metadata::Stability;
 use portage_repo::Repository;
@@ -12,17 +12,7 @@ use super::ResolveMode;
 use super::resolve_atom;
 use super::which::dep_matches_cpv;
 
-use crate::cli::C_PKG;
-
-const C_STABLE: Style = Style::new()
-    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)))
-    .effects(Effects::BOLD);
-const C_TESTING: Style = Style::new()
-    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Yellow)))
-    .effects(Effects::BOLD);
-const C_DISABLED: Style = Style::new()
-    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)))
-    .effects(Effects::BOLD);
+use crate::style::{C_DISABLED, C_PKG, C_STABLE, C_TESTING};
 
 pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[String]) -> Result<()> {
     let repo = Repository::open(repo_path)?;

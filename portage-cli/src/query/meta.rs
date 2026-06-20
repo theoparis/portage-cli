@@ -12,7 +12,7 @@ use portage_vdb::Vdb;
 use super::ResolveMode;
 use super::resolve_atom;
 use super::which::dep_matches_cpv;
-use crate::cli::{C_LABEL, C_PKG};
+use crate::style::{C_LABEL, C_PKG};
 use crate::vdb::find_packages;
 
 pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[String]) -> Result<()> {

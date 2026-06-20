@@ -10,7 +10,7 @@ use portage_atom_pubgrub::{
 };
 use portage_metadata::CacheEntry;
 
-pub(super) use crate::cli::C_PKG;
+pub(super) use crate::style::C_PKG;
 
 // emerge color scheme: bold green for keywords/atoms/tags, bold red/blue for flags
 // Package names use plain green (not bold) to match portage's PKG_MERGE style

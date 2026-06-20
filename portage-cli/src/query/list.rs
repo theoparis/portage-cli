@@ -6,7 +6,7 @@ use portage_atom::Cpv;
 use portage_repo::Repository;
 use portage_vdb::Vdb;
 
-use crate::cli::{C_CAT, C_PKGNAME, C_VERSION};
+use crate::style::{C_CAT, C_PKGNAME, C_VERSION};
 
 pub fn run(repo_path: &Path, patterns: &[String]) -> Result<()> {
     let repo = Repository::open(repo_path)?;

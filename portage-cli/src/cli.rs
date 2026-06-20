@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use anstyle::{AnsiColor, Effects, Style};
 use clap::builder::styling::{AnsiColor as ClapAnsiColor, Styles};
 use clap::{Parser, Subcommand};
 use gentoo_core::Arch;
@@ -171,32 +170,6 @@ pub struct Cli {
     #[arg(num_args = 1..)]
     pub atoms: Vec<String>,
 }
-
-// Shared color styles for consistent `em` output (package names, labels, etc.).
-// These are plain anstyle::Style so they can be interpolated in format strings
-// with anstream writers (e.g. "{C_PKG}foo{C_PKG:#}"). Central definition avoids
-// duplication across search/list/depgraph and makes future color tweaks safe
-// from parallel agent edits ("Claude" vs current).
-pub const C_PKG: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
-pub const C_LABEL: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
-pub const C_BOLD: Style = Style::new().effects(Effects::BOLD);
-pub const C_STAR: Style = Style::new()
-    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)))
-    .effects(Effects::BOLD);
-pub const C_MASKED: Style = Style::new()
-    .fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)))
-    .effects(Effects::BOLD);
-
-// For `em query list`:
-// - w/out -I (available packages from tree): outputs CPNs (cat/pkgname), no version
-// - with -I (installed): outputs CPVs (cat/pkgname-version)
-// cat: most subdued (dimmed)
-// pkgname: bright/light green (BrightGreen)
-// version: plain green (only shown for -I)
-pub const C_CAT: Style = Style::new().effects(Effects::DIMMED);
-pub const C_PKGNAME: Style =
-    Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::BrightGreen)));
-pub const C_VERSION: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Green)));
 
 /// The resolved set of roots for a command (see docs/root-model.md): config
 /// source, the planner's installed base, and the install target. Built once

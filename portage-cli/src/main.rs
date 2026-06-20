@@ -12,6 +12,7 @@ mod regen;
 mod search;
 mod select;
 mod setup;
+mod style;
 mod use_flags;
 mod vdb;
 

@@ -7,12 +7,38 @@
 //! the profile-linking item). Target the sysroot with the global `--config-root`
 //! (e.g. `em --config-root /usr/<CTARGET> select profile set <path>`).
 
+use std::io::Write as _;
+
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
-use portage_repo::{ReposConf, Repository};
+use portage_repo::{MakeConf, ProfileDesc, ReposConf, Repository};
 
 use super::config_portage_dir;
 use crate::cli::{Cli, ProfileAction};
+use crate::style::{C_STAR, profile_status};
+
+/// The architecture profiles are filtered to: `ARCH` from the effective
+/// `make.conf` (a cross sysroot may pin it), else the global `--arch` (the host
+/// by default).
+fn effective_arch(globals: &Cli) -> String {
+    let make_conf = config_portage_dir(globals).join("make.conf");
+    if let Ok(conf) = MakeConf::load(&make_conf)
+        && let Some(arch) = conf.get("ARCH").filter(|a| !a.is_empty())
+    {
+        return arch.to_string();
+    }
+    globals.arch.as_str().to_string()
+}
+
+/// Profiles matching `arch` (the eselect-like filter), in `profiles.desc` order.
+fn profiles_for(repo: &Repository, arch: &str) -> Result<Vec<ProfileDesc>> {
+    Ok(repo
+        .profiles_desc()
+        .context("reading profiles.desc")?
+        .into_iter()
+        .filter(|d| d.arch().as_str() == arch)
+        .collect())
+}
 
 pub fn run(action: &ProfileAction, globals: &Cli) -> Result<()> {
     match action {
@@ -52,22 +78,27 @@ fn current_profile(globals: &Cli, repo: &Repository) -> Option<String> {
 
 fn list(globals: &Cli) -> Result<()> {
     let repo = main_repo()?;
-    let descs = repo.profiles_desc().context("reading profiles.desc")?;
+    let arch = effective_arch(globals);
+    let descs = profiles_for(&repo, &arch)?;
     let current = current_profile(globals, &repo);
+    let mut out = anstream::stdout();
     for (i, d) in descs.iter().enumerate() {
+        // Path stays plain for legibility; only the status and the current
+        // marker are coloured.
+        let st = profile_status(d.status());
         let mark = if current.as_deref() == Some(d.path()) {
-            " *"
+            format!(" {C_STAR}*{C_STAR:#}")
         } else {
-            ""
+            String::new()
         };
-        println!(
-            "  [{}]   {}  ({}, {}){}",
+        writeln!(
+            out,
+            "  [{}]  {}  ({st}{}{st:#}){mark}",
             i + 1,
             d.path(),
-            d.arch().as_str(),
             d.status(),
-            mark
-        );
+        )
+        .ok();
     }
     Ok(())
 }
@@ -84,11 +115,11 @@ fn show(globals: &Cli) -> Result<()> {
 fn set(globals: &Cli, target: &str) -> Result<()> {
     let repo = main_repo()?;
 
-    // Resolve a list number (1-based, as displayed) to a profile path; otherwise
-    // treat the argument as a profile path directly (the cross-aware case — no
-    // host-arch validation).
+    // Resolve a list number (1-based, against the same arch-filtered list `list`
+    // shows) to a profile path; otherwise treat the argument as a profile path
+    // directly (the cross-aware case — no host-arch validation).
     let profile_path = if let Ok(n) = target.parse::<usize>() {
-        let descs = repo.profiles_desc().context("reading profiles.desc")?;
+        let descs = profiles_for(&repo, &effective_arch(globals))?;
         let idx = n.checked_sub(1).context("profile numbers start at 1")?;
         descs
             .get(idx)

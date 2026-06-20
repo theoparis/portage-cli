@@ -6,7 +6,7 @@ use portage_atom::{Cpn, Cpv};
 use portage_metadata::RawCacheEntry;
 use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
 
-use crate::cli::{C_BOLD, C_LABEL, C_MASKED, C_PKG, C_STAR};
+use crate::style::{C_BOLD, C_LABEL, C_MASKED, C_PKG, C_STAR};
 
 pub async fn run(
     repo_paths: &[std::path::PathBuf],
