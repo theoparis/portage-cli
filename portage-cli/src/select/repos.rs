@@ -5,12 +5,15 @@
 //! repositories (`sync-type`/`sync-uri` and the online repository list) are a
 //! TODO — see `todo/crossdev-target.md`.
 
+use std::io::Write as _;
+
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use portage_repo::ReposConf;
 
 use super::config_portage_dir;
 use crate::cli::{Cli, RepositoryAction};
+use crate::style::C_STAR;
 
 pub fn run(action: &RepositoryAction, globals: &Cli) -> Result<()> {
     match action {
@@ -46,13 +49,15 @@ fn repo_conf_file(globals: &Cli, name: &str) -> Utf8PathBuf {
 fn list(globals: &Cli) -> Result<()> {
     // `Utf8PathBuf: AsRef<Path>`, so the camino paths feed `load_from` directly.
     let conf = ReposConf::load_from(&conf_paths(globals)).context("reading repos.conf")?;
+    let mut out = anstream::stdout();
     for r in conf.repos() {
+        // Tint the main repo's marker green, matching the current-profile `*`.
         let main = if conf.main_repo().is_some_and(|m| m.name == r.name) {
-            " (main)"
+            format!(" ({C_STAR}main{C_STAR:#})")
         } else {
-            ""
+            String::new()
         };
-        println!("  {:<20} {}{}", r.name, r.location.display(), main);
+        writeln!(out, "  {:<20} {}{main}", r.name, r.location.display()).ok();
     }
     Ok(())
 }
