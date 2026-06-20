@@ -1,11 +1,18 @@
 # package.env — per-package build environment (RESOLVER-FREE slice)
 
-STATUS: **build-env slice DONE (commit 4846c5b); USE part remains, resolver-side.**
+STATUS: **build-env slice DONE (commit 7ce7c5b); USE part remains, resolver-side.**
 The non-USE build environment is applied: `build_and_merge` (ebuild.rs) sources
 matching `/etc/portage/env/<file>` entries on top of make.conf via the new
 `EbuildShell::source_env_file` and the new `portage-cli/src/package_env.rs`
 reader (atom→files, dir form, host + config overlay, slot-aware). FEATURES
 composes, *FLAGS/MAKEOPTS replace; covered by unit + composition tests.
+
+CONFIRMED 2026-06-20: landed in master alongside the `wip/solver-abstraction`
+work (portage-solver crate + resolvo 0.11 bump, both additive — `em` depends on
+neither). Full AGENTS.md checklist green (fmt/build/clippy/27 test suites), and a
+re-benchmark vs baseline 8ce7a01 shows **no regression** — `em -pe` still
+**1.23×** faster on firefox/gcc/multi (identical 619-line firefox plan), i.e. the
+interning gains survived the fold+rebase+solver integration intact.
 
 REMAINING (resolver-side, do NOT bundle with the above): `USE` set by a
 package.env env file is not reflected in resolution — the resolved plan's USE
