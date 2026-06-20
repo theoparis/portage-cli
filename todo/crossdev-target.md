@@ -32,26 +32,110 @@ Authoritative design context: `docs/root-model.md` (§ Cross, § Sequencing),
 So **resolution/pretend for cross is essentially done**; everything below is past
 `-p`.
 
+## Prerequisites — CONFIRMED LIVE (2026-06-20, release `em`)
+
+Verified against the actual binary/code, not docs (which understated it):
+
+| # | Prerequisite | Check | Result |
+|---|---|---|---|
+| P1 | crossdev overlay + `cross-*` resolve (symlink-follow) | `em -p cross-riscv64-unknown-linux-gnu/binutils` | `U 2.46.1 [2.46.0]` ✓ |
+| P2 | `--root` target-root offset | `em -p --root /tmp/e --config-root / zlib` | `N … to /tmp/e/` ✓ |
+| P3 | `--prefix` offset | `em -p --prefix /tmp/p zlib` | `R … to /tmp/p/` ✓ |
+| P4 | `--local` `EPREFIX=~/.gentoo` (the **retarget** primitive) | `em -p --local zlib` | `R … to ~/.gentoo/` ✓ |
+| P5 | `MergeRoot::Host` build-closure walk wired | `host_copies::compute(...,&cross)` spliced into plan (mod.rs:636) | ✓ |
+| P6 | `--setup` prefix bootstrap | `setup.rs::bootstrap` (needs `--local`/`--prefix`) | ✓ |
+| P7 | root derivation composes config/base/target/eprefix | `Cli::roots()` (cli.rs) | ✓ |
+| P8 | **cross-context detection + dual-root routing already exist** | `root_aware::CrossContext{sysroot,target,chost,cbuild,active}`, `detect()` reads `CHOST`/`CBUILD` from the sysroot make.conf, `is_cross_arch()`; `MergeRoot` nodes in the solver | ✓ |
+
+**Reconciliation:** the earlier "crossdev not started beyond `-p`" framing was
+stale. Cross-context **detection** and **dual-root `MergeRoot` routing** are
+implemented (`root_aware.rs`, `host_copies.rs`, pubgrub `MergeRoot`). What's
+genuinely missing: (a) the **entry-point ergonomics** — a `--cross <tuple>` /
+`<CTARGET>-emerge` that points `config_root` at the sysroot (today hand-driven as
+`--config-root /usr/<CTARGET> --root /usr/<CTARGET>`); (b) the actual cross
+**build** (run phases with cross env); (c) the **`--local` sub-path retarget**
+(below).
+
+### Gap for the retarget requirement (point 1)
+`--local` currently hardcodes `target = EPREFIX = ~/.gentoo`. A cross sysroot at
+`~/.gentoo/usr/<CTARGET>` needs either `--prefix ~/.gentoo/usr/<CTARGET>` (works
+today, but config comes from the host, not the sysroot) or — better — the cross
+entry point (concern 2) setting `EPREFIX=~/.gentoo`, `sysroot = target =
+$EPREFIX/usr/<CTARGET>`, and `config_root` at that sysroot. The primitives (P3/P4/
+P7) compose; only the cross-specific wiring is missing.
+
 ## Decomposition: three orthogonal concerns (the planning frame)
 
 crossdev conflates three things into one stage loop. em should treat them as
 **separate concerns split by install root**, each mapping to an existing em
 primitive:
 
-### 1. Populate the `/usr/<CTARGET>` sysroot — *Target root, ≈ `--local --setup`*
+### 1. Populate the `<EPREFIX>/usr/<CTARGET>` sysroot — *Target root, ≈ `--local --setup`*
 The target-arch artifacts: kernel-headers, libc (glibc/musl), and the runtimes
 (compiler-rt, libunwind, libc++/libc++abi). They install **into the sysroot**
-(`ROOT=/usr/<CTARGET>`), cross-built. This is em's ROOT-offset build of target
-packages — the `--root`/`--local` machinery — plus a `--setup`-style bootstrap to
-lay down the empty sysroot's base config (crossdev writes
-`/usr/<CTARGET>/etc/portage/{make.conf,package.*}`; em's `--local --setup`
-already bootstraps a prefix — reuse that path, see `setup.rs`).
+(cross-built). This is em's ROOT-offset build of target packages — the
+`--root`/`--local` machinery — plus a `--setup`-style bootstrap to lay down the
+empty sysroot's base config (crossdev writes
+`<sysroot>/etc/portage/{make.conf,package.*}`; em's `--local --setup` already
+bootstraps a prefix — reuse that path, see `setup.rs`).
 
-### 2. The `<CTARGET>-emerge` driver — *the wrapper / entry point*
-Recognise the cross invocation and set
-`CHOST/CBUILD, SYSROOT=ESYSROOT=/usr/<CTARGET>, BROOT=/, ROOT=/usr/<CTARGET>`
-(overridable), then run em's normal resolve+build with per-class root routing
-(already in place via Tier-1). Thin — config plumbing.
+**REQUIREMENT — the sysroot must be RELOCATABLE, not hardcoded to `/usr/<CTARGET>`.**
+The axis is **self-contained (own libc/kernel) vs host-shared**, and it is the
+`--root` vs `--prefix` distinction (NOT `--local`, which is merely a prefix):
+
+| mode | sysroot location | libc + kernel | which em primitive |
+|---|---|---|---|
+| **default** `em crossdev <t>` | `/usr/<CTARGET>` (`EPREFIX=/`) | system | (root install, crossdev parity) |
+| **`--root DIR`** | `DIR` (own VDB) | **built from scratch** (self-contained) → the "stage1 from scratch" | `--root` offset, empty VDB ⇒ full closure `N` |
+| **`--prefix DIR`** (and `--local` = `--prefix ~/.gentoo`) | `DIR` | **host's libc+kernel SHARED** (base = host; only the delta builds) | prefix overlay, host VDB shared ⇒ delta only |
+
+- **`--local` is shorthand for `--prefix ~/.gentoo`** — a host-sharing prefix,
+  *not* self-contained. (Smoke test confirmed: `em -p --local cross-…/gcc` →
+  `U gcc`, no closure, because the host's cross binutils/glibc/headers are
+  shared. Correct for a prefix.)
+- **`--root <empty>`** is the self-contained path: an isolated VDB ⇒ em plans the
+  whole toolchain closure from scratch (all `N`), own libc/kernel. This is "stage1
+  from scratch".
+- **`--prefix`** = root-model `target ≠ base` (base = host): share host
+  libc+kernel-headers, build only what's missing — much lighter.
+
+Both must work; the driver (concern 2) takes the sysroot/prefix/root as input and
+nothing may assume `/usr/<CTARGET>`.
+
+This reuses the `--local`/`--prefix` EPREFIX machinery (`root-model.md`,
+[[local-eprefix-mode]]): every cross location var gets the prefix —
+`SYSROOT=ESYSROOT=<EPREFIX>/usr/<CTARGET>`, `ROOT` likewise, and
+`PORTAGE_CONFIGROOT=<EPREFIX>/usr/<CTARGET>`. NB for LLVM:
+the generated `clang` cross cfg (`--sysroot=…`) and `/etc/clang/cross/*.cfg`
+location must also follow `<EPREFIX>`, not the hardcoded `/usr/<CTARGET>` crossdev
+writes.
+
+### 2. The driver — *a dedicated `em crossdev` subcommand (+ a `<CTARGET>-emerge` wrapper)*
+**Make it a separate subcommand**, not just a flag, so users coming from the
+original `crossdev` get a seamless/familiar interface. Two entry forms:
+
+- **`em crossdev -t <tuple> [-s0..s4] [-L] [--ex-pkg X] [--ov-output DIR] …`** —
+  the orchestrator, **mirroring the original `crossdev` option surface** (same
+  flags: `-t/--target`, the stage flags, `-L/--llvm`, `--ex-*`, the overlay/`--ov-*`
+  and package-override `--[bdgkl]pkg/cat/env` options, `-S/--stable`, `-C/--clean`,
+  `--init-target`, `--show-target-cfg`). It does concern-1 init/setup (lay down
+  the sysroot base + overlay, reusing `--setup`/`setup.rs`) and drives the stage
+  sequence (concerns 1+3) over em's own resolve+build — replacing the crossdev
+  bash, not shelling out to it.
+  **Default install target: `/usr/<CTARGET>`** (`EPREFIX=/`), exactly like the
+  original crossdev — bare `em crossdev <tuple>` is the privileged system install
+  to `/usr/<CTARGET>`. The retarget (concern 1, `<EPREFIX>/usr/<CTARGET>`, e.g.
+  `~/.gentoo/usr/<CTARGET>`) is **opt-in** via `--local`/`--prefix`; the default
+  is unchanged so existing crossdev users get identical behaviour.
+- **`<CTARGET>-emerge <pkg>`** — the per-target emerge for ongoing builds /
+  `--ex-pkg` (concern 3) and target packages (concern 1). Generated by
+  `em crossdev` (like crossdev installs `/usr/bin/<CTARGET>-emerge`); it's just
+  `em` with the cross context auto-detected (P8 `root_aware::detect` already does
+  this from the sysroot make.conf) — sets
+  `CHOST/CBUILD, SYSROOT=ESYSROOT=<EPREFIX>/usr/<CTARGET>, BROOT=/, ROOT=…`.
+
+So the subcommand owns the orchestration + UX; the wrapper is the thin
+per-package path. Map crossdev flags 1:1 where sensible; document any deltas.
 
 ### 3. Host-installed cross tooling — *Host root, the "cross compilers" / `--ex-pkg`*
 Things that install on the **host** (`ROOT=/`) but provide target capability:
