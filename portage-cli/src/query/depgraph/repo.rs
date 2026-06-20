@@ -28,61 +28,211 @@ pub(super) struct AutounmaskCandidate {
     pub reasons: Vec<FilterReason>,
 }
 
-/// Returns true if the keyword list satisfies `accept_keywords` for the given arch.
+/// One parsed `ACCEPT_KEYWORDS` / `package.accept_keywords` token.
 ///
-/// Empty `accept_keywords` falls back to accepting stable + testing (tool default).
-pub(super) fn keyword_accepts(
-    keywords: &[Keyword],
-    arch: &str,
-    accept_keywords: &[String],
-) -> bool {
-    if accept_keywords.iter().any(|k| k == "**") {
-        return true;
-    }
-    if accept_keywords.is_empty() {
-        // No ACCEPT_KEYWORDS loaded; the profile baseline is stable-only.
-        return keywords
-            .iter()
-            .any(|kw| kw.arch.as_str() == arch && kw.stability == Stability::Stable);
-    }
-    // Portage semantics: accepting `~arch` (testing) implies accepting stable
-    // `arch` too — testing is a superset of stable.  `*` accepts any stable
-    // keyword for the arch, `~*` any testing keyword (which also implies stable).
-    let testing_tok = format!("~{arch}");
-    let accept_testing = accept_keywords
-        .iter()
-        .any(|k| *k == testing_tok || k == "~*");
-    let accept_stable = accept_testing
-        || accept_keywords
-            .iter()
-            .any(|k| k.as_str() == arch || k == "*");
-
-    keywords.iter().any(|kw| {
-        if kw.arch.as_str() != arch {
-            return false;
-        }
-        match kw.stability {
-            Stability::Stable => accept_stable,
-            Stability::Testing => accept_testing,
-            _ => false,
-        }
-    })
+/// Tokens are parsed (and their arches interned) at config-read time, so the
+/// solver never sees a keyword string — matching against a package's
+/// [`Keyword`] list is a `u32` comparison with no per-check allocation.
+#[derive(Clone, Copy)]
+pub(super) enum AcceptToken {
+    /// `arch` — accept the stable keyword for this arch.
+    Stable(Interned<DefaultInterner>),
+    /// `~arch` — accept the testing keyword (implies stable) for this arch.
+    Testing(Interned<DefaultInterner>),
+    /// `*` — accept a stable keyword for any arch.
+    AnyStable,
+    /// `~*` — accept a testing keyword for any arch (implies stable).
+    AnyTesting,
+    /// `**` — accept regardless of keywords (even an unkeyworded/live ebuild).
+    Any,
 }
 
-/// Returns the testing keyword string needed for `arch` if the package only has `~arch`
-/// and it is not already in `accept_keywords`.
-fn keyword_needed(keywords: &[Keyword], arch: &str, accept_keywords: &[String]) -> Option<String> {
-    if keyword_accepts(keywords, arch, accept_keywords) {
-        return None;
-    }
-    // Check whether a testing keyword for this arch exists in the package metadata.
-    keywords.iter().find_map(|kw| {
-        if kw.arch.as_str() == arch && kw.stability == Stability::Testing {
-            Some(format!("~{}", arch))
-        } else {
-            None
+impl AcceptToken {
+    /// Parse one token. Returns `None` for tokens we don't model — the
+    /// incremental `-arch` removal form, which the previous string matcher also
+    /// silently ignored.
+    pub(super) fn parse(tok: &str) -> Option<Self> {
+        match tok {
+            "**" => Some(Self::Any),
+            "~*" => Some(Self::AnyTesting),
+            "*" => Some(Self::AnyStable),
+            _ if tok.starts_with('-') => None,
+            _ => match tok.strip_prefix('~') {
+                Some(arch) => Some(Self::Testing(Interned::intern(arch))),
+                None => Some(Self::Stable(Interned::intern(tok))),
+            },
         }
-    })
+    }
+}
+
+/// The accept decision for a single (interned) arch, reduced to flags.
+#[derive(Clone, Copy, Default)]
+struct ArchAccept {
+    /// A stable keyword for the arch is accepted.
+    stable: bool,
+    /// A testing (`~arch`) keyword is accepted (implies `stable`).
+    testing: bool,
+    /// `**` — accept even with no matching keyword.
+    any: bool,
+}
+
+impl ArchAccept {
+    /// Fold one token's contribution, relative to the target `arch`.
+    fn add(&mut self, tok: AcceptToken, arch: Interned<DefaultInterner>) {
+        match tok {
+            // testing is a superset of stable, so accepting it implies stable.
+            AcceptToken::Any => {
+                self.any = true;
+                self.testing = true;
+                self.stable = true;
+            }
+            AcceptToken::AnyTesting => {
+                self.testing = true;
+                self.stable = true;
+            }
+            AcceptToken::AnyStable => self.stable = true,
+            AcceptToken::Testing(a) if a == arch => {
+                self.testing = true;
+                self.stable = true;
+            }
+            AcceptToken::Stable(a) if a == arch => self.stable = true,
+            _ => {}
+        }
+    }
+
+    /// Whether a package with `keywords` is accepted under this decision.
+    fn accepts(self, keywords: &[Keyword], arch: Interned<DefaultInterner>) -> bool {
+        if self.any {
+            return true;
+        }
+        keywords.iter().any(|kw| {
+            kw.arch == arch
+                && match kw.stability {
+                    Stability::Stable => self.stable,
+                    Stability::Testing => self.testing,
+                    _ => false,
+                }
+        })
+    }
+}
+
+/// Global `ACCEPT_KEYWORDS` plus per-package `package.accept_keywords`, parsed
+/// into interned tokens once.
+///
+/// The global decision is precomputed for the host arch; per-package entries
+/// are folded in per version only when present, so the common no-override path
+/// is allocation-free and reduces to a keyword scan with `u32` comparisons.
+pub(super) struct AcceptKeywords {
+    /// Host arch, interned — the axis every acceptance check compares against.
+    arch: Interned<DefaultInterner>,
+    /// Precomputed decision from the global `ACCEPT_KEYWORDS` tokens.
+    global: ArchAccept,
+    /// Per-package overrides: `(atom, [tokens])`. A bare atom is pre-expanded to
+    /// `~arch` (portage's rule). Empty ⇒ no per-package work in the hot path.
+    per_package: Vec<(Dep, Vec<AcceptToken>)>,
+}
+
+impl AcceptKeywords {
+    /// Build from pre-parsed tokens: the global `ACCEPT_KEYWORDS` list and the
+    /// per-package `(atom, tokens)` entries from `package.accept_keywords`.
+    /// Tokens are already interned (parsed at config-read time); a bare
+    /// per-package atom arrives as an empty token list and is expanded here to
+    /// "accept this arch's `~arch`" (portage's rule).
+    pub(super) fn new(
+        arch: &Arch,
+        global: &[AcceptToken],
+        per_package: Vec<(Dep, Vec<AcceptToken>)>,
+    ) -> Self {
+        let arch_key = Interned::intern(arch.as_str());
+        let mut global_accept = ArchAccept::default();
+        for &tok in global {
+            global_accept.add(tok, arch_key);
+        }
+        // An empty global list means "stable only" (the historical fallback).
+        if global.is_empty() {
+            global_accept.stable = true;
+        }
+        let per_package = per_package
+            .into_iter()
+            .map(|(dep, mut toks)| {
+                if toks.is_empty() {
+                    // Bare atom ⇒ accept this arch's testing keyword.
+                    toks.push(AcceptToken::Testing(arch_key));
+                }
+                (dep, toks)
+            })
+            .collect();
+        Self {
+            arch: arch_key,
+            global: global_accept,
+            per_package,
+        }
+    }
+
+    /// Test-only constructor from a global token list (no per-package entries).
+    #[cfg(test)]
+    pub(super) fn from_global(arch: &Arch, global: &[&str]) -> Self {
+        let toks: Vec<AcceptToken> = global.iter().filter_map(|s| AcceptToken::parse(s)).collect();
+        Self::new(arch, &toks, Vec::new())
+    }
+
+    /// The accept decision for one package version, folding any matching
+    /// per-package overrides into the precomputed global decision. Returns the
+    /// global decision unchanged (no work) in the common no-override case.
+    fn decision(&self, cpv: &Cpv, slot: Option<Interned<DefaultInterner>>) -> ArchAccept {
+        if self.per_package.is_empty() {
+            return self.global;
+        }
+        let slot_str = slot.as_ref().map(|s| s.as_str());
+        let mut acc = self.global;
+        for (dep, toks) in &self.per_package {
+            if dep.matches_cpv(cpv, slot_str) {
+                for &t in toks {
+                    acc.add(t, self.arch);
+                }
+            }
+        }
+        acc
+    }
+
+    /// Whether `keywords` is accepted for this version.
+    pub(super) fn accepts(
+        &self,
+        keywords: &[Keyword],
+        cpv: &Cpv,
+        slot: Option<Interned<DefaultInterner>>,
+    ) -> bool {
+        self.decision(cpv, slot).accepts(keywords, self.arch)
+    }
+
+    /// Whether this version is merged on a *stable* basis (accepted, and not via
+    /// a testing keyword) — gates the `use.stable.{force,mask}` sets.
+    pub(super) fn is_stable(
+        &self,
+        keywords: &[Keyword],
+        cpv: &Cpv,
+        slot: Option<Interned<DefaultInterner>>,
+    ) -> bool {
+        let d = self.decision(cpv, slot);
+        d.accepts(keywords, self.arch) && !d.testing
+    }
+
+    /// The `~arch` token an autounmask would need: the version is not accepted
+    /// but carries a testing keyword for the host arch.
+    pub(super) fn keyword_needed(
+        &self,
+        keywords: &[Keyword],
+        cpv: &Cpv,
+        slot: Option<Interned<DefaultInterner>>,
+    ) -> Option<String> {
+        if self.accepts(keywords, cpv, slot) {
+            return None;
+        }
+        keywords
+            .iter()
+            .any(|kw| kw.arch == self.arch && kw.stability == Stability::Testing)
+            .then(|| format!("~{}", self.arch.as_str()))
+    }
 }
 
 /// Returns true if the license expression is fully covered by `accept`,
@@ -127,8 +277,7 @@ fn effective_use_config(
     use_config: &portage_atom_pubgrub::UseConfig,
     package_use: &[(Dep, Vec<String>)],
     force_mask: &super::force_mask::ForceMask,
-    arch: &str,
-    accept_keywords: &[String],
+    accept_keywords: &AcceptKeywords,
     cpv: &Cpv,
     meta: &portage_metadata::EbuildMetadata,
     slot: Option<Interned<DefaultInterner>>,
@@ -138,7 +287,7 @@ fn effective_use_config(
     let mut cfg = apply_package_use(use_config, cpv, slot, package_use).into_owned();
     apply_iuse_defaults(&mut cfg, meta);
     if !force_mask.is_empty() {
-        let stable = super::force_mask::is_stable(&meta.keywords, arch, accept_keywords);
+        let stable = accept_keywords.is_stable(&meta.keywords, cpv, slot);
         force_mask.apply(&mut cfg, cpv, stable);
     }
     cfg
@@ -161,8 +310,7 @@ fn license_ok_for(
     use_config: &portage_atom_pubgrub::UseConfig,
     package_use: &[(Dep, Vec<String>)],
     force_mask: &super::force_mask::ForceMask,
-    arch: &str,
-    accept_keywords: &[String],
+    accept_keywords: &AcceptKeywords,
 ) -> bool {
     let Some(lic) = &meta.license else {
         return true;
@@ -175,7 +323,6 @@ fn license_ok_for(
         use_config,
         package_use,
         force_mask,
-        arch,
         accept_keywords,
         cpv,
         meta,
@@ -262,8 +409,7 @@ pub(super) fn repo_name_of<'a>(data: &'a RepoData, cpv: &Cpv) -> &'a str {
 
 pub(super) struct Adapter<'a> {
     pub(super) data: &'a RepoData,
-    pub(super) arch: &'a Arch,
-    pub(super) accept_keywords: &'a [String],
+    pub(super) accept_keywords: &'a AcceptKeywords,
     pub(super) package_mask: &'a [Dep],
     pub(super) package_unmask: &'a [Dep],
     pub(super) accept_license: &'a portage_repo::AcceptLicense,
@@ -314,7 +460,8 @@ impl Adapter<'_> {
     /// phantom slots for versions the solver can never select.
     fn version_accepted(&self, cpv: &Cpv, cache: &portage_metadata::CacheEntry) -> bool {
         let meta = &cache.metadata;
-        keyword_accepts(&meta.keywords, self.arch.as_str(), self.accept_keywords)
+        self.accept_keywords
+            .accepts(&meta.keywords, cpv, Some(meta.slot.slot))
             && !is_masked(self.package_mask, self.package_unmask, cpv, &meta.slot)
             && self.license_ok(cpv, meta)
     }
@@ -330,7 +477,6 @@ impl Adapter<'_> {
             self.use_config,
             self.package_use,
             self.force_mask,
-            self.arch.as_str(),
             self.accept_keywords,
         )
     }
@@ -425,7 +571,8 @@ impl PackageRepository for Adapter<'_> {
         // This is what makes crossdev's package.use.force/mask (multilib/cet/…)
         // take effect on cross-* packages.
         let stable = meta.is_some_and(|m| {
-            super::force_mask::is_stable(&m.keywords, self.arch.as_str(), self.accept_keywords)
+            self.accept_keywords
+                .is_stable(&m.keywords, cpv, Some(m.slot.slot))
         });
         if !self.force_mask.is_empty() {
             self.force_mask.apply(&mut cfg, cpv, stable);
@@ -629,7 +776,9 @@ pub(super) async fn load_repos(
     }
 
     let mut cpns: Vec<Cpn> = cpns_set.into_iter().collect();
-    cpns.sort_by_key(|c| format!("{}/{}", c.category, c.package));
+    // `Cpn: Ord` already compares category then package over the interned
+    // strings — alphabetical, no per-comparison allocation.
+    cpns.sort_unstable();
 
     RepoData {
         cpns,
@@ -644,8 +793,7 @@ pub(super) async fn load_repos(
 pub(super) fn target_package(
     data: &RepoData,
     dep: &Dep,
-    arch: &Arch,
-    accept_keywords: &[String],
+    accept_keywords: &AcceptKeywords,
     package_mask: &[Dep],
     package_unmask: &[Dep],
     accept_license: &portage_repo::AcceptLicense,
@@ -667,8 +815,9 @@ pub(super) fn target_package(
     let target_slot = entries
         .iter()
         .filter(|(cpv, cache)| {
-            dep.matches_cpv(cpv, Some(cache.metadata.slot.slot.as_str()))
-                && keyword_accepts(&cache.metadata.keywords, arch.as_str(), accept_keywords)
+            let slot = cache.metadata.slot.slot;
+            dep.matches_cpv(cpv, Some(slot.as_str()))
+                && accept_keywords.accepts(&cache.metadata.keywords, cpv, Some(slot))
                 && !is_masked(package_mask, package_unmask, cpv, &cache.metadata.slot)
                 && license_ok_for(
                     cpv,
@@ -677,7 +826,6 @@ pub(super) fn target_package(
                     use_config,
                     package_use,
                     force_mask,
-                    arch.as_str(),
                     accept_keywords,
                 )
         })
@@ -753,8 +901,7 @@ pub(super) fn find_cache<'a>(
 pub(super) fn find_autounmask_candidates(
     data: &RepoData,
     dropped: &[DroppedDep],
-    arch: &str,
-    accept_keywords: &[String],
+    accept_keywords: &AcceptKeywords,
     package_mask: &[Dep],
     package_unmask: &[Dep],
     accept_license: &portage_repo::AcceptLicense,
@@ -787,7 +934,7 @@ pub(super) fn find_autounmask_candidates(
 
             let mut reasons = Vec::new();
 
-            if let Some(kw) = keyword_needed(&meta.keywords, arch, accept_keywords) {
+            if let Some(kw) = accept_keywords.keyword_needed(&meta.keywords, cpv, slot) {
                 reasons.push(FilterReason::Keyword(kw));
             }
             if is_masked(package_mask, package_unmask, cpv, &meta.slot) {
@@ -801,7 +948,6 @@ pub(super) fn find_autounmask_candidates(
                         use_config,
                         package_use,
                         force_mask,
-                        arch,
                         accept_keywords,
                         cpv,
                         meta,
@@ -847,6 +993,46 @@ mod tests {
 
     fn dep(s: &str) -> Dep {
         Dep::parse(s).unwrap()
+    }
+
+    #[test]
+    fn accept_keywords_per_package_override() {
+        let arch = Arch::intern("arm64");
+        let tok = |s: &str| AcceptToken::parse(s).unwrap();
+        let kws = |s: &str| Keyword::parse_line(s).unwrap();
+        let testing = kws("~arm64");
+        let stable = kws("arm64");
+        let foo = Cpv::parse("dev-libs/foo-1").unwrap();
+        let bar = Cpv::parse("dev-libs/bar-1").unwrap();
+
+        // Global stable-only config: ~arm64 is masked everywhere.
+        let global = AcceptKeywords::from_global(&arch, &["arm64"]);
+        assert!(global.accepts(&stable, &foo, None));
+        assert!(!global.accepts(&testing, &foo, None));
+        // Autounmask would suggest ~arm64 for the testing-only package.
+        assert_eq!(
+            global.keyword_needed(&testing, &foo, None).as_deref(),
+            Some("~arm64")
+        );
+
+        // Per-package `dev-libs/foo ~arm64` unmasks foo but not bar.
+        let per = AcceptKeywords::new(
+            &arch,
+            &[tok("arm64")],
+            vec![(dep("dev-libs/foo"), vec![tok("~arm64")])],
+        );
+        assert!(per.accepts(&testing, &foo, None), "foo unmasked");
+        assert!(!per.accepts(&testing, &bar, None), "bar still masked");
+        // No longer suggested for foo (it is already accepted).
+        assert_eq!(per.keyword_needed(&testing, &foo, None), None);
+
+        // A bare atom (`dev-libs/foo`) means "accept this arch's ~arm64".
+        let bare = AcceptKeywords::new(&arch, &[tok("arm64")], vec![(dep("dev-libs/foo"), vec![])]);
+        assert!(bare.accepts(&testing, &foo, None));
+
+        // A testing merge is never "stable" for use.stable.* gating.
+        assert!(global.is_stable(&stable, &foo, None));
+        assert!(!per.is_stable(&testing, &foo, None));
     }
 
     /// Build a one-package `RepoData` from md5-cache text.
@@ -899,12 +1085,12 @@ mod tests {
             ("dev-lang/python-3.14.6", &cache("3.14")),
         ]);
         let arch = Arch::intern("amd64");
+        let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
         let slot = |atom: &str| {
             target_package(
                 &data,
                 &dep(atom),
-                &arch,
-                &["amd64".to_string()],
+                &ak,
                 &[],
                 &[],
                 &accept_all_licenses(),
@@ -945,10 +1131,10 @@ mod tests {
             use_force: vec!["a".to_string()],
             ..Default::default()
         };
+        let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
         let adapter = Adapter {
             data: &data,
-            arch: &arch,
-            accept_keywords: &["amd64".to_string()],
+            accept_keywords: &ak,
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
@@ -986,10 +1172,10 @@ mod tests {
         use_config.enable(Interned::intern("b"));
 
         let fm = ForceMask::default();
+        let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
         let adapter = Adapter {
             data: &data,
-            arch: &arch,
-            accept_keywords: &["amd64".to_string()],
+            accept_keywords: &ak,
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
@@ -1024,10 +1210,10 @@ mod tests {
         use_config.enable(Interned::intern("a")); // only a on ⇒ ?? satisfied
 
         let fm = ForceMask::default();
+        let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
         let adapter = Adapter {
             data: &data,
-            arch: &arch,
-            accept_keywords: &["amd64".to_string()],
+            accept_keywords: &ak,
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
@@ -1067,10 +1253,10 @@ mod tests {
             pkg_mask: index_by_cpn(vec![(dep("cross-foo/gcc"), vec!["cet".to_string()])]),
             ..Default::default()
         };
+        let ak = AcceptKeywords::from_global(&arch, &["~amd64"]);
         let adapter = Adapter {
             data: &data,
-            arch: &arch,
-            accept_keywords: &["~amd64".to_string()],
+            accept_keywords: &ak,
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),

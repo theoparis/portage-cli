@@ -23,9 +23,8 @@ use std::collections::{BTreeSet, HashMap};
 use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Dep};
 use portage_atom_pubgrub::UseConfig;
-use portage_metadata::Keyword;
 
-use super::repo::{keyword_accepts, mask_matches};
+use super::repo::mask_matches;
 
 /// Per-atom force/mask entries grouped by `Cpn`. The profile chain contributes
 /// hundreds of `package.use.{force,mask}` atoms; grouping by `Cpn` turns a
@@ -146,31 +145,12 @@ impl ForceMask {
     }
 }
 
-/// Whether `cpv` is "stable" for the purpose of `*.stable.*` force/mask, i.e.
-/// merged due to a stable keyword.
-///
-/// Mirrors Portage's `KeywordsManager.isStable`: the package must be accepted by
-/// `accept_keywords`, **and** would become unacceptable if every keyword were
-/// downgraded to its `~` form. For a single arch that reduces to: accepted *and*
-/// `accept_keywords` does not accept testing (`~arch`, `~*`, or `**`). So on a
-/// `~arch` configuration this is always `false`.
-pub(super) fn is_stable(keywords: &[Keyword], arch: &str, accept_keywords: &[String]) -> bool {
-    if !keyword_accepts(keywords, arch, accept_keywords) {
-        return false;
-    }
-    let testing = format!("~{arch}");
-    let accepts_testing = accept_keywords
-        .iter()
-        .any(|k| *k == testing || k == "~*" || k == "**");
-    !accepts_testing
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use portage_atom::Version;
     use portage_atom_pubgrub::UseFlagState;
-    use portage_metadata::Stability;
 
     fn cpv(s: &str) -> Cpv {
         let (cpn, ver) = s.rsplit_once('-').unwrap();
@@ -182,13 +162,6 @@ mod tests {
 
     fn dep(s: &str) -> Dep {
         Dep::parse(s).unwrap()
-    }
-
-    fn kw(arch: &str, stability: Stability) -> Keyword {
-        Keyword {
-            arch: Interned::intern(arch),
-            stability,
-        }
     }
 
     #[test]
@@ -253,19 +226,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn is_stable_follows_accept_keywords() {
-        let keywords = [kw("arm64", Stability::Stable)];
-        // pure-stable config → stable
-        assert!(is_stable(&keywords, "arm64", &["arm64".into()]));
-        // testing accepted → never stable
-        assert!(!is_stable(
-            &keywords,
-            "arm64",
-            &["arm64".into(), "~arm64".into()]
-        ));
-        assert!(!is_stable(&keywords, "arm64", &["~arm64".into()]));
-        // not accepted at all → not stable
-        assert!(!is_stable(&keywords, "arm64", &["amd64".into()]));
-    }
 }

@@ -181,9 +181,15 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         package_unmask,
         force_mask,
         accept_keywords,
+        package_accept_keywords,
         accept_license,
         distdir,
     } = use_env;
+
+    // Fold global ACCEPT_KEYWORDS and per-package package.accept_keywords into a
+    // single interned acceptance decision (precomputed for the host arch).
+    let accept_keywords =
+        repo::AcceptKeywords::new(arch, &accept_keywords, package_accept_keywords);
 
     let target_installed_cpvs: std::collections::HashSet<Cpv> = target_installed
         .iter()
@@ -221,7 +227,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         let pkg = repo::target_package(
             &data,
             &dep,
-            arch,
             &accept_keywords,
             &package_mask,
             &package_unmask,
@@ -253,7 +258,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     let build_and_solve = |autosolve_use: bool, pkg_use: &[(Dep, Vec<String>)]| {
         let adapter = repo::Adapter {
             data: &data,
-            arch,
             accept_keywords: &accept_keywords,
             package_mask: &package_mask,
             package_unmask: &package_unmask,
@@ -394,10 +398,10 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             // version is merged due to a stable keyword.
             if !force_mask.is_empty() {
                 let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-                let keywords = repo::find_cache(&data, pkg, ver)
-                    .map(|c| c.metadata.keywords.as_slice())
-                    .unwrap_or(&[]);
-                let stable = force_mask::is_stable(keywords, arch.as_str(), &accept_keywords);
+                let cache = repo::find_cache(&data, pkg, ver);
+                let keywords = cache.map(|c| c.metadata.keywords.as_slice()).unwrap_or(&[]);
+                let slot = cache.map(|c| c.metadata.slot.slot);
+                let stable = accept_keywords.is_stable(keywords, &cpv, slot);
                 let (forced, masked) = force_mask.effective(&cpv, stable);
                 if !forced.is_empty() || !masked.is_empty() {
                     let mut tokens: Vec<String> = forced.into_iter().collect();
@@ -432,7 +436,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     let autounmask_candidates = repo::find_autounmask_candidates(
         &data,
         provider.dropped_deps(),
-        arch.as_str(),
         &accept_keywords,
         &package_mask,
         &package_unmask,
@@ -690,7 +693,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
 
     let _display_adapter = repo::Adapter {
         data: &data,
-        arch,
         accept_keywords: &accept_keywords,
         package_mask: &package_mask,
         package_unmask: &package_unmask,

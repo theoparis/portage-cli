@@ -4,6 +4,7 @@ use portage_atom_pubgrub::{UseConfig, UseFlagState};
 use portage_repo::{AcceptLicense, LicenseGroupRegistry, ProfileStack, Repository};
 
 use super::force_mask::{ForceMask, index_by_cpn};
+use super::repo::AcceptToken;
 
 type Result<T> = anyhow::Result<T>;
 
@@ -25,8 +26,12 @@ pub(super) struct UseEnv {
     /// Profile USE force/mask policy (global + per-package + stable variants),
     /// applied per package to effective USE and consulted by the Level-C cede gate.
     pub force_mask: ForceMask,
-    /// Effective ACCEPT_KEYWORDS tokens (e.g. `["arm64", "~arm64"]`).
-    pub accept_keywords: Vec<String>,
+    /// Effective global `ACCEPT_KEYWORDS`, parsed to interned tokens.
+    pub accept_keywords: Vec<AcceptToken>,
+    /// Per-package `package.accept_keywords` (and legacy `package.keywords`)
+    /// entries: `(atom, [tokens])`, tokens interned. A bare atom carries an
+    /// empty token list (expanded to `~arch` when the host arch is known).
+    pub package_accept_keywords: Vec<(Dep, Vec<AcceptToken>)>,
     /// Effective `ACCEPT_LICENSE` after `@GROUP` expansion and `-` denials.
     pub accept_license: AcceptLicense,
     /// Resolved `DISTDIR` (where fetched distfiles live), for download-size accounting.
@@ -92,6 +97,28 @@ async fn compute_use_env(
     let expand = split_var("USE_EXPAND");
     let expand_hidden = split_var("USE_EXPAND_HIDDEN");
     let accept_keywords = effective_accept_keywords(&split_var, &shell);
+
+    // Per-package keyword acceptance, in portage's precedence order: the profile
+    // stack first, then site `/etc/portage/package.accept_keywords` (and the
+    // legacy `package.keywords`), then the user config overlay last. Bare atoms
+    // (no token) are preserved — they mean "accept this package's `~arch`".
+    let mut package_accept_keywords: Vec<(Dep, Vec<AcceptToken>)> = stack
+        .package_accept_keywords()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(dep, toks)| {
+            let parsed = toks.iter().filter_map(|t| AcceptToken::parse(t)).collect();
+            (dep, parsed)
+        })
+        .collect();
+    package_accept_keywords
+        .extend(load_package_keywords(portage_dir.join("package.accept_keywords").as_str()));
+    package_accept_keywords
+        .extend(load_package_keywords(portage_dir.join("package.keywords").as_str()));
+    if let Some(overlay) = config_overlay {
+        package_accept_keywords
+            .extend(load_package_keywords(overlay.join("package.accept_keywords").as_str()));
+    }
     let license_groups = LicenseGroupRegistry::from_repo(repo)
         .map_err(|e| anyhow::anyhow!("failed to load license groups: {e}"))?;
     let accept_license_tokens = {
@@ -164,6 +191,7 @@ async fn compute_use_env(
         package_unmask,
         force_mask,
         accept_keywords,
+        package_accept_keywords,
         accept_license,
         distdir,
     })
@@ -175,19 +203,20 @@ async fn compute_use_env(
 fn effective_accept_keywords(
     split_var: &dyn Fn(&str) -> Vec<String>,
     shell: &portage_repo::EbuildShell,
-) -> Vec<String> {
+) -> Vec<AcceptToken> {
     let arch = shell.get_var("ARCH").unwrap_or_default();
     let ak = split_var("ACCEPT_KEYWORDS");
+    let parse = |toks: &[String]| toks.iter().filter_map(|t| AcceptToken::parse(t)).collect();
     if arch.is_empty() {
-        return ak;
+        return parse(&ak);
     }
     let testing = format!("~{arch}");
     let has_arch = ak.iter().any(|k| k == &arch || k == &testing);
     if has_arch {
-        return ak;
+        return parse(&ak);
     }
     // Broken expansion (e.g. `["~"]` or empty) — mirror portage's make.conf default.
-    vec![arch, testing]
+    parse(&[arch, testing])
 }
 
 fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {
@@ -228,6 +257,52 @@ fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {
             if !flags.is_empty() {
                 result.push((dep, flags));
             }
+        }
+    }
+    result
+}
+
+/// Load `package.accept_keywords` / `package.keywords`: `(atom, [tokens])` per
+/// line, `#` comments, optionally a directory. Tokens are parsed to interned
+/// [`AcceptToken`]s at read time. Unlike [`load_package_use`], a bare atom (no
+/// tokens) is *kept* with an empty token list — portage reads it as "accept
+/// this package's `~arch`" (expanded once the host arch is known).
+fn load_package_keywords(path: &str) -> Vec<(Dep, Vec<AcceptToken>)> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Vec::new();
+    }
+    let files: Vec<_> = if p.is_dir() {
+        let mut v: Vec<_> = std::fs::read_dir(p)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file())
+            .collect();
+        v.sort();
+        v
+    } else {
+        vec![p.to_path_buf()]
+    };
+    let mut result = Vec::new();
+    for file in files {
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let Some(atom_str) = parts.next() else {
+                continue;
+            };
+            let Ok(dep) = Dep::parse(atom_str) else {
+                continue;
+            };
+            let tokens: Vec<AcceptToken> = parts.filter_map(AcceptToken::parse).collect();
+            result.push((dep, tokens));
         }
     }
     result
