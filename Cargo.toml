@@ -22,7 +22,7 @@ gentoo-core = { version = "0.5", path = "gentoo-core" }
 gentoo-stages = { version = "0.5", path = "gentoo-stages" }
 portage-atom = { version = "0.10", path = "portage-atom" }
 portage-metadata = { version = "0.8", path = "portage-metadata" }
-portage-atom-pubgrub = { version = "0.5", path = "portage-atom-pubgrub" }
+portage-atom-pubgrub = { version = "0.6", path = "portage-atom-pubgrub" }
 portage-atom-resolvo = { version = "0.7", path = "portage-atom-resolvo" }
 portage-repo = { path = "portage-repo" }
 portage-distfiles = { path = "portage-distfiles" }
