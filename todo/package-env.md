@@ -1,9 +1,18 @@
 # package.env — per-package build environment (RESOLVER-FREE slice)
 
-STATUS: **open; safe to develop in parallel with resolver work.** This slice
-lives entirely in the build/merge path and must NOT touch the resolver
-(`portage-cli/src/query/depgraph/**`, `portage-atom-pubgrub/**`,
-`portage-cli/src/query/depgraph/use_env.rs`). Handoff brief for a second instance.
+STATUS: **build-env slice DONE (commit 4846c5b); USE part remains, resolver-side.**
+The non-USE build environment is applied: `build_and_merge` (ebuild.rs) sources
+matching `/etc/portage/env/<file>` entries on top of make.conf via the new
+`EbuildShell::source_env_file` and the new `portage-cli/src/package_env.rs`
+reader (atom→files, dir form, host + config overlay, slot-aware). FEATURES
+composes, *FLAGS/MAKEOPTS replace; covered by unit + composition tests.
+
+REMAINING (resolver-side, do NOT bundle with the above): `USE` set by a
+package.env env file is not reflected in resolution — the resolved plan's USE
+currently wins at build time. To honour it the resolver must read package.env
+USE at resolution time (`query/depgraph/use_env.rs`) so the displayed plan and
+the build agree. That is the only open piece; everything below was the original
+brief for the now-completed build-env slice.
 
 ## What it is
 
