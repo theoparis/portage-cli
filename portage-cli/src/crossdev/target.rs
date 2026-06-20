@@ -110,10 +110,17 @@ impl CrossTarget {
     /// The repo-relative target profile path (`gentoo_profile` in
     /// crossdev-stages). Linked **directly** — `eselect profile` rejects a
     /// foreign arch.
+    ///
+    /// This deliberately uses the **arch-specific** profile, the crossdev-stages
+    /// fix (`lib/sysroot.sh`): canonical `crossdev` hardcodes the arch-neutral
+    /// `embedded` profile for every sysroot and then has to re-inject
+    /// ARCH/ELIBC/KERNEL + the multilib ABI chain via a `profile/` shim — a
+    /// shortcoming. The arch profile supplies all of that directly.
     pub fn profile_path(&self) -> String {
-        // Bare-metal (newlib, no kernel): the arch-neutral `embedded` base
-        // profile. The arch-specific `default/linux/*` profiles force
-        // `kernel_linux` and assume a full OS the target does not have.
+        // Bare-metal (newlib, no kernel) is the one case the arch fix can't
+        // cover: there is no `default/linux/<arch>` profile, so fall back to the
+        // arch-neutral `embedded` base (the `default/linux/*` profiles force
+        // `kernel_linux` and assume a full OS the target does not have).
         if !self.has_kernel {
             return "embedded".to_owned();
         }

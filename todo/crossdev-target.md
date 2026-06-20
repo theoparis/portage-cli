@@ -218,6 +218,46 @@ against the host arch and fails). Need a tuple→profile mapping (reuse
 crossdev-stages' `gentoo_profile`, or crossdev's `--show-target-cfg` arch). This
 is also the missing piece behind concern 1's self-contained `--root` path.
 
+### crossdev's hardcoded `embedded` profile is a SHORTCOMING — em follows the crossdev-stages fix
+Read from the canonical `crossdev` sources (`emerge-wrapper` `cross_wrap_etc`):
+crossdev links **`embedded` for *every* sysroot** —
+`ln -snf ${MAIN_REPO_PATH}/profiles/embedded ${SYSROOT}/etc/portage/make.profile`
+— regardless of target arch. Because `embedded` is arch-neutral, crossdev then
+has to **inject what the profile would have provided** via a local `profile/`
+subdir it ships in `/usr/share/crossdev/etc/portage/`:
+- `profile/make.defaults`: `ARCH=<arch>`, `KERNEL="-linux <kernel>"`, `ELIBC=<libc>`
+- `profile/use.force`: `-kernel_linux` + `kernel_<KERNEL>`
+- (LLVM) appends `CC=<CHOST>-clang`, `LD=ld.lld`, `AR=llvm-ar`, … to make.defaults
+
+That whole `profile/` dance exists **only to paper over the arch-neutral
+`embedded` base** — it loses the arch profile's multilib/ABI/USE-default chain
+(e.g. riscv `rv64/lp64d`), which crossdev then has to reconstruct per-package in
+the multilib env files (`load_multilib_env`). **crossdev-stages fixes this**
+(`lib/sysroot.sh:84-93`): it links the proper arch-specific `gentoo_profile`
+(`default/linux/riscv/23.0/rv64/lp64d`) directly, so ARCH/ELIBC/KERNEL/ABI all
+come from the profile and no `profile/` override is needed.
+
+**em adopts the crossdev-stages fix** (`crossdev/target.rs::profile_path`): link
+the arch-specific profile for OS targets; fall back to `embedded` **only** for
+bare-metal (`-elf`/newlib, no kernel), where no `default/linux/<arch>` profile
+applies. Consequently em does **not** need crossdev's `profile/make.defaults` +
+`use.force` shim — the arch profile supplies ARCH/ELIBC/KERNEL. (LLVM's
+`CC=<CHOST>-clang` toolchain vars from make.defaults are still relevant and
+belong with the Stage-B build-env wiring, not the profile shim.)
+
+### crossdev helper wrappers (read for Stage A/B build-env parity)
+- **`cross-emerge`/`cross-ebuild`**: `CHOST` from argv0, `SYSROOT=/usr/$CHOST`,
+  `PORTAGE_CONFIGROOT=$SYSROOT`, `CBUILD`+`BUILD_*FLAGS` from host `portageq`,
+  `exec emerge --root-deps=rdeps`. (ROOT comes from the sysroot make.conf.)
+- **`cross-pkg-config`** (`<CHOST>-pkg-config`): sets `PKG_CONFIG_SYSROOT_DIR=
+  $SYSROOT`, `PKG_CONFIG_LIBDIR`/`PKG_CONFIG_SYSTEM_*` into `$ESYSROOT/usr/<libdir>`,
+  libdir from `LIBDIR_${ABI}` (else probe `-print-file-name=pkgconfig`), and
+  **rejects host `-I`/`-L`** in the output as a guard. em's build env must point
+  pkg-config at the sysroot for cross target-package builds.
+- **`cross-fix-root`**: post-install fixup — chmod sysroot libs, rewrite `.la`
+  `libdir=`/`dependency_libs` and `*-config` `prefix=` to `$SYSROOT/usr`, and add
+  `<CHOST>-`prefixed `*-config` symlinks. Relevant to the merge/postinst path.
+
 ## The two toolchain models (KEY: they are very different)
 
 ### GCC cross (`cross-<triple>/*`, crossdev's classic model)
@@ -361,6 +401,58 @@ concern-1+2 init:
 Net: tool 2 ≈ done (reuse `MakeConf`+`setup.rs`); **tools 1 and 3 are the new
 build**, both pure FS setup ⇒ a clean, testable first slice with no resolver
 dependency. Sequencing: 1 → 2 → 3, then they wire into `em crossdev --init-target`.
+
+## Stage A/B findings — the real `<CTARGET>-emerge` wrapper (2026-06-21)
+
+Read from the installed `/usr/bin/<CTARGET>-emerge` (the authoritative driver):
+
+```sh
+CHOST=<tuple>                       # from argv0
+SYSROOT=${BROOT}/usr/${CHOST}       # = /usr/<CHOST>
+PORTAGE_CONFIGROOT=${SYSROOT}       # config (profile/make.conf) FROM THE SYSROOT
+# CBUILD + BUILD_CFLAGS/CXXFLAGS/CPPFLAGS/LDFLAGS: queried from the HOST
+#   (portageq envvar with CHOST/SYSROOT/CONFIGROOT unset)
+exec emerge --root-deps=rdeps "$@"
+```
+
+- **`ROOT` is NOT set by the wrapper** — it comes from the sysroot `make.conf`
+  (`ROOT=/usr/${CHOST}/`). So the sysroot make.conf's `ROOT` matters (our
+  EPREFIX-aware `ROOT` write feeds this).
+- **`--root-deps=rdeps` is the crux**: only **RDEPEND** is installed into the
+  target ROOT (the sysroot); **DEPEND/BDEPEND resolve against the build host
+  (`/`)**. This is the inverse of the toolchain case (`host_copies.rs`, which
+  pushes host build-copies): here the *bulk* is host build-deps and only runtime
+  deps land in the sysroot.
+- `BUILD_*FLAGS`/`CBUILD` come from the host config; `C*FLAGS` from the sysroot.
+
+### Two concrete em gaps blocking target-package cross builds
+Probed live (`em -p --config-root /usr/<CHOST> --root /usr/<CHOST> sys-libs/zlib`
+→ `NoSolution`/`NoVersions` over `(Unbounded,Unbounded)` on `merge_root: Target`):
+
+1. **Repo visibility from the sysroot config-root.** The sysroot has no
+   `repos.conf`, so with `PORTAGE_CONFIGROOT=<sysroot>` the gentoo repo is
+   invisible ⇒ *every* package has no versions. Fix: either `--init-target`
+   writes a sysroot `repos.conf` referencing the host gentoo (+ crossdev)
+   overlays, or the cross entry point keeps host repo discovery while taking
+   profile/make.conf from the sysroot.
+2. **`--root-deps=rdeps` semantics.** em currently resolves *all* deps against
+   the target root. Need: DEPEND/BDEPEND → BROOT/host (`/`), RDEPEND → target
+   (sysroot). em has the dual-root primitives (`MergeRoot::{Host,Target}`,
+   `host_copies.rs`) but for the *inverse* split; this is the `--root-deps=rdeps`
+   policy expressed in the solver's root routing.
+
+The cross compiler (`<CHOST>-gcc`/`-ld`) is already on `PATH`, so once
+resolution is fixed the eclass-driven build should follow. NB: cross
+**toolchain** packages (`cross-*/binutils|gcc`) are HOST builds — resolve them
+with **host** config (config-root=`/`), NOT the sysroot (that NoSolution is
+self-inflicted, see "Host stage1 vs target sysroot" above). Only **target**
+packages use the sysroot config + `--root-deps=rdeps`.
+
+**Recommended Stage-B order:** (1) sysroot `repos.conf` in `--init-target`
+[small, FS-only, unblocks repo visibility], then (2) `--root-deps=rdeps` root
+routing [resolver, the real work], then (3) the `<CTARGET>-emerge` wrapper
+[Stage A ergonomics] + verify one leaf target lib builds and `file` reports the
+target arch.
 
 ## Implementation stages
 

@@ -100,12 +100,15 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
     write_cross_env(target, globals)?;
     ensure_repos_conf(globals, &overlay)?;
     write_sysroot_config(target, &sysroot, &gentoo_path)?;
+    write_sysroot_repos_conf(&sysroot, &gentoo_path, &overlay)?;
 
     println!(">>> cross target {} ready", target.tuple);
     println!("    overlay:  {overlay}  ({})", target.category());
     println!("    sysroot:  {sysroot}");
+    // The toolchain itself is a HOST build (compiler lands on /), so it resolves
+    // with host config — NOT the sysroot (that fights the cross make.conf ROOT).
     println!(
-        "    verify:   em -p --config-root {sysroot} --root {sysroot} {}/gcc",
+        "    toolchain: em -p {}/gcc          # host build of the cross compiler",
         target.category()
     );
     Ok(())
@@ -178,6 +181,27 @@ fn write_sysroot_config(target: &CrossTarget, sysroot: &Utf8Path, gentoo: &Utf8P
         );
     }
     symlink_force(&profile_dir, &portage.join("make.profile"))
+}
+
+/// Write `<sysroot>/etc/portage/repos.conf` referencing the host gentoo (main)
+/// repo and the crossdev overlay, so a cross build with
+/// `PORTAGE_CONFIGROOT=<sysroot>` still sees the ebuild tree — the sysroot has no
+/// repos of its own (crossdev-stages copies the host `repos.conf` likewise).
+fn write_sysroot_repos_conf(
+    sysroot: &Utf8Path,
+    gentoo: &Utf8Path,
+    overlay: &Utf8Path,
+) -> Result<()> {
+    let dir = sysroot.join("etc/portage/repos.conf");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {dir}"))?;
+    write_if_absent(
+        &dir.join("gentoo.conf"),
+        &format!("[DEFAULT]\nmain-repo = gentoo\n\n[gentoo]\nlocation = {gentoo}\n"),
+    )?;
+    write_if_absent(
+        &dir.join(format!("{OVERLAY_NAME}.conf")),
+        &format!("[{OVERLAY_NAME}]\nlocation = {overlay}\nmasters = gentoo\nauto-sync = false\n"),
+    )
 }
 
 /// The special cross `make.conf` body (crossdev `set_metadata`): `CHOST`/`CBUILD`
