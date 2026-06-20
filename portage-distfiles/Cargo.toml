@@ -9,6 +9,8 @@ description = "Distfile fetching and verification for Gentoo Portage"
 repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "portage", "distfiles", "fetch"]
 categories = ["network-programming", "development-tools"]
+# Unpublishable: depends on portage-repo, which pulls in the brush fork via git.
+publish = false
 
 [dependencies]
 portage-metadata = { workspace = true }

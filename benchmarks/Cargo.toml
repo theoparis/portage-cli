@@ -2,6 +2,8 @@
 name = "portage-bench"
 version = "0.1.0"
 edition = "2024"
+# Unpublishable: benchmark-only crate that depends on pkgcraft via git.
+publish = false
 
 [features]
 lasso = [

@@ -9,6 +9,8 @@ description = "Gentoo ebuild repository layout reader based on PMS"
 repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "portage", "repository", "pms"]
 categories = ["parser-implementations", "development-tools"]
+# Unpublishable: depends on the brush fork via git. Release once brush is on crates.io.
+publish = false
 
 [features]
 dhat-heap = ["dep:dhat"]

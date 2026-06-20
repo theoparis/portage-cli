@@ -9,6 +9,8 @@ description = "Gentoo Portage command-line tools (em)"
 repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "portage", "cli", "package-manager"]
 categories = ["command-line-utilities", "development-tools"]
+# Unpublishable: depends on portage-repo/portage-distfiles, which pull in the brush fork via git.
+publish = false
 
 [[bin]]
 name = "em"
