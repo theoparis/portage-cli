@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use gentoo_core::Arch;
@@ -235,6 +236,51 @@ impl AcceptKeywords {
     }
 }
 
+/// Global `ACCEPT_LICENSE` plus per-package `package.license`.
+///
+/// The global list applies to every package; per-package entries extend it
+/// (allow more, or `-deny`) for versions whose atom matches. The common
+/// no-override path borrows the global decision — no allocation.
+pub(super) struct AcceptLicenses {
+    global: portage_repo::AcceptLicense,
+    /// `(atom, overlay)` — each overlay is the per-line tokens parsed into an
+    /// `AcceptLicense`, merged onto the global decision for matching versions.
+    per_package: Vec<(Dep, portage_repo::AcceptLicense)>,
+}
+
+impl AcceptLicenses {
+    pub(super) fn new(
+        global: portage_repo::AcceptLicense,
+        per_package: Vec<(Dep, portage_repo::AcceptLicense)>,
+    ) -> Self {
+        Self {
+            global,
+            per_package,
+        }
+    }
+
+    /// The license-acceptance decision in effect for one package version.
+    /// Returns the global decision *borrowed* when no per-package entry matches
+    /// (the common case); otherwise a merged clone (global + matched overlays).
+    fn effective_for(
+        &self,
+        cpv: &Cpv,
+        slot: Option<Interned<DefaultInterner>>,
+    ) -> Cow<'_, portage_repo::AcceptLicense> {
+        if self.per_package.is_empty() {
+            return Cow::Borrowed(&self.global);
+        }
+        let slot_str = slot.as_ref().map(|s| s.as_str());
+        let mut merged: Option<portage_repo::AcceptLicense> = None;
+        for (dep, overlay) in &self.per_package {
+            if dep.matches_cpv(cpv, slot_str) {
+                merged.get_or_insert_with(|| self.global.clone()).merge(overlay);
+            }
+        }
+        merged.map_or(Cow::Borrowed(&self.global), Cow::Owned)
+    }
+}
+
 /// Returns true if the license expression is fully covered by `accept`,
 /// evaluating `use? ( … )` branches against `enabled` (a package's effective
 /// USE). For an expression with no conditionals, `enabled` is never consulted.
@@ -306,7 +352,7 @@ fn use_predicate(cfg: &portage_atom_pubgrub::UseConfig) -> impl Fn(&str) -> bool
 fn license_ok_for(
     cpv: &Cpv,
     meta: &portage_metadata::EbuildMetadata,
-    accept_license: &portage_repo::AcceptLicense,
+    accept_licenses: &AcceptLicenses,
     use_config: &portage_atom_pubgrub::UseConfig,
     package_use: &[(Dep, Vec<String>)],
     force_mask: &super::force_mask::ForceMask,
@@ -315,10 +361,11 @@ fn license_ok_for(
     let Some(lic) = &meta.license else {
         return true;
     };
-    if !license_has_conditional(lic) {
-        return license_accepted(lic, accept_license, &|_| false);
-    }
     let slot = Some(meta.slot.slot);
+    let accept = accept_licenses.effective_for(cpv, slot);
+    if !license_has_conditional(lic) {
+        return license_accepted(lic, &accept, &|_| false);
+    }
     let cfg = effective_use_config(
         use_config,
         package_use,
@@ -328,7 +375,7 @@ fn license_ok_for(
         meta,
         slot,
     );
-    license_accepted(lic, accept_license, &use_predicate(&cfg))
+    license_accepted(lic, &accept, &use_predicate(&cfg))
 }
 
 /// Check whether `mask_dep` matches the given `cpv` (version + CPN, no slot check).
@@ -412,7 +459,7 @@ pub(super) struct Adapter<'a> {
     pub(super) accept_keywords: &'a AcceptKeywords,
     pub(super) package_mask: &'a [Dep],
     pub(super) package_unmask: &'a [Dep],
-    pub(super) accept_license: &'a portage_repo::AcceptLicense,
+    pub(super) accept_licenses: &'a AcceptLicenses,
     /// Global desired USE (profile + make.conf), folded with per-version
     /// `package.use` + IUSE defaults by `desired_use`.
     pub(super) use_config: &'a portage_atom_pubgrub::UseConfig,
@@ -473,7 +520,7 @@ impl Adapter<'_> {
         license_ok_for(
             cpv,
             meta,
-            self.accept_license,
+            self.accept_licenses,
             self.use_config,
             self.package_use,
             self.force_mask,
@@ -796,7 +843,7 @@ pub(super) fn target_package(
     accept_keywords: &AcceptKeywords,
     package_mask: &[Dep],
     package_unmask: &[Dep],
-    accept_license: &portage_repo::AcceptLicense,
+    accept_licenses: &AcceptLicenses,
     use_config: &portage_atom_pubgrub::UseConfig,
     package_use: &[(Dep, Vec<String>)],
     force_mask: &super::force_mask::ForceMask,
@@ -822,7 +869,7 @@ pub(super) fn target_package(
                 && license_ok_for(
                     cpv,
                     &cache.metadata,
-                    accept_license,
+                    accept_licenses,
                     use_config,
                     package_use,
                     force_mask,
@@ -904,7 +951,7 @@ pub(super) fn find_autounmask_candidates(
     accept_keywords: &AcceptKeywords,
     package_mask: &[Dep],
     package_unmask: &[Dep],
-    accept_license: &portage_repo::AcceptLicense,
+    accept_licenses: &AcceptLicenses,
     use_config: &portage_atom_pubgrub::UseConfig,
     package_use: &[(Dep, Vec<String>)],
     force_mask: &super::force_mask::ForceMask,
@@ -941,6 +988,7 @@ pub(super) fn find_autounmask_candidates(
                 reasons.push(FilterReason::Masked);
             }
             if let Some(lic) = &meta.license {
+                let accept = accept_licenses.effective_for(cpv, slot);
                 // Evaluate `use? ( … )` branches against the version's effective
                 // USE so a non-FREE license behind a disabled flag is not flagged.
                 let needed = if license_has_conditional(lic) {
@@ -953,9 +1001,9 @@ pub(super) fn find_autounmask_candidates(
                         meta,
                         slot,
                     );
-                    licenses_needed(lic, accept_license, &use_predicate(&cfg))
+                    licenses_needed(lic, &accept, &use_predicate(&cfg))
                 } else {
-                    licenses_needed(lic, accept_license, &|_| false)
+                    licenses_needed(lic, &accept, &|_| false)
                 };
                 if !needed.is_empty() {
                     reasons.push(FilterReason::License(needed));
@@ -1035,6 +1083,32 @@ mod tests {
         assert!(!per.is_stable(&testing, &foo, None));
     }
 
+    #[test]
+    fn accept_license_per_package_override() {
+        let groups = LicenseGroupRegistry::default();
+        let global = AcceptLicense::from_tokens(&["MIT".into()], &groups);
+        let foo = Cpv::parse("dev-libs/foo-1").unwrap();
+        let bar = Cpv::parse("dev-libs/bar-1").unwrap();
+
+        // package.license `dev-libs/foo GPL-2` accepts GPL-2 for foo only.
+        let licenses = AcceptLicenses::new(
+            global.clone(),
+            vec![(
+                dep("dev-libs/foo"),
+                AcceptLicense::from_tokens(&["GPL-2".into()], &groups),
+            )],
+        );
+        assert!(licenses.effective_for(&foo, None).accepts("GPL-2"));
+        assert!(!licenses.effective_for(&bar, None).accepts("GPL-2"));
+        // The global MIT acceptance still applies everywhere.
+        assert!(licenses.effective_for(&bar, None).accepts("MIT"));
+
+        // No per-package entries ⇒ the global decision is borrowed unchanged.
+        let plain = AcceptLicenses::new(global, Vec::new());
+        assert!(!plain.effective_for(&foo, None).accepts("GPL-2"));
+        assert!(plain.effective_for(&foo, None).accepts("MIT"));
+    }
+
     /// Build a one-package `RepoData` from md5-cache text.
     fn repo_with(cpv: &str, cache_text: &str) -> (RepoData, Cpv) {
         let cpv = Cpv::parse(cpv).unwrap();
@@ -1093,7 +1167,7 @@ mod tests {
                 &ak,
                 &[],
                 &[],
-                &accept_all_licenses(),
+                &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
                 &UseConfig::new(),
                 &[],
                 &ForceMask::default(),
@@ -1138,7 +1212,7 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
-            accept_license: &accept_all_licenses(),
+            accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
             use_config: &use_config,
             package_use: &[],
             force_mask: &fm, // a is use.force'd
@@ -1179,7 +1253,7 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
-            accept_license: &accept_all_licenses(),
+            accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
             use_config: &use_config,
             package_use: &[],
             force_mask: &fm,
@@ -1217,7 +1291,7 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
-            accept_license: &accept_all_licenses(),
+            accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
             use_config: &use_config,
             package_use: &[],
             force_mask: &fm,
@@ -1260,7 +1334,7 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
-            accept_license: &accept_all_licenses(),
+            accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
             use_config: &use_config,
             package_use: &[],
             force_mask: &fm,

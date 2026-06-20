@@ -32,8 +32,11 @@ pub(super) struct UseEnv {
     /// entries: `(atom, [tokens])`, tokens interned. A bare atom carries an
     /// empty token list (expanded to `~arch` when the host arch is known).
     pub package_accept_keywords: Vec<(Dep, Vec<AcceptToken>)>,
-    /// Effective `ACCEPT_LICENSE` after `@GROUP` expansion and `-` denials.
+    /// Effective global `ACCEPT_LICENSE` after `@GROUP` expansion and `-` denials.
     pub accept_license: AcceptLicense,
+    /// Per-package `package.license` entries: `(atom, overlay)`, each overlay
+    /// already parsed/expanded against the license groups.
+    pub package_license: Vec<(Dep, AcceptLicense)>,
     /// Resolved `DISTDIR` (where fetched distfiles live), for download-size accounting.
     pub distdir: String,
 }
@@ -137,6 +140,27 @@ async fn compute_use_env(
         }
     };
     let accept_license = AcceptLicense::from_tokens(&accept_license_tokens, &license_groups);
+
+    // Per-package `package.license`, in portage's precedence order: profile
+    // stack, then site `/etc/portage/package.license`, then the config overlay.
+    // Each line's tokens are expanded into an `AcceptLicense` overlay now.
+    let mut package_license: Vec<(Dep, AcceptLicense)> = stack
+        .package_license()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(dep, toks)| (dep, AcceptLicense::from_tokens(&toks, &license_groups)))
+        .collect();
+    package_license.extend(load_package_license(
+        portage_dir.join("package.license").as_str(),
+        &license_groups,
+    ));
+    if let Some(overlay) = config_overlay {
+        package_license.extend(load_package_license(
+            overlay.join("package.license").as_str(),
+            &license_groups,
+        ));
+    }
+
     let distdir = shell
         .get_var("DISTDIR")
         .filter(|s| !s.is_empty())
@@ -193,6 +217,7 @@ async fn compute_use_env(
         accept_keywords,
         package_accept_keywords,
         accept_license,
+        package_license,
         distdir,
     })
 }
@@ -303,6 +328,54 @@ fn load_package_keywords(path: &str) -> Vec<(Dep, Vec<AcceptToken>)> {
             };
             let tokens: Vec<AcceptToken> = parts.filter_map(AcceptToken::parse).collect();
             result.push((dep, tokens));
+        }
+    }
+    result
+}
+
+/// Load `package.license`: `(atom, overlay)` per line, `#` comments, optionally a
+/// directory. Each line's license tokens (`@GROUP`, `-deny`, `*`, names) are
+/// expanded against `groups` into a per-package [`AcceptLicense`] overlay now,
+/// so resolution never re-parses them.
+fn load_package_license(
+    path: &str,
+    groups: &LicenseGroupRegistry,
+) -> Vec<(Dep, AcceptLicense)> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Vec::new();
+    }
+    let files: Vec<_> = if p.is_dir() {
+        let mut v: Vec<_> = std::fs::read_dir(p)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file())
+            .collect();
+        v.sort();
+        v
+    } else {
+        vec![p.to_path_buf()]
+    };
+    let mut result = Vec::new();
+    for file in files {
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let Some(atom_str) = parts.next() else {
+                continue;
+            };
+            let Ok(dep) = Dep::parse(atom_str) else {
+                continue;
+            };
+            let tokens: Vec<String> = parts.map(String::from).collect();
+            result.push((dep, AcceptLicense::from_tokens(&tokens, groups)));
         }
     }
     result

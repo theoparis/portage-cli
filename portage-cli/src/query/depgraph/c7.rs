@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use portage_repo::{AcceptLicense, LicenseGroupRegistry};
 
 use super::force_mask::ForceMask;
-use super::repo::{AcceptKeywords, Adapter, RepoData, target_package};
+use super::repo::{AcceptKeywords, AcceptLicenses, Adapter, RepoData, target_package};
 
 /// Build a `RepoData` from `(cpv, md5-cache-text)` pairs.
 fn repo_from(entries: &[(&str, &str)]) -> RepoData {
@@ -81,7 +81,10 @@ impl Outcome {
 fn solve_with(data: &RepoData, targets: &[&str], pu: &[(Dep, Vec<String>)]) -> Option<Outcome> {
     let arch = Arch::intern("amd64");
     let accept = AcceptKeywords::from_global(&arch, &["amd64"]);
-    let lic = AcceptLicense::from_tokens(&["*".into()], &LicenseGroupRegistry::default());
+    let lic = AcceptLicenses::new(
+        AcceptLicense::from_tokens(&["*".into()], &LicenseGroupRegistry::default()),
+        Vec::new(),
+    );
     let fm = ForceMask::default();
     let use_config = UseConfig::new();
     let adapter = Adapter {
@@ -90,7 +93,7 @@ fn solve_with(data: &RepoData, targets: &[&str], pu: &[(Dep, Vec<String>)]) -> O
         package_mask: &[],
         package_unmask: &[],
         installed_cpvs: &std::collections::HashSet::new(),
-        accept_license: &lic,
+        accept_licenses: &lic,
         use_config: &use_config,
         package_use: pu,
         force_mask: &fm,

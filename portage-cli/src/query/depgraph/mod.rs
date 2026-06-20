@@ -183,6 +183,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         accept_keywords,
         package_accept_keywords,
         accept_license,
+        package_license,
         distdir,
     } = use_env;
 
@@ -190,6 +191,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     // single interned acceptance decision (precomputed for the host arch).
     let accept_keywords =
         repo::AcceptKeywords::new(arch, &accept_keywords, package_accept_keywords);
+    // Likewise fold global ACCEPT_LICENSE with per-package package.license.
+    let accept_licenses = repo::AcceptLicenses::new(accept_license, package_license);
 
     let target_installed_cpvs: std::collections::HashSet<Cpv> = target_installed
         .iter()
@@ -230,7 +233,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             &accept_keywords,
             &package_mask,
             &package_unmask,
-            &accept_license,
+            &accept_licenses,
             &use_config,
             &package_use,
             &force_mask,
@@ -261,7 +264,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             accept_keywords: &accept_keywords,
             package_mask: &package_mask,
             package_unmask: &package_unmask,
-            accept_license: &accept_license,
+            accept_licenses: &accept_licenses,
             use_config: &use_config,
             package_use: pkg_use,
             force_mask: &force_mask,
@@ -439,7 +442,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         &accept_keywords,
         &package_mask,
         &package_unmask,
-        &accept_license,
+        &accept_licenses,
         &use_config,
         &package_use,
         &force_mask,
@@ -696,7 +699,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         accept_keywords: &accept_keywords,
         package_mask: &package_mask,
         package_unmask: &package_unmask,
-        accept_license: &accept_license,
+        accept_licenses: &accept_licenses,
         use_config: &use_config,
         package_use: &package_use,
         force_mask: &force_mask,
