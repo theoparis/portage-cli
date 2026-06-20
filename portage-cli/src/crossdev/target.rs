@@ -111,6 +111,12 @@ impl CrossTarget {
     /// crossdev-stages). Linked **directly** — `eselect profile` rejects a
     /// foreign arch.
     pub fn profile_path(&self) -> String {
+        // Bare-metal (newlib, no kernel): the arch-neutral `embedded` base
+        // profile. The arch-specific `default/linux/*` profiles force
+        // `kernel_linux` and assume a full OS the target does not have.
+        if !self.has_kernel {
+            return "embedded".to_owned();
+        }
         match self.gentoo_arch().as_str() {
             "riscv" => "default/linux/riscv/23.0/rv64/lp64d".to_owned(),
             "x86" => "default/linux/x86/23.0/i686".to_owned(),
@@ -184,6 +190,8 @@ mod tests {
         assert!(!t.has_kernel);
         assert!(!t.packages().contains(&("sys-kernel", "linux-headers")));
         assert!(t.packages().contains(&("sys-libs", "newlib")));
+        // bare metal uses the arch-neutral embedded profile, not a linux one
+        assert_eq!(t.profile_path(), "embedded");
     }
 
     #[test]

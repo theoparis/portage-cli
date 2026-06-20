@@ -97,6 +97,7 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
     let sysroot = sysroot(target, globals);
 
     write_overlay(target, &overlay, &gentoo_path)?;
+    write_cross_env(target, globals)?;
     ensure_repos_conf(globals, &overlay)?;
     write_sysroot_config(target, &sysroot, &gentoo_path)?;
 
@@ -165,7 +166,7 @@ fn write_sysroot_config(target: &CrossTarget, sysroot: &Utf8Path, gentoo: &Utf8P
     let portage = sysroot.join("etc/portage");
     std::fs::create_dir_all(&portage).with_context(|| format!("creating {portage}"))?;
 
-    write_if_absent(&portage.join("make.conf"), &make_conf_body(target))?;
+    write_if_absent(&portage.join("make.conf"), &make_conf_body(target, sysroot))?;
 
     // Link make.profile DIRECTLY (absolute) to the target-arch profile — eselect
     // profile validates against the host arch and refuses a foreign one.
@@ -180,8 +181,10 @@ fn write_sysroot_config(target: &CrossTarget, sysroot: &Utf8Path, gentoo: &Utf8P
 }
 
 /// The special cross `make.conf` body (crossdev `set_metadata`): `CHOST`/`CBUILD`
-/// so the cross context is detectable, `ARCH`/keywords + target `CFLAGS`.
-fn make_conf_body(target: &CrossTarget) -> String {
+/// so the cross context is detectable, `ARCH`/keywords + target `CFLAGS`. `ROOT`
+/// tracks the actual sysroot so a retargeted prefix (`--local`/`--prefix`, e.g.
+/// `~/.gentoo/usr/<CTARGET>`) is honoured, not the hardcoded `/usr/<CTARGET>`.
+fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path) -> String {
     let arch = target.gentoo_arch();
     let tuple = &target.tuple;
     let cbuild = host_chost();
@@ -192,11 +195,40 @@ fn make_conf_body(target: &CrossTarget) -> String {
          CTARGET={tuple}\n\
          ARCH=\"{arch}\"\n\
          ACCEPT_KEYWORDS=\"{arch} ~{arch}\"\n\
-         ROOT=\"/usr/{tuple}/\"\n\
+         ROOT=\"{sysroot}/\"\n\
          CFLAGS=\"{}\"\n\
          CXXFLAGS=\"${{CFLAGS}}\"\n",
         target.cflags(),
     )
+}
+
+/// Write the cross packages' `package.env` + `env/<category>/<pkg>.conf` into the
+/// config root's `etc/portage` (where the host-side `cross-*` builds read it).
+///
+/// Each env file carries the collision-safety crossdev sets on every cross
+/// package: `SYMLINK_LIB=no` and a `COLLISION_IGNORE` for the build-id tree, so
+/// several cross toolchains can coexist on one host. The full per-ABI multilib
+/// block crossdev's `load_multilib_env` emits (CHOST_*/LIBDIR_*/ABI/…) is
+/// arch-specific and deferred to the build stages.
+fn write_cross_env(target: &CrossTarget, globals: &Cli) -> Result<()> {
+    const ENV_HEADER: &str =
+        "SYMLINK_LIB=no\nCOLLISION_IGNORE=\"${COLLISION_IGNORE} /usr/lib/debug/.build-id\"\n";
+
+    let portage = config_root(globals).join("etc/portage");
+    let category = target.category();
+
+    let env_dir = portage.join("env").join(&category);
+    std::fs::create_dir_all(&env_dir).with_context(|| format!("creating {env_dir}"))?;
+
+    let mut mappings = String::new();
+    for (_, pkg) in target.packages() {
+        write_if_absent(&env_dir.join(format!("{pkg}.conf")), ENV_HEADER)?;
+        mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
+    }
+
+    let pe_dir = portage.join("package.env");
+    std::fs::create_dir_all(&pe_dir).with_context(|| format!("creating {pe_dir}"))?;
+    write_if_absent(&pe_dir.join(&category), &mappings)
 }
 
 /// The host `CHOST` (= the target's `CBUILD`), read from the host `make.conf`.
