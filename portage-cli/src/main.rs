@@ -109,18 +109,6 @@ async fn main() {
     let cli = cli::Cli::parse();
     cli.color.write_global();
 
-    // --setup bootstraps the prefix layout before anything else. With no atoms
-    // or applet it's a standalone "prepare this prefix" command.
-    if cli.setup {
-        if let Err(e) = setup::bootstrap(&cli.roots()) {
-            eprintln!("error: {e:#}");
-            std::process::exit(1);
-        }
-        if cli.applet.is_none() && cli.atoms.is_empty() {
-            return;
-        }
-    }
-
     let result = match &cli.applet {
         Some(applet) => run_applet(applet, &cli).await,
         None => {
@@ -641,7 +629,8 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             .await
         }
         Applet::Atom { atoms } => run_atom(atoms),
-        Applet::Select { module, args } => select::run(module, args, globals),
+        Applet::Select { command } => select::run(command, globals),
+        Applet::Setup => setup::bootstrap(&globals.roots()),
         Applet::Dispatch => {
             eprintln!("dispatch-conf");
             bail!("not implemented: dispatch-conf")

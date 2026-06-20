@@ -10,26 +10,16 @@ use camino::{Utf8Path, Utf8PathBuf};
 use portage_repo::ReposConf;
 
 use super::config_portage_dir;
-use crate::cli::Cli;
+use crate::cli::{Cli, RepositoryAction};
 
-pub fn run(args: &[String], globals: &Cli) -> Result<()> {
-    let arg = |i: usize| args.get(i).map(String::as_str);
-    match arg(0).unwrap_or("list") {
-        "list" => list(globals),
-        "add" => {
-            let name = arg(1).context("usage: em select repos add <name> <location>")?;
-            let location = arg(2).context("usage: em select repos add <name> <location>")?;
-            add(globals, name, Utf8Path::new(location))
+pub fn run(action: &RepositoryAction, globals: &Cli) -> Result<()> {
+    match action {
+        RepositoryAction::List => list(globals),
+        RepositoryAction::Add { name, location } => add(globals, name, Utf8Path::new(location)),
+        RepositoryAction::Remove { name } => remove(globals, name),
+        RepositoryAction::Create { name, location } => {
+            create(globals, name, location.as_deref().map(Utf8Path::new))
         }
-        "remove" | "rm" => {
-            let name = arg(1).context("usage: em select repos remove <name>")?;
-            remove(globals, name)
-        }
-        "create" => {
-            let name = arg(1).context("usage: em select repos create <name> [location]")?;
-            create(globals, name, arg(2).map(Utf8Path::new))
-        }
-        other => bail!("em select repos: unknown action '{other}' (list, add, remove, create)"),
     }
 }
 

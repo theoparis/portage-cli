@@ -9,20 +9,16 @@
 mod profile;
 mod repos;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::cli::Cli;
+use crate::cli::{Cli, SelectCommand};
 
-/// Dispatch `em select <module> [args...]`.
-pub fn run(module: &str, args: &[String], globals: &Cli) -> Result<()> {
-    match module {
-        "profile" => profile::run(args, globals),
-        "repos" | "repository" => repos::run(args, globals),
-        other => bail!(
-            "em select: module '{other}' is not implemented (have: profile, repos). \
-             Use the system `eselect {other}` for now."
-        ),
+/// Dispatch `em select <module> <action>`.
+pub fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
+    match command {
+        SelectCommand::Profile { action } => profile::run(action, globals),
+        SelectCommand::Repository { action } => repos::run(action, globals),
     }
 }
 

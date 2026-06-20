@@ -12,19 +12,13 @@ use camino::{Utf8Path, Utf8PathBuf};
 use portage_repo::{ReposConf, Repository};
 
 use super::config_portage_dir;
-use crate::cli::Cli;
+use crate::cli::{Cli, ProfileAction};
 
-pub fn run(args: &[String], globals: &Cli) -> Result<()> {
-    match args.first().map(String::as_str).unwrap_or("list") {
-        "list" => list(globals),
-        "show" => show(globals),
-        "set" => {
-            let target = args
-                .get(1)
-                .context("usage: em select profile set <number|path>")?;
-            set(globals, target)
-        }
-        other => bail!("em select profile: unknown action '{other}' (list, show, set)"),
+pub fn run(action: &ProfileAction, globals: &Cli) -> Result<()> {
+    match action {
+        ProfileAction::List => list(globals),
+        ProfileAction::Show => show(globals),
+        ProfileAction::Set { target } => set(globals, target),
     }
 }
 

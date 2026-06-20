@@ -1,4 +1,4 @@
-//! `--setup`: bootstrap an unprivileged prefix layout so a subsequent build
+//! `em setup`: bootstrap an unprivileged prefix layout so a subsequent build
 //! (or the next `em --local` / `em --prefix DIR` run) has the directories,
 //! the overlay search-path `bashrc`, and a `make.conf` placeholder it needs.
 //!
@@ -19,7 +19,7 @@ use crate::cli::Roots;
 
 /// The `bashrc` recipe for an in-place (`--local`) prefix: paths are already
 /// correct in the installed `.pc`, so only the search path is added.
-const BASHRC_LOCAL: &str = r#"# Overlay search paths for `em --local` (created by `em --setup`).
+const BASHRC_LOCAL: &str = r#"# Overlay search paths for `em --local` (created by `em setup`).
 # EPREFIX makes the installed .pc record correct ${EPREFIX}/usr paths, so the
 # build only needs them on the search path — no sysroot/CPPFLAGS rewriting.
 if [[ -n ${EPREFIX} ]]; then
@@ -70,7 +70,7 @@ fi
 /// The `bashrc` recipe for a ROOT-offset (`--prefix DIR`) prefix: the staged
 /// `.pc` record host-absolute `/usr` paths, so the real headers/libs are found
 /// via the compiler/linker search while pkg-config just confirms presence.
-const BASHRC_PREFIX: &str = r#"# Overlay search paths for `em --prefix DIR` (created by `em --setup`).
+const BASHRC_PREFIX: &str = r#"# Overlay search paths for `em --prefix DIR` (created by `em setup`).
 # Host (/) is the build sysroot; the prefix is layered on top. Do NOT set
 # PKG_CONFIG_SYSROOT_DIR (host .pc must keep their real paths); the prefix .pc
 # emit harmless host-absolute -I/-L while the real files are found via the flags.
@@ -97,12 +97,16 @@ const SKELETON: &[&str] = &[
     "usr/share",
 ];
 
-/// Bootstrap the prefix described by `roots`. Requires `--local` or `--prefix`
-/// (a target other than the host `/`).
+/// Bootstrap the layout described by `roots`. Needs a target other than the host
+/// `/` — i.e. `--local`, `--prefix DIR`, or `--root DIR` (the cross-sysroot
+/// confdir case; pair with `em select profile` to set its profile).
 pub fn bootstrap(roots: &Roots) -> Result<()> {
     let eroot = roots.merge_root();
     if eroot.as_str() == "/" {
-        anyhow::bail!("--setup needs a prefix: use it with --local or --prefix DIR");
+        anyhow::bail!(
+            "em setup needs a target: use --local, --prefix DIR, or --root DIR \
+             (the host / is never bootstrapped)"
+        );
     }
     let is_local = roots.eprefix().is_some();
 
@@ -164,7 +168,7 @@ fn make_conf_template(is_local: bool, eroot: &Utf8Path) -> String {
         format!("#   em --prefix {eroot} <pkg>   # builds a ROOT-offset tree here\n")
     };
     format!(
-        "# Portage config overlay for this em prefix (created by `em --setup`).\n\
+        "# Portage config overlay for this em prefix (created by `em setup`).\n\
          #\n\
          # Use this prefix with:\n\
          {how}\

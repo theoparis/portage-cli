@@ -58,18 +58,11 @@ pub struct Cli {
     #[arg(long, value_name = "DIR", global = true)]
     pub prefix: Option<String>,
 
-    /// Bootstrap the prefix layout before building: skeleton directories, a
-    /// `bashrc` overlay search-path recipe, and a commented `make.conf`. Use
-    /// with `--local` (`~/.gentoo`) or `--prefix DIR`. Safe to re-run (never
-    /// clobbers existing files). With no atoms it just sets up and exits.
-    #[arg(long, global = true)]
-    pub setup: bool,
-
     /// Unprivileged in-place install into a Gentoo-Prefix at `~/.gentoo`
     /// (`EPREFIX=~/.gentoo`): packages are configured for and installed to
     /// `~/.gentoo/usr/...`, usable in place (add `~/.gentoo/usr/bin` to PATH).
     /// Profile/make.conf come from the host; `~/.gentoo/etc/portage` overlays
-    /// `package.use`/`bashrc` (see `--setup`). Full XDG layout is issue #2.
+    /// `package.use`/`bashrc` (see `em setup`). Full XDG layout is issue #2.
     #[arg(long, global = true)]
     pub local: bool,
 
@@ -322,7 +315,7 @@ impl Cli {
             target: path(&self.prefix).or_else(|| path(&self.root)),
             eprefix: None,
             // A --prefix overlay reads prefix-local package.use/bashrc from
-            // DIR/etc/portage (created by --setup); host config provides the
+            // DIR/etc/portage (created by `em setup`); host config provides the
             // profile. None for host / --root (config is already offset).
             config_overlay: path(&self.prefix).map(|p| p.join("etc/portage")),
             // --prefix also relocates distfiles/build trees under the target.
@@ -531,13 +524,14 @@ pub enum Applet {
         atoms: Vec<String>,
     },
 
-    #[command(about = "Modular system configuration (eselect)")]
+    #[command(about = "Native config selectors (profile, repos) — eselect-like")]
     Select {
-        #[arg(required = true)]
-        module: String,
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        command: SelectCommand,
     },
+
+    #[command(about = "Bootstrap a prefix layout (use with --local or --prefix)")]
+    Setup,
 
     #[command(about = "Safe configuration file updates (dispatch-conf)")]
     Dispatch,
@@ -586,6 +580,64 @@ pub enum MaintCommand {
         /// Remove orphaned entries from the world file
         #[arg(short, long)]
         fix: bool,
+    },
+}
+
+/// `em select <module>` — native, eselect-like config selectors.
+#[derive(Subcommand)]
+pub enum SelectCommand {
+    #[command(about = "Select the system/sysroot profile (cross-aware)")]
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
+    #[command(
+        visible_alias = "repos",
+        about = "Manage local repositories (overlays)"
+    )]
+    Repository {
+        #[command(subcommand)]
+        action: RepositoryAction,
+    },
+}
+
+/// `em select profile <action>`.
+#[derive(Subcommand)]
+pub enum ProfileAction {
+    #[command(about = "List available profiles (marks the current one)")]
+    List,
+    #[command(about = "Show the current profile")]
+    Show,
+    #[command(about = "Set the profile by list number or path (cross-aware: no arch check)")]
+    Set {
+        /// Profile list number (from `list`) or path (e.g. `default/linux/riscv/23.0/rv64/lp64d`).
+        target: String,
+    },
+}
+
+/// `em select repository <action>` — local repos only (remote sync is a TODO).
+#[derive(Subcommand)]
+pub enum RepositoryAction {
+    #[command(about = "List configured repositories")]
+    List,
+    #[command(about = "Register an existing local repository")]
+    Add {
+        /// Repository name.
+        name: String,
+        /// Existing local path to the repository.
+        location: String,
+    },
+    #[command(visible_alias = "rm", about = "Remove a repository's repos.conf entry")]
+    Remove {
+        /// Repository name.
+        name: String,
+    },
+    #[command(about = "Create a new local overlay (skeleton + repos.conf entry)")]
+    Create {
+        /// Repository name.
+        name: String,
+        /// Location (default: `<config-root>/var/db/repos/<name>`).
+        location: Option<String>,
     },
 }
 
