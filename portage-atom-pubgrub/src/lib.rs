@@ -48,6 +48,7 @@ mod package;
 mod provider;
 mod repository;
 mod required_use;
+mod solver_impl;
 mod use_config;
 mod validate;
 mod version_set;
