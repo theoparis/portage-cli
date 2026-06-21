@@ -276,13 +276,14 @@ impl DependencyProvider for PortageDependencyProvider {
                     vd,
                     &self.host_installed,
                     &self.sysroot_installed,
-                    self.root_deps_rdeps && !package.is_virtual(),
+                    target_drops_depend(self.root_deps_rdeps, package),
                 )));
             }
-            let runtime: DependencyConstraints<PortagePackage, PortageVersionSet> = vd.by_class[1]
-                .iter() // RDEPEND
-                .chain(vd.by_class[3].iter()) // PDEPEND
-                .chain(vd.by_class[4].iter()) // IDEPEND
+            let runtime: DependencyConstraints<PortagePackage, PortageVersionSet> = vd
+                .rdepend()
+                .iter()
+                .chain(vd.pdepend())
+                .chain(vd.idepend())
                 .map(|(p, vs, _)| (p.clone(), vs.clone()))
                 .collect();
             return Ok(Dependencies::Available(runtime));
@@ -307,7 +308,7 @@ impl DependencyProvider for PortageDependencyProvider {
                 vd,
                 &self.host_installed,
                 &self.sysroot_installed,
-                self.root_deps_rdeps && !package.is_virtual(),
+                target_drops_depend(self.root_deps_rdeps, package),
             )));
         }
         if self.cross_active && package.merge_root() == MergeRoot::Host && self.with_bdeps {
@@ -345,6 +346,17 @@ fn stamp_root(p: &PortagePackage, root: MergeRoot) -> PortagePackage {
     p.at_merge_root(root)
 }
 
+/// Whether this Target node drops its `DEPEND` under `--root-deps=rdeps`.
+///
+/// Guards the footgun: the synthetic solver root also reports
+/// [`MergeRoot::Target`] (the enum default for non-real nodes) and carries the
+/// requested target seeds in its `DEPEND` slot — so dropping `DEPEND` on a
+/// *virtual* node would discard the user's targets and collapse the solve. Real
+/// target packages drop `DEPEND`; the root never does.
+fn target_drops_depend(rdeps: bool, package: &PortagePackage) -> bool {
+    rdeps && !package.is_virtual()
+}
+
 fn cross_target_runtime_deps(
     vd: &VersionData,
     host_installed: &HashMap<PortagePackage, HostEntry>,
@@ -357,21 +369,15 @@ fn cross_target_runtime_deps(
     // cannot install onto the host (wrong arch). Default (offset/same-arch):
     // keep `DEPEND` → target ROOT.
     let depend = (!root_deps_rdeps)
-        .then(|| vd.by_class[0].iter())
+        .then(|| vd.depend().iter())
         .into_iter()
         .flatten();
     let mut out: Vec<(PortagePackage, PortageVersionSet)> = depend
-        .chain(vd.by_class[1].iter())
-        .chain(vd.by_class[3].iter())
+        .chain(vd.rdepend())
+        .chain(vd.pdepend())
         .map(|(p, vs, _)| (stamp_root(p, MergeRoot::Target), vs.clone()))
         .collect();
-    append_unsatisfied_broot(
-        &mut out,
-        &vd.by_class[4],
-        host_installed,
-        vd,
-        MergeRoot::Host,
-    );
+    append_unsatisfied_broot(&mut out, vd.idepend(), host_installed, vd, MergeRoot::Host);
     out.into_iter().collect()
 }
 
@@ -380,26 +386,15 @@ fn host_native_deps(
     vd: &VersionData,
     host_installed: &HashMap<PortagePackage, HostEntry>,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
-    let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
+    let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd
+        .depend()
         .iter()
-        .chain(vd.by_class[1].iter())
-        .chain(vd.by_class[3].iter())
+        .chain(vd.rdepend())
+        .chain(vd.pdepend())
         .map(|(p, vs, _)| (stamp_root(p, MergeRoot::Host), vs.clone()))
         .collect();
-    append_unsatisfied_broot(
-        &mut out,
-        &vd.by_class[2],
-        host_installed,
-        vd,
-        MergeRoot::Host,
-    );
-    append_unsatisfied_broot(
-        &mut out,
-        &vd.by_class[4],
-        host_installed,
-        vd,
-        MergeRoot::Host,
-    );
+    append_unsatisfied_broot(&mut out, vd.bdepend(), host_installed, vd, MergeRoot::Host);
+    append_unsatisfied_broot(&mut out, vd.idepend(), host_installed, vd, MergeRoot::Host);
     out.into_iter().collect()
 }
 
@@ -409,22 +404,23 @@ fn broot_filtered(
     vd: &VersionData,
     host_installed: &HashMap<PortagePackage, HostEntry>,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
-    let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
+    let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd
+        .depend()
         .iter()
-        .chain(vd.by_class[1].iter())
-        .chain(vd.by_class[3].iter())
+        .chain(vd.rdepend())
+        .chain(vd.pdepend())
         .map(|(p, vs, _)| (p.clone(), vs.clone()))
         .collect();
     append_unsatisfied_broot(
         &mut out,
-        &vd.by_class[2],
+        vd.bdepend(),
         host_installed,
         vd,
         MergeRoot::Target,
     );
     append_unsatisfied_broot(
         &mut out,
-        &vd.by_class[4],
+        vd.idepend(),
         host_installed,
         vd,
         MergeRoot::Target,

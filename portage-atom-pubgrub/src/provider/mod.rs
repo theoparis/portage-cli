@@ -58,6 +58,29 @@ pub(crate) struct VersionData {
 }
 
 impl VersionData {
+    /// `DEPEND` — build-time (target) deps. Named accessors over the positional
+    /// `by_class` layout (0=DEPEND 1=RDEPEND 2=BDEPEND 3=PDEPEND 4=IDEPEND) so
+    /// the root-routing in `solve.rs` reads by name, not magic index.
+    pub(crate) fn depend(&self) -> &[convert::Req] {
+        &self.by_class[0]
+    }
+    /// `RDEPEND` — run-time deps.
+    pub(crate) fn rdepend(&self) -> &[convert::Req] {
+        &self.by_class[1]
+    }
+    /// `BDEPEND` — build-host deps (EAPI 7+).
+    pub(crate) fn bdepend(&self) -> &[convert::Req] {
+        &self.by_class[2]
+    }
+    /// `PDEPEND` — post-merge deps.
+    pub(crate) fn pdepend(&self) -> &[convert::Req] {
+        &self.by_class[3]
+    }
+    /// `IDEPEND` — install-time deps (EAPI 8+).
+    pub(crate) fn idepend(&self) -> &[convert::Req] {
+        &self.by_class[4]
+    }
+
     /// Build a deps-only version (no blockers/use-deps/etc.), used for synthetic
     /// solver nodes: the root target set and OR-group / USE-decision branches.
     /// `merged` is collected from a flattened view of `by_class` (flag stripped).
