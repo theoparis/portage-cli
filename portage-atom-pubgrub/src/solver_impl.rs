@@ -49,6 +49,32 @@ impl Solver for PortageDependencyProvider {
         PortageDependencyProvider::set_rebuild_tree(self, on);
     }
 
+    fn set_cross_active(&mut self, active: bool) {
+        PortageDependencyProvider::set_cross_active(self, active);
+    }
+
+    fn set_root_deps_rdeps(&mut self, active: bool) {
+        PortageDependencyProvider::set_root_deps_rdeps(self, active);
+    }
+
+    fn add_host_installed(&mut self, pkg: SolverInstalled) {
+        PortageDependencyProvider::add_host_installed(
+            self,
+            to_portage_package(pkg.cpn, pkg.slot),
+            pkg.version,
+            pkg.active_use,
+            pkg.iuse,
+        );
+    }
+
+    fn add_sysroot_installed(&mut self, pkg: SolverInstalled) {
+        PortageDependencyProvider::add_sysroot_installed(
+            self,
+            to_portage_package(pkg.cpn, pkg.slot),
+            pkg.version,
+        );
+    }
+
     fn resolve_targets(&mut self, targets: &[TargetSpec]) -> Result<Plan, SolveError> {
         let pg_targets: Vec<(PortagePackage, PortageVersionSet)> = targets
             .iter()
@@ -286,6 +312,56 @@ mod tests {
         assert!(
             matches!((oi, ri), (Some(o), Some(r)) if o < r),
             "openssl installs before rust: {order:?}"
+        );
+    }
+
+    /// Cross config + resolve driven entirely through the `Solver` trait:
+    /// `set_cross_active` + `set_root_deps_rdeps` make a target package's
+    /// build-only `DEPEND` drop from the sysroot plan while its `RDEPEND` stays.
+    /// Proves the cross knobs are usable via the trait, not just the concrete API.
+    #[test]
+    fn solver_trait_cross_rdeps_drops_target_depend() {
+        let slot0 = Some(Interned::intern("0"));
+        let mut repo = InMemoryRepository::new();
+        repo.add_version(
+            Cpv::parse("dev-build/buildtool-1.0").unwrap(),
+            slot0,
+            None,
+            deps("", ""),
+        );
+        repo.add_version(
+            Cpv::parse("sys-libs/runlib-1.0").unwrap(),
+            slot0,
+            None,
+            deps("", ""),
+        );
+        // leaf: DEPEND on the build tool, RDEPEND on the runtime lib.
+        repo.add_version(
+            Cpv::parse("app-misc/leaf-1.0").unwrap(),
+            slot0,
+            None,
+            deps("dev-build/buildtool", "sys-libs/runlib"),
+        );
+        let mut provider = PortageDependencyProvider::new(repo);
+        Solver::set_cross_active(&mut provider, true);
+        Solver::set_root_deps_rdeps(&mut provider, true);
+
+        let target = TargetSpec::any_in(Cpn::parse("app-misc/leaf").unwrap(), None);
+        let plan = Solver::resolve_targets(&mut provider, &[target]).unwrap();
+
+        let selected: Vec<&str> = plan
+            .selected
+            .iter()
+            .map(|p| p.cpn.package.as_str())
+            .collect();
+        assert!(selected.contains(&"leaf"), "leaf resolves: {selected:?}");
+        assert!(
+            selected.contains(&"runlib"),
+            "rdeps keeps RDEPEND: {selected:?}"
+        );
+        assert!(
+            !selected.contains(&"buildtool"),
+            "rdeps drops target DEPEND: {selected:?}"
         );
     }
 }

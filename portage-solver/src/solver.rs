@@ -45,6 +45,29 @@ pub trait Solver {
     /// Default no-op.
     fn set_rebuild_tree(&mut self, _on: bool) {}
 
+    /// Enable dual-root cross planning (crossdev `{target}-emerge`): the solver
+    /// keys nodes by `(package, merge_root)` so build-host deps (`BDEPEND`/
+    /// `IDEPEND`) route to `BROOT` while runtime deps install into the target
+    /// sysroot. Default no-op — a native-only backend ignores it and produces a
+    /// single-root (host) plan, which is the correct native result.
+    fn set_cross_active(&mut self, _active: bool) {}
+
+    /// crossdev `--root-deps=rdeps`: discard a target package's `DEPEND` from the
+    /// sysroot graph (build deps resolve against the host toolchain, not the
+    /// target ROOT). Only meaningful under [`set_cross_active`]. Default no-op.
+    fn set_root_deps_rdeps(&mut self, _active: bool) {}
+
+    /// Register a package present on the build host (`BROOT`, `/`) so a
+    /// host-satisfied `BDEPEND`/`IDEPEND` edge is not rebuilt into the plan.
+    /// Only meaningful under [`set_cross_active`]. Default no-op.
+    /// ([`InstalledPackage::policy`] is ignored for host/sysroot registrations.)
+    fn add_host_installed(&mut self, _pkg: InstalledPackage) {}
+
+    /// Register a package present in the cross sysroot (`ESYSROOT`) so a
+    /// sysroot-satisfied `DEPEND` is not rebuilt. Only meaningful under
+    /// [`set_cross_active`]. Default no-op.
+    fn add_sysroot_installed(&mut self, _pkg: InstalledPackage) {}
+
     /// Run the resolve. All targets are solved together in one joint solve over
     /// a synthetic root, returning the owned [`Plan`] (selected packages,
     /// labelled graph, install order) and the advisory output (dropped deps,
