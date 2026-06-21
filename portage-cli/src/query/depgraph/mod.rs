@@ -193,11 +193,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     // target's keywords are honoured — a package keyworded `~riscv`/`riscv` is
     // accepted for a riscv sysroot even though the host is arm64. Without this
     // every target package would be filtered out (NoVersions).
-    let cross_arch = cross
-        .active
-        .then(|| cross.chost.as_deref().and_then(Arch::from_chost))
-        .flatten();
-    let accept_arch = cross_arch.as_ref().unwrap_or(arch);
+    let accept_arch = cross.target_arch().unwrap_or(arch);
     let accept_keywords =
         repo::AcceptKeywords::new(accept_arch, &accept_keywords, package_accept_keywords);
     // Likewise fold global ACCEPT_LICENSE with per-package package.license.
@@ -296,11 +292,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             PortageDependencyProvider::new_for_targets_with_bdeps(adapter, seeds, solve_with_bdeps);
         provider.set_cross_active(cross.active);
         // crossdev `--root-deps=rdeps`: only a genuine cross-*arch* build discards
-        // target `DEPEND` from the sysroot graph. Same-arch offset/stage builds
-        // (`--root stage1/`, `cross.active` but `cross_arch == host`) keep
-        // `DEPEND` → target ROOT, so gate on the target arch differing from host.
-        let cross_rdeps = matches!(&cross_arch, Some(ta) if ta != arch);
-        provider.set_root_deps_rdeps(cross_rdeps);
+        // target `DEPEND` from the sysroot graph (same-arch offset/stage builds
+        // keep `DEPEND` → target ROOT).
+        provider.set_root_deps_rdeps(cross.root_deps_rdeps(arch));
         provider.set_rebuild_tree(emptytree_native);
         // `--deep` and native emptytree bump `:*` deps to the newest slot.
         provider.set_prefer_newest_slot(deep || emptytree_native);

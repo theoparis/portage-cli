@@ -5,15 +5,22 @@
 //! plan/output glue.
 
 use camino::{Utf8Path, Utf8PathBuf};
+use gentoo_core::Arch;
 use portage_atom::Version;
 use portage_atom_pubgrub::{MergeRoot, PortagePackage};
 
 use crate::cli::Roots;
 
 /// Cross-compilation context derived from CLI roots.
+///
+/// The single owner of "is this a cross build, and how" for the resolver: the
+/// derived predicates ([`is_cross_arch`](Self::is_cross_arch),
+/// [`target_arch`](Self::target_arch), [`root_deps_rdeps`](Self::root_deps_rdeps))
+/// are computed here so call sites don't each re-derive them from `chost`.
 #[derive(Debug, Clone)]
 pub struct CrossContext {
-    /// Whether dual-root cross planning is active for this invocation.
+    /// Whether dual-root cross planning is active for this invocation (any of:
+    /// config≠install root, foreign target arch, or an install offset).
     pub active: bool,
     /// `ESYSROOT` / `PORTAGE_CONFIGROOT`: where `DEPEND` is resolved.
     pub sysroot: Utf8PathBuf,
@@ -23,6 +30,10 @@ pub struct CrossContext {
     pub chost: Option<String>,
     /// Host `CBUILD` from the profile `make.conf` (if readable).
     pub cbuild: Option<String>,
+    /// Gentoo keyword `ARCH` of the target `CHOST` (e.g. `riscv`), when `active`
+    /// and the `CHOST` maps to a known arch. Derived once; drives both keyword
+    /// acceptance and the `--root-deps=rdeps` gate.
+    target_arch: Option<Arch>,
 }
 
 impl CrossContext {
@@ -32,6 +43,20 @@ impl CrossContext {
             (Some(c), Some(b)) => c != b,
             _ => self.sysroot.as_str() != "/",
         }
+    }
+
+    /// The target keyword arch (from `CHOST`), if this is an active cross build
+    /// to a recognised arch. Used to accept the target's keywords instead of the
+    /// host `--arch`.
+    pub fn target_arch(&self) -> Option<&Arch> {
+        self.target_arch.as_ref()
+    }
+
+    /// Whether crossdev `--root-deps=rdeps` applies: a genuine cross-*arch* build
+    /// (target arch differs from the invocation's `host_arch`). Same-arch offset/
+    /// stage builds return `false` and keep `DEPEND` → target ROOT.
+    pub fn root_deps_rdeps(&self, host_arch: &Arch) -> bool {
+        self.target_arch.as_ref().is_some_and(|ta| ta != host_arch)
     }
 }
 
@@ -60,15 +85,18 @@ pub fn detect(roots: &Roots) -> CrossContext {
             target: Utf8PathBuf::from("/"),
             chost: None,
             cbuild: None,
+            target_arch: None,
         };
     }
 
+    let target_arch = chost.as_deref().and_then(Arch::from_chost);
     CrossContext {
         active: true,
         sysroot,
         target,
         chost,
         cbuild,
+        target_arch,
     }
 }
 
