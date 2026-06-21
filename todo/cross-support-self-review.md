@@ -39,6 +39,20 @@ internals through concrete extension methods the trait does not know about.
    `cross_active`/`rdeps`), pubgrub `solve.rs` (per-dep-class routing), and a
    post-solve `host_copies.rs` walk. Root policy has no single owner.
 
+## Status (consolidation pass, 2026-06-21)
+
+Behaviour-preserving consolidation done (commits after this doc):
+- ✅ **Arch predicates collapsed** — `CrossContext.target_arch` is computed once in
+  `detect()` and exposed via `target_arch()` / `root_deps_rdeps(host_arch)`;
+  `depgraph/mod.rs` no longer re-derives `Arch::from_chost` twice.
+- ✅ **`by_class` magic indices named** — `VersionData::{depend,rdepend,bdepend,
+  pdepend,idepend}()` replace `by_class[0..4]` in the cross routing.
+- ✅ **`is_virtual` guard named** — `target_drops_depend()` documents the synthetic
+  -root footgun in one place.
+- ⏳ **Still scattered:** `detect().active` still ORs three orthogonal axes, and the
+  `MergeRoot::Target` *default* remains (named-guarded, not removed). These are the
+  structural items to weigh against the trait decision below, not yet done.
+
 ## Concrete ad-hoc smells (ranked, cheap → structural)
 
 - **MergeRoot defaults to `Target` for every non-real node** (`package.rs:122`),
