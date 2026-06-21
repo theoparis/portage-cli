@@ -22,6 +22,7 @@ use portage_repo::{MakeConf, ReposConf, Repository};
 
 use crate::cli::{Cli, CrossdevArgs};
 use crate::style::{C_LABEL, C_PKG};
+use crate::util::write_if_absent;
 use target::CrossTarget;
 
 /// The overlay name crossdev uses — one overlay holds every `cross-*` category.
@@ -296,11 +297,4 @@ fn append_line(path: &Utf8Path, line: &str) -> Result<()> {
     body.push_str(line);
     body.push('\n');
     std::fs::write(path, body).with_context(|| format!("writing {path}"))
-}
-
-fn write_if_absent(path: &Utf8Path, contents: &str) -> Result<()> {
-    if path.exists() {
-        return Ok(());
-    }
-    std::fs::write(path, contents).with_context(|| format!("writing {path}"))
 }

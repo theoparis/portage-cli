@@ -15,6 +15,7 @@ mod select;
 mod setup;
 mod style;
 mod use_flags;
+mod util;
 mod vdb;
 
 #[cfg(feature = "mimalloc")]

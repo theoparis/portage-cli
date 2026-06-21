@@ -593,7 +593,8 @@ fn format_kib(bytes: u64) -> String {
     format!("{} KiB", bytes.div_ceil(1024))
 }
 
-/// Like [`print_pretty`], but honours per-entry [`MergeRoot`](portage_atom_pubgrub::MergeRoot).
+/// Print the emerge-style pretty plan, honouring each entry's
+/// [`MergeRoot`](portage_atom_pubgrub::MergeRoot) (cross/host split).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn print_pretty_rooted(
     data: &RepoData,
@@ -641,53 +642,6 @@ pub(super) fn print_pretty_rooted(
         slot_op_cpns,
         verbose,
         cross,
-    );
-}
-
-#[allow(clippy::too_many_arguments, dead_code)]
-pub(super) fn print_pretty(
-    data: &RepoData,
-    order: &[(PortagePackage, Version)],
-    installed: &HashMap<Cpn, HashMap<String, Version>>,
-    installed_entries: &[super::installed::VdbEntry],
-    use_config: &UseConfig,
-    package_use: &[(Dep, Vec<UseOverride>)],
-    use_expand: &[String],
-    use_expand_hidden: &[String],
-    flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
-    sizes: &HashMap<Cpv, u64>,
-    slot_op_cpns: &std::collections::HashSet<Cpn>,
-    verbose: u8,
-    target_root: Option<&camino::Utf8Path>,
-) {
-    let merge_roots: Vec<_> = order
-        .iter()
-        .map(|_| portage_atom_pubgrub::MergeRoot::Target)
-        .collect();
-    let cross = super::root_aware::CrossContext {
-        active: false,
-        sysroot: camino::Utf8PathBuf::from("/"),
-        target: target_root
-            .map(|p| p.to_owned())
-            .unwrap_or_else(|| camino::Utf8PathBuf::from("/")),
-        chost: None,
-        cbuild: None,
-    };
-    print_pretty_with_roots(
-        data,
-        order,
-        &merge_roots,
-        installed,
-        installed_entries,
-        use_config,
-        package_use,
-        use_expand,
-        use_expand_hidden,
-        flag_reqs,
-        sizes,
-        slot_op_cpns,
-        verbose,
-        &cross,
     );
 }
 

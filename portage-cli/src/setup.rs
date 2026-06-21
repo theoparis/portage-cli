@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use camino::Utf8Path;
 
 use crate::cli::Roots;
+use crate::util::write_if_absent;
 
 /// The `bashrc` recipe for an in-place (`--local`) prefix: paths are already
 /// correct in the installed `.pc`, so only the search path is added.
@@ -249,13 +250,5 @@ fn link_host_entries(dst_dir: &Utf8Path, host_dir: &str, prefix: &str) -> Result
         let target = format!("{host_dir}/{name}");
         let _ = std::os::unix::fs::symlink(&target, link.as_std_path());
     }
-    Ok(())
-}
-
-fn write_if_absent(path: &Utf8Path, contents: &str) -> Result<()> {
-    if path.exists() {
-        return Ok(());
-    }
-    std::fs::write(path.as_std_path(), contents).with_context(|| format!("writing {path}"))?;
     Ok(())
 }
