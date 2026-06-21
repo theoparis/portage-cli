@@ -6,22 +6,9 @@ use crate::package::PortagePackage;
 use crate::provider::PortageDependencyProvider;
 use crate::version_set::PortageVersionSet;
 
-/// Dependency class label for an edge in the dependency graph.
-///
-/// Corresponds to the five dependency variables defined by PMS 8.2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DepClass {
-    /// DEPEND — build-time dependencies.
-    Depend,
-    /// RDEPEND — run-time dependencies.
-    Rdepend,
-    /// BDEPEND — build-host dependencies (EAPI 7+).
-    Bdepend,
-    /// PDEPEND — post-merge dependencies.
-    Pdepend,
-    /// IDEPEND — install-time dependencies (EAPI 8+).
-    Idepend,
-}
+// `DepClass` (the five PMS 8.2 dependency variables) is shared vocabulary,
+// defined once in `portage-solver`.
+pub use portage_solver::DepClass;
 
 /// A labeled edge in the dependency graph: (from_pkg, from_version) depends on
 /// (to_pkg, to_version) via the given class.

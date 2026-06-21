@@ -24,18 +24,10 @@ use std::fmt;
 use portage_atom::Cpn;
 use portage_atom::interner::{DefaultInterner, Interned};
 
-/// Where a real package instance is merged — host `BROOT` or target `ROOT`.
-///
-/// Solver nodes are keyed by `(CPN, slot, merge_root)` so the same CPV can
-/// appear twice under cross (native host tool + cross target runtime).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord, Default)]
-pub enum MergeRoot {
-    /// Native build merged to the build host (`BROOT`, `/`).
-    Host,
-    /// Cross (or native target) build merged to `ROOT` / `EROOT`.
-    #[default]
-    Target,
-}
+// `MergeRoot` is the shared vocabulary type, defined once in `portage-solver`.
+// Solver nodes are keyed by `(CPN, slot, merge_root)` so the same CPV can appear
+// twice under cross (native host tool + cross target runtime).
+pub use portage_solver::MergeRoot;
 
 /// A PubGrub-compatible package identifier.
 ///
