@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use camino::{Utf8Path, Utf8PathBuf};
+
 use super::repository::Repository;
 use super::util;
 use crate::error::Result;
@@ -31,14 +33,25 @@ pub struct ReposConf {
 }
 
 impl ReposConf {
-    /// Load `repos.conf` using portage's default search paths:
-    /// `/usr/share/portage/config/repos.conf` (defaults), then
-    /// `/etc/portage/repos.conf` (file or directory of `*.conf`).
+    /// Load `repos.conf` for a system rooted at `/` (`config_root = /`, no
+    /// overlay).
     pub fn load() -> Result<Self> {
-        Self::load_from(&[
-            Path::new("/usr/share/portage/config/repos.conf"),
-            Path::new("/etc/portage/repos.conf"),
-        ])
+        Self::load_rooted(Utf8Path::new("/"), &[])
+    }
+
+    /// Load `repos.conf` in portage's search order, rooted at `config_root`: the
+    /// global defaults (`<config_root>/usr/share/portage/config/repos.conf`),
+    /// then the user confdir (`<config_root>/etc/portage/repos.conf`), then each
+    /// `extra` confdir's `repos.conf` (e.g. a `--local`/`--prefix` overlay that
+    /// layers on a host `config_root`). Mirrors portage's
+    /// `load_repository_config()`. Missing paths are skipped.
+    pub fn load_rooted(config_root: &Utf8Path, extra: &[&Utf8Path]) -> Result<Self> {
+        let mut paths: Vec<Utf8PathBuf> = vec![
+            config_root.join("usr/share/portage/config/repos.conf"),
+            config_root.join("etc/portage/repos.conf"),
+        ];
+        paths.extend(extra.iter().map(|d| d.join("repos.conf")));
+        Self::load_from(&paths)
     }
 
     /// Load from explicit paths in override order. Each path may be a file

@@ -9,7 +9,6 @@ use std::io::Write as _;
 
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
-use portage_repo::ReposConf;
 
 use super::config_portage_dir;
 use crate::cli::{Cli, RepositoryAction};
@@ -26,19 +25,6 @@ pub fn run(action: &RepositoryAction, globals: &Cli) -> Result<()> {
     }
 }
 
-/// `repos.conf` search paths for the active config root.
-fn conf_paths(globals: &Cli) -> Vec<Utf8PathBuf> {
-    let config_root = globals
-        .roots()
-        .config()
-        .unwrap_or_else(|| Utf8Path::new("/"))
-        .to_owned();
-    vec![
-        config_root.join("usr/share/portage/config/repos.conf"),
-        config_portage_dir(globals).join("repos.conf"),
-    ]
-}
-
 /// The per-repo conf file `em` writes/removes (`repos.conf/<name>.conf`).
 fn repo_conf_file(globals: &Cli, name: &str) -> Utf8PathBuf {
     config_portage_dir(globals)
@@ -47,8 +33,7 @@ fn repo_conf_file(globals: &Cli, name: &str) -> Utf8PathBuf {
 }
 
 fn list(globals: &Cli) -> Result<()> {
-    // `Utf8PathBuf: AsRef<Path>`, so the camino paths feed `load_from` directly.
-    let conf = ReposConf::load_from(&conf_paths(globals)).context("reading repos.conf")?;
+    let conf = globals.roots().repos_conf().context("reading repos.conf")?;
     let mut out = anstream::stdout();
     for r in conf.repos() {
         // Tint the main repo's marker green, matching the current-profile `*`.

@@ -253,6 +253,15 @@ impl Roots {
     pub fn sysroot(&self) -> Option<&camino::Utf8Path> {
         self.config.as_deref().or(self.base.as_deref())
     }
+
+    /// Load `repos.conf` portage-style for this invocation: global defaults +
+    /// confdir under the config root, plus the `--local`/`--prefix` overlay
+    /// confdir. The single source of truth for repo discovery.
+    pub fn repos_conf(&self) -> portage_repo::Result<portage_repo::ReposConf> {
+        let cfg = self.config().unwrap_or_else(|| camino::Utf8Path::new("/"));
+        let extra: Vec<&camino::Utf8Path> = self.config_overlay().into_iter().collect();
+        portage_repo::ReposConf::load_rooted(cfg, &extra)
+    }
 }
 
 /// The user's home directory from `$HOME`, falling back to `/root` only if
@@ -330,7 +339,7 @@ impl Cli {
         if let Some(p) = &self.repo {
             return p.clone();
         }
-        if let Ok(rc) = portage_repo::ReposConf::load()
+        if let Ok(rc) = self.roots().repos_conf()
             && let Some(main) = rc.main_repo()
         {
             return main.location.to_string_lossy().into_owned();
@@ -344,7 +353,7 @@ impl Cli {
         if let Some(p) = &self.repo {
             return vec![std::path::PathBuf::from(p)];
         }
-        match portage_repo::ReposConf::load() {
+        match self.roots().repos_conf() {
             Ok(rc) if !rc.repos().is_empty() => {
                 rc.repos().iter().map(|e| e.location.clone()).collect()
             }

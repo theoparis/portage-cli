@@ -142,8 +142,8 @@ fn sysroot(target: &CrossTarget, globals: &Cli) -> Utf8PathBuf {
 }
 
 /// The configured main repo (`gentoo`) — the real ebuilds the overlay links to.
-fn main_repo() -> Result<Repository> {
-    let conf = ReposConf::load().context("reading repos.conf")?;
+fn main_repo(globals: &Cli) -> Result<Repository> {
+    let conf = globals.roots().repos_conf().context("reading repos.conf")?;
     let entry = conf
         .main_repo()
         .or_else(|| conf.find("gentoo"))
@@ -174,7 +174,7 @@ fn show_target_cfg(target: &CrossTarget, globals: &Cli) -> Result<()> {
 }
 
 fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
-    let gentoo = main_repo()?;
+    let gentoo = main_repo(globals)?;
     let gentoo_path = gentoo.path().to_owned();
     let overlay = setup_root(globals).join("var/db/repos").join(OVERLAY_NAME);
     let sysroot = sysroot(target, globals);
