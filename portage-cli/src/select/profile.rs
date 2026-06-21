@@ -82,15 +82,21 @@ fn list(globals: &Cli) -> Result<()> {
     let descs = profiles_for(&repo, &arch)?;
     let current = current_profile(globals, &repo);
     let mut out = anstream::stdout();
+
+    // Calculate the width needed for the number column (e.g., "[10]" needs 4 chars)
+    let max_num = descs.len();
+    let num_width = max_num.to_string().len();
+
     for (i, d) in descs.iter().enumerate() {
         // Path stays plain for legibility; only the status and — for the current
         // profile — the list number and the `*` marker are coloured.
         let st = profile_status(d.status());
         let is_current = current.as_deref() == Some(d.path());
+        let n = i + 1;
         let num = if is_current {
-            format!("{C_STAR}[{}]{C_STAR:#}", i + 1)
+            format!("{C_STAR}[{:>width$}]{C_STAR:#}", n, width = num_width)
         } else {
-            format!("[{}]", i + 1)
+            format!("[{:>width$}]", n, width = num_width)
         };
         let mark = if is_current {
             format!(" {C_STAR}*{C_STAR:#}")
