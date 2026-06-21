@@ -1,17 +1,19 @@
 //! `em crossdev` — set up a cross-compilation target, a `crossdev` workalike.
 //!
-//! Today this implements the **no-build setup** (`--init-target` /
-//! `--show-target-cfg`): the three Stage-0 tools from `todo/crossdev-target.md`
-//! — overlay creation (the `cross-*` symlink category + `metadata`/`profiles` +
-//! a `repos.conf` entry), the cross sysroot `make.conf`, and the **direct**
-//! `make.profile` symlink (`eselect profile` refuses a foreign arch). Building
-//! the staged toolchain (Stages B/C there) is future work.
+//! Implements the **no-build setup** (`--init-target` / `--show-target-cfg`):
+//! overlay creation (the `cross-*` symlink category + `metadata`/`profiles` + a
+//! `repos.conf` entry), the cross sysroot `make.conf`, and the **direct**
+//! `make.profile` symlink (`eselect profile` refuses a foreign arch). `--setup`
+//! additionally derives the ordered [`stages::toolchain_plan`] bootstrap
+//! (binutils → headers → gcc-stage1 → libc → gcc-stage2); driving each step
+//! through the merge path is the remaining work (see todo/crossdev-target.md).
 //!
 //! The install location follows em's root model: the sysroot is
 //! `<EROOT>/usr/<CTARGET>`, so `em crossdev <t>` targets `/usr/<CTARGET>` (like
 //! crossdev), `em --local crossdev <t>` targets `~/.gentoo/usr/<CTARGET>`, and
 //! `em --prefix DIR`/`--root DIR` retarget under `DIR`.
 
+mod stages;
 mod target;
 
 use std::io::Write;
@@ -37,11 +39,69 @@ pub fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
     if args.init_target {
         return init_target(&target, globals);
     }
+    if args.setup {
+        return setup(&target, globals);
+    }
     bail!(
         "em crossdev does setup only for now — pass --init-target to lay down the \
-         overlay + sysroot config, or --show-target-cfg to preview it (building \
-         the toolchain is not implemented yet)"
+         overlay + sysroot config, --setup to bootstrap the cross toolchain, or \
+         --show-target-cfg to preview the derived config"
     );
+}
+
+/// `em crossdev <tuple> --setup`: bootstrap the cross toolchain into the prefix
+/// (`/usr/<chost>`). The full intertwined sequence (binutils → headers →
+/// gcc-stage1 → libc → gcc-stage2) — the compiler is not usable until the libc
+/// step lands, so toolchain and stage1 libc are one bootstrap.
+///
+/// Today this lays down the FS config (idempotent) and prints the ordered
+/// [`StagePlan`](stages::StagePlan); driving each step through the merge path is
+/// the next increment (see todo/crossdev-target.md).
+fn setup(target: &CrossTarget, globals: &Cli) -> Result<()> {
+    init_target(target, globals)?;
+    let plan = stages::toolchain_plan(target);
+    let mut out = anstream::stdout();
+    writeln!(
+        out,
+        "\n{C_LABEL}Toolchain bootstrap plan{C_LABEL:#} ({}):",
+        target.tuple
+    )
+    .ok();
+    for (i, step) in plan.steps.iter().enumerate() {
+        let flags = step_flags(step);
+        writeln!(
+            out,
+            "  {C_LABEL}{n:>2}.{C_LABEL:#} {C_PKG}{label}{C_PKG:#}{flags}",
+            n = i + 1,
+            label = step.label,
+        )
+        .ok();
+        for atom in &step.atoms {
+            writeln!(out, "        {atom}").ok();
+        }
+    }
+    writeln!(
+        out,
+        "\n(plan only — step execution through the merge path is not wired yet)"
+    )
+    .ok();
+    Ok(())
+}
+
+/// Render a step's USE override / `--nodeps` as a compact suffix for the plan.
+fn step_flags(step: &stages::StageStep) -> String {
+    let mut parts = Vec::new();
+    if step.nodeps {
+        parts.push("--nodeps".to_string());
+    }
+    if !step.use_override.is_empty() {
+        parts.push(format!("USE=\"{}\"", step.use_override.join(" ")));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", parts.join(" "))
+    }
 }
 
 /// `PORTAGE_CONFIGROOT` for this invocation (where `repos.conf`/the overlay live).

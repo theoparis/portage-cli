@@ -609,6 +609,12 @@ pub struct CrossdevArgs {
     #[arg(long)]
     pub init_target: bool,
 
+    /// Bootstrap the cross toolchain into the prefix (`/usr/<tuple>`): the full
+    /// intertwined sequence (binutils → headers → gcc-stage1 → libc →
+    /// gcc-stage2). Implies `--init-target`.
+    #[arg(long)]
+    pub setup: bool,
+
     /// Print the derived target configuration and exit (no writes).
     #[arg(long)]
     pub show_target_cfg: bool,

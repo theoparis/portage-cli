@@ -605,6 +605,17 @@ toolchain template (Stage C list) → `--setup`; (4) the stage1/stage3 templates
 `--sysroot`; (5) seed-from-stage3 via `gentoo-stages`. Stage 1+2 are the shared
 core both phases depend on — build it first.
 
+**Progress (2026-06-21):** `crossdev/stages.rs` landed the `StagePlan`/`StageStep`
+types + `toolchain_plan()` (the GCC two-stage + LLVM-runtimes templates, with the
+`headers-only`/`--nodeps`/per-stage gcc USE), unit-tested. `em crossdev <t> --setup`
+runs `--init-target` then prints the ordered plan. **Remaining:** the *driver* —
+execute each step through the resolve+merge path (per-step `USE` override,
+`--nodeps`, `-b/-k`), which is sequence item (1)+(2). `--setup` is plan-only until
+then. Decision recap (user): `--setup` is one intertwined bootstrap (compiler
+needs the cross libc to work); only *after* a valid compiler exists are toolchain
+update vs target-stage build nearly independent. Toolchain template was built
+first.
+
 ### Stage C — toolchain bootstrap (the real crossdev workflow) — LARGE
 NB: Stage B built a **leaf lib against an already-bootstrapped toolchain**. The
 toolchain itself needs crossdev's staged bootstrap, which em does NOT yet do —
