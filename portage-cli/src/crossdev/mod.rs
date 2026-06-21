@@ -30,7 +30,7 @@ use target::CrossTarget;
 /// The overlay name crossdev uses — one overlay holds every `cross-*` category.
 const OVERLAY_NAME: &str = "crossdev";
 
-pub fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
+pub async fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
     let target = CrossTarget::parse(&args.target, args.llvm)?;
 
     if args.show_target_cfg {
@@ -40,7 +40,7 @@ pub fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
         return init_target(&target, globals);
     }
     if args.setup {
-        return setup(&target, globals);
+        return setup(&target, globals).await;
     }
     bail!(
         "em crossdev does setup only for now — pass --init-target to lay down the \
@@ -54,37 +54,62 @@ pub fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
 /// gcc-stage1 → libc → gcc-stage2) — the compiler is not usable until the libc
 /// step lands, so toolchain and stage1 libc are one bootstrap.
 ///
-/// Today this lays down the FS config (idempotent) and prints the ordered
-/// [`StagePlan`](stages::StagePlan); driving each step through the merge path is
-/// the next increment (see todo/crossdev-target.md).
-fn setup(target: &CrossTarget, globals: &Cli) -> Result<()> {
-    init_target(target, globals)?;
+/// Lays down the FS config (idempotent), then runs each step of the ordered
+/// [`StagePlan`](stages::StagePlan) through the shared merge path
+/// ([`crate::emerge_atoms`]) — per-step `USE` override + `--nodeps`. With `-p`
+/// each step prints its plan instead of building.
+async fn setup(target: &CrossTarget, globals: &Cli) -> Result<()> {
+    // `-p` only previews the staged builds — don't write the overlay/sysroot.
+    if !globals.pretend {
+        init_target(target, globals)?;
+    }
     let plan = stages::toolchain_plan(target);
     let mut out = anstream::stdout();
+    let verb = if globals.pretend { "Plan" } else { "Bootstrap" };
     writeln!(
         out,
-        "\n{C_LABEL}Toolchain bootstrap plan{C_LABEL:#} ({}):",
-        target.tuple
+        "\n{C_LABEL}{verb} cross toolchain{C_LABEL:#} ({}) — {} steps:",
+        target.tuple,
+        plan.steps.len()
     )
     .ok();
+
     for (i, step) in plan.steps.iter().enumerate() {
-        let flags = step_flags(step);
+        // Flush the step header before building so progress shows immediately
+        // (and survives the `process::exit` on a step that needs config changes,
+        // which does not flush buffered stdout). The header names the step, so a
+        // failure needs no extra context.
         writeln!(
             out,
-            "  {C_LABEL}{n:>2}.{C_LABEL:#} {C_PKG}{label}{C_PKG:#}{flags}",
+            "\n{C_LABEL}[{n}/{total}] {label}{C_LABEL:#}{flags}",
             n = i + 1,
+            total = plan.steps.len(),
             label = step.label,
+            flags = step_flags(step),
         )
         .ok();
-        for atom in &step.atoms {
-            writeln!(out, "        {atom}").ok();
-        }
+        out.flush().ok();
+        crate::emerge_atoms(
+            globals,
+            &step.atoms,
+            crate::EmergeOpts {
+                use_override: &step.use_override,
+                nodeps: step.nodeps,
+            },
+        )
+        .await?;
     }
-    writeln!(
-        out,
-        "\n(plan only — step execution through the merge path is not wired yet)"
-    )
-    .ok();
+
+    if !globals.pretend {
+        writeln!(
+            out,
+            "\n>>> cross toolchain {} ready in {}/usr/{}",
+            target.tuple,
+            globals.roots().merge_root(),
+            target.tuple,
+        )
+        .ok();
+    }
     Ok(())
 }
 

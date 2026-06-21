@@ -253,6 +253,12 @@ pub struct PortageDependencyProvider {
     /// invocations by the caller (never native offset/same-arch stage builds,
     /// which keep `DEPEND` → target ROOT).
     pub(crate) root_deps_rdeps: bool,
+    /// `--nodeps` (emerge `-O`): merge only the explicitly named targets, with no
+    /// dependency expansion. Real packages report no dependencies, so the solve
+    /// resolves the requested atoms to versions and nothing else. Used by the
+    /// staged toolchain bootstrap to break the glibc-headers→newer-gcc cycle
+    /// before a compiler exists. Off by default.
+    pub(crate) nodeps: bool,
     /// Preferred version (`0`/`1`) for each `UseDecision` node, i.e. the value
     /// the caller's policy would have given the ceded flag.  `choose_version`
     /// biases toward it so a `SolverDecided` flag only flips when a constraint
@@ -571,6 +577,7 @@ impl PortageDependencyProvider {
             rebuild_tree: false,
             prefer_newest_slot: false,
             root_deps_rdeps: false,
+            nodeps: false,
             use_decision_prefer,
             use_decision_meta,
             solved_use_decisions: HashMap::new(),
@@ -682,6 +689,12 @@ impl PortageDependencyProvider {
     /// cross-arch builds; same-arch offset/stage builds leave it off.
     pub fn set_root_deps_rdeps(&mut self, active: bool) {
         self.root_deps_rdeps = active;
+    }
+
+    /// `--nodeps` (emerge `-O`): merge only the named targets, no dependency
+    /// expansion (see the [`nodeps`](Self::nodeps) field).
+    pub fn set_nodeps(&mut self, active: bool) {
+        self.nodeps = active;
     }
 
     fn ensure_host_instances(&mut self) {

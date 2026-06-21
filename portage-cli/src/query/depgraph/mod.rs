@@ -95,6 +95,9 @@ pub struct DepgraphOpts<'a> {
     /// `:*` any-slot dep to the newest slot (like `emerge -uD`) rather than
     /// keeping a satisfying installed slot.
     pub deep: bool,
+    /// `--nodeps` (emerge `-O`): merge only the named atoms, no dependency
+    /// expansion. Used by the staged toolchain bootstrap.
+    pub nodeps: bool,
 }
 
 pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome> {
@@ -112,6 +115,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         onlydeps,
         with_bdeps,
         deep,
+        nodeps,
     } = opts;
     let cross = root_aware::detect(roots);
     let config_root = roots.config();
@@ -295,6 +299,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         // target `DEPEND` from the sysroot graph (same-arch offset/stage builds
         // keep `DEPEND` → target ROOT).
         provider.set_root_deps_rdeps(cross.root_deps_rdeps(arch));
+        provider.set_nodeps(nodeps);
         provider.set_rebuild_tree(emptytree_native);
         // `--deep` and native emptytree bump `:*` deps to the newest slot.
         provider.set_prefer_newest_slot(deep || emptytree_native);

@@ -261,6 +261,13 @@ impl DependencyProvider for PortageDependencyProvider {
             )));
         };
 
+        // `--nodeps`: a real package reports no dependencies, so only the
+        // explicitly named targets (the synthetic root's deps) enter the plan.
+        // The root is virtual, so its target list is untouched.
+        if self.nodeps && !package.is_virtual() {
+            return Ok(Dependencies::Available(DependencyConstraints::default()));
+        }
+
         // For installed packages at their installed version, skip build-time
         // deps (DEPEND = index 0, BDEPEND = index 2).  The package is already
         // built; re-solving its build deps would drag in bootstrap toolchain

@@ -124,7 +124,16 @@ async fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("error: {e:#}");
+        // `process::exit` does not flush buffered stdout (the resolver's plan /
+        // change block); do it explicitly so nothing printed is lost.
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        // A "changes needed" resolve exits 1 quietly — the change block is already
+        // printed (and the staged driver prints its step header), so an `error:`
+        // line would be noise. Everything else gets the message.
+        if e.downcast_ref::<error::ConfigChangesNeeded>().is_none() {
+            eprintln!("error: {e:#}");
+        }
         std::process::exit(1);
     }
 }
@@ -134,6 +143,63 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     if cli.search || cli.searchdesc {
         return search::run_emerge_style(&cli.search_repos(), &cli.atoms, cli.searchdesc).await;
     }
+    emerge_atoms(
+        cli,
+        &cli.atoms,
+        EmergeOpts {
+            use_override: &[],
+            nodeps: cli.nodeps,
+        },
+    )
+    .await
+}
+
+/// Per-call overrides for [`emerge_atoms`], used by the staged-build driver to
+/// run each step with its own USE and `--nodeps` while sharing the rest of the
+/// global config.
+pub(crate) struct EmergeOpts<'a> {
+    /// USE tokens (emerge syntax: `headers-only`, `-cxx`) forced on top of the
+    /// configured USE, for both the resolve and the build (applied via the `USE`
+    /// env, as `USE=… emerge` does).
+    pub use_override: &'a [String],
+    /// `--nodeps`: merge only the named atoms, no dependency expansion.
+    pub nodeps: bool,
+}
+
+/// Resolve and (unless `--pretend`) merge `raw_atoms` with the global config in
+/// `cli`, plus the per-call [`EmergeOpts`]. Factored out of [`run_emerge`] so the
+/// crossdev staged-build driver can run each toolchain step through the very
+/// same path.
+pub(crate) async fn emerge_atoms(
+    cli: &cli::Cli,
+    raw_atoms: &[String],
+    opts: EmergeOpts<'_>,
+) -> Result<()> {
+    // Apply the per-step USE override to the process env for the duration of the
+    // step (restored after), so the resolve's USE-conditional expansion and the
+    // build phases both see it. Mirrors crossdev's `USE="…" doemerge`.
+    let saved_use = std::env::var("USE").ok();
+    if !opts.use_override.is_empty() {
+        let base = saved_use.clone().unwrap_or_default();
+        let merged = format!("{base} {}", opts.use_override.join(" "));
+        // SAFETY: the driver runs steps sequentially; no other task reads/writes
+        // USE between this set and the restore below.
+        unsafe { std::env::set_var("USE", merged.trim()) };
+    }
+    let result = emerge_atoms_inner(cli, raw_atoms, opts.nodeps).await;
+    if !opts.use_override.is_empty() {
+        // SAFETY: see above.
+        unsafe {
+            match &saved_use {
+                Some(v) => std::env::set_var("USE", v),
+                None => std::env::remove_var("USE"),
+            }
+        }
+    }
+    result
+}
+
+async fn emerge_atoms_inner(cli: &cli::Cli, raw_atoms: &[String], nodeps: bool) -> Result<()> {
     let resolved = cli.repo_path();
     let repo_path = camino::Utf8Path::new(&resolved);
     if !repo_path.is_dir() {
@@ -165,7 +231,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     // Expand @set references (e.g. @system, @world) to concrete atoms before
     // resolution. Sets are read from the config root's profile (@system) and
     // the merge target (@world/@selected, user sets).
-    let expanded = expand_sets(&cli.atoms, roots.config(), roots.merge_root());
+    let expanded = expand_sets(raw_atoms, roots.config(), roots.merge_root());
     let parsed = query::resolve_atoms(&expanded, &repo, vdb.as_ref(), mode);
     let atoms: Vec<String> = parsed.iter().map(|d| d.to_string()).collect();
     if atoms.is_empty() {
@@ -192,19 +258,24 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         onlydeps: cli.onlydeps,
         with_bdeps: cli.with_bdeps,
         deep: cli.deep,
+        nodeps,
     })
     .await?;
 
+    // Pretend: a non-zero resolver exit means USE/mask changes are needed (the
+    // change block was already printed). Surface it as a typed error so the
+    // normal Result flow yields exit 1 — `main` prints it quietly, and the
+    // staged driver stops at the step that needs the change, with step context.
     if cli.pretend {
-        if outcome.exit_code != 0 {
-            std::process::exit(outcome.exit_code);
-        }
-        return Ok(());
+        return match outcome.exit_code {
+            0 => Ok(()),
+            _ => Err(error::ConfigChangesNeeded.into()),
+        };
     }
 
     // em <atoms>: build and merge the resolved plan, in order.
     if outcome.exit_code != 0 {
-        bail!("configuration changes are required (see above) — refusing to merge");
+        return Err(error::ConfigChangesNeeded.into());
     }
     // --prefix additionally relocates distfiles and the build trees under the
     // target (a self-contained tree); --root leaves them at the host defaults.
@@ -646,7 +717,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
         Applet::Atom { atoms } => run_atom(atoms),
         Applet::Select { command } => select::run(command, globals),
         Applet::Setup => setup::bootstrap(&globals.roots()),
-        Applet::Crossdev(args) => crossdev::run(args, globals),
+        Applet::Crossdev(args) => crossdev::run(args, globals).await,
         Applet::Dispatch => {
             eprintln!("dispatch-conf");
             bail!("not implemented: dispatch-conf")
@@ -747,6 +818,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 onlydeps: globals.onlydeps,
                 with_bdeps: globals.with_bdeps,
                 deep: globals.deep,
+                nodeps: globals.nodeps,
             })
             .await?;
             if outcome.exit_code != 0 {
