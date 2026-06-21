@@ -188,9 +188,18 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     } = use_env;
 
     // Fold global ACCEPT_KEYWORDS and per-package package.accept_keywords into a
-    // single interned acceptance decision (precomputed for the host arch).
+    // single interned acceptance decision. A cross build accepts by the TARGET
+    // arch (derived from the sysroot `CHOST`), not the host `--arch`, so the
+    // target's keywords are honoured — a package keyworded `~riscv`/`riscv` is
+    // accepted for a riscv sysroot even though the host is arm64. Without this
+    // every target package would be filtered out (NoVersions).
+    let cross_arch = cross
+        .active
+        .then(|| cross.chost.as_deref().and_then(Arch::from_chost))
+        .flatten();
+    let accept_arch = cross_arch.as_ref().unwrap_or(arch);
     let accept_keywords =
-        repo::AcceptKeywords::new(arch, &accept_keywords, package_accept_keywords);
+        repo::AcceptKeywords::new(accept_arch, &accept_keywords, package_accept_keywords);
     // Likewise fold global ACCEPT_LICENSE with per-package package.license.
     let accept_licenses = repo::AcceptLicenses::new(accept_license, package_license);
 

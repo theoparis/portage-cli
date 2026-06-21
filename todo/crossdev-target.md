@@ -425,21 +425,31 @@ exec emerge --root-deps=rdeps "$@"
   deps land in the sysroot.
 - `BUILD_*FLAGS`/`CBUILD` come from the host config; `C*FLAGS` from the sysroot.
 
-### Two concrete em gaps blocking target-package cross builds
+### em gaps blocking target-package cross builds
 Probed live (`em -p --config-root /usr/<CHOST> --root /usr/<CHOST> sys-libs/zlib`
 → `NoSolution`/`NoVersions` over `(Unbounded,Unbounded)` on `merge_root: Target`):
 
-1. **Repo visibility from the sysroot config-root.** The sysroot has no
-   `repos.conf`, so with `PORTAGE_CONFIGROOT=<sysroot>` the gentoo repo is
-   invisible ⇒ *every* package has no versions. Fix: either `--init-target`
-   writes a sysroot `repos.conf` referencing the host gentoo (+ crossdev)
-   overlays, or the cross entry point keeps host repo discovery while taking
-   profile/make.conf from the sysroot.
-2. **`--root-deps=rdeps` semantics.** em currently resolves *all* deps against
-   the target root. Need: DEPEND/BDEPEND → BROOT/host (`/`), RDEPEND → target
-   (sysroot). em has the dual-root primitives (`MergeRoot::{Host,Target}`,
-   `host_copies.rs`) but for the *inverse* split; this is the `--root-deps=rdeps`
-   policy expressed in the solver's root routing.
+1. **FIXED (2026-06-21) — keyword acceptance used the host arch, not the
+   target.** The real blocker: `AcceptKeywords::new` was keyed to the global
+   `--arch` (host, e.g. arm64), so a target package keyworded `~riscv`/`riscv`
+   was filtered out for a riscv sysroot ⇒ every target package = NoVersions.
+   Decoded by instrumenting: cpn was `sys-libs/zlib`, `in_data=true`, yet served
+   no Target versions; `--arch riscv` made it resolve. Fix (`depgraph/mod.rs`):
+   when `cross.active`, derive the acceptance arch from the sysroot `CHOST`
+   (`Arch::from_chost`) instead of `--arch`. Now `em -p --config-root <sysroot>
+   --root <sysroot> <pkg>` resolves the full target closure into the sysroot with
+   no manual `--arch`. (The sysroot `repos.conf` from `--init-target` is still
+   wanted so `PORTAGE_CONFIGROOT=<sysroot>` sees the tree, but repo discovery
+   currently falls back to the host `ReposConf::load()`, so it was not the gating
+   bug.)
+2. **`--root-deps=rdeps` semantics (still open, refinement).** em currently
+   routes a target package's DEPEND → Target (`cross_target_runtime_deps`), so a
+   build-only dep is pulled into the sysroot. crossdev's `--root-deps=rdeps`
+   installs only RDEPEND into the sysroot; DEPEND/BDEPEND resolve against the
+   build host (`/`). em has the dual-root primitives (`MergeRoot::{Host,Target}`,
+   `host_copies.rs`); this is the inverse split expressed in the solver's routing.
+   Not blocking `-p` (the closure resolves); matters for not building host tools
+   into the sysroot.
 
 The cross compiler (`<CHOST>-gcc`/`-ld`) is already on `PATH`, so once
 resolution is fixed the eclass-driven build should follow. NB: cross
