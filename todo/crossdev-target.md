@@ -517,19 +517,37 @@ tools resolving on BROOT (already handled by the dual-root solver + `--root-deps
 =rdeps`), and the cross toolchain PATH when it is NOT in `/usr/bin` (LLVM
 `--target`/`--sysroot` model).
 
-### Stage B — cross builder (one target package end-to-end) — MEDIUM
-**The env is already wired** (see the Stage-A correction above): `--cross` →
-config/root = sysroot → make.conf supplies CHOST/CBUILD/CFLAGS, `set_build_roots`
-supplies SYSROOT=ESYSROOT=ROOT + BROOT=/. So Stage B is *verification + gap
-closing*, not env plumbing:
-- **GCC**: `<triple>-gcc` from the installed `cross-<triple>` toolchain — already
-  on PATH, picked up via `tc-getCC` = `${CHOST}-gcc`.
-- **LLVM**: host `clang --target=<triple> --sysroot=$ESYSROOT`, `lld` — this DOES
-  need wiring (no `<triple>-clang` unless `clang-crossdev-wrappers` is installed).
-Prove it by cross-building a single leaf target lib into `<sysroot>` (e.g. zlib)
-with the host toolchain installed, then `file` the artifact = target arch. That
-flushes out the real gaps (PATH, BDEPEND-on-BROOT, sandbox paths) without the
-toolchain bootstrap.
+### Stage B — cross builder (one leaf target package) — DONE (2026-06-21)
+Verified end-to-end: `em --cross riscv64-unknown-linux-gnu sys-libs/zlib`
+produces a real **RISC-V** `libz.so` (`file` → `ELF … UCB RISC-V, double-float
+ABI`) merged into the sysroot, on an aarch64 host with the crossdev toolchain
+installed.
+
+The one real gap the build flushed out (everything else was already wired):
+- **Toolchain selection.** The env wiring (CHOST/CBUILD/CFLAGS from make.conf,
+  SYSROOT=ESYSROOT=ROOT, BROOT=/) was all correct, but the build still used the
+  **host `gcc`** → a host-arch artifact. Root cause: `tc-getCC` only exports
+  `CC=${CHOST}-gcc` when something calls it, and for a *single-ABI* target the
+  multilib `DEFAULT_ABI` path skips `multilib_toolchain_setup`'s CC export, so an
+  ebuild that builds with a raw `./configure` (zlib) never gets the cross CC.
+  Diagnosed with a probe ebuild: CHOST **did** propagate (`CHOST=riscv64-…`), so
+  it was purely CC selection. Fix (`portage-repo` `shell.rs::init_build_env`): when
+  cross (CHOST≠CBUILD, both set) and `${CHOST}-gcc` is on PATH, proactively export
+  `CC/CXX/AR/NM/RANLIB/STRIP/OBJCOPY/OBJDUMP/READELF/LD = ${CHOST}-<tool>` unless
+  already set — em's standing-in for `tc-getCC`. Native builds (CBUILD unset or
+  ==CHOST) untouched.
+- Header note: the cross gcc's baked-in `--sysroot` (`/usr/<tuple>`) already has
+  the headers/libc, so a clean `--cross` build (SYSROOT==ROOT==populated sysroot)
+  resolves `sys/types.h` etc. A split `--config-root X --root Y(empty)` leaves
+  SYSROOT empty and fails — not a bug, just don't point ROOT at an unpopulated
+  tree for a from-scratch build.
+
+Still TODO for Stage B breadth:
+- **LLVM**: host `clang --target=<triple> --sysroot=$ESYSROOT`, `lld` — needs
+  wiring (no `<triple>-clang` unless `clang-crossdev-wrappers` is installed); the
+  GCC `${CHOST}-<tool>` export above does not cover the clang model.
+- A leaf with real deps (confirm RDEPEND libs resolve from the sysroot and
+  BDEPEND tools from BROOT during an actual build, not just `-p`).
 
 ### Stage C — toolchain bootstrap (the real crossdev workflow) — LARGE
 Drive the staged builds above. Split by model:

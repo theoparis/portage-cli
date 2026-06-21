@@ -1110,6 +1110,40 @@ impl EbuildShell {
                 self.set_var(var, &val);
             }
         }
+
+        // Cross toolchain selection. When building for a foreign CHOST (cross:
+        // CHOST and CBUILD both set and differing) and the prefixed compiler is
+        // on PATH, export the toolchain vars as `${CHOST}-<tool>` unless the
+        // ebuild env already set them. This mirrors `tc-getCC`/`tc-getPROG`
+        // (toolchain-funcs.eclass), but proactively: em sets it up front so even
+        // ebuilds that build with a raw `./configure` (not `$(tc-getCC)`) — e.g.
+        // sys-libs/zlib — pick up the cross compiler instead of the host `gcc`,
+        // which otherwise silently yields a host-arch artifact. Native builds
+        // (CBUILD unset, or CHOST == CBUILD) are untouched.
+        if let (Some(chost), Some(cbuild)) = (
+            self.get_var("CHOST").filter(|s| !s.is_empty()),
+            self.get_var("CBUILD").filter(|s| !s.is_empty()),
+        ) && chost != cbuild
+            && program_on_path(&format!("{chost}-gcc"))
+        {
+            for (var, tool) in [
+                ("CC", "gcc"),
+                ("CXX", "g++"),
+                ("AR", "ar"),
+                ("NM", "nm"),
+                ("RANLIB", "ranlib"),
+                ("STRIP", "strip"),
+                ("OBJCOPY", "objcopy"),
+                ("OBJDUMP", "objdump"),
+                ("READELF", "readelf"),
+                ("LD", "ld"),
+            ] {
+                if self.get_var(var).filter(|s| !s.is_empty()).is_none() {
+                    self.set_var(var, &format!("{chost}-{tool}"));
+                }
+            }
+        }
+
         // Strip GNU make jobserver tokens from MAKEFLAGS if set.  The fds
         // (--jobserver-auth=R,W or legacy --jobserver-fds=R,W) belong to a
         // make process in the caller's tree and are not valid here.  Leaving
@@ -1901,6 +1935,14 @@ fn strip_jobserver_tokens(flags: &str) -> String {
         .filter(|tok| !tok.starts_with("--jobserver-auth=") && !tok.starts_with("--jobserver-fds="))
         .collect();
     cleaned.join(" ")
+}
+
+/// Whether `name` resolves to a file on `$PATH` (a `type -p`-style lookup, used
+/// to gate cross-toolchain selection on `${CHOST}-gcc` actually existing).
+fn program_on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
+        .unwrap_or(false)
 }
 
 ///
