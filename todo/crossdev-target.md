@@ -442,14 +442,27 @@ Probed live (`em -p --config-root /usr/<CHOST> --root /usr/<CHOST> sys-libs/zlib
    wanted so `PORTAGE_CONFIGROOT=<sysroot>` sees the tree, but repo discovery
    currently falls back to the host `ReposConf::load()`, so it was not the gating
    bug.)
-2. **`--root-deps=rdeps` semantics (still open, refinement).** em currently
-   routes a target package's DEPEND → Target (`cross_target_runtime_deps`), so a
-   build-only dep is pulled into the sysroot. crossdev's `--root-deps=rdeps`
-   installs only RDEPEND into the sysroot; DEPEND/BDEPEND resolve against the
-   build host (`/`). em has the dual-root primitives (`MergeRoot::{Host,Target}`,
-   `host_copies.rs`); this is the inverse split expressed in the solver's routing.
-   Not blocking `-p` (the closure resolves); matters for not building host tools
-   into the sysroot.
+2. **FIXED (2026-06-21) — `--root-deps=rdeps` semantics.** A genuine cross-*arch*
+   target build now discards the target package's DEPEND (build-only) from the
+   sysroot graph, matching crossdev's `<CTARGET>-emerge --root-deps=rdeps`: only
+   RDEPEND/PDEPEND install into the sysroot; build deps resolve on the host
+   toolchain (BDEPEND was already host-routed). Plumbing: new provider flag
+   `root_deps_rdeps` (`set_root_deps_rdeps`), consumed in
+   `cross_target_runtime_deps` (drops `by_class[0]`). Gated in `depgraph/mod.rs`
+   to `cross_arch != host arch` so same-arch offset/stage builds (`--root
+   stage1/`, also `cross.active`) keep DEPEND → target ROOT. **Subtlety:** the
+   synthetic solver root's seed targets live in `by_class[0]` and the root reports
+   `MergeRoot::Target`, so rdeps must be suppressed for `package.is_virtual()` —
+   otherwise it drops the user's requested targets and the whole solve collapses
+   to empty (hit this; fixed with the `&& !package.is_virtual()` guard at both
+   call sites). Unit test `root_deps_rdeps_drops_target_depend` covers on/off.
+
+   **Also found — empty cross plan = missing target VDB.** If `<sysroot>/var/db/pkg`
+   does not exist, the installed loader falls back to the **host** VDB, so
+   host-installed packages (zlib, libpcre2…) wrongly satisfy target requests and
+   the plan comes up empty. `--init-target` now `mkdir -p`s the empty target VDB
+   (`write_sysroot_config`); a fresh sysroot then resolves `[ebuild N ... to
+   <sysroot>/]` correctly. (Manual sysroots need the dir too.)
 
 The cross compiler (`<CHOST>-gcc`/`-ld`) is already on `PATH`, so once
 resolution is fixed the eclass-driven build should follow. NB: cross
@@ -459,10 +472,11 @@ self-inflicted, see "Host stage1 vs target sysroot" above). Only **target**
 packages use the sysroot config + `--root-deps=rdeps`.
 
 **Recommended Stage-B order:** (1) sysroot `repos.conf` in `--init-target`
-[small, FS-only, unblocks repo visibility], then (2) `--root-deps=rdeps` root
-routing [resolver, the real work], then (3) the `<CTARGET>-emerge` wrapper
-[Stage A ergonomics] + verify one leaf target lib builds and `file` reports the
-target arch.
+[DONE, commit 9407925], (2) `--root-deps=rdeps` root routing [DONE — see gap #2;
+keyword-arch fix + rdeps drop + target-VDB dir], then **(3) NEXT: the
+`<CTARGET>-emerge` wrapper / `em --cross <tuple>` entry point** [Stage A
+ergonomics] + verify one leaf target lib actually builds and `file` reports the
+target arch [Stage B build shell].
 
 ## Implementation stages
 

@@ -295,6 +295,12 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         let mut provider =
             PortageDependencyProvider::new_for_targets_with_bdeps(adapter, seeds, solve_with_bdeps);
         provider.set_cross_active(cross.active);
+        // crossdev `--root-deps=rdeps`: only a genuine cross-*arch* build discards
+        // target `DEPEND` from the sysroot graph. Same-arch offset/stage builds
+        // (`--root stage1/`, `cross.active` but `cross_arch == host`) keep
+        // `DEPEND` → target ROOT, so gate on the target arch differing from host.
+        let cross_rdeps = matches!(&cross_arch, Some(ta) if ta != arch);
+        provider.set_root_deps_rdeps(cross_rdeps);
         provider.set_rebuild_tree(emptytree_native);
         // `--deep` and native emptytree bump `:*` deps to the newest slot.
         provider.set_prefer_newest_slot(deep || emptytree_native);

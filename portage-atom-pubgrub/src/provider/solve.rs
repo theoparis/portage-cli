@@ -276,6 +276,7 @@ impl DependencyProvider for PortageDependencyProvider {
                     vd,
                     &self.host_installed,
                     &self.sysroot_installed,
+                    self.root_deps_rdeps && !package.is_virtual(),
                 )));
             }
             let runtime: DependencyConstraints<PortagePackage, PortageVersionSet> = vd.by_class[1]
@@ -306,6 +307,7 @@ impl DependencyProvider for PortageDependencyProvider {
                 vd,
                 &self.host_installed,
                 &self.sysroot_installed,
+                self.root_deps_rdeps && !package.is_virtual(),
             )));
         }
         if self.cross_active && package.merge_root() == MergeRoot::Host && self.with_bdeps {
@@ -347,9 +349,18 @@ fn cross_target_runtime_deps(
     vd: &VersionData,
     host_installed: &HashMap<PortagePackage, HostEntry>,
     _sysroot_installed: &HashMap<PortagePackage, Version>,
+    root_deps_rdeps: bool,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
-    let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd.by_class[0]
-        .iter()
+    // `--root-deps=rdeps` (cross-arch): discard `DEPEND` (class 0) from the
+    // sysroot graph entirely — the cross toolchain + the `RDEPEND` libraries
+    // already in the sysroot cover build-time needs, and a target build dep
+    // cannot install onto the host (wrong arch). Default (offset/same-arch):
+    // keep `DEPEND` → target ROOT.
+    let depend = (!root_deps_rdeps)
+        .then(|| vd.by_class[0].iter())
+        .into_iter()
+        .flatten();
+    let mut out: Vec<(PortagePackage, PortageVersionSet)> = depend
         .chain(vd.by_class[1].iter())
         .chain(vd.by_class[3].iter())
         .map(|(p, vs, _)| (stamp_root(p, MergeRoot::Target), vs.clone()))

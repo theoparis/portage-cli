@@ -223,6 +223,13 @@ pub struct PortageDependencyProvider {
     /// version, see `rank_slots_by_version`). Off by default so plain `-p`/`-up`
     /// stays minimal.
     pub(crate) prefer_newest_slot: bool,
+    /// `--root-deps=rdeps` (crossdev cross builds): discard a target package's
+    /// `DEPEND` from the target-root graph. Only `RDEPEND`/`PDEPEND` install into
+    /// the sysroot; build-time deps resolve against the build host (`/`), where
+    /// the cross toolchain lives. Off by default, and gated to true cross-arch
+    /// invocations by the caller (never native offset/same-arch stage builds,
+    /// which keep `DEPEND` → target ROOT).
+    pub(crate) root_deps_rdeps: bool,
     /// Preferred version (`0`/`1`) for each `UseDecision` node, i.e. the value
     /// the caller's policy would have given the ceded flag.  `choose_version`
     /// biases toward it so a `SolverDecided` flag only flips when a constraint
@@ -540,6 +547,7 @@ impl PortageDependencyProvider {
             with_bdeps,
             rebuild_tree: false,
             prefer_newest_slot: false,
+            root_deps_rdeps: false,
             use_decision_prefer,
             use_decision_meta,
             solved_use_decisions: HashMap::new(),
@@ -644,6 +652,13 @@ impl PortageDependencyProvider {
     /// to the newest slot rather than keeping a satisfying installed slot.
     pub fn set_prefer_newest_slot(&mut self, active: bool) {
         self.prefer_newest_slot = active;
+    }
+
+    /// `--root-deps=rdeps`: drop a target package's `DEPEND` from the sysroot
+    /// graph (crossdev cross-build semantics). The caller gates this to genuine
+    /// cross-arch builds; same-arch offset/stage builds leave it off.
+    pub fn set_root_deps_rdeps(&mut self, active: bool) {
+        self.root_deps_rdeps = active;
     }
 
     fn ensure_host_instances(&mut self) {
@@ -3112,6 +3127,81 @@ mod tests {
             solution
                 .iter()
                 .any(|(p, _)| p.cpn().package.as_str() == "glibc")
+        );
+    }
+
+    /// `--root-deps=rdeps` (crossdev cross builds): a target package's `DEPEND`
+    /// (build-only) is discarded from the sysroot graph, while `RDEPEND` still
+    /// installs into the sysroot. Mirrors crossdev's `<CTARGET>-emerge
+    /// --root-deps=rdeps`, where build deps resolve on the host toolchain and
+    /// only runtime libraries land in the target ROOT.
+    #[test]
+    fn root_deps_rdeps_drops_target_depend() {
+        let slot0 = Interned::intern("0");
+        let mut repo = InMemoryRepository::new();
+        // A build-only dependency (DEPEND, absent from RDEPEND).
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/buildtool-1.0").unwrap(),
+            Some(slot0),
+            None,
+            empty_deps(),
+        );
+        // A runtime library (RDEPEND).
+        repo.add_version(
+            portage_atom::Cpv::parse("sys-libs/runlib-1.0").unwrap(),
+            Some(slot0),
+            None,
+            empty_deps(),
+        );
+        // The target leaf: DEPEND on the build tool, RDEPEND on the runtime lib.
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/leaf-1.0").unwrap(),
+            Some(slot0),
+            None,
+            PackageDeps {
+                depend: DepEntry::parse("dev-build/buildtool").unwrap(),
+                rdepend: DepEntry::parse("sys-libs/runlib").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        // Cross solve at the two `--root-deps` policies.
+        let solve = |rdeps: bool| {
+            let mut repo = repo.clone();
+            repo.set_use_config(UseConfig::new());
+            let mut provider = PortageDependencyProvider::new(repo);
+            provider.set_cross_active(true);
+            provider.set_root_deps_rdeps(rdeps);
+            let leaf = PortagePackage::slotted(Cpn::parse("app-misc/leaf").unwrap(), slot0);
+            provider
+                .resolve_targets(vec![(leaf, PortageVersionSet::any())])
+                .unwrap()
+        };
+        let names = |sol: &SelectedDependencies<PortagePackage, Version>| {
+            sol.iter()
+                .map(|(p, _)| p.cpn().package.as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        // rdeps on: the leaf and its RDEPEND install into the sysroot; the
+        // build-only DEPEND is discarded (resolved on the host toolchain).
+        let on = names(&solve(true));
+        assert!(on.iter().any(|p| p == "leaf"), "leaf itself must resolve");
+        assert!(
+            on.iter().any(|p| p == "runlib"),
+            "rdeps keeps RDEPEND in the sysroot: {on:?}"
+        );
+        assert!(
+            !on.iter().any(|p| p == "buildtool"),
+            "rdeps must discard the target DEPEND (build tool): {on:?}"
+        );
+
+        // rdeps off (the default / same-arch offset build): DEPEND still
+        // installs into the target ROOT.
+        let off = names(&solve(false));
+        assert!(
+            off.iter().any(|p| p == "buildtool"),
+            "without rdeps the target DEPEND stays in the target-root graph: {off:?}"
         );
     }
 

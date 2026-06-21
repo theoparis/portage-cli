@@ -169,6 +169,14 @@ fn write_sysroot_config(target: &CrossTarget, sysroot: &Utf8Path, gentoo: &Utf8P
     let portage = sysroot.join("etc/portage");
     std::fs::create_dir_all(&portage).with_context(|| format!("creating {portage}"))?;
 
+    // Materialise an (empty) target package database. Without it the installed
+    // loader finds no VDB at `<sysroot>/var/db/pkg` and falls back to the host
+    // VDB, so host-installed packages wrongly satisfy target requests and the
+    // cross plan comes up empty. An empty dir = "nothing installed in the
+    // sysroot yet", which is what we want for a fresh target.
+    let vdb = sysroot.join("var/db/pkg");
+    std::fs::create_dir_all(&vdb).with_context(|| format!("creating {vdb}"))?;
+
     write_if_absent(&portage.join("make.conf"), &make_conf_body(target, sysroot))?;
 
     // Link make.profile DIRECTLY (absolute) to the target-arch profile — eselect
