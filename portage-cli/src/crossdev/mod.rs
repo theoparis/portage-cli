@@ -129,13 +129,10 @@ fn step_flags(step: &stages::StageStep) -> String {
     }
 }
 
-/// `PORTAGE_CONFIGROOT` for this invocation (where `repos.conf`/the overlay live).
-fn config_root(globals: &Cli) -> Utf8PathBuf {
-    globals
-        .roots()
-        .config()
-        .unwrap_or_else(|| Utf8Path::new("/"))
-        .to_owned()
+/// `EROOT`/prefix the overlay, `repos.conf`, and `package.env` are written under
+/// (`~/.gentoo` for `--local`), so an unprivileged setup is writable + readable.
+fn setup_root(globals: &Cli) -> Utf8PathBuf {
+    globals.roots().merge_root().to_owned()
 }
 
 /// The target sysroot `<EROOT>/usr/<CTARGET>` (EROOT = `/` by default, the prefix
@@ -179,7 +176,7 @@ fn show_target_cfg(target: &CrossTarget, globals: &Cli) -> Result<()> {
 fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
     let gentoo = main_repo()?;
     let gentoo_path = gentoo.path().to_owned();
-    let overlay = config_root(globals).join("var/db/repos").join(OVERLAY_NAME);
+    let overlay = setup_root(globals).join("var/db/repos").join(OVERLAY_NAME);
     let sysroot = sysroot(target, globals);
 
     write_overlay(target, &overlay, &gentoo_path)?;
@@ -232,17 +229,13 @@ fn write_overlay(target: &CrossTarget, overlay: &Utf8Path, gentoo: &Utf8Path) ->
 /// Register the overlay in `repos.conf` if no entry of that name exists yet
 /// (crossdev/eselect may already provide one — don't duplicate it).
 fn ensure_repos_conf(globals: &Cli, overlay: &Utf8Path) -> Result<()> {
-    let config_root = config_root(globals);
-    let conf_paths = [
-        config_root.join("usr/share/portage/config/repos.conf"),
-        config_root.join("etc/portage/repos.conf"),
-    ];
-    if let Ok(conf) = ReposConf::load_from(&conf_paths)
+    let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
+    if let Ok(conf) = ReposConf::load_from(&[&conf_dir])
         && conf.find(OVERLAY_NAME).is_some()
     {
         return Ok(());
     }
-    let dir = config_root.join("etc/portage/repos.conf");
+    let dir = conf_dir;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {dir}"))?;
     write_if_absent(
         &dir.join(format!("{OVERLAY_NAME}.conf")),
@@ -332,7 +325,7 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli) -> Result<()> {
     const ENV_HEADER: &str =
         "SYMLINK_LIB=no\nCOLLISION_IGNORE=\"${COLLISION_IGNORE} /usr/lib/debug/.build-id\"\n";
 
-    let portage = config_root(globals).join("etc/portage");
+    let portage = setup_root(globals).join("etc/portage");
     let category = target.category();
 
     let env_dir = portage.join("env").join(&category);

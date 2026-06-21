@@ -136,7 +136,15 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             .parent()
             .map(std::path::PathBuf::from)
             .unwrap_or_default();
-        match portage_repo::ReposConf::load() {
+        // Confdir repos.conf, plus the prefix's for `--local`/`--prefix` (so a
+        // `cross-*` overlay under `~/.gentoo` is found without root).
+        let cfg_root = config_root.unwrap_or_else(|| Utf8Path::new("/"));
+        let mut conf_paths: Vec<std::path::PathBuf> =
+            vec![cfg_root.join("etc/portage/repos.conf").into_std_path_buf()];
+        if let Some(overlay) = roots.config_overlay() {
+            conf_paths.push(overlay.join("repos.conf").into_std_path_buf());
+        }
+        match portage_repo::ReposConf::load_from(&conf_paths) {
             Ok(rc) => rc
                 .repos()
                 .iter()
