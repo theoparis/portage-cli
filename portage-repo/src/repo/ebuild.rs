@@ -73,8 +73,10 @@ impl Ebuild {
     /// The CPV is derived from the directory structure:
     /// `<repo>/<category>/<pkg>/<pkg>-<ver>.ebuild`
     pub fn from_path(path: &Utf8Path) -> Result<Self> {
-        let path = path.canonicalize_utf8().unwrap_or_else(|_| path.to_owned());
-
+        // Derive the CPV from the *given* path, not a canonicalized one: the
+        // `cross-*` overlay symlinks `cross-<CTARGET>/pkg` to the real category,
+        // and that overlay category is what the build must use as `CATEGORY`, so
+        // `toolchain.eclass` sets `CTARGET=${CATEGORY#cross-}` and cross-builds.
         let filename = path
             .file_name()
             .ok_or_else(|| Error::Shell("ebuild path has no filename".into()))?;
@@ -94,7 +96,12 @@ impl Ebuild {
         let cpv = Cpv::parse(&cpv_str)
             .map_err(|e| Error::Shell(format!("invalid CPV {cpv_str:?}: {e}")))?;
 
-        Ok(Self::new(cpv, path))
+        // Store the canonical path so `repo_root` (eclasses) and the ebuild dir
+        // (FILESDIR) resolve to the real package, while the CPV keeps the given
+        // overlay category — a `cross-*` symlink reads as the real ebuild but
+        // builds under `cross-<CTARGET>`.
+        let real_path = path.canonicalize_utf8().unwrap_or_else(|_| path.to_owned());
+        Ok(Self::new(cpv, real_path))
     }
 
     /// Repository root inferred from the ebuild path.

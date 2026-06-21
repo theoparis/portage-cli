@@ -865,7 +865,14 @@ impl EbuildShell {
         self.set_var("P", &p);
         self.set_var("PF", &pf);
 
-        let filesdir = self.repo_path.join(category).join(pn).join("files");
+        // FILESDIR is the ebuild's own dir + `files` (PMS), not repo+cat+pn —
+        // they differ only for a `cross-*` symlink, whose real files live with
+        // the symlinked ebuild, under the real category.
+        let filesdir = ebuild
+            .path()
+            .parent()
+            .map(|d| d.join("files"))
+            .unwrap_or_else(|| self.repo_path.join(category).join(pn).join("files"));
         self.set_var("FILESDIR", filesdir.as_str());
 
         // Detect EAPI before sourcing per PMS 7.3.1
@@ -1278,7 +1285,14 @@ impl EbuildShell {
         self.set_var("P", &p);
         self.set_var("PF", &pf);
 
-        let filesdir = self.repo_path.join(category).join(pn).join("files");
+        // FILESDIR is the ebuild's own dir + `files` (PMS), not repo+cat+pn —
+        // they differ only for a `cross-*` symlink, whose real files live with
+        // the symlinked ebuild, under the real category.
+        let filesdir = ebuild
+            .path()
+            .parent()
+            .map(|d| d.join("files"))
+            .unwrap_or_else(|| self.repo_path.join(category).join(pn).join("files"));
         self.set_var("FILESDIR", filesdir.as_str());
 
         let eapi = ebuild.detect_eapi()?;
