@@ -549,6 +549,62 @@ Still TODO for Stage B breadth:
 - A leaf with real deps (confirm RDEPEND libs resolve from the sysroot and
   BDEPEND tools from BROOT during an actual build, not just `-p`).
 
+## `em crossdev --setup` — full cross environment (design, 2026-06-21)
+
+The full cross `--setup` is **two phases** (the user's two items), which crossdev
++ crossdev-stages keep terminologically distinct (`docs/design.md`):
+
+1. **Toolchain creation** → the **crossdev prefix** `/usr/<chost>` on the **host**
+   (`ROOT=/`, config from host). The cross compiler + headers + stage1 libs. This
+   is "Stage C" below (the staged binutils→headers→gcc1→glibc→gcc2 bootstrap).
+   *Not* a sysroot — "sysroot" is reserved for the `--sysroot` compiler flag.
+2. **Sysroot/target-stage creation** → the **target stage** rootfs at `ROOT=/target`,
+   built with `em --cross <tuple>` (= `<chost>-emerge`). Two sub-modes mirroring
+   catalyst: **stage1** (bootstrap: `baselayout` `USE=build` → `packages.build` →
+   `portage`) and **stage3** (`@system`/`@world`). Optionally **seeded** from a
+   target-arch stage3 tarball (the unused `gentoo-stages` downloader).
+
+**Why "both share the stage1/stage3 problems":** each is an *ordered build into a
+root the solver can't fully resolve against* (nothing installed yet), so neither
+is pure solver output. The shared problems, from `cross-stage.sh`:
+- **Ordered, curated build lists** with explicit bootstrap order (not a plain atom
+  set) — the chicken-and-egg (headers-only, `--nodeps`, two-stage gcc/glibc).
+- **`USE=build`** minimal pass for `baselayout`/`portage` (and stage1 gcc USE).
+- **Binpkg** (`-b -k`) to cache+reuse across the staged passes.
+- **Per-root profile selection** (`eselect profile set` on each root).
+- **`merge-usr --root`** (crossdev prefix starts split-usr).
+- **The `--sysroot=$EROOT` LDFLAGS workaround** for hosttools like `perl`.
+
+**The shared abstraction em needs — an ordered `StagePlan` driver.** A `StagePlan`
+is `Vec<StageStep>` where `StageStep { atoms, use_override, env_tag, nodeps,
+binpkg, root }`; the driver runs each step through the *existing* build/merge path
+(the one Stage B verified) against the step's root. Both phases are `StagePlan`
+templates:
+- **toolchain plan** → host config, `ROOT=/`, installs into `/usr/<chost>` via the
+  `cross-*` overlay category; the GCC/LLVM stage list with per-stage `USE` + the
+  `*-stage1`/`*-headers` env tags (`write_cross_env` already lays some down).
+- **sysroot stage1 plan** → `--cross` (config/root = target), `USE=build`
+  baselayout→packages.build→portage; **stage3 plan** → `@system`/`@world`.
+
+**Reuse map (already in em):** the build shell + cross toolchain selection (Stage
+B), `--cross` entry point, `--root-deps=rdeps`, `--init-target` FS setup, the
+completed `Solver` trait, and `gentoo-stages` for the seed tarball. **New:** the
+`StagePlan` type + driver, the two templates, and `-b/-k` binpkg + `USE=build`
+plumbing in the driver.
+
+**Proposed CLI surface** (em owns the build engine + standalone path; crossdev-
+stages stays the rootless-sandbox/image orchestrator that calls em):
+- `em crossdev <tuple> --setup` (alias `--stage4`): toolchain bootstrap into the
+  prefix. `--stage0..--stage3` stop earlier (binutils-only … libc).
+- `em crossdev <tuple> --sysroot[=stage1|stage3] [--seed <stage3.tar>] --root DIR`:
+  build the target stage. (Or fold under `em --cross <tuple> --stage1`.)
+
+**Implementation sequence:** (1) `StagePlan`/`StageStep` + driver over the existing
+merge path; (2) `--nodeps` + per-step `USE` override + `-b/-k` plumbing; (3) the
+toolchain template (Stage C list) → `--setup`; (4) the stage1/stage3 templates →
+`--sysroot`; (5) seed-from-stage3 via `gentoo-stages`. Stage 1+2 are the shared
+core both phases depend on — build it first.
+
 ### Stage C — toolchain bootstrap (the real crossdev workflow) — LARGE
 NB: Stage B built a **leaf lib against an already-bootstrapped toolchain**. The
 toolchain itself needs crossdev's staged bootstrap, which em does NOT yet do —
