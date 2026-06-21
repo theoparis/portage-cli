@@ -550,14 +550,42 @@ Still TODO for Stage B breadth:
   BDEPEND tools from BROOT during an actual build, not just `-p`).
 
 ### Stage C — toolchain bootstrap (the real crossdev workflow) — LARGE
-Drive the staged builds above. Split by model:
-- **LLVM first** (simpler): headers → target libc (glibc/musl) +
-  `compiler-rt`/`libunwind`/`libc++` into the sysroot, all with host clang. A
-  working `<triple>` sysroot you can `clang --target` against.
-- **GCC**: the binutils→headers→gcc1→libc→gcc2 sequence with the stage1/stage2
-  USE toggling driven by em (crossdev replicates portage policy here).
-Decide how em expresses "build me a `<triple>` toolchain" — a set/meta target
-(`@cross-toolchain`?) vs explicit package list vs a `--toolchain` mode.
+NB: Stage B built a **leaf lib against an already-bootstrapped toolchain**. The
+toolchain itself needs crossdev's staged bootstrap, which em does NOT yet do —
+it is the chicken-and-egg part (a compiler needs a libc, a libc needs a
+compiler). em's plain dependency solver can't express it; it needs an explicit
+**ordered bootstrap driver** with per-stage USE/env, mirroring crossdev.
+
+**Canonical crossdev GCC sequence** (`/usr/bin/crossdev` `doemerge` loop,
+lines ~1939-2049), staged `is_s0..is_s4`:
+1. **binutils** (`USE=${BUSE}`) — the assembler/linker, no compiler yet.
+2. **stage1 (bare C compiler)**: first **kernel-headers** (`headers-only`) then
+   **libc headers** — glibc with `USE="headers-only"` **and `--nodeps`** to break
+   the glibc→newer-gcc dep cycle (`${LPKG}-headers`). Then **gcc-stage1**
+   (`${GPKG}-stage1`) with `GUSE_DISABLE_STAGE_1 = -fortran -d -go -jit -cxx
+   -openmp -sanitize -zstd -zlib …`: a freestanding C compiler, no libc.
+3. **stage2 (kernel headers)**: full `linux-headers` (`${KPKG}-stage1/stage2`).
+4. **stage3 (libc)**: full **glibc/musl**, compiled by gcc-stage1.
+5. **stage4 (full compiler)**: **gcc-stage2** (`${GPKG}-stage2`,
+   `GUSE_DISABLE_STAGE_2 = … -sanitize`) linked against the just-built libc; the
+   final `<triple>-gcc`. (LLVM model: `compiler-rt` at stage1, then
+   `libunwind`/`libcxxabi`/`libcxx` at stage4 — no two-stage gcc.)
+
+Two bootstrap tricks em must reproduce: **two-stage glibc** (headers-only →
+full) and **two-stage gcc** (stage1 no-libc → stage2 full). crossdev expresses
+the per-stage build via `USE="…" doemerge ${PKG} ${PKG}-stageN`, where the
+`-stageN` tag selects a `/etc/portage/env/<cat>/<pkg>` file crossdev wrote
+(`*-stage1`/`*-headers`/`*-quick`). em equivalent: drive the same ordered list
+with per-step USE overrides + the cross env files (`write_cross_env` already lays
+some down), gated `--root-deps=rdeps` + `--nodeps` where crossdev uses them.
+
+**LLVM first** (simpler, no two-stage gcc): headers → target libc (glibc/musl) +
+`compiler-rt`/`libunwind`/`libc++` into the sysroot, all with host clang.
+
+Decide how em expresses "build me a `<triple>` toolchain" — a `--toolchain`/
+`--stageN` mode on `em crossdev` (closest to crossdev) vs a set/meta target
+(`@cross-toolchain`). Leaning `em crossdev <t> --stage4` driving the ordered
+list, since the per-stage USE/env doesn't fit a plain atom set.
 
 ### Stage D — true dual-root scheduling — LARGE, deferred
 Independent `PackageData` per root so a CPV needing both host-native and
