@@ -495,18 +495,41 @@ and otherwise bails with `run: em crossdev -t <tuple> --init-target`. Tests:
 → `[ebuild N] ... to <eroot>/usr/<t>/`, header shows
 `CHOST=riscv64-… CBUILD=aarch64-…`.
 
-Not (yet) set by `--cross`, deferred to Stage B's build shell: the **build-time**
-env `CHOST/CBUILD/SYSROOT/ESYSROOT/BROOT` + compiler on PATH. `--cross` only does
-config/root location today; that is enough for `-p` and for resolution.
+**Correction (the build shell already sources our confdir):** the build-time env
+is NOT a separate Stage-B task — it falls out of the existing merge path once
+`--cross` points config/root at the sysroot:
+- `ebuild.rs` `apply_profile_env(config_root=…/usr/<tuple>)` sources the sysroot
+  make.defaults chain + make.conf, so phases see **CHOST, CBUILD, target
+  CFLAGS/LDFLAGS, ABI, USE_EXPAND** — straight from the make.conf `--init-target`
+  wrote. The cross `package.env`/`env/*.conf` is sourced too.
+- `set_build_roots(config_root, build_sysroot=None, eprefix=None)`: with
+  `config == base == target` (build_sysroot None), `shell.rs` sets
+  `SYSROOT = ESYSROOT = ROOT = <sysroot>` and `BROOT = "/"` — exactly crossdev's
+  `SYSROOT=ESYSROOT=ROOT=/usr/<CHOST>`, `BROOT=/`. `econf` then passes
+  `--host=$CHOST --build=$CBUILD`.
+- `${CHOST}-gcc` (`tc-getCC`) is already on the host PATH from the installed
+  `cross-<tuple>/gcc`.
+
+So Stage B is not env wiring — it is just *running a real build and verifying*:
+the toolchain is installed, the compiler is actually invoked cross, and the
+artifact is the target arch (`file`). Watch for the genuine gaps: BDEPEND build
+tools resolving on BROOT (already handled by the dual-root solver + `--root-deps
+=rdeps`), and the cross toolchain PATH when it is NOT in `/usr/bin` (LLVM
+`--target`/`--sysroot` model).
 
 ### Stage B — cross builder (one target package end-to-end) — MEDIUM
-The novel piece: the build shell (`ebuild.rs run_phase`) for a target task sets
-`CHOST/CBUILD/SYSROOT/ESYSROOT/BROOT` and puts the right compiler on PATH:
-- **GCC**: `<triple>-gcc` from the installed `cross-<triple>` toolchain.
-- **LLVM**: host `clang --target=<triple> --sysroot=$ESYSROOT`, `lld`.
-Prove it by cross-building a single leaf target lib into `/usr/<CHOST>` (e.g.
-`cross-riscv64-unknown-linux-gnu/zlib`-style) and checking the artifact is the
-target arch (`file`). Validates env + toolchain wiring before the toolchain dance.
+**The env is already wired** (see the Stage-A correction above): `--cross` →
+config/root = sysroot → make.conf supplies CHOST/CBUILD/CFLAGS, `set_build_roots`
+supplies SYSROOT=ESYSROOT=ROOT + BROOT=/. So Stage B is *verification + gap
+closing*, not env plumbing:
+- **GCC**: `<triple>-gcc` from the installed `cross-<triple>` toolchain — already
+  on PATH, picked up via `tc-getCC` = `${CHOST}-gcc`.
+- **LLVM**: host `clang --target=<triple> --sysroot=$ESYSROOT`, `lld` — this DOES
+  need wiring (no `<triple>-clang` unless `clang-crossdev-wrappers` is installed).
+Prove it by cross-building a single leaf target lib into `<sysroot>` (e.g. zlib)
+with the host toolchain installed, then `file` the artifact = target arch. That
+flushes out the real gaps (PATH, BDEPEND-on-BROOT, sandbox paths) without the
+toolchain bootstrap.
 
 ### Stage C — toolchain bootstrap (the real crossdev workflow) — LARGE
 Drive the staged builds above. Split by model:
