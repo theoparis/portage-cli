@@ -480,15 +480,24 @@ target arch [Stage B build shell].
 
 ## Implementation stages
 
-### Stage A — cross entry point (`{target}-emerge` equivalent) — SMALL
-Recognise a cross invocation and wire the location vars from the crossdev config:
-- trigger: argv0 `<tuple>-emerge`, or an explicit `em --cross <tuple>` (decide;
-  argv0 matches portage, `--cross` is friendlier).
-- set `CHOST=<tuple>`, `CBUILD=<host tuple>`, `SYSROOT=ESYSROOT=/usr/<CHOST>`,
-  `BROOT=/`, `ROOT=/usr/<CHOST>/` (overridable), `PORTAGE_CONFIGROOT=/usr/<CHOST>`.
-- today this is hand-driven as `em -p --root /usr/<CHOST> --config-root
-  /usr/<CHOST>`; Stage A makes it a real entry point. Mostly config plumbing in
-  the cli + `root_aware.rs`/`overlay.rs`.
+### Stage A — cross entry point (`{target}-emerge` equivalent) — DONE (2026-06-21)
+Implemented as a global `--cross <tuple>` flag (chose the flag over argv0
+`<tuple>-emerge`: friendlier, and em has no per-target symlinks). It is **sugar**
+over the existing root model: `Cli::roots()` layers the cross sysroot
+`<EROOT>/usr/<tuple>` on top of `base_roots()` as `config == base == target`
+(crossdev's `PORTAGE_CONFIGROOT == ROOT == SYSROOT`). `<EROOT>` still comes from
+`--local`/`--prefix`/`--root`, so `em --local --cross <t>` targets
+`~/.gentoo/usr/<t>`. CHOST/CBUILD + `--root-deps=rdeps` then fall out of the
+existing `root_aware::detect` (reads the sysroot make.conf) — no extra plumbing.
+`run_emerge` pre-flights the sysroot (`<sysroot>/etc/portage/make.conf` exists)
+and otherwise bails with `run: em crossdev -t <tuple> --init-target`. Tests:
+`cli::tests::cross_*`. Verified live: `em --root <eroot> --cross <t> -p zlib`
+→ `[ebuild N] ... to <eroot>/usr/<t>/`, header shows
+`CHOST=riscv64-… CBUILD=aarch64-…`.
+
+Not (yet) set by `--cross`, deferred to Stage B's build shell: the **build-time**
+env `CHOST/CBUILD/SYSROOT/ESYSROOT/BROOT` + compiler on PATH. `--cross` only does
+config/root location today; that is enough for `-p` and for resolution.
 
 ### Stage B — cross builder (one target package end-to-end) — MEDIUM
 The novel piece: the build shell (`ebuild.rs run_phase`) for a target task sets

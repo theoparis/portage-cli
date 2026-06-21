@@ -164,6 +164,14 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     pub vdb: Option<String>,
 
+    /// Cross-build for a crossdev target tuple: resolve/install into the target
+    /// sysroot `<EROOT>/usr/<TUPLE>` (the crossdev `<TUPLE>-emerge` entry point).
+    /// Sugar for `--config-root <sysroot> --root <sysroot>`; the cross context
+    /// (CHOST/CBUILD, `--root-deps=rdeps`) is read from the sysroot make.conf.
+    /// Set the target up first with `em crossdev -t <TUPLE> --init-target`.
+    #[arg(long, value_name = "TUPLE", global = true)]
+    pub cross: Option<String>,
+
     #[command(subcommand)]
     pub applet: Option<Applet>,
 
@@ -259,7 +267,31 @@ fn home_dir() -> camino::Utf8PathBuf {
 
 impl Cli {
     /// Resolve the root model (docs/root-model.md) from the global flags.
+    ///
+    /// `--cross <tuple>` layers on top of the base model: it targets the crossdev
+    /// sysroot `<EROOT>/usr/<tuple>` as both config-root and root (crossdev's
+    /// `PORTAGE_CONFIGROOT == ROOT == SYSROOT`). The `<EROOT>` it sits under still
+    /// comes from `--local`/`--prefix`/`--root`, so `em --local --cross <t>`
+    /// targets `~/.gentoo/usr/<t>`.
     pub fn roots(&self) -> Roots {
+        let base = self.base_roots();
+        let Some(tuple) = self.cross.as_deref() else {
+            return base;
+        };
+        let sysroot = base.merge_root().join("usr").join(tuple);
+        Roots {
+            config: Some(sysroot.clone()),
+            base: Some(sysroot.clone()),
+            target: Some(sysroot),
+            eprefix: None,
+            config_overlay: None,
+            relocate: false,
+        }
+    }
+
+    /// The root model from `--local`/`--prefix`/`--root`/`--config-root`, before
+    /// any `--cross` sysroot override (see [`roots`](Self::roots)).
+    fn base_roots(&self) -> Roots {
         let path = |s: &Option<String>| s.as_deref().map(camino::Utf8PathBuf::from);
         // `--local`: in-place Gentoo-Prefix at ~/.gentoo. Profile/make.conf come
         // from the host; ~/.gentoo/etc/portage overlays package.use/bashrc.
@@ -318,6 +350,50 @@ impl Cli {
             }
             _ => vec![std::path::PathBuf::from("/var/db/repos/gentoo")],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cross_targets_sysroot_under_eroot() {
+        // `--cross` sits under the `--root` EROOT and pins config == base ==
+        // target to `<EROOT>/usr/<tuple>` (PORTAGE_CONFIGROOT == ROOT == SYSROOT).
+        let cli = Cli::parse_from([
+            "em",
+            "--root",
+            "/srv/x",
+            "--cross",
+            "riscv64-unknown-linux-gnu",
+            "-p",
+            "sys-libs/zlib",
+        ]);
+        let r = cli.roots();
+        let sysroot = "/srv/x/usr/riscv64-unknown-linux-gnu";
+        assert_eq!(r.config().unwrap().as_str(), sysroot);
+        assert_eq!(r.merge_root().as_str(), sysroot);
+        assert_eq!(r.base().unwrap().as_str(), sysroot);
+        assert_eq!(r.config(), r.target());
+    }
+
+    #[test]
+    fn cross_defaults_to_root_eroot() {
+        // No `--root`: EROOT is `/`, so the sysroot is `/usr/<tuple>`.
+        let cli = Cli::parse_from(["em", "--cross", "riscv64-unknown-linux-gnu", "-p", "zlib"]);
+        assert_eq!(
+            cli.roots().merge_root().as_str(),
+            "/usr/riscv64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn no_cross_keeps_base_roots() {
+        let cli = Cli::parse_from(["em", "-p", "sys-libs/zlib"]);
+        let r = cli.roots();
+        assert_eq!(r.config(), None);
+        assert_eq!(r.merge_root().as_str(), "/");
     }
 }
 

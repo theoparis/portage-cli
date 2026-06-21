@@ -149,6 +149,18 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
     // --prefix overlay), installed view = VDB(base) ∪ VDB(target), and the
     // plan installs into target.
     let roots = cli.roots();
+    // `--cross <tuple>` targets `<EROOT>/usr/<tuple>`; fail early with a setup
+    // hint if that sysroot has not been laid down by `em crossdev --init-target`
+    // (otherwise the profile/make.conf read fails with an opaque ENOENT).
+    if let Some(tuple) = cli.cross.as_deref() {
+        let cfg = roots.config().unwrap_or_else(|| camino::Utf8Path::new("/"));
+        if !cfg.join("etc/portage/make.conf").exists() {
+            bail!(
+                "cross target '{tuple}' is not set up at {cfg}\n  \
+                 run: em crossdev -t {tuple} --init-target"
+            );
+        }
+    }
     // Expand @set references (e.g. @system, @world) to concrete atoms before
     // resolution. Sets are read from the config root's profile (@system) and
     // the merge target (@world/@selected, user sets).
