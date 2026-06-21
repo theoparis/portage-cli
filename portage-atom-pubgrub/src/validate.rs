@@ -382,32 +382,6 @@ pub(crate) fn blocker_cpn_slot_matches(sol_pkg: &PortagePackage, blocker: &Dep) 
     }
 }
 
-/// Return true if `dep` matches `cpv` — used for package.mask / package.use matching.
-///
-/// `slot` is the slot of the candidate package.  When the dep atom names a
-/// slot (e.g. `:0`), only packages in that slot match — mirroring portage's
-/// `_match_slot` logic in `match_from_list`.  Bare slot operators (`:=`,
-/// `:*`) carry no slot constraint and are ignored here.
-pub(crate) fn dep_matches_cpv(
-    dep: &portage_atom::Dep,
-    cpv: &portage_atom::Cpv,
-    slot: Option<Interned<DefaultInterner>>,
-) -> bool {
-    if dep.cpn != cpv.cpn {
-        return false;
-    }
-    if let Some(portage_atom::SlotDep::Slot { slot: Some(s), .. }) = &dep.slot_dep
-        && slot != Some(s.slot)
-    {
-        return false;
-    }
-    match (dep.op, &dep.version) {
-        (None, None) => true,
-        (Some(op), Some(ver)) => version_matches_operator(&cpv.version, op, dep.glob, ver),
-        _ => false,
-    }
-}
-
 pub(crate) fn version_matches_operator(
     candidate: &Version,
     op: portage_atom::Operator,

@@ -6,16 +6,9 @@ use portage_atom::{Cpn, Cpv, Version};
 use crate::required_use::RequiredUse;
 use crate::use_config::UseConfig;
 
-/// Default state for an IUSE flag, from the `+`/`-` prefix in IUSE.
-///
-/// See [PMS 7.2](https://projects.gentoo.org/pms/9/pms.html#mandatory-ebuilddefined-variables).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum IUseDefault {
-    /// `+flag` — enabled by default.
-    Enabled,
-    /// `-flag` — disabled by default.
-    Disabled,
-}
+// `IUseDefault` (the `+`/`-` IUSE default state) is shared vocabulary, defined
+// once in `portage-solver`.
+pub use portage_solver::IUseDefault;
 
 /// Metadata for a single ebuild version, including its dependency trees.
 #[derive(Clone)]
