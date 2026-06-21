@@ -27,8 +27,12 @@ use crate::{
 
 impl Solver for PortageDependencyProvider {
     fn add_installed(&mut self, pkg: SolverInstalled) {
+        let package = to_portage_package(pkg.cpn, pkg.slot);
+        if !pkg.blockers.is_empty() {
+            self.add_installed_blockers(&package, &pkg.blockers);
+        }
         let pg = InstalledPackage {
-            package: to_portage_package(pkg.cpn, pkg.slot),
+            package,
             version: pkg.version,
             policy: map_installed_policy(pkg.policy),
             active_use: pkg.active_use,

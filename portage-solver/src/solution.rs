@@ -111,6 +111,10 @@ pub struct InstalledPackage {
     pub active_use: Vec<Interned<DefaultInterner>>,
     /// IUSE flags declared by the installed instance.
     pub iuse: Vec<Interned<DefaultInterner>>,
+    /// Blocker atoms (`!foo`/`!!foo`) this installed instance declares, so the
+    /// solver can report a conflict if the plan would co-install a blocked
+    /// package. Empty for most packages.
+    pub blockers: Vec<crate::Dep>,
 }
 
 /// A resolve target, in already-resolved form (the consumer's slot/version
