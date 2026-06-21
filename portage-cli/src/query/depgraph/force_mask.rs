@@ -8,8 +8,8 @@
 //! them onto a package's effective USE.
 //!
 //! The `.stable.*` files only influence a package "merged due to a stable
-//! keyword" (portage(5)); [`is_stable`] reproduces Portage's
-//! `KeywordsManager.isStable`. On a `~arch` `ACCEPT_KEYWORDS` every package is
+//! keyword" (portage(5)); the caller passes that `stable` decision in (Portage's
+//! `KeywordsManager.isStable`). On a `~arch` `ACCEPT_KEYWORDS` every package is
 //! merged via an unstable keyword, so the stable sets never apply there — they
 //! matter on pure-stable systems.
 //!

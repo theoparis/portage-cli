@@ -54,18 +54,18 @@ pub trait Solver {
 
     /// crossdev `--root-deps=rdeps`: discard a target package's `DEPEND` from the
     /// sysroot graph (build deps resolve against the host toolchain, not the
-    /// target ROOT). Only meaningful under [`set_cross_active`]. Default no-op.
+    /// target ROOT). Only meaningful under [`set_cross_active`](Self::set_cross_active). Default no-op.
     fn set_root_deps_rdeps(&mut self, _active: bool) {}
 
     /// Register a package present on the build host (`BROOT`, `/`) so a
     /// host-satisfied `BDEPEND`/`IDEPEND` edge is not rebuilt into the plan.
-    /// Only meaningful under [`set_cross_active`]. Default no-op.
+    /// Only meaningful under [`set_cross_active`](Self::set_cross_active). Default no-op.
     /// ([`InstalledPackage::policy`] is ignored for host/sysroot registrations.)
     fn add_host_installed(&mut self, _pkg: InstalledPackage) {}
 
     /// Register a package present in the cross sysroot (`ESYSROOT`) so a
     /// sysroot-satisfied `DEPEND` is not rebuilt. Only meaningful under
-    /// [`set_cross_active`]. Default no-op.
+    /// [`set_cross_active`](Self::set_cross_active). Default no-op.
     fn add_sysroot_installed(&mut self, _pkg: InstalledPackage) {}
 
     /// Run the resolve. All targets are solved together in one joint solve over

@@ -692,7 +692,8 @@ impl PortageDependencyProvider {
     }
 
     /// `--nodeps` (emerge `-O`): merge only the named targets, no dependency
-    /// expansion (see the [`nodeps`](Self::nodeps) field).
+    /// expansion. A real package then reports no dependencies, so the solve
+    /// resolves the requested atoms to versions and nothing else.
     pub fn set_nodeps(&mut self, active: bool) {
         self.nodeps = active;
     }
