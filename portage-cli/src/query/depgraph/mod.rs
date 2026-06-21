@@ -743,18 +743,20 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 HashMap::new()
             };
             output::print_pretty_rooted(
-                &data,
+                &output::PrettyCtx {
+                    data: &data,
+                    installed: &installed,
+                    installed_entries: &target_installed,
+                    use_config: &use_config,
+                    package_use: &package_use,
+                    use_expand: &use_expand,
+                    use_expand_hidden: &use_expand_hidden,
+                    flag_reqs: &flag_reqs,
+                    sizes: &sizes,
+                    slot_op_cpns: &slot_op_cpns,
+                    verbose,
+                },
                 &plan_entries,
-                &installed,
-                &target_installed,
-                &use_config,
-                &package_use,
-                &use_expand,
-                &use_expand_hidden,
-                &flag_reqs,
-                &sizes,
-                &slot_op_cpns,
-                verbose,
                 &cross,
             )
         }

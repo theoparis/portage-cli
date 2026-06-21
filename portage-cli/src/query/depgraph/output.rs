@@ -593,22 +593,28 @@ fn format_kib(bytes: u64) -> String {
     format!("{} KiB", bytes.div_ceil(1024))
 }
 
+/// Shared render inputs for the pretty plan printers: the resolved package data
+/// plus all the USE / size / flag-requirement context. Bundled so the rooted and
+/// per-entry printers don't thread a dozen positional args each.
+pub(super) struct PrettyCtx<'a> {
+    pub data: &'a RepoData,
+    pub installed: &'a HashMap<Cpn, HashMap<String, Version>>,
+    pub installed_entries: &'a [super::installed::VdbEntry],
+    pub use_config: &'a UseConfig,
+    pub package_use: &'a [(Dep, Vec<UseOverride>)],
+    pub use_expand: &'a [String],
+    pub use_expand_hidden: &'a [String],
+    pub flag_reqs: &'a HashMap<&'a PortagePackage, &'a UseFlagRequirement>,
+    pub sizes: &'a HashMap<Cpv, u64>,
+    pub slot_op_cpns: &'a std::collections::HashSet<Cpn>,
+    pub verbose: u8,
+}
+
 /// Print the emerge-style pretty plan, honouring each entry's
 /// [`MergeRoot`](portage_atom_pubgrub::MergeRoot) (cross/host split).
-#[allow(clippy::too_many_arguments)]
 pub(super) fn print_pretty_rooted(
-    data: &RepoData,
+    ctx: &PrettyCtx,
     plan: &[super::root_aware::PlanEntry],
-    installed: &HashMap<Cpn, HashMap<String, Version>>,
-    installed_entries: &[super::installed::VdbEntry],
-    use_config: &UseConfig,
-    package_use: &[(Dep, Vec<UseOverride>)],
-    use_expand: &[String],
-    use_expand_hidden: &[String],
-    flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
-    sizes: &HashMap<Cpv, u64>,
-    slot_op_cpns: &std::collections::HashSet<Cpn>,
-    verbose: u8,
     cross: &super::root_aware::CrossContext,
 ) {
     if cross.active && cross.is_cross_arch() {
@@ -627,10 +633,17 @@ pub(super) fn print_pretty_rooted(
         .map(|e| (e.pkg.clone(), e.version.clone()))
         .collect();
     let merge_roots: Vec<_> = plan.iter().map(|e| e.merge_root).collect();
-    print_pretty_with_roots(
+    print_pretty_with_roots(ctx, &order, &merge_roots, cross);
+}
+
+fn print_pretty_with_roots(
+    ctx: &PrettyCtx,
+    order: &[(PortagePackage, Version)],
+    merge_roots: &[portage_atom_pubgrub::MergeRoot],
+    cross: &super::root_aware::CrossContext,
+) {
+    let &PrettyCtx {
         data,
-        &order,
-        &merge_roots,
         installed,
         installed_entries,
         use_config,
@@ -641,27 +654,7 @@ pub(super) fn print_pretty_rooted(
         sizes,
         slot_op_cpns,
         verbose,
-        cross,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn print_pretty_with_roots(
-    data: &RepoData,
-    order: &[(PortagePackage, Version)],
-    merge_roots: &[portage_atom_pubgrub::MergeRoot],
-    installed: &HashMap<Cpn, HashMap<String, Version>>,
-    installed_entries: &[super::installed::VdbEntry],
-    use_config: &UseConfig,
-    package_use: &[(Dep, Vec<UseOverride>)],
-    use_expand: &[String],
-    use_expand_hidden: &[String],
-    flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
-    sizes: &HashMap<Cpv, u64>,
-    slot_op_cpns: &std::collections::HashSet<Cpn>,
-    verbose: u8,
-    cross: &super::root_aware::CrossContext,
-) {
+    } = ctx;
     let mut out = anstream::stdout();
 
     writeln!(
