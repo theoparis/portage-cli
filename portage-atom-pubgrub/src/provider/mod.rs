@@ -144,8 +144,11 @@ pub struct DroppedDep {
     pub package: PortagePackage,
     /// The version range that was requested.
     pub version_set: PortageVersionSet,
-    /// Other real packages in the same `||` group that were available.
-    /// Empty when the dep was not inside a `||` (direct unconditional dep).
+    /// Sibling branches in the same `||` group that are available (a real
+    /// package, or a `SlotChoice`/`Choice` virtual when the sibling branch is
+    /// multi-slot or itself a nested group). Empty when the dep was not inside a
+    /// `||`, or when every sibling is also unavailable — only then is the dropped
+    /// dep a genuine autounmask candidate.
     pub alternatives: Vec<PortagePackage>,
 }
 
@@ -496,8 +499,14 @@ impl PortageDependencyProvider {
         // problem unsolvable.
         let known: HashSet<PortagePackage> = packages.keys().cloned().collect();
 
-        // Build a map from each real package to the other real packages in the
-        // same || group (Choice node).  Used to populate DroppedDep::alternatives.
+        // Build a map from each branch of a || group (Choice node) to its sibling
+        // branches.  Used to populate DroppedDep::alternatives so a dropped branch
+        // with an available sibling is not reported by autounmask.  Virtual
+        // siblings are kept: a multi-slot branch (e.g. `>=sys-devel/gcc-6.2` over
+        // gcc's many slots) is represented as a `SlotChoice` node, and its
+        // presence in `known` is exactly the "an alternative is available" signal
+        // — dropping it left a single-version sibling (e.g. `llvm-runtimes/libgcc`,
+        // masked for this arch) looking alternative-less and falsely reported.
         let mut or_alternatives: HashMap<PortagePackage, Vec<PortagePackage>> = HashMap::new();
         for (pkg, data) in packages.iter_mut() {
             if !matches!(pkg, PortagePackage::Choice { .. }) {
@@ -509,9 +518,7 @@ impl PortageDependencyProvider {
                     let taken = std::mem::take(constraints);
                     let items: Vec<_> = taken.into_iter().collect();
                     for (dep, _) in &items {
-                        if !dep.is_virtual() {
-                            branch_deps.push(dep.clone());
-                        }
+                        branch_deps.push(dep.clone());
                     }
                     *constraints = items.into_iter().collect();
                 }
@@ -1514,6 +1521,55 @@ mod tests {
         assert!(
             !in_solution("dev-libs/not-installed"),
             "non-installed alternative should not be chosen"
+        );
+    }
+
+    /// A dropped `||` branch must keep a *multi-slot* sibling as an alternative.
+    /// Regression for glibc's `BDEPEND=|| ( >=sys-devel/gcc-6.2
+    /// >=llvm-runtimes/libgcc-18 )`: gcc is multi-slot (a `SlotChoice` virtual),
+    /// llvm-runtimes/libgcc is masked for the arch (dropped). The dropped branch
+    /// was recorded with no alternatives — because sibling collection skipped
+    /// virtual nodes — so autounmask falsely reported it as needing an unmask.
+    #[test]
+    fn dropped_or_branch_keeps_multislot_sibling() {
+        let mut repo = InMemoryRepository::new();
+        // gcclike: two slots → the `>=…-1` branch becomes a SlotChoice virtual.
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-libs/gcclike-1.0").unwrap(),
+            Some(Interned::intern("1")),
+            None,
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-libs/gcclike-2.0").unwrap(),
+            Some(Interned::intern("2")),
+            None,
+            empty_deps(),
+        );
+        // llvmlike is absent from the repo → the other branch drops.
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/consumer-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                depend: DepEntry::parse("|| ( >=dev-libs/gcclike-1 dev-libs/llvmlike )").unwrap(),
+                ..empty_deps()
+            },
+        );
+        let provider = {
+            repo.set_use_config(UseConfig::new());
+            PortageDependencyProvider::new(repo)
+        };
+
+        let dropped = provider
+            .dropped_deps()
+            .iter()
+            .find(|d| d.package.cpn().package.as_str() == "llvmlike")
+            .expect("llvmlike should be a dropped dep");
+        assert!(
+            !dropped.alternatives.is_empty(),
+            "the dropped llvmlike branch must keep the multi-slot gcclike sibling \
+             as an alternative (so autounmask does not falsely report it)"
         );
     }
 
