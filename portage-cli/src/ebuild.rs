@@ -9,7 +9,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use portage_distfiles::{DistfileResolver, FetchConfig, FetchStatus, Fetcher};
 use portage_metadata::SrcUriEntry;
 use portage_repo::{
-    DEFAULT_MAKE_CONF, Ebuild, EbuildEnv, LEGACY_MAKE_CONF, MakeConf, Manifest, Repository,
+    DEFAULT_MAKE_CONF, Ebuild, EbuildEnv, LEGACY_MAKE_CONF, MakeConf, Manifest, ReposConf,
+    Repository,
 };
 use portage_vdb::{ContentsEntry, ContentsKind, InstalledPackage, MergeSpec, Vdb};
 
@@ -182,6 +183,49 @@ pub async fn build_and_merge(
     .with_context(|| format!("build log: {log}"))
 }
 
+/// Resolve a repo's master repositories (depth-first), so eclasses inherited
+/// from a master are found. Master locations come from `repos.conf` by name,
+/// falling back to a sibling of `repo_root`. Masters that can't be opened are
+/// skipped with a warning rather than aborting the build.
+fn resolve_masters(
+    repo: &Repository,
+    repo_root: &Utf8Path,
+    conf: Option<&ReposConf>,
+) -> Vec<Repository> {
+    fn recurse(
+        repo: &Repository,
+        repo_root: &Utf8Path,
+        conf: Option<&ReposConf>,
+        out: &mut Vec<Repository>,
+        seen: &mut HashSet<String>,
+    ) {
+        for name in &repo.layout().masters {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let location = conf
+                .and_then(|c| c.find(name))
+                .map(|e| Utf8PathBuf::from_path_buf(e.location.clone()).unwrap_or_default())
+                .filter(|p| !p.as_str().is_empty())
+                .unwrap_or_else(|| repo_root.parent().unwrap_or(repo_root).join(name));
+            match Repository::open(location.as_std_path()) {
+                Ok(master) => {
+                    recurse(&master, &location, conf, out, seen);
+                    out.push(master);
+                }
+                Err(e) => {
+                    eprintln!("warning: master repo '{name}' for {repo_root} unavailable: {e}");
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    seen.insert(repo.name().to_string());
+    recurse(repo, repo_root, conf, &mut out, &mut seen);
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_inner(
     ebuild_path: &str,
@@ -211,6 +255,17 @@ async fn run_inner(
     let repo = Repository::open(repo_root.as_std_path())
         .with_context(|| format!("opening repo at {repo_root}"))?;
 
+    // Cross-* packages sidestep masters (they symlink into gentoo, so
+    // `repo_root` already is gentoo), but plain overlays inherit a master's
+    // eclasses and need its tree resolved — see `resolve_masters`.
+    let repos_conf = {
+        let cr = config_root.unwrap_or_else(|| Utf8Path::new("/"));
+        let overlay = eprefix.map(|e| e.join("etc/portage"));
+        let extra: Vec<&Utf8Path> = overlay.as_deref().into_iter().collect();
+        ReposConf::load_rooted(cr, &extra).ok()
+    };
+    let masters = resolve_masters(&repo, &repo_root, repos_conf.as_ref());
+
     let work_root = match work_dir {
         Some(p) => p.to_owned(),
         None => {
@@ -219,7 +274,11 @@ async fn run_inner(
         }
     };
 
-    let mut shell = repo.shell().await.context("creating shell")?;
+    let master_refs: Vec<&Repository> = masters.iter().collect();
+    let mut shell = repo
+        .shell_with_masters(&master_refs)
+        .await
+        .context("creating shell")?;
     if let Some(dir) = distdir {
         shell.set_distdir(dir.to_owned());
     }

@@ -797,16 +797,6 @@ impl EbuildShell {
         self.sync_eclass_dirs_var();
     }
 
-    /// Prepend an eclass directory (searched before existing dirs).
-    ///
-    /// Used to add master repository eclass directories so they are
-    /// searched before the overlay's own eclasses.
-    pub fn prepend_eclass_dir(&mut self, dir: Utf8PathBuf) {
-        self.invalidate_baseline();
-        self.eclass_dirs.insert(0, dir);
-        self.sync_eclass_dirs_var();
-    }
-
     /// Update the `__PORTAGE_ECLASS_DIRS` shell variable to reflect the
     /// current set of eclass directories.  Called after any mutation of
     /// [`Self::eclass_dirs`].
@@ -2002,14 +1992,17 @@ impl Repository {
 
     /// Create an [`EbuildShell`] with master repository eclass directories.
     ///
-    /// Master eclass directories are prepended (searched first).
+    /// The repo's own `eclass/` is searched first; masters follow as fallback,
+    /// in reverse `masters` order. This matches portage, where a repo's own
+    /// eclass overrides its masters' and later masters override earlier ones
+    /// (`eclass_locations = [master1, …, masterN, own]`, last-writer-wins).
     /// See [PMS 4.7](https://projects.gentoo.org/pms/9/pms.html#tree-layout).
     pub async fn shell_with_masters(&self, masters: &[&Repository]) -> Result<EbuildShell> {
         let mut shell = EbuildShell::new(self).await?;
         for master in masters.iter().rev() {
             let dir = master.path().join("eclass");
             if dir.is_dir() {
-                shell.prepend_eclass_dir(dir);
+                shell.add_eclass_dir(dir);
             }
         }
         Ok(shell)
@@ -2026,7 +2019,7 @@ impl Repository {
         for master in masters.iter().rev() {
             let dir = master.path().join("eclass");
             if dir.is_dir() {
-                shell.prepend_eclass_dir(dir);
+                shell.add_eclass_dir(dir);
             }
         }
         Ok(shell)
@@ -2091,6 +2084,46 @@ mod tests {
         assert!(use_env.contains("ssl"));
         assert!(use_env.contains("gtk"));
         assert!(!use_env.contains("doc"));
+    }
+
+    #[tokio::test]
+    async fn eclass_search_path_prefers_own_repo_over_masters() {
+        // Build an overlay with two masters (m1, m2). The search path must put
+        // the overlay's own eclass/ first, then masters in reverse order, so
+        // first-hit-wins matches portage's last-writer-wins (own > m2 > m1).
+        fn mk_repo(base: &std::path::Path, name: &str) -> std::path::PathBuf {
+            let p = base.join(name);
+            std::fs::create_dir_all(p.join("metadata")).unwrap();
+            std::fs::create_dir_all(p.join("profiles")).unwrap();
+            std::fs::create_dir_all(p.join("eclass")).unwrap();
+            std::fs::write(p.join("metadata/layout.conf"), "masters = \n").unwrap();
+            std::fs::write(p.join("profiles/repo_name"), format!("{name}\n")).unwrap();
+            p
+        }
+
+        let dir = tempdir().unwrap();
+        let base = dir.path();
+        let m1 = mk_repo(base, "m1");
+        let m2 = mk_repo(base, "m2");
+        let own = mk_repo(base, "own");
+
+        let m1_repo = Repository::open(&m1).unwrap();
+        let m2_repo = Repository::open(&m2).unwrap();
+        let own_repo = Repository::open(&own).unwrap();
+
+        let shell = own_repo
+            .shell_with_masters(&[&m1_repo, &m2_repo])
+            .await
+            .unwrap();
+
+        let dirs = shell.get_var("__PORTAGE_ECLASS_DIRS").unwrap_or_default();
+        let expected = format!(
+            "{}:{}:{}",
+            own.join("eclass").display(),
+            m2.join("eclass").display(),
+            m1.join("eclass").display(),
+        );
+        assert_eq!(dirs, expected);
     }
 
     #[tokio::test]
