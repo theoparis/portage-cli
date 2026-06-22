@@ -1,10 +1,14 @@
 # Crossdev `{target}` — build a cross sysroot + compiler(s)
 
-STATUS: **planning / not started beyond `-p` parity.** Goal: make `em` act as a
-`{target}-emerge` that actually *builds* a cross toolchain and sysroot for a
-foreign `CHOST` (`CBUILD ≠ CHOST`), covering **both** the GCC and the
-**LLVM/Clang** toolchain models. Target libc is the standard choice (glibc /
-musl, and LLVM libc only as a generic option if a target wants it).
+STATUS: **GCC toolchain bootstrap BUILDS end to end** (`em --local crossdev -t
+riscv64-unknown-linux-gnu --setup` → `EXIT=0`, all 6 staged steps; see the
+2026-06-22 smoke-test section below). Remaining: the built toolchain is **not yet
+functional** (stale binutils install → missing `as`/`ld` wrappers; gcc-config/
+binutils-config activation) — clean-slate reinstall + validate `file` → RISC-V is
+the next milestone. Goal: make `em` act as a `{target}-emerge` that actually
+*builds* a cross toolchain and sysroot for a foreign `CHOST` (`CBUILD ≠ CHOST`),
+covering **both** the GCC and the **LLVM/Clang** toolchain models. Target libc is
+the standard choice (glibc / musl, and LLVM libc only as a generic option).
 
 Authoritative design context: `docs/root-model.md` (§ Cross, § Sequencing),
 `todo/em-root-characterization.md`, `todo/nonemptytree-bdeps-gap.md`.
@@ -617,37 +621,52 @@ update vs target-stage build nearly independent. Toolchain template was built
 first.
 
 **Smoke test (2026-06-22) — `em --local crossdev -t riscv64-unknown-linux-gnu
---setup` runs end to end; BLOCKS at gcc-stage1.** First full `--setup --local`
-run on the dev host. Stages **1–3 succeed**: binutils (already installed),
-kernel-headers (`headers-only`), libc-headers (glibc `headers-only --nodeps`).
-Stage **4 (gcc-stage1) fails**. Two distinct causes:
+--setup` now runs END TO END (`EXIT=0`, all 6 steps: binutils → kernel-headers →
+libc-headers → gcc-stage1 → libc → gcc-stage2).** Three bugs found and fixed to
+get gcc-stage1 through build+install:
 
-1. **Per-step `USE=-flag` did not override a `+flag` IUSE default — FIXED
-   (commit `fix(use): let an explicit USE=-flag override a +flag IUSE default`).**
-   The driver injects stage USE (`-cxx -fortran …`) via the process `USE` env
-   var. The global USE resolution flattened to an *enabled-only* set, so a
-   `-cxx` whose flag was never globally enabled (cxx is a per-package default,
-   not a profile flag) was dropped — "merely absent" — and `fold_iuse_defaults`
-   re-enabled the `+cxx` default. `-openmp` worked only because openmp *is* a
-   profile flag. gcc-stage1 thus configured `--enable-languages=c,c++,fortran`
-   and tried to build the **target** `libstdc++-v3`/`libbacktrace` against the
-   *headers-only* glibc → `configure: error: C compiler cannot create
-   executables`. Fixed by tracking explicit disables through resolution
-   (`merge_flag_lists_signed` → `ResolvedUse.disabled` → `UseFlagState::Disabled`
-   in `compute_use_env`); `em -pv` now shows `USE="-cxx -fortran -openmp"` for
-   the cross gcc. (Considered and rejected: writing a scoped `package.use` per
-   step — brittle file churn; the env var with correct precedence is the
+1. **Per-step `USE=-flag` did not override a `+flag` IUSE default** — commit
+   `fix(use): let an explicit USE=-flag override a +flag IUSE default`. The driver
+   injects stage USE (`-cxx -fortran …`) via the process `USE` env var. The global
+   USE resolution flattened to an *enabled-only* set, so a `-cxx` whose flag was
+   never globally enabled (cxx is a per-package default, not a profile flag) was
+   dropped — "merely absent" — and `fold_iuse_defaults` re-enabled the `+cxx`
+   default (`-openmp` worked only because openmp *is* a profile flag). gcc-stage1
+   thus configured `--enable-languages=c,c++,fortran` and tried to build the
+   **target** `libstdc++-v3`/`libbacktrace` against the *headers-only* glibc →
+   `C compiler cannot create executables`. Fixed by tracking explicit disables
+   through resolution (`merge_flag_lists_signed` → `ResolvedUse.disabled` →
+   `UseFlagState::Disabled`). `em -pv` now shows `USE="-cxx -fortran -openmp"`,
+   configure → `--enable-languages=c`. (Rejected: writing a scoped `package.use`
+   per step — brittle file churn; the env var with correct precedence is the
    portage-faithful mechanism.)
-2. **Secondary — `command not found: -print-multi-lib` / `-mabi=lp64d` in gcc
-   `src_install`.** A brush/em command-substitution with an empty tool var (looks
-   like `$(... -gcc) -print-multi-lib` expanding the gcc to nothing). Surfaces
-   after the language misconfig; re-test now that stage1 is C-only — may be moot.
+2. **`emake -f -` lost piped stdin** — commit `fix(emake): forward the pipeline's
+   stdin …`. toolchain.eclass `get_make_var`/`XGCC`
+   (`echo -e "…include $makefile" | emake -s -f -`, in `gcc_movelibs`) saw no
+   makefile → `make: No targets. Stop.` → `$(XGCC)` empty → `command not found:
+   -print-multi-lib` / `-mabi=lp64d`. The `emake` builtin wired stdout/stderr but
+   not stdin; added `context_stdin`.
+3. **Unprivileged root chown** — commit `fix(build): tolerate root chown/chgrp …`.
+   `toolchain.eclass: chown -R 0:0 "${LIBPATH}" || die` fails EPERM as uid 1000
+   (no fakeroot) → bare `die`. Added fakeroot-style `chown`/`chgrp` shims that
+   tolerate failure only when not root. (Only 2 eclasses do raw root chown:
+   toolchain + kernel-2; everything else uses `fowners`/`fperms`.)
 
-NEXT: re-run `em --local crossdev -t riscv64-unknown-linux-gnu --setup` — gcc-
-stage1 should now build C-only; watch for blocker #2 and then libc → gcc-stage2.
+Also fixed: `-p`/`-a`/`-D` were not `global = true` in clap, so they were rejected
+*after* a subcommand (`em … crossdev … --setup -p`). Now global.
 
-Also fixed this session: `-p`/`-a`/`-D` were not `global = true` in clap, so they
-were rejected *after* a subcommand (`em … crossdev … --setup -p`). Now global.
+**REMAINING — toolchain not yet *functional* (activation gap).** The bootstrap
+*builds*, but a smoke compile fails: `riscv64-…-gcc -print-prog-name=as` → bare
+`as` (host assembler) → `as: invalid option -- 'p'`. Causes:
+- **binutils in the prefix is a stale pre-fix `already installed` skip** — its
+  `as`/`ld` binaries + `/usr/bin/<CTARGET>-as` wrappers are absent from `~/.gentoo`
+  (`find ~/.gentoo/usr -name 'riscv64-…-as'` → nothing), though
+  `etc/env.d/binutils/riscv64-…-2.46.1` exists. Needs a **clean binutils
+  reinstall** with the fixes (the `--setup` skips it because the VDB says
+  installed). NEXT: force a binutils rebuild, then re-validate.
+- **Toolchain activation**: gcc-config/binutils-config wrappers + `env.d`/PATH so
+  `<CTARGET>-gcc` finds its cross `as`/`ld` and emits target objects (verify
+  `file` → `ELF … RISC-V`). This is the real Stage-C completion criterion.
 
 **Progress (2026-06-22) — toolchain-package build shell VERIFIED; eclass
 resolution corrected.** Two findings while bringing up the Stage-C driver:
