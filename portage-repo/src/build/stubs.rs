@@ -123,4 +123,13 @@ fowners()   { :; }
 docompress() { :; }
 dostrip()    { :; }
 edo()        { :; }
+
+# Unprivileged install tolerance (no fakeroot): eclasses run `chown 0:0`/`chgrp`
+# in src_install (e.g. toolchain.eclass `chown -R 0:0 "${LIBPATH}" || die`). As
+# non-root that fails with EPERM and aborts the build, but for a user-owned
+# Gentoo Prefix install root ownership is meaningless. Attempt the real command;
+# tolerate failure only when we are not root (mirroring fakeroot), so a genuine
+# privileged-build error still propagates. `id -u` runs only on failure.
+chown() { command chown "$@" || { [[ ${EUID:-$(id -u)} -ne 0 ]] && return 0; return 1; }; }
+chgrp() { command chgrp "$@" || { [[ ${EUID:-$(id -u)} -ne 0 ]] && return 0; return 1; }; }
 "#;
