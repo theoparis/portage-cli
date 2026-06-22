@@ -616,6 +616,71 @@ needs the cross libc to work); only *after* a valid compiler exists are toolchai
 update vs target-stage build nearly independent. Toolchain template was built
 first.
 
+**Smoke test (2026-06-22) — `em --local crossdev -t riscv64-unknown-linux-gnu
+--setup` runs end to end; BLOCKS at gcc-stage1.** First full `--setup --local`
+run on the dev host. Stages **1–3 succeed**: binutils (already installed),
+kernel-headers (`headers-only`), libc-headers (glibc `headers-only --nodeps`).
+Stage **4 (gcc-stage1) fails**. Two distinct causes:
+
+1. **Per-step `USE=-flag` did not override a `+flag` IUSE default — FIXED
+   (commit `fix(use): let an explicit USE=-flag override a +flag IUSE default`).**
+   The driver injects stage USE (`-cxx -fortran …`) via the process `USE` env
+   var. The global USE resolution flattened to an *enabled-only* set, so a
+   `-cxx` whose flag was never globally enabled (cxx is a per-package default,
+   not a profile flag) was dropped — "merely absent" — and `fold_iuse_defaults`
+   re-enabled the `+cxx` default. `-openmp` worked only because openmp *is* a
+   profile flag. gcc-stage1 thus configured `--enable-languages=c,c++,fortran`
+   and tried to build the **target** `libstdc++-v3`/`libbacktrace` against the
+   *headers-only* glibc → `configure: error: C compiler cannot create
+   executables`. Fixed by tracking explicit disables through resolution
+   (`merge_flag_lists_signed` → `ResolvedUse.disabled` → `UseFlagState::Disabled`
+   in `compute_use_env`); `em -pv` now shows `USE="-cxx -fortran -openmp"` for
+   the cross gcc. (Considered and rejected: writing a scoped `package.use` per
+   step — brittle file churn; the env var with correct precedence is the
+   portage-faithful mechanism.)
+2. **Secondary — `command not found: -print-multi-lib` / `-mabi=lp64d` in gcc
+   `src_install`.** A brush/em command-substitution with an empty tool var (looks
+   like `$(... -gcc) -print-multi-lib` expanding the gcc to nothing). Surfaces
+   after the language misconfig; re-test now that stage1 is C-only — may be moot.
+
+NEXT: re-run `em --local crossdev -t riscv64-unknown-linux-gnu --setup` — gcc-
+stage1 should now build C-only; watch for blocker #2 and then libc → gcc-stage2.
+
+Also fixed this session: `-p`/`-a`/`-D` were not `global = true` in clap, so they
+were rejected *after* a subcommand (`em … crossdev … --setup -p`). Now global.
+
+**Progress (2026-06-22) — toolchain-package build shell VERIFIED; eclass
+resolution corrected.** Two findings while bringing up the Stage-C driver:
+
+- **The cross *toolchain* package build shell works** (not just Stage-B leaf
+  libs). `cross-riscv64-unknown-linux-gnu/binutils` cross-*configures* correctly:
+  `CATEGORY=cross-riscv64-…`, `CTARGET=riscv64-unknown-linux-gnu`, `configure`
+  reports the riscv64 target triple and finds every `riscv64-unknown-linux-gnu-*`
+  tool, with **no `tc-arch: command not found`**. This confirms the KEY
+  ARCHITECTURAL INSIGHT for toolchain packages: the original `tc-arch` failure
+  was the `cross-*` category-collapse bug, fixed by the canonical-path change
+  (commit 33cddfc) — `Ebuild::from_path` now derives the CPV from the *given*
+  (overlay) path so `CATEGORY` stays `cross-*`, while storing the *canonical*
+  path so `repo_root` resolves to gentoo and eclasses are found. So the staged
+  bootstrap is blocked only on the **driver**, not the build shell.
+- **`em ebuild` now resolves master-repo eclasses** (was: only the repo's own
+  `eclass/`). A standalone overlay with `masters = gentoo` (not a `cross-*`
+  symlink into gentoo) previously failed `inherit flag-o-matic` with "eclass not
+  found". `ebuild.rs::run_inner` now resolves masters by name via repos.conf
+  (sibling-dir fallback; unresolvable masters skipped with a warning) and uses
+  `shell_with_masters`. The `cross-*` path didn't need this (symlinks ⇒
+  `repo_root` is already gentoo) but it makes plain overlays correct and the
+  cross overlay robust regardless of layout.
+- **Eclass search-path precedence fixed to match portage.** `shell_with_masters`
+  used to *prepend* master eclass dirs, so a master's eclass won over the repo's
+  own on a name conflict — the inverse of portage. Portage builds
+  `eclass_locations = [master1, …, masterN, own]` with last-writer-wins
+  (`repository/config.py` + `eclass_cache.py`), i.e. **own repo > masterN > … >
+  master1**. em now *appends* masters in reverse order so its first-hit-wins list
+  is `[own, masterN, …, master1]` — same precedence. Regression test
+  `eclass_search_path_prefers_own_repo_over_masters`. (Affects `em regen` too,
+  which shares `shell_with_masters_and_cache`.)
+
 ### Stage C — toolchain bootstrap (the real crossdev workflow) — LARGE
 NB: Stage B built a **leaf lib against an already-bootstrapped toolchain**. The
 toolchain itself needs crossdev's staged bootstrap, which em does NOT yet do —
