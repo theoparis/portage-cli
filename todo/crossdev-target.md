@@ -655,18 +655,31 @@ get gcc-stage1 through build+install:
 Also fixed: `-p`/`-a`/`-D` were not `global = true` in clap, so they were rejected
 *after* a subcommand (`em … crossdev … --setup -p`). Now global.
 
-**REMAINING — toolchain not yet *functional* (activation gap).** The bootstrap
-*builds*, but a smoke compile fails: `riscv64-…-gcc -print-prog-name=as` → bare
-`as` (host assembler) → `as: invalid option -- 'p'`. Causes:
-- **binutils in the prefix is a stale pre-fix `already installed` skip** — its
-  `as`/`ld` binaries + `/usr/bin/<CTARGET>-as` wrappers are absent from `~/.gentoo`
-  (`find ~/.gentoo/usr -name 'riscv64-…-as'` → nothing), though
-  `etc/env.d/binutils/riscv64-…-2.46.1` exists. Needs a **clean binutils
-  reinstall** with the fixes (the `--setup` skips it because the VDB says
-  installed). NEXT: force a binutils rebuild, then re-validate.
-- **Toolchain activation**: gcc-config/binutils-config wrappers + `env.d`/PATH so
-  `<CTARGET>-gcc` finds its cross `as`/`ld` and emits target objects (verify
-  `file` → `ELF … RISC-V`). This is the real Stage-C completion criterion.
+**REMAINING — toolchain not yet *functional* (2 gaps, found 2026-06-22 via a
+clean-slate reinstall).** A clean reinstall (wiped the cross VDB + install trees,
+re-ran `--setup`) rebuilt **all** packages from scratch (steps 1–4 each `merged 1`),
+but the toolchain still can't compile (`riscv64-…-gcc /tmp/t.c` → host `as:
+invalid option -- 'p'`; no `libc.so`/`libc.a` in the sysroot). Two driver bugs:
+
+1. **Two-stage same-version steps are SKIPPED.** Step 3 installs
+   `glibc-2.43-r2[headers-only]`, step 4 `gcc-15.3.1[stage1]`. Steps 5 (full glibc)
+   and 6 (gcc-stage2) are the **same CPV**, so `run_merge_plan`'s resume logic
+   (main.rs ~335: "recorded at the planned version → skip") skips them — `>>> …
+   already installed — skipping`. The two-stage rebuild (headers-only→full,
+   stage1→stage2) is the *whole point* and must force. The skip ignores USE; the
+   right fix is USE-aware (`--newuse`-style: reinstall when the installed USE
+   differs from the planned USE), which also benefits normal merges. Driver-local
+   alternative: a `StageStep.force`/emptytree-for-atom flag, but USE-aware skip is
+   cleaner and not crossdev-specific. **This is the top blocker.**
+2. **binutils not activated** — no `/usr/bin/<CTARGET>-{as,ld,…}` wrappers exist
+   after install (`find ~/.gentoo/usr -name 'riscv64-…-as'` → nothing), though
+   `etc/env.d/binutils/riscv64-…-2.46.1` is written. binutils-config (pkg_postinst)
+   isn't producing the wrappers in the prefix, so `<CTARGET>-gcc -print-prog-name=
+   as` → bare `as`. Need binutils-config/gcc-config activation (wrappers +
+   `env.d`/PATH) for `<CTARGET>-gcc` to find its cross `as`/`ld`.
+
+Completion criterion (unchanged): `<CTARGET>-gcc hello.c` → `file a.out` reports
+`ELF … RISC-V`. The *build* pipeline is done; these two are merge/activation.
 
 **Progress (2026-06-22) — toolchain-package build shell VERIFIED; eclass
 resolution corrected.** Two findings while bringing up the Stage-C driver:
