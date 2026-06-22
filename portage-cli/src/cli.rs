@@ -27,10 +27,10 @@ pub struct Cli {
     #[command(flatten)]
     pub color: colorchoice_clap::Color,
 
-    #[arg(short = 'p', long)]
+    #[arg(short = 'p', long, global = true)]
     pub pretend: bool,
 
-    #[arg(short = 'a', long)]
+    #[arg(short = 'a', long, global = true)]
     pub ask: bool,
 
     #[arg(short = 'v', long, action = clap::ArgAction::Count, global = true)]
@@ -39,7 +39,7 @@ pub struct Cli {
     #[arg(short = 'q', long, global = true)]
     pub quiet: bool,
 
-    #[arg(short = 'D', long)]
+    #[arg(short = 'D', long, global = true)]
     pub deep: bool,
 
     #[arg(long, value_name = "ARCH", default_value_t = Arch::current(), value_parser = parse_arch)]
