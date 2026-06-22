@@ -22,6 +22,10 @@ impl builtins::Command for EmakeCommand {
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         let (stdout, stderr) = super::context_stdio(&context);
+        // Forward the pipeline's stdin so `emake -f -` can read a makefile from
+        // a pipe (toolchain.eclass's `get_make_var`); without it make sees no
+        // makefile and stops with "No targets".
+        let stdin = super::context_stdin(&context);
         // make (and any pkg-config/linker it spawns) must see the full build
         // environment, including bashrc-exported overlay search paths.
         let env_vars = super::context_env(&context);
@@ -53,6 +57,7 @@ impl builtins::Command for EmakeCommand {
                 .args(&extra)
                 .args(&args)
                 .envs(env_vars)
+                .stdin(stdin)
                 .stdout(stdout)
                 .stderr(stderr)
                 .status()

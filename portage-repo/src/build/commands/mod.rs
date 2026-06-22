@@ -61,6 +61,23 @@ pub(crate) fn context_stdio<SE: brush_core::ShellExtensions>(
     (stdout, stderr)
 }
 
+/// Stdio handle for a builtin's spawned child stdin, honouring the shell
+/// context's redirections. Needed for `emake -f -` (read makefile from a pipe):
+/// without forwarding the pipeline's read end, the child `make` sees the host
+/// stdin and reads no makefile (`No targets. Stop.`). A non-redirected stdin
+/// (the real terminal) is inherited.
+pub(crate) fn context_stdin<SE: brush_core::ShellExtensions>(
+    context: &brush_core::ExecutionContext<'_, SE>,
+) -> std::process::Stdio {
+    use brush_core::openfiles::{OpenFile, OpenFiles};
+    match context.try_fd(OpenFiles::STDIN_FD) {
+        Some(OpenFile::Stdin(_)) | None => std::process::Stdio::inherit(),
+        Some(f) => f
+            .try_into()
+            .unwrap_or_else(|_| std::process::Stdio::inherit()),
+    }
+}
+
 /// The shell's exported environment as `(name, value)` pairs. A Rust builtin's
 /// spawned child (`configure`, `make`, …) otherwise inherits only em's host
 /// process environment, missing the build env the shell carries: make.conf
