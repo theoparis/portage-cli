@@ -416,9 +416,11 @@ async fn merge_sequential(
 
     for (i, planned) in plan.iter().enumerate() {
         // The VDB is the resume state: `var/db/pkg/<cat>/<pf>` exists iff this
-        // exact version is already installed in the target root.
+        // exact version is already installed in the target root. An intentional
+        // reinstall (explicit target / USE rebuild) is built anyway — emerge
+        // reinstalls a requested atom by default.
         let pkg_vdb = merge_root.join("var/db/pkg").join(&planned.cpv);
-        if !emptytree && pkg_vdb.exists() {
+        if !emptytree && !planned.reinstall && pkg_vdb.exists() {
             println!(
                 ">>> [{}/{total}] {} is already installed — skipping",
                 i + 1,
@@ -548,7 +550,10 @@ async fn merge_parallel(
         while !stop_new && inflight.len() < jobs {
             let Some(i) = sched.next_ready() else { break };
             let planned = &plan[i];
-            if !emptytree && merge_root.join("var/db/pkg").join(&planned.cpv).exists() {
+            if !emptytree
+                && !planned.reinstall
+                && merge_root.join("var/db/pkg").join(&planned.cpv).exists()
+            {
                 println!(">>> {} is already installed — skipping", planned.cpv);
                 skipped += 1;
                 sched.complete(i);

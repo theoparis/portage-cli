@@ -54,6 +54,11 @@ pub struct PlannedMerge {
     /// `BDEPEND` (build-host tools), pre-USE-evaluation, for the pre-flight
     /// build-dependency check.
     pub bdepend: Vec<portage_atom::DepEntry>,
+    /// This cpv is already installed yet the resolver kept it in the plan — an
+    /// explicitly-requested target (emerge reinstalls these by default) or a
+    /// same-version USE rebuild. The merge loop must build it rather than treat
+    /// the VDB entry as a resume-skip.
+    pub reinstall: bool,
 }
 
 /// What [`depgraph`] resolved.
@@ -892,6 +897,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 use_flags: flags,
                 depend,
                 bdepend,
+                // Kept in the plan despite being installed ⇒ an intentional
+                // reinstall (explicit target / USE rebuild), not a resume-skip.
+                reinstall: target_installed_cpvs.contains(&cpv),
             }
         })
         .collect();
