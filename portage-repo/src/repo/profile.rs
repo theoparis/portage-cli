@@ -615,6 +615,34 @@ pub(crate) fn merge_flag_lists<'a>(iter: impl Iterator<Item = &'a str>) -> Vec<S
     acc
 }
 
+/// Like [`merge_flag_lists`] but *preserves explicit disables*: a flag whose net
+/// final token is negative is emitted as `-flag` rather than dropped, so a
+/// `USE=-foo` survives even when `foo` was never enabled in a prior layer. This
+/// keeps the negation visible to the per-package step, where it must override a
+/// `+foo` IUSE default — portage's USE-over-IUSE-default precedence. The output
+/// round-trips (a `-flag` in a later input is read back as "disabled"), so it
+/// chains across profile/`make.conf`/env layers. Used only for the `USE` var.
+pub(crate) fn merge_flag_lists_signed<'a>(iter: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut order: Vec<String> = Vec::new();
+    let mut state: HashMap<String, bool> = HashMap::new();
+    for val in iter {
+        for token in val.split_whitespace() {
+            let (name, enabled) = match token.strip_prefix('-') {
+                Some(n) => (n.to_string(), false),
+                None => (token.to_string(), true),
+            };
+            if !state.contains_key(&name) {
+                order.push(name.clone());
+            }
+            state.insert(name, enabled);
+        }
+    }
+    order
+        .into_iter()
+        .map(|n| if state[&n] { n } else { format!("-{n}") })
+        .collect()
+}
+
 /// Recursively collect profiles depth-first, ancestors before self.
 ///
 /// `visited` is a set of canonicalized paths already added; a profile seen a

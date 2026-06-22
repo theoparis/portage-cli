@@ -84,7 +84,7 @@ async fn compute_use_env(
         .map(|p| p.as_std_path())
         .collect();
 
-    let flags = stack
+    let resolved = stack
         .use_flags(&mut shell, &confs)
         .await
         .map_err(|e| anyhow::anyhow!("failed to evaluate USE flags: {e}"))?;
@@ -170,9 +170,20 @@ async fn compute_use_env(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/var/cache/distfiles".to_string());
 
+    // Enabled flags first, then explicit `USE=-flag` disables. Recording the
+    // disables as `Disabled` (not merely absent) is what lets a configured
+    // `-flag` override a package's `+flag` IUSE default in `fold_iuse_defaults`
+    // — matching portage's USE-over-IUSE-default precedence.
+    // Enabled flags first, then explicit `USE=-flag` disables. Recording the
+    // disables as `Disabled` (not merely absent) is what lets a configured
+    // `-flag` override a package's `+flag` IUSE default in `fold_iuse_defaults`
+    // — matching portage's USE-over-IUSE-default precedence.
     let mut config = UseConfig::new();
-    for flag in flags {
+    for flag in resolved.enabled {
         config.set(flag, UseFlagState::Enabled);
+    }
+    for flag in resolved.disabled {
+        config.set(flag, UseFlagState::Disabled);
     }
 
     let mut package_use: Vec<(Dep, Vec<UseOverride>)> = stack

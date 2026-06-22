@@ -13,7 +13,19 @@ use super::shell::EbuildShell;
 use crate::error::Result;
 use crate::repo::profile::{
     Profile, ProfileEnv, ProfileEnvLayer, ProfileStack, UseFlags, merge_flag_lists,
+    merge_flag_lists_signed,
 };
+
+/// Merge an incremental variable's layers. `USE` preserves explicit disables
+/// (`-flag` kept so it can override a `+flag` IUSE default per package); every
+/// other incremental var (`USE_EXPAND` values, …) drops them as before.
+fn merge_use_var<'a>(var: &str, iter: impl Iterator<Item = &'a str>) -> Vec<String> {
+    if var == "USE" {
+        merge_flag_lists_signed(iter)
+    } else {
+        merge_flag_lists(iter)
+    }
+}
 
 impl Profile {
     /// Source this profile's `make.defaults` into the shell, if present.
@@ -46,14 +58,15 @@ impl ProfileStack {
     /// Sources profile `make.defaults`, extra confs (e.g. `/etc/portage/make.conf`),
     /// then applies the process-environment layer, `use.force`, and `use.mask`.
     ///
-    /// Returns enabled-only flags as interned strings.  The shell's bash state is
-    /// updated as a side-effect (necessary for bash evaluation); the Rust-side
-    /// `use_flags` HashSet is **not** set — call `configure_shell` for that.
+    /// Returns the enabled flags plus the flags explicitly disabled by a `-flag`
+    /// USE token (see [`ResolvedUse`]).  The shell's bash state is updated as a
+    /// side-effect (necessary for bash evaluation); the Rust-side `use_flags`
+    /// HashSet is **not** set — call `configure_shell` for that.
     pub async fn use_flags(
         &self,
         shell: &mut EbuildShell,
         extra_confs: &[&std::path::Path],
-    ) -> Result<UseFlags> {
+    ) -> Result<ResolvedUse> {
         resolve_use_flags(shell, self, extra_confs).await
     }
 
@@ -151,7 +164,7 @@ impl ProfileStack {
             // Merge this layer's contributions into the external accumulator.
             for (var, val) in &vars {
                 let prev = acc.get(var.as_str()).cloned().unwrap_or_default();
-                let merged = merge_flag_lists([prev.as_str(), val.as_str()].into_iter());
+                let merged = merge_use_var(var, [prev.as_str(), val.as_str()].into_iter());
                 acc.insert(var.clone(), merged.join(" "));
             }
 
@@ -192,9 +205,19 @@ pub async fn configure_shell(
     stack: &ProfileStack,
     extra_confs: &[&std::path::Path],
 ) -> Result<()> {
-    let flags = resolve_use_flags(shell, stack, extra_confs).await?;
-    let refs: Vec<&str> = flags.iter().map(|f| f.as_str()).collect();
+    let resolved = resolve_use_flags(shell, stack, extra_confs).await?;
+    let refs: Vec<&str> = resolved.enabled.iter().map(|f| f.as_str()).collect();
     shell.set_use_flags(&refs)
+}
+
+/// The outcome of resolving a profile stack's USE: the enabled flags plus the
+/// flags an explicit `-flag` USE token turned off. `disabled` is carried so the
+/// per-package step can record them as explicit `Disabled` and override a
+/// `+flag` IUSE default — portage gives a configured `USE=-flag` precedence over
+/// the ebuild's default. `enabled`/`disabled` are disjoint.
+pub struct ResolvedUse {
+    pub enabled: UseFlags,
+    pub disabled: Vec<Interned<DefaultInterner>>,
 }
 
 /// Resolve the effective USE flags for a profile stack without setting the
@@ -215,12 +238,15 @@ pub async fn configure_shell(
 /// 6. Profile `use.force` — unconditional add
 /// 7. Profile `use.mask` — unconditional remove
 ///
+/// `USE=-flag` disables (steps 1-3) are tracked separately and returned in
+/// [`ResolvedUse::disabled`]; `use.force` clears a flag from that set.
+///
 /// The shell's bash state is updated as a side-effect.
 async fn resolve_use_flags(
     shell: &mut EbuildShell,
     stack: &ProfileStack,
     extra_confs: &[&std::path::Path],
-) -> Result<UseFlags> {
+) -> Result<ResolvedUse> {
     let ProfileEnv { layers: _ } = stack.profile_env(shell).await?;
 
     for conf in extra_confs {
@@ -229,24 +255,34 @@ async fn resolve_use_flags(
 
     apply_env_layer(shell).await?;
 
-    let mut flags = collect_use_flags(shell);
+    let CollectedUse {
+        mut enabled,
+        mut disabled,
+    } = collect_use_flags(shell);
 
-    let flag_set: HashSet<String> = flags.iter().cloned().collect();
+    let flag_set: HashSet<String> = enabled.iter().cloned().collect();
     for flag in stack.use_force()? {
         if !flag_set.contains(&flag) {
-            flags.push(flag);
+            enabled.push(flag.clone());
         }
+        disabled.retain(|f| f != &flag); // force wins over an explicit disable
     }
 
     let mask: HashSet<String> = stack.use_mask()?.into_iter().collect();
-    flags.retain(|f| !mask.contains(f.as_str()));
+    enabled.retain(|f| !mask.contains(f.as_str()));
 
-    Ok(UseFlags(
-        flags
+    Ok(ResolvedUse {
+        enabled: UseFlags(
+            enabled
+                .iter()
+                .map(|f| Interned::<DefaultInterner>::intern(f.as_str()))
+                .collect(),
+        ),
+        disabled: disabled
             .iter()
             .map(|f| Interned::<DefaultInterner>::intern(f.as_str()))
             .collect(),
-    ))
+    })
 }
 
 /// Merge process-environment USE variables into the shell as a final incremental layer.
@@ -275,7 +311,7 @@ async fn apply_env_layer(shell: &mut EbuildShell) -> Result<()> {
     for var in &vars {
         if let Ok(env_val) = std::env::var(var) {
             let existing = shell.get_var(var).unwrap_or_default();
-            let merged = merge_flag_lists([existing.as_str(), env_val.as_str()].into_iter());
+            let merged = merge_use_var(var, [existing.as_str(), env_val.as_str()].into_iter());
             restore += &format!("{}={}\n", var, shell_quote(&merged.join(" ")));
         }
     }
@@ -349,7 +385,7 @@ async fn source_incremental(shell: &mut EbuildShell, path: &std::path::Path) -> 
     let mut merged_acc: HashMap<String, String> = saved;
     for (var, new_val) in &contributed {
         let prev = merged_acc.get(var.as_str()).cloned().unwrap_or_default();
-        let merged = merge_flag_lists([prev.as_str(), new_val.as_str()].into_iter());
+        let merged = merge_use_var(var, [prev.as_str(), new_val.as_str()].into_iter());
         merged_acc.insert(var.clone(), merged.join(" "));
     }
 
@@ -367,15 +403,31 @@ fn shell_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn collect_use_flags(shell: &EbuildShell) -> Vec<String> {
+/// Enabled and explicitly-disabled USE flags resolved from the shell state.
+///
+/// `disabled` carries flags a `-flag` token turned off (from the signed `USE`
+/// merge), kept so the per-package step can override a `+flag` IUSE default.
+struct CollectedUse {
+    enabled: Vec<String>,
+    disabled: Vec<String>,
+}
+
+fn collect_use_flags(shell: &EbuildShell) -> CollectedUse {
     let use_str = shell.get_var("USE").unwrap_or_default();
     let mut flags: Vec<String> = Vec::new();
+    let mut disabled: Vec<String> = Vec::new();
 
     for token in use_str.split_whitespace() {
         if let Some(name) = token.strip_prefix('-') {
             flags.retain(|f| f != name);
-        } else if !flags.iter().any(|f| f == token) {
-            flags.push(token.to_string());
+            if !disabled.iter().any(|f| f == name) {
+                disabled.push(name.to_string());
+            }
+        } else {
+            disabled.retain(|f| f != token);
+            if !flags.iter().any(|f| f == token) {
+                flags.push(token.to_string());
+            }
         }
     }
 
@@ -401,7 +453,10 @@ fn collect_use_flags(shell: &EbuildShell) -> Vec<String> {
         }
     }
 
-    flags
+    CollectedUse {
+        enabled: flags,
+        disabled,
+    }
 }
 
 #[cfg(test)]
@@ -482,6 +537,45 @@ mod tests {
         let flags: HashSet<&str> = use_val.split_whitespace().collect();
         assert!(flags.contains("foo"), "foo from make.defaults");
         assert!(flags.contains("bar"), "bar from make.defaults");
+    }
+
+    #[tokio::test]
+    async fn use_flags_tracks_explicit_disable_of_unenabled_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let profile = make_profile(&dir, "test", &[]);
+        // `-cxx` for a flag never enabled elsewhere must survive as an explicit
+        // disable, so a per-package `+cxx` IUSE default can be overridden.
+        std::fs::write(profile.join("make.defaults"), "USE=\"foo -cxx\"\n").unwrap();
+        let stack = ProfileStack::build(profile).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let resolved = stack.use_flags(&mut shell, &[]).await.unwrap();
+        let enabled: Vec<&str> = resolved.enabled.iter().map(|f| f.as_str()).collect();
+        let disabled: Vec<&str> = resolved.disabled.iter().map(|f| f.as_str()).collect();
+        assert!(enabled.contains(&"foo"), "foo enabled");
+        assert!(!enabled.contains(&"cxx"), "cxx not enabled");
+        assert!(
+            disabled.contains(&"cxx"),
+            "explicit -cxx tracked as disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn use_flags_reenable_clears_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        // Child re-enables what the parent disabled: net enabled, not disabled.
+        let parent = make_profile(&dir, "parent", &[]);
+        std::fs::write(parent.join("make.defaults"), "USE=\"-cxx\"\n").unwrap();
+        let child = make_profile(&dir, "child", &["../parent"]);
+        std::fs::write(child.join("make.defaults"), "USE=\"cxx\"\n").unwrap();
+        let stack = ProfileStack::build(child).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let resolved = stack.use_flags(&mut shell, &[]).await.unwrap();
+        let enabled: Vec<&str> = resolved.enabled.iter().map(|f| f.as_str()).collect();
+        let disabled: Vec<&str> = resolved.disabled.iter().map(|f| f.as_str()).collect();
+        assert!(enabled.contains(&"cxx"), "cxx re-enabled by child");
+        assert!(!disabled.contains(&"cxx"), "no longer disabled");
     }
 
     #[tokio::test]
