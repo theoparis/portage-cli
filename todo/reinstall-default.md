@@ -1,10 +1,33 @@
 # Explicit-target reinstall default (emerge `foo && foo` → two installs)
 
-STATUS: **in progress (2026-06-22).** Behaviour difference vs emerge: emerge
-*reinstalls an explicitly-requested atom by default* (shown `[ebuild   R   ]`),
-so `emerge foo && emerge foo` builds foo twice; `--noreplace`/`-n` opts out. `em`
-instead **skips** a target already in the VDB at the planned version, so the
-second `em foo` is a no-op.
+STATUS: **core fixed 2026-06-22; one follow-up symptom open (staged glibc).**
+Behaviour difference vs emerge: emerge *reinstalls an explicitly-requested atom
+by default* (`[ebuild   R   ]`), so `emerge foo && emerge foo` builds foo twice;
+`--noreplace`/`-n` opts out. `em` instead **skipped** a target already in the VDB
+at the planned version.
+
+DONE:
+- `fix(merge): reinstall an explicitly-requested atom already in the VDB`
+  (`7f43c27`): `PlannedMerge.reinstall` (= cpv already installed yet still in the
+  plan ⇒ explicit target / USE rebuild); the merge loop builds it instead of
+  resume-skipping.
+- `fix(merge): treat a same-cpv reinstall as a self-replace` (`bb89327`): dropped
+  the `find_slot_occupant(...).filter(|old| old.cpv() != ebuild.cpv())` so the
+  installed package is the replace target — own files exempt from collision
+  detection, unmerged after the new content lands.
+
+Verified: cross `--setup` now rebuilds **all 6 steps, no skips, no collisions**.
+
+OPEN — **staged glibc still installs headers-only.** With the above, step 5
+(full glibc) rebuilds, but the result is still headers-only (622-byte CONTENTS,
+no `libc.so`), even though the recorded/plan USE has `-headers-only` and the
+process `USE` env is empty. `just_headers()` is `is_crosscompile && use
+headers-only`, so the *build shell* evaluated `use headers-only` true despite the
+plan. Not a stale work dir (em already pre-build-cleans). Suspect either the
+build shell not honouring the plan's `-headers-only` for an at-best-version
+reinstall, or the activation gap (no cross `as`/`ld`) forcing a degraded build.
+Compare against portage (below) and instrument `use headers-only` in the glibc
+build shell. (gcc-stage2 likewise produced no `libstdc++` — same family.)
 
 ## Why it matters now
 
