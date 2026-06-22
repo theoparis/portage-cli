@@ -711,10 +711,14 @@ async fn run_merge(
     let vdb = open_or_create_vdb(&vdb_root)?;
 
     let slot_main = env.slot_main().to_owned();
+    // The slot occupant (if any) is the package being replaced — its files are
+    // exempt from collision detection and it is unmerged after the new content
+    // lands. This includes a same-cpv reinstall (emerge's default for a
+    // requested atom): a self-replace whose old/new CONTENTS match, so the
+    // unmerge removes nothing but the own-file collision exemption still applies.
     let old_pkg = vdb
         .find_slot_occupant(&ebuild.cpv().cpn, &slot_main)
-        .context("slot conflict query failed")?
-        .filter(|old| old.cpv() != ebuild.cpv());
+        .context("slot conflict query failed")?;
 
     shell
         .run_phase(
