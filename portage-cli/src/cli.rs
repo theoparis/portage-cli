@@ -685,6 +685,21 @@ pub enum SelectCommand {
         #[command(subcommand)]
         action: RepositoryAction,
     },
+    #[command(
+        visible_alias = "gcc",
+        about = "Select the active compiler profile (gcc-config/eselect gcc workalike)"
+    )]
+    Compiler {
+        #[command(subcommand)]
+        action: CompilerAction,
+    },
+    #[command(
+        about = "Select the active binutils profile (binutils-config/eselect binutils workalike)"
+    )]
+    Binutils {
+        #[command(subcommand)]
+        action: BinutilsAction,
+    },
 }
 
 /// `em select profile <action>`.
@@ -724,6 +739,56 @@ pub enum RepositoryAction {
         name: String,
         /// Location (default: `<config-root>/var/db/repos/<name>`).
         location: Option<String>,
+    },
+}
+
+/// `em select compiler <action>` — gcc-config workalike.
+#[derive(Subcommand)]
+pub enum CompilerAction {
+    #[command(about = "List available compiler profiles")]
+    List {
+        /// Target tuple (CTARGET) to list profiles for.
+        #[arg(short, long)]
+        target: Option<String>,
+    },
+    #[command(about = "Show the current compiler profile")]
+    Show {
+        /// Target tuple (CTARGET) to show profile for.
+        #[arg(short, long)]
+        target: Option<String>,
+    },
+    #[command(about = "Set the active compiler profile")]
+    Set {
+        /// Compiler profile to activate (e.g., `riscv64-unknown-linux-gnu-16` or `1` for list number).
+        profile: String,
+        /// Target tuple (CTARGET) for cross-compiler selection.
+        #[arg(short, long)]
+        target: Option<String>,
+    },
+}
+
+/// `em select binutils <action>` — binutils-config workalike.
+#[derive(Subcommand)]
+pub enum BinutilsAction {
+    #[command(about = "List available binutils profiles")]
+    List {
+        /// Target tuple (CTARGET) to list profiles for.
+        #[arg(short, long)]
+        target: Option<String>,
+    },
+    #[command(about = "Show the current binutils profile")]
+    Show {
+        /// Target tuple (CTARGET) to show profile for.
+        #[arg(short, long)]
+        target: Option<String>,
+    },
+    #[command(about = "Set the active binutils profile")]
+    Set {
+        /// Binutils profile to activate (e.g., `riscv64-unknown-linux-gnu-2.46.0` or `1` for list number).
+        profile: String,
+        /// Target tuple (CTARGET) for cross-binutils selection.
+        #[arg(short, long)]
+        target: Option<String>,
     },
 }
 

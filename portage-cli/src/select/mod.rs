@@ -5,7 +5,11 @@
 //!   profile, which `eselect profile` refuses).
 //! - [`repos`] — `eselect repository` limited to **local** repositories
 //!   (creating/adding/removing overlays on disk; remote syncing is a TODO).
+//! - [`compiler`] — `gcc-config`/`eselect gcc` workalike for compiler profile selection.
+//! - [`binutils`] — `binutils-config`/`eselect binutils` workalike for binutils profile selection.
 
+mod binutils;
+mod compiler;
 mod profile;
 mod repos;
 
@@ -19,6 +23,8 @@ pub fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
     match command {
         SelectCommand::Profile { action } => profile::run(action, globals),
         SelectCommand::Repository { action } => repos::run(action, globals),
+        SelectCommand::Compiler { action } => compiler::run(action, globals),
+        SelectCommand::Binutils { action } => binutils::run(action, globals),
     }
 }
 
