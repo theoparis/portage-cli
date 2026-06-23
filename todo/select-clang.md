@@ -52,7 +52,8 @@ This could be integrated into `em select linker` instead.
 ## Implementation status
 
 - **Option A: LLVM slot selection** ✅ **IMPLEMENTED**
-  - `em select clang list` — lists available LLVM slots
+  - `em select clang list` — lists available LLVM slots with full target tuples
+    (e.g., `clang-21 [aarch64-unknown-linux-gnu, riscv64-unknown-linux-gnu]`)
   - `em select clang show` — shows current active slot
   - `em select clang set <slot>` — sets active LLVM slot
   - Works with `--config-root`, `--local`, `--prefix`

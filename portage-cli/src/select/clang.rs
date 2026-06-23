@@ -137,15 +137,11 @@ fn find_slot_targets(slot_dir: &Utf8PathBuf) -> Vec<String> {
             for binary in &clang_binaries {
                 if let Some(prefix) = name.strip_suffix(binary) {
                     // Strip trailing dash if present (e.g., "aarch64-unknown-linux-gnu-" -> "aarch64-unknown-linux-gnu")
-                    let prefix = prefix.strip_suffix('-').unwrap_or(prefix);
+                    let target = prefix.strip_suffix('-').unwrap_or(prefix);
                     // Check it's not just the binary itself (which would give empty prefix)
                     // and not just a dash
-                    if !prefix.is_empty() && prefix != "-" {
-                        // Extract just the arch part (first component before -)
-                        // e.g., "aarch64-unknown-linux-gnu" -> "aarch64"
-                        // or "riscv64-unknown-elf" -> "riscv64"
-                        let arch = prefix.split('-').next().unwrap_or(prefix);
-                        targets.push(arch.to_string());
+                    if !target.is_empty() && target != "-" {
+                        targets.push(target.to_string());
                         break; // Only add once per file (clang, clang++, clang-cpp all have same prefix)
                     }
                 }
