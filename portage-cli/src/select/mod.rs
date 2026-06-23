@@ -7,9 +7,11 @@
 //!   (creating/adding/removing overlays on disk; remote syncing is a TODO).
 //! - [`compiler`] — `gcc-config`/`eselect gcc` workalike for compiler profile selection.
 //! - [`binutils`] — `binutils-config`/`eselect binutils` workalike for binutils profile selection.
+//! - [`linker`] — linker profile selection for ld, lld, mold, etc.
 
 mod binutils;
 mod compiler;
+mod linker;
 mod profile;
 mod repos;
 
@@ -25,6 +27,7 @@ pub fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
         SelectCommand::Repository { action } => repos::run(action, globals),
         SelectCommand::Compiler { action } => compiler::run(action, globals),
         SelectCommand::Binutils { action } => binutils::run(action, globals),
+        SelectCommand::Linker { action } => linker::run(action, globals),
     }
 }
 

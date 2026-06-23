@@ -700,6 +700,11 @@ pub enum SelectCommand {
         #[command(subcommand)]
         action: BinutilsAction,
     },
+    #[command(about = "Select the active linker profile")]
+    Linker {
+        #[command(subcommand)]
+        action: LinkerAction,
+    },
 }
 
 /// `em select profile <action>`.
@@ -787,6 +792,31 @@ pub enum BinutilsAction {
         /// Binutils profile to activate (e.g., `riscv64-unknown-linux-gnu-2.46.0` or `1` for list number).
         profile: String,
         /// Target tuple (CTARGET) for cross-binutils selection.
+        #[arg(short, long)]
+        target: Option<String>,
+    },
+}
+
+/// `em select linker <action>` — linker profile selection.
+#[derive(Subcommand)]
+pub enum LinkerAction {
+    #[command(about = "List available linker profiles")]
+    List {
+        /// Target tuple (CTARGET) to list profiles for.
+        #[arg(short, long)]
+        target: Option<String>,
+    },
+    #[command(about = "Show the current linker profile")]
+    Show {
+        /// Target tuple (CTARGET) to show profile for.
+        #[arg(short, long)]
+        target: Option<String>,
+    },
+    #[command(about = "Set the active linker profile")]
+    Set {
+        /// Linker profile to activate (e.g., `riscv64-unknown-linux-gnu-lld-18` or `1` for list number).
+        profile: String,
+        /// Target tuple (CTARGET) for cross-linker selection.
         #[arg(short, long)]
         target: Option<String>,
     },
