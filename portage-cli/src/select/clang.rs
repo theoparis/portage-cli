@@ -39,6 +39,8 @@ fn current_clang_slot_path(globals: &Cli) -> Utf8PathBuf {
 #[derive(Debug, Clone)]
 struct ClangSlot {
     name: String,
+    /// List of architectures that have {arch}-clang symlinks
+    targets: Vec<String>,
     /// Whether this slot is from the host system or the current config root
     is_host: bool,
 }
@@ -96,11 +98,61 @@ fn collect_clang_slots(
         // LLVM slots are numeric (e.g., "15", "16", "17", "22") or major.minor (e.g., "17.0")
         // We use a simple heuristic: if it starts with a digit, it's likely a slot
         if name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            slots.push(ClangSlot { name, is_host });
+            // Find available targets for this slot
+            let targets = find_slot_targets(&path);
+            slots.push(ClangSlot {
+                name,
+                targets,
+                is_host,
+            });
         }
     }
 
     Ok(())
+}
+
+/// Find which targets have {arch}-clang symlinks in a slot's bin directory
+fn find_slot_targets(slot_dir: &Utf8PathBuf) -> Vec<String> {
+    let bin_dir = slot_dir.join("bin");
+    let mut targets: Vec<String> = Vec::new();
+
+    if !bin_dir.is_dir() {
+        return targets;
+    }
+
+    // List of clang binaries that might have target prefixes
+    let clang_binaries = ["clang", "clang++", "clang-cpp"];
+
+    if let Ok(entries) = std::fs::read_dir(&bin_dir) {
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let Ok(path) = Utf8PathBuf::from_path_buf(entry.path()) else {
+                continue;
+            };
+            let name = path.file_name().unwrap_or_default().to_string();
+
+            // Check if this file name starts with a target prefix followed by a clang binary
+            for binary in &clang_binaries {
+                if let Some(prefix) = name.strip_suffix(binary) {
+                    // Strip trailing dash if present (e.g., "aarch64-unknown-linux-gnu-" -> "aarch64-unknown-linux-gnu")
+                    let prefix = prefix.strip_suffix('-').unwrap_or(prefix);
+                    // Check it's not just the binary itself (which would give empty prefix)
+                    // and not just a dash
+                    if !prefix.is_empty() && prefix != "-" {
+                        targets.push(prefix.to_string());
+                        break; // Only add once per file (clang, clang++, clang-cpp all have same prefix)
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicate and sort
+    targets.sort();
+    targets.dedup();
+    targets
 }
 
 /// Get the current clang slot.
@@ -169,11 +221,24 @@ fn list(globals: &Cli) -> Result<()> {
         let n = idx + 1;
         let is_current = current.as_deref() == Some(&slot.name);
         let num = format!("[{:>width$}]", n, width = num_width);
-        let mut slot_display = if is_current {
-            format!("{}{C_STAR} *{C_STAR:#}", slot.name)
-        } else {
-            slot.name.clone()
-        };
+
+        // Format: clang-{version} {arch1}[I] {arch2}[I] [* if current]
+        let mut slot_display = format!("clang-{}", slot.name);
+
+        if !slot.targets.is_empty() {
+            slot_display.push(' ');
+            for (i, target) in slot.targets.iter().enumerate() {
+                if i > 0 {
+                    slot_display.push(' ');
+                }
+                slot_display.push_str(target);
+                slot_display.push_str("[I]");
+            }
+        }
+
+        if is_current {
+            slot_display = format!("{}{C_STAR} *{C_STAR:#}", slot_display);
+        }
 
         // Add source label if in prefix context
         let roots = globals.roots();
