@@ -49,7 +49,11 @@ fn current_binutils_config_path(globals: &Cli, target: &str) -> Utf8PathBuf {
     if system_path.is_file() {
         return system_path;
     }
-    config_portage_dir(globals).join(format!("env.d/binutils/config-{}", target))
+    // config file is at ${EPREFIX}/etc/env.d/binutils/config-{target}
+    config_portage_dir(globals)
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join(format!("env.d/binutils/config-{}", target))
 }
 
 /// Path to the global binutils environment file (05binutils).
@@ -58,7 +62,11 @@ fn global_binutils_env_path(globals: &Cli) -> Utf8PathBuf {
     if system_path.is_file() || system_path.parent().is_some_and(|p| p.is_dir()) {
         return system_path;
     }
-    config_portage_dir(globals).join("env.d/05binutils")
+    // env file is at ${EPREFIX}/etc/env.d/05binutils
+    config_portage_dir(globals)
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join("env.d/05binutils")
 }
 
 /// Get CHOST from make.conf.

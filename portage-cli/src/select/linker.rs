@@ -50,7 +50,11 @@ fn current_linker_config_path(globals: &Cli, target: &str) -> Utf8PathBuf {
     if system_path.is_file() {
         return system_path;
     }
-    config_portage_dir(globals).join(format!("env.d/linker/config-{}", target))
+    // config file is at ${EPREFIX}/etc/env.d/linker/config-{target}
+    config_portage_dir(globals)
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join(format!("env.d/linker/config-{}", target))
 }
 
 /// Path to the global linker environment file.
@@ -59,7 +63,11 @@ fn global_linker_env_path(globals: &Cli) -> Utf8PathBuf {
     if system_path.is_file() || system_path.parent().is_some_and(|p| p.is_dir()) {
         return system_path;
     }
-    config_portage_dir(globals).join("env.d/06linker")
+    // env file is at ${EPREFIX}/etc/env.d/06linker
+    config_portage_dir(globals)
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join("env.d/06linker")
 }
 
 /// Get CHOST from make.conf.

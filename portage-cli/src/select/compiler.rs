@@ -50,7 +50,12 @@ fn current_gcc_config_path(globals: &Cli, target: &str) -> Utf8PathBuf {
     if system_path.is_file() {
         return system_path;
     }
-    config_portage_dir(globals).join(format!("env.d/gcc/config-{}", target))
+    // config file is at ${EPREFIX}/etc/env.d/gcc/config-{target}
+    // (env.d is sibling of etc/portage)
+    config_portage_dir(globals)
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join(format!("env.d/gcc/config-{}", target))
 }
 
 /// Path to the global gcc environment file.
@@ -59,7 +64,11 @@ fn global_gcc_env_path(globals: &Cli, target: &str) -> Utf8PathBuf {
     if system_path.is_file() || system_path.parent().is_some_and(|p| p.is_dir()) {
         return system_path;
     }
-    config_portage_dir(globals).join(format!("env.d/04gcc-{}", target))
+    // env file is at ${EPREFIX}/etc/env.d/04gcc-{target}
+    config_portage_dir(globals)
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join(format!("env.d/04gcc-{}", target))
 }
 
 /// Get CHOST from make.conf.
