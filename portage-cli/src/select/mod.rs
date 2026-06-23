@@ -8,8 +8,10 @@
 //! - [`compiler`] — `gcc-config`/`eselect gcc` workalike for compiler profile selection.
 //! - [`binutils`] — `binutils-config`/`eselect binutils` workalike for binutils profile selection.
 //! - [`linker`] — linker profile selection for ld, lld, mold, etc.
+//! - [`clang`] — LLVM/clang slot selection.
 
 mod binutils;
+mod clang;
 mod compiler;
 mod linker;
 mod profile;
@@ -28,6 +30,7 @@ pub fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
         SelectCommand::Compiler { action } => compiler::run(action, globals),
         SelectCommand::Binutils { action } => binutils::run(action, globals),
         SelectCommand::Linker { action } => linker::run(action, globals),
+        SelectCommand::Clang { action } => clang::run(action, globals),
     }
 }
 

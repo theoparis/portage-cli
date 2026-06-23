@@ -705,6 +705,11 @@ pub enum SelectCommand {
         #[command(subcommand)]
         action: LinkerAction,
     },
+    #[command(about = "Select the active LLVM/clang slot")]
+    Clang {
+        #[command(subcommand)]
+        action: ClangAction,
+    },
 }
 
 /// `em select profile <action>`.
@@ -819,6 +824,20 @@ pub enum LinkerAction {
         /// Target tuple (CTARGET) for cross-linker selection.
         #[arg(short, long)]
         target: Option<String>,
+    },
+}
+
+/// `em select clang <action>` — LLVM/clang slot selection.
+#[derive(Subcommand)]
+pub enum ClangAction {
+    #[command(about = "List available LLVM/clang slots")]
+    List,
+    #[command(about = "Show the current LLVM/clang slot")]
+    Show,
+    #[command(about = "Set the active LLVM/clang slot")]
+    Set {
+        /// LLVM slot to activate (e.g., `22` or `1` for list number).
+        slot: String,
     },
 }
 
