@@ -29,6 +29,10 @@ pub const C_CAT: Style = Style::new().effects(Effects::DIMMED);
 pub const C_PKGNAME: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::BrightGreen)));
 /// Version strings.
 pub const C_VERSION: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green)));
+/// Prefix profile source label.
+pub const C_PREFIX: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan)));
+/// Host profile source label.
+pub const C_HOST: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Yellow)));
 
 // ── Stability / status palette (stable=green, testing/dev=yellow, …=red) ────
 /// Stable keyword / stable profile.

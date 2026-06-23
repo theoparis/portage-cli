@@ -12,7 +12,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use super::config_portage_dir;
 use crate::cli::{Cli, CompilerAction};
-use crate::style::C_STAR;
+use crate::style::{C_HOST, C_PREFIX, C_STAR};
 
 /// Base directory for gcc env.d files.
 ///
@@ -108,72 +108,31 @@ fn get_chost(globals: &Cli) -> Result<String> {
 struct GccProfile {
     name: String,
     target: String,
+    /// Whether this profile is from the host system or the current config root
+    is_host: bool,
 }
 
 /// List all gcc profiles, grouped by target.
+/// When using --local or --prefix, also includes host system profiles
+/// with a flag indicating their source.
 fn list_all_gcc_profiles(globals: &Cli) -> Result<BTreeMap<String, Vec<GccProfile>>> {
-    let base_dir = gcc_env_d_dir(globals);
     let mut profiles_by_target: BTreeMap<String, Vec<GccProfile>> = BTreeMap::new();
 
-    if base_dir.is_dir() {
-        for entry in std::fs::read_dir(&base_dir)? {
-            let entry = entry?;
-            let Ok(path) = Utf8PathBuf::from_path_buf(entry.path()) else {
-                continue;
-            };
-            let name = path.file_name().unwrap_or_default().to_string();
+    // Check if we're in a prefix/local context
+    let roots = globals.roots();
+    let is_prefix_context = roots.config().is_none() && roots.config_overlay().is_some();
 
-            // Skip config files
-            if name.starts_with("config-") {
-                continue;
-            }
+    // Collect profiles from the current config root (prefix/local)
+    let prefix_base_dir = gcc_env_d_dir(globals);
+    if prefix_base_dir.is_dir() {
+        collect_profiles(&prefix_base_dir, &mut profiles_by_target, false)?;
+    }
 
-            // Skip non-profile files
-            if name.ends_with(".conf") || name.is_empty() || !name.contains(char::is_numeric) {
-                continue;
-            }
-
-            // Read the profile to get CTARGET
-            let target: Option<String> = {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let mut found = None;
-                    for line in content.lines() {
-                        let line = line.trim();
-                        if line.starts_with("CTARGET=") {
-                            let mut target = line.trim_start_matches("CTARGET=").trim().to_string();
-                            let needs_strip = (target.starts_with('"') && target.ends_with('"'))
-                                || (target.starts_with("'") && target.ends_with("'"));
-                            if needs_strip {
-                                target = target[1..target.len() - 1].to_string();
-                            }
-                            found = Some(target);
-                            break;
-                        }
-                    }
-                    found
-                } else {
-                    None
-                }
-            };
-
-            // If no CTARGET found, try to extract from profile name
-            let profile_target = target.unwrap_or_else(|| {
-                if let Some(pos) = name.rfind('-') {
-                    let version_part = &name[pos + 1..];
-                    if version_part.chars().all(|c| c.is_ascii_digit() || c == '.') {
-                        return name[..pos].to_string();
-                    }
-                }
-                name.clone()
-            });
-
-            profiles_by_target
-                .entry(profile_target.clone())
-                .or_default()
-                .push(GccProfile {
-                    name: name.clone(),
-                    target: profile_target,
-                });
+    // If in prefix context, also check system location
+    if is_prefix_context {
+        let system_dir = Utf8PathBuf::from("/etc/env.d/gcc");
+        if system_dir.is_dir() {
+            collect_profiles(&system_dir, &mut profiles_by_target, true)?;
         }
     }
 
@@ -182,6 +141,75 @@ fn list_all_gcc_profiles(globals: &Cli) -> Result<BTreeMap<String, Vec<GccProfil
     }
 
     Ok(profiles_by_target)
+}
+
+/// Helper to collect profiles from a directory
+fn collect_profiles(
+    base_dir: &Utf8PathBuf,
+    profiles_by_target: &mut BTreeMap<String, Vec<GccProfile>>,
+    is_host: bool,
+) -> Result<()> {
+    for entry in std::fs::read_dir(base_dir)? {
+        let entry = entry?;
+        let Ok(path) = Utf8PathBuf::from_path_buf(entry.path()) else {
+            continue;
+        };
+        let name = path.file_name().unwrap_or_default().to_string();
+
+        // Skip config files
+        if name.starts_with("config-") {
+            continue;
+        }
+
+        // Skip non-profile files
+        if name.ends_with(".conf") || name.is_empty() || !name.contains(char::is_numeric) {
+            continue;
+        }
+
+        // Read the profile to get CTARGET
+        let target: Option<String> = {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let mut found = None;
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.starts_with("CTARGET=") {
+                        let mut target = line.trim_start_matches("CTARGET=").trim().to_string();
+                        let needs_strip = (target.starts_with('"') && target.ends_with('"'))
+                            || (target.starts_with("'") && target.ends_with("'"));
+                        if needs_strip {
+                            target = target[1..target.len() - 1].to_string();
+                        }
+                        found = Some(target);
+                        break;
+                    }
+                }
+                found
+            } else {
+                None
+            }
+        };
+
+        // If no CTARGET found, try to extract from profile name
+        let profile_target = target.unwrap_or_else(|| {
+            if let Some(pos) = name.rfind('-') {
+                let version_part = &name[pos + 1..];
+                if version_part.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    return name[..pos].to_string();
+                }
+            }
+            name.clone()
+        });
+
+        profiles_by_target
+            .entry(profile_target.clone())
+            .or_default()
+            .push(GccProfile {
+                name: name.clone(),
+                target: profile_target,
+                is_host,
+            });
+    }
+    Ok(())
 }
 
 /// Get the current gcc profile for a target.
@@ -289,11 +317,24 @@ fn list(globals: &Cli) -> Result<()> {
         for profile in profiles {
             let is_current = current.as_deref() == Some(&profile.name);
             let num = format!("[{:>width$}]", n, width = num_width);
-            let profile_display = if is_current {
+            let mut profile_display = if is_current {
                 format!("{}{C_STAR} *{C_STAR:#}", profile.name)
             } else {
                 profile.name.clone()
             };
+
+            // Add source label if in prefix context
+            let roots = globals.roots();
+            let is_prefix_context = roots.config().is_none() && roots.config_overlay().is_some();
+            if is_prefix_context {
+                let label = if profile.is_host {
+                    format!("{C_HOST} (host){C_HOST:#}")
+                } else {
+                    format!("{C_PREFIX} (prefix){C_PREFIX:#}")
+                };
+                profile_display.push_str(&label);
+            }
+
             writeln!(out, "  {num} {}", profile_display).ok();
             n += 1;
         }
