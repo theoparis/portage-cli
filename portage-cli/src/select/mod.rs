@@ -16,7 +16,7 @@ mod profile;
 mod repos;
 
 use anyhow::Result;
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8PathBuf;
 
 use crate::cli::{Cli, SelectCommand};
 
@@ -32,11 +32,17 @@ pub fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
 }
 
 /// The configuration root for `etc/portage` operations: `--config-root`
-/// (cross sysroot / offset) when given, else `/`.
+/// (cross sysroot / offset) when given, else `--prefix`/`--local` overlay, else `/`.
 fn config_portage_dir(globals: &Cli) -> Utf8PathBuf {
-    globals
-        .roots()
-        .config()
-        .unwrap_or_else(|| Utf8Path::new("/"))
-        .join("etc/portage")
+    let roots = globals.roots();
+    // If config root is explicitly set (--config-root), use it
+    if let Some(config) = roots.config() {
+        return config.join("etc/portage");
+    }
+    // If using --local or --prefix, use the overlay directory (already points to etc/portage)
+    if let Some(overlay) = roots.config_overlay() {
+        return overlay.to_path_buf();
+    }
+    // Fall back to system root
+    Utf8PathBuf::from("/etc/portage")
 }
