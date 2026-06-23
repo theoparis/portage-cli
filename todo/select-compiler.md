@@ -1,13 +1,17 @@
 # `em select compiler` — `gcc-config` workalike
 
-STATUS: **not started.** The compiler-side twin of [[select-binutils]]. After a
-(cross) gcc merge the binaries land under
-`${EPREFIX}/usr/${CBUILD}/${CTARGET}/gcc-bin/${VER}/${CTARGET}-{gcc,g++,cpp,…}`
-plus an `env.d/gcc/${CTARGET}-${VER}` entry, but the active-profile wiring
-(`/usr/bin` wrappers for the native CHOST, `env.d/05gcc` PATH/LDPATH, the gcc
-`config` files, the `${CTARGET}` symlinks) is not created — so the toolchain is
-installed but not "selected". Found via the crossdev clean-slate reinstall
-([[crossdev-target]] — gap #2).
+STATUS: **implemented.** `em select compiler` (and its `gcc` alias) now provides
+a `gcc-config`/`eselect gcc` workalike. Implemented features:
+- `em select compiler list` — lists all gcc profiles grouped by target architecture
+- `em select compiler show [--target <CTARGET>]` — shows current profile for target
+- `em select compiler set <profile> [--target <CTARGET>]` — activates a profile
+- Per-architecture grouping with `*` marking active profiles
+- Respects `--config-root`, `--local`, `--prefix` flags
+- Falls back to `/etc/env.d/gcc` for system-wide profiles
+- Auto-detects CHOST from make.conf
+
+REMAINING: The user mentioned wanting `--gcc` and `--clang` flags for compiler-specific
+handling. Also need to add linker support. See [[select-binutils]] for coordination.
 
 ## What gcc-config does (to replicate)
 

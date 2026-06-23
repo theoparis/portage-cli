@@ -1,11 +1,17 @@
 # `em select binutils` — `binutils-config` workalike
 
-STATUS: **not started.** Needed to make a freshly-merged (cross) binutils
-*usable*: the `as`/`ld`/… binaries install under
-`${EPREFIX}/usr/${CHOST}/${CTARGET}/binutils-bin/${VER}/` (and an `env.d`
-entry), but nothing creates the `${EPREFIX}/usr/bin/${CTARGET}-{as,ld,…}`
-wrappers, so `${CTARGET}-gcc -print-prog-name=as` falls back to the host `as`.
-Found via the crossdev clean-slate reinstall ([[crossdev-target]] — gap #2).
+STATUS: **implemented.** `em select binutils` now provides a
+`binutils-config`/`eselect binutils` workalike. Implemented features:
+- `em select binutils list` — lists all binutils profiles grouped by target architecture
+- `em select binutils show [--target <CTARGET>]` — shows current profile for target
+- `em select binutils set <profile> [--target <CTARGET>]` — activates a profile
+- Per-architecture grouping with `*` marking active profiles
+- Respects `--config-root`, `--local`, `--prefix` flags
+- Falls back to `/etc/env.d/binutils` for system-wide profiles
+- Auto-detects CHOST from make.conf
+
+REMAINING: Need to add `em select linker` for linker-specific handling as mentioned
+by the user. See coordination with [[select-compiler]].
 
 ## What binutils-config does (to replicate)
 
