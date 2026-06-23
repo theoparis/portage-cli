@@ -1,6 +1,6 @@
 # `em select clang` — Clang/LLVM version and linker configuration
 
-STATUS: **not started.** Clang in Gentoo uses a different mechanism than gcc:
+STATUS: **Option A implemented.** Clang in Gentoo uses a different mechanism than gcc:
 
 ## How Clang is deployed in Gentoo
 
@@ -49,13 +49,22 @@ This could be integrated into `em select linker` instead.
 - [[select-compiler]] — for gcc (different mechanism)
 - [[select-binutils]] — for binutils (different mechanism)
 
+## Implementation status
+
+- **Option A: LLVM slot selection** ✅ **IMPLEMENTED**
+  - `em select clang list` — lists available LLVM slots
+  - `em select clang show` — shows current active slot
+  - `em select clang set <slot>` — sets active LLVM slot
+  - Works with `--config-root`, `--local`, `--prefix`
+  - Shows host/prefix labels when in prefix context
+
+- **Option B: Linker configuration** ⏳ **NOT STARTED**
+  - Would manage `-fuse-ld=` in `/etc/clang/${SLOT}/gentoo-linker.cfg`
+  - Could be integrated into `em select linker` or a separate `em select clang linker` subcommand
+
 ## Decision needed
 
-Should `em select clang` be:
-1. A separate subcommand for LLVM slot selection?
-2. Integrated into `em select compiler` with `--clang` flag?
-3. Part of `em select linker` for the `-fuse-ld=` configuration?
-4. All of the above?
-
-RECOMMENDATION: Start with Option A (LLVM slot selection) as a separate subcommand, 
-then add linker configuration as a separate concern.
+Should linker configuration for clang be:
+1. Part of `em select linker` (unified linker management)?
+2. A separate `em select clang linker` subcommand?
+3. Integrated into `em select clang set` with additional flags?

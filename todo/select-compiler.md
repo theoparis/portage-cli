@@ -13,8 +13,10 @@ a `gcc-config`/`eselect gcc` workalike. Implemented features:
   `(host)` / `(prefix)` labels to disambiguate sources
 
 REMAINING: The user mentioned wanting `--gcc` and `--clang` flags for compiler-specific
-handling to distinguish between different compiler types. See [[select-binutils]] and
-[[select-linker]] for the other toolchain tools.
+handling. However, clang now has its own `em select clang` subcommand (Option A)
+for LLVM slot selection, since it uses a different mechanism than gcc.
+See [[select-clang]] for clang support and [[select-binutils]], [[select-linker]]
+for the other toolchain tools.
 
 ## What gcc-config does (to replicate)
 
