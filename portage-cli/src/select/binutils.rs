@@ -15,11 +15,21 @@ use crate::style::C_STAR;
 
 /// Base directory for binutils env.d files.
 fn binutils_env_d_dir(globals: &Cli) -> Utf8PathBuf {
+    // First check config-root location (respects --config-root, --local, --prefix)
+    let config_portage = config_portage_dir(globals);
+    if let Some(parent) = config_portage.parent() {
+        let config_env_dir = parent.join("env.d/binutils");
+        if config_env_dir.is_dir() {
+            return config_env_dir;
+        }
+    }
+    // Fall back to system location
     let system_dir = Utf8PathBuf::from("/etc/env.d/binutils");
     if system_dir.is_dir() {
         return system_dir;
     }
-    config_portage_dir(globals).join("env.d/binutils")
+    // Fall back to config-root env.d
+    config_portage.join("env.d/binutils")
 }
 
 /// Path to the current binutils profile config file.
