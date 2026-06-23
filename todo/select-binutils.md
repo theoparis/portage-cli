@@ -9,9 +9,11 @@ STATUS: **implemented.** `em select binutils` now provides a
 - Respects `--config-root`, `--local`, `--prefix` flags
 - Falls back to `/etc/env.d/binutils` for system-wide profiles
 - Auto-detects CHOST from make.conf
+- When using `--local` or `--prefix`, shows both host and prefix profiles with color-coded
+  `(host)` / `(prefix)` labels to disambiguate sources
 
-REMAINING: Need to add `em select linker` for linker-specific handling as mentioned
-by the user. See coordination with [[select-compiler]].
+RELATED: See [[select-compiler]] for GCC and [[select-linker]] for linker.
+Together they form the complete toolchain activation suite.
 
 ## What binutils-config does (to replicate)
 

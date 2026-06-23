@@ -9,6 +9,8 @@ for ld, lld, mold, etc. Implemented features:
 - Respects `--config-root`, `--local`, `--prefix` flags
 - Falls back to `/etc/env.d/linker` for system-wide profiles
 - Auto-detects CHOST from make.conf
+- When using `--local` or `--prefix`, shows both host and prefix profiles with color-coded
+  `(host)` / `(prefix)` labels to disambiguate sources
 
 RELATED: Works alongside [[select-compiler]] and [[select-binutils]] for
 complete toolchain activation.

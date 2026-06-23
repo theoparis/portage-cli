@@ -9,9 +9,12 @@ a `gcc-config`/`eselect gcc` workalike. Implemented features:
 - Respects `--config-root`, `--local`, `--prefix` flags
 - Falls back to `/etc/env.d/gcc` for system-wide profiles
 - Auto-detects CHOST from make.conf
+- When using `--local` or `--prefix`, shows both host and prefix profiles with color-coded
+  `(host)` / `(prefix)` labels to disambiguate sources
 
 REMAINING: The user mentioned wanting `--gcc` and `--clang` flags for compiler-specific
-handling. Also need to add linker support. See [[select-binutils]] for coordination.
+handling to distinguish between different compiler types. See [[select-binutils]] and
+[[select-linker]] for the other toolchain tools.
 
 ## What gcc-config does (to replicate)
 
