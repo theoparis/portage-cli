@@ -141,7 +141,11 @@ fn find_slot_targets(slot_dir: &Utf8PathBuf) -> Vec<String> {
                     // Check it's not just the binary itself (which would give empty prefix)
                     // and not just a dash
                     if !prefix.is_empty() && prefix != "-" {
-                        targets.push(prefix.to_string());
+                        // Extract just the arch part (first component before -)
+                        // e.g., "aarch64-unknown-linux-gnu" -> "aarch64"
+                        // or "riscv64-unknown-elf" -> "riscv64"
+                        let arch = prefix.split('-').next().unwrap_or(prefix);
+                        targets.push(arch.to_string());
                         break; // Only add once per file (clang, clang++, clang-cpp all have same prefix)
                     }
                 }
@@ -222,18 +226,18 @@ fn list(globals: &Cli) -> Result<()> {
         let is_current = current.as_deref() == Some(&slot.name);
         let num = format!("[{:>width$}]", n, width = num_width);
 
-        // Format: clang-{version} {arch1}[I] {arch2}[I] [* if current]
+        // Format: clang-{version} [arch1, arch2, ...] [* if current]
         let mut slot_display = format!("clang-{}", slot.name);
 
         if !slot.targets.is_empty() {
-            slot_display.push(' ');
+            slot_display.push_str(" [");
             for (i, target) in slot.targets.iter().enumerate() {
                 if i > 0 {
-                    slot_display.push(' ');
+                    slot_display.push_str(", ");
                 }
                 slot_display.push_str(target);
-                slot_display.push_str("[I]");
             }
+            slot_display.push(']');
         }
 
         if is_current {
