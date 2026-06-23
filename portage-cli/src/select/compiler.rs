@@ -8,29 +8,40 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 
 use anyhow::{Context, Result, bail};
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
 use super::config_portage_dir;
 use crate::cli::{Cli, CompilerAction};
 use crate::style::C_STAR;
 
 /// Base directory for gcc env.d files.
+///
+/// For system: /etc/env.d/gcc
+/// For --local (Prefix): ${EPREFIX}/etc/env.d/gcc (e.g., ~/.gentoo/etc/env.d/gcc)
+/// For --prefix <DIR>: <DIR>/etc/env.d/gcc
 fn gcc_env_d_dir(globals: &Cli) -> Utf8PathBuf {
-    // First check config-root location (respects --config-root, --local, --prefix)
     let config_portage = config_portage_dir(globals);
+
+    // config_portage_dir returns ${EPREFIX}/etc/portage (e.g., ~/.gentoo/etc/portage)
+    // env.d is a sibling directory: ${EPREFIX}/etc/env.d
     if let Some(parent) = config_portage.parent() {
         let config_env_dir = parent.join("env.d/gcc");
         if config_env_dir.is_dir() {
             return config_env_dir;
         }
     }
+
     // Fall back to system location
     let system_dir = Utf8PathBuf::from("/etc/env.d/gcc");
     if system_dir.is_dir() {
         return system_dir;
     }
-    // Fall back to config-root env.d
-    config_portage.join("env.d/gcc")
+
+    // If neither exists, return the config-root env.d location (will be created on first use)
+    config_portage
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join("env.d/gcc")
 }
 
 /// Path to the current compiler profile config file.

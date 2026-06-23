@@ -8,29 +8,40 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 
 use anyhow::{Context, Result, bail};
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
 use super::config_portage_dir;
 use crate::cli::{Cli, LinkerAction};
 use crate::style::C_STAR;
 
 /// Base directory for linker env.d files.
+///
+/// For system: /etc/env.d/linker
+/// For --local (Prefix): ${EPREFIX}/etc/env.d/linker (e.g., ~/.gentoo/etc/env.d/linker)
+/// For --prefix <DIR>: <DIR>/etc/env.d/linker
 fn linker_env_d_dir(globals: &Cli) -> Utf8PathBuf {
-    // First check config-root location (respects --config-root, --local, --prefix)
     let config_portage = config_portage_dir(globals);
+
+    // config_portage_dir returns ${EPREFIX}/etc/portage
+    // env.d is a sibling directory: ${EPREFIX}/etc/env.d
     if let Some(parent) = config_portage.parent() {
         let config_env_dir = parent.join("env.d/linker");
         if config_env_dir.is_dir() {
             return config_env_dir;
         }
     }
+
     // Fall back to system location
     let system_dir = Utf8PathBuf::from("/etc/env.d/linker");
     if system_dir.is_dir() {
         return system_dir;
     }
-    // Fall back to config-root env.d
-    config_portage.join("env.d/linker")
+
+    // If neither exists, return the config-root env.d location (will be created on first use)
+    config_portage
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join("env.d/linker")
 }
 
 /// Path to the current linker profile config file.
