@@ -671,12 +671,41 @@ invalid option -- 'p'`; no `libc.so`/`libc.a` in the sysroot). Two driver bugs:
    differs from the planned USE), which also benefits normal merges. Driver-local
    alternative: a `StageStep.force`/emptytree-for-atom flag, but USE-aware skip is
    cleaner and not crossdev-specific. **This is the top blocker.**
-2. **binutils not activated** — no `/usr/bin/<CTARGET>-{as,ld,…}` wrappers exist
-   after install (`find ~/.gentoo/usr -name 'riscv64-…-as'` → nothing), though
-   `etc/env.d/binutils/riscv64-…-2.46.1` is written. binutils-config (pkg_postinst)
-   isn't producing the wrappers in the prefix, so `<CTARGET>-gcc -print-prog-name=
-   as` → bare `as`. Need binutils-config/gcc-config activation (wrappers +
-   `env.d`/PATH) for `<CTARGET>-gcc` to find its cross `as`/`ld`.
+2. **binutils not activated — WRAPPER CREATION + `--setup` WIRING DONE
+   (2026-06-24).** Two pieces were missing under one heading:
+   - `em select {binutils,compiler} set` only wrote `config-<target>` + the env.d
+     global file; the **`/usr/bin/<CTARGET>-*` wrapper symlinks were never created**
+     (the doc claimed them; the code didn't). Now `EnvDProfile::install_wrappers`
+     replicates `binutils-config` (two-level `usr/libexec/gcc/<T>/<tool>` →
+     `binutils-bin/<VER>`, then `usr/bin/<T>-<tool>`) and `gcc-config`
+     (`usr/bin/<T>-<tool>` → `<GCC_PATH>/<T>-<tool>` + `<T>-cc`), all rooted at
+     `<EPREFIX>` so `--local`/`--prefix` link their own binaries. See
+     [[select-binutils]], [[select-compiler]]. Unit-tested.
+   - `crossdev --setup` now calls `select::activate_{binutils,compiler}` after the
+     binutils/gcc steps (`activate_toolchain`, EPREFIX-aware), so the prefix gets
+     activated instead of the host `/` that the eclass `pkg_postinst`'s
+     `binutils-config` targets. Activates the newest profile built into this root;
+     no-op under `-p`.
+   **Build-PATH exposure — TRACED + FIXED (2026-06-25).** `init_build_env`
+   (`shell.rs:1062-1076`) rebuilds PATH from the process PATH but **strips every
+   `$HOME` path** — and `~/.gentoo/usr/bin` is under `$HOME`, so the freshly
+   installed wrappers are removed. The only thing that re-adds it is the `--local`
+   prefix `bashrc` hook (`setup.rs::BASHRC_LOCAL`: `export
+   PATH="${_ov}/usr/bin:${PATH}"`), loaded into the build shell by
+   `ebuild.rs` (config-overlay bashrc). But `crossdev::init_target` never wrote
+   that bashrc — only `em setup` did. Fix: `init_target` now calls
+   `setup::bootstrap(&roots)` when `EROOT != /` (idempotent), so `em --local
+   crossdev --setup` lays down the prefix `bashrc`+skeleton and the wrappers in
+   `~/.gentoo/usr/bin` are on the gcc-stage build PATH. Verified `--prefix`
+   bootstrap fires (writes BASHRC_PREFIX, no PATH hook — by design, ROOT-offset
+   binaries shouldn't shadow host tools).
+   **STILL OPEN:** (a) live `em --local crossdev --setup` end-to-end →
+   `<CTARGET>-gcc hello.c` → `file` = RISC-V; (b) two latent edges — `--prefix`
+   cross has no PATH hook for its cross gcc, and the cross-CC auto-export gate
+   (`shell.rs:1124` `program_on_path`) reads the **process** PATH not the
+   bashrc-extended shell PATH, so on a host with no system crossdev toolchain the
+   prefix's `<CTARGET>-gcc` wouldn't trip the gate. Both fine on this dev box
+   (system crossdev present); revisit if testing on a clean host.
 
 Completion criterion (unchanged): `<CTARGET>-gcc hello.c` → `file a.out` reports
 `ELF … RISC-V`. The *build* pipeline is done; these two are merge/activation.

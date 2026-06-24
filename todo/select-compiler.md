@@ -1,6 +1,16 @@
 # `em select compiler` — `gcc-config` workalike
 
-STATUS: **implemented.** `em select compiler` (and its `gcc` alias) now provides
+STATUS: **implemented (incl. wrapper symlinks, 2026-06-24).** Like
+[[select-binutils]], the wrapper half was missing and is now done:
+`install_wrappers` reads the env.d `GCC_PATH` and creates
+`usr/bin/<T>-<tool>` → `<GCC_PATH>/<T>-<tool>` (gcc-bin binaries are already
+`<T>-`prefixed) plus the `<T>-cc` alias, always re-rooted under `<EPREFIX>` so a
+prefix install links its own gcc, not a same-pathed host copy. Unit-tested
+(`cross_wrappers_link_gcc_bin_directly`). STILL TODO: auto-invoke from
+`crossdev --setup` after the gcc-stage1/stage2 steps (binutils-config first). See
+[[crossdev-target]].
+
+`em select compiler` (and its `gcc` alias) now provides
 a `gcc-config`/`eselect gcc` workalike. Implemented features:
 - `em select compiler list` — lists all gcc profiles grouped by target architecture
 - `em select compiler show [--target <CTARGET>]` — shows current profile for target

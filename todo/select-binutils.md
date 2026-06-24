@@ -1,6 +1,21 @@
 # `em select binutils` — `binutils-config` workalike
 
-STATUS: **implemented.** `em select binutils` now provides a
+STATUS: **implemented (incl. wrapper symlinks, 2026-06-24).** Earlier the module
+only wrote `config-<target>` + the env.d global file; the **`/usr/bin/<CTARGET>-*`
+wrapper creation it claimed was NOT actually done** — so `<CTARGET>-gcc` could not
+find its cross `as`/`ld` (the gap-#2 blocker in [[crossdev-target]]). Now
+`set_profile` calls `EnvDProfile::install_wrappers` and binutils replicates
+`binutils-config`'s two-level layout: `usr/libexec/gcc/<T>/<tool>` → the
+`binutils-bin/<VER>` binary, then `usr/bin/<T>-<tool>` → that libexec link, all
+rooted at `<EPREFIX>` (so `--local`/`--prefix` link their own binaries). Bin dir
+located on disk (cross nests under `usr/<CBUILD>/<T>/binutils-bin`, native at
+`usr/<T>/binutils-bin`). No-op until the binaries are merged. Unit-tested
+(`cross_wrappers_use_libexec_indirection`, `no_binaries_is_a_noop`).
+STILL TODO: **auto-invoke from `crossdev --setup`** after the binutils step (the
+eclass `pkg_postinst` calls the *host* `/usr/bin/binutils-config`, which activates
+into `/` not the prefix). See [[crossdev-target]].
+
+`em select binutils` now provides a
 `binutils-config`/`eselect binutils` workalike. Implemented features:
 - `em select binutils list` — lists all binutils profiles grouped by target architecture
 - `em select binutils show [--target <CTARGET>]` — shows current profile for target
