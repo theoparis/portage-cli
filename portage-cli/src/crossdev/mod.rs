@@ -108,6 +108,15 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
             },
         )
         .await?;
+
+        // Activate the toolchain into *this* root after the step that built it —
+        // the eclass `pkg_postinst` runs the host's `binutils-config`/`gcc-config`,
+        // which target `/`, so a `--local`/`--prefix` toolchain stays inert without
+        // this. binutils first (gcc's cross `as`/`ld` come from it), before
+        // gcc-stage1 builds at a later step.
+        if !globals.pretend {
+            activate_toolchain(target, globals, step)?;
+        }
     }
 
     if !globals.pretend {
@@ -119,6 +128,27 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
             target.tuple,
         )
         .ok();
+    }
+    Ok(())
+}
+
+/// Run the prefix-side `binutils-config`/`gcc-config` after the step that built
+/// the tool, creating the `<EROOT>/usr/bin/<CTARGET>-*` wrappers. Keyed off the
+/// step's package so it fires once per toolchain component.
+fn activate_toolchain(target: &CrossTarget, globals: &Cli, step: &stages::StageStep) -> Result<()> {
+    let Some(atom) = step.atoms.first() else {
+        return Ok(());
+    };
+    let tuple = &target.tuple;
+    let activated = if atom.ends_with("/binutils") {
+        crate::select::activate_binutils(globals, tuple)?
+    } else if atom.ends_with("/gcc") {
+        crate::select::activate_compiler(globals, tuple)?
+    } else {
+        return Ok(());
+    };
+    if activated {
+        println!("    activated {} for {tuple}", step.label);
     }
     Ok(())
 }
@@ -184,6 +214,16 @@ fn show_target_cfg(target: &CrossTarget, globals: &Cli) -> Result<()> {
 }
 
 fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
+    // For a retargeted prefix (`--local`/`--prefix`/`--root`) bootstrap it first:
+    // `setup::bootstrap` writes the prefix `bashrc` that re-adds `<EROOT>/usr/bin`
+    // to the build PATH (the shell sanitiser strips `$HOME` paths, so a `--local`
+    // prefix's own bin is otherwise invisible). That is what makes the cross
+    // toolchain wrappers we install reachable by the gcc-stage builds. Idempotent.
+    let roots = globals.roots();
+    if roots.merge_root().as_str() != "/" {
+        crate::setup::bootstrap(&roots)?;
+    }
+
     let gentoo = main_repo(globals)?;
     let gentoo_path = gentoo.path().to_owned();
     let overlay = setup_root(globals).join("var/db/repos").join(OVERLAY_NAME);
