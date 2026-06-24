@@ -21,9 +21,19 @@ pub trait EnvDProfile: Sized + 'static {
     /// The subdirectory name under env.d/ (e.g., "gcc", "binutils", "linker").
     fn env_d_subdir() -> &'static str;
 
-    /// The prefix for the global environment file (e.g., "04gcc-", "05binutils", "06linker").
-    /// If empty, no per-target suffix is used.
-    fn global_env_prefix() -> &'static str;
+    /// The name of the global environment file in env.d/.
+    /// For gcc: "04gcc-{target}" (includes target)
+    /// For binutils: "05binutils" (no target)
+    /// For linker: "06linker" (no target)
+    fn global_env_file() -> &'static str;
+
+    /// Whether the global env file name includes a target suffix that needs to be formatted.
+    /// For gcc: true (uses {target})
+    /// For binutils: false
+    /// For linker: false
+    fn global_env_uses_target() -> bool {
+        false
+    }
 
     /// The variable name to look for in profiles to extract the target (e.g., "CTARGET", "TARGET").
     fn target_var_name() -> &'static str;
@@ -75,29 +85,20 @@ fn current_config_path<T: EnvDProfile>(globals: &Cli, target: &str) -> Utf8PathB
 
 /// Path to the global environment file.
 fn global_env_path<T: EnvDProfile>(globals: &Cli, target: &str) -> Utf8PathBuf {
-    if T::global_env_prefix().is_empty() {
-        let system_path = Utf8PathBuf::from(format!("/etc/env.d/{}", T::env_d_subdir()));
-        if system_path.is_file() || system_path.parent().is_some_and(|p| p.is_dir()) {
-            return system_path;
-        }
-        config_portage_dir(globals)
-            .parent()
-            .unwrap_or(Utf8Path::new("/"))
-            .join(format!("env.d/{}", T::env_d_subdir()))
+    let file_name = if T::global_env_uses_target() {
+        T::global_env_file().replace("{target}", target)
     } else {
-        let system_path = Utf8PathBuf::from(format!(
-            "/etc/env.d/{}{}",
-            T::global_env_prefix(),
-            target
-        ));
-        if system_path.is_file() || system_path.parent().is_some_and(|p| p.is_dir()) {
-            return system_path;
-        }
-        config_portage_dir(globals)
-            .parent()
-            .unwrap_or(Utf8Path::new("/"))
-            .join(format!("env.d/{}{}", T::global_env_prefix(), target))
+        T::global_env_file().to_string()
+    };
+    
+    let system_path = Utf8PathBuf::from(format!("/etc/env.d/{}", file_name));
+    if system_path.is_file() || system_path.parent().is_some_and(|p| p.is_dir()) {
+        return system_path;
     }
+    config_portage_dir(globals)
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join(format!("env.d/{}", file_name))
 }
 
 /// A profile with its target.

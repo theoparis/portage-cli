@@ -21,8 +21,12 @@ impl env_d::EnvDProfile for GccProfileType {
         "gcc"
     }
 
-    fn global_env_prefix() -> &'static str {
-        "04gcc-"
+    fn global_env_file() -> &'static str {
+        "04gcc-{target}"
+    }
+
+    fn global_env_uses_target() -> bool {
+        true
     }
 
     fn target_var_name() -> &'static str {

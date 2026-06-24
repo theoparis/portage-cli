@@ -21,7 +21,7 @@ impl env_d::EnvDProfile for LinkerProfileType {
         "linker"
     }
 
-    fn global_env_prefix() -> &'static str {
+    fn global_env_file() -> &'static str {
         "06linker"
     }
 

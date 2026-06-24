@@ -20,7 +20,7 @@ impl env_d::EnvDProfile for BinutilsProfileType {
         "binutils"
     }
 
-    fn global_env_prefix() -> &'static str {
+    fn global_env_file() -> &'static str {
         "05binutils"
     }
 
