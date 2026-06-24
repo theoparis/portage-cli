@@ -305,7 +305,7 @@ fn write_sysroot_repos_conf(
 /// so the cross context is detectable, `ARCH`/keywords + target `CFLAGS`. `ROOT`
 /// tracks the actual sysroot so a retargeted prefix (`--local`/`--prefix`, e.g.
 /// `~/.gentoo/usr/<CTARGET>`) is honoured, not the hardcoded `/usr/<CTARGET>`.
-fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path) -> String {
+fn make_conf_body(target: &CrossTarget, _sysroot: &Utf8Path) -> String {
     let arch = target.gentoo_arch();
     let tuple = &target.tuple;
     let cbuild = host_chost();
@@ -316,7 +316,7 @@ fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path) -> String {
          CTARGET={tuple}\n\
          ARCH=\"{arch}\"\n\
          ACCEPT_KEYWORDS=\"{arch} ~{arch}\"\n\
-         ROOT=\"{sysroot}/\"\n\
+         ROOT=\"/\"\n\
          CFLAGS=\"{}\"\n\
          CXXFLAGS=\"${{CFLAGS}}\"\n",
         target.cflags(),
@@ -332,8 +332,10 @@ fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path) -> String {
 /// block crossdev's `load_multilib_env` emits (CHOST_*/LIBDIR_*/ABI/…) is
 /// arch-specific and deferred to the build stages.
 fn write_cross_env(target: &CrossTarget, globals: &Cli) -> Result<()> {
-    const ENV_HEADER: &str =
-        "SYMLINK_LIB=no\nCOLLISION_IGNORE=\"${COLLISION_IGNORE} /usr/lib/debug/.build-id\"\n";
+    let env_header = format!(
+        "CTARGET={}\nSYMLINK_LIB=no\nCOLLISION_IGNORE=\"${{COLLISION_IGNORE}} /usr/lib/debug/.build-id\"\n",
+        target.tuple
+    );
 
     let portage = setup_root(globals).join("etc/portage");
     let category = target.category();
@@ -343,7 +345,7 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli) -> Result<()> {
 
     let mut mappings = String::new();
     for (_, pkg) in target.packages() {
-        write_if_absent(&env_dir.join(format!("{pkg}.conf")), ENV_HEADER)?;
+        write_if_absent(&env_dir.join(format!("{pkg}.conf")), &env_header)?;
         mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
     }
 
