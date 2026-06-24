@@ -1,0 +1,18 @@
+//! Shared depgraph-related flags for use in both the main CLI and query depgraph subcommand.
+
+use clap::Args;
+
+/// Flags related to dependency graph resolution that can be used by multiple commands.
+#[derive(Args, Debug, Clone)]
+pub struct DepgraphFlags {
+    /// Re-examine transitive dependencies for updates (emerge --deep).
+    /// Bumps `:*` any-slot deps to the newest slot rather than keeping
+    /// a satisfying installed slot.
+    #[arg(short = 'D', long)]
+    pub deep: bool,
+
+    /// Re-evaluate USE flags for all packages (emerge --newuse).
+    /// Forces re-examination of USE state for installed packages.
+    #[arg(short = 'N', long)]
+    pub newuse: bool,
+}

@@ -4,6 +4,9 @@ use clap::builder::styling::{AnsiColor as ClapAnsiColor, Styles};
 use clap::{Parser, Subcommand};
 use gentoo_core::Arch;
 
+mod depgraph_flags;
+pub use depgraph_flags::DepgraphFlags;
+
 const fn cli_styles() -> Styles {
     Styles::styled()
         .header(ClapAnsiColor::Yellow.on_default().bold())
@@ -27,6 +30,9 @@ pub struct Cli {
     #[command(flatten)]
     pub color: colorchoice_clap::Color,
 
+    #[command(flatten)]
+    pub depgraph_flags: DepgraphFlags,
+
     #[arg(short = 'p', long, global = true)]
     pub pretend: bool,
 
@@ -38,9 +44,6 @@ pub struct Cli {
 
     #[arg(short = 'q', long, global = true)]
     pub quiet: bool,
-
-    #[arg(short = 'D', long, global = true)]
-    pub deep: bool,
 
     #[arg(long, value_name = "ARCH", default_value_t = Arch::current(), value_parser = parse_arch)]
     pub arch: Arch,
@@ -68,9 +71,6 @@ pub struct Cli {
     /// Search package names and descriptions, like emerge --searchdesc
     #[arg(short = 'S', long)]
     pub searchdesc: bool,
-
-    #[arg(short = 'N', long)]
-    pub newuse: bool,
 
     #[arg(short = 'u', long)]
     pub update: bool,
@@ -627,6 +627,9 @@ pub struct CrossdevArgs {
     /// Print the derived target configuration and exit (no writes).
     #[arg(long)]
     pub show_target_cfg: bool,
+
+    #[command(flatten)]
+    pub depgraph_flags: DepgraphFlags,
 }
 
 #[derive(Subcommand)]
@@ -923,6 +926,8 @@ pub enum QueryCommand {
         /// Let the solver choose USE flags to satisfy REQUIRED_USE (Level C).
         #[arg(long)]
         autosolve_use: bool,
+        #[command(flatten)]
+        depgraph_flags: DepgraphFlags,
     },
     #[command(about = "List files installed by a package", alias = "f")]
     Files {

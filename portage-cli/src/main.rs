@@ -149,6 +149,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         EmergeOpts {
             use_override: &[],
             nodeps: cli.nodeps,
+            depgraph_flags: None,
         },
     )
     .await
@@ -164,6 +165,9 @@ pub(crate) struct EmergeOpts<'a> {
     pub use_override: &'a [String],
     /// `--nodeps`: merge only the named atoms, no dependency expansion.
     pub nodeps: bool,
+    /// Override depgraph flags (deep, newuse) for this call. When None, uses
+    /// the values from cli.depgraph_flags.
+    pub depgraph_flags: Option<crate::cli::DepgraphFlags>,
 }
 
 /// Resolve and (unless `--pretend`) merge `raw_atoms` with the global config in
@@ -186,7 +190,7 @@ pub(crate) async fn emerge_atoms(
         // USE between this set and the restore below.
         unsafe { std::env::set_var("USE", merged.trim()) };
     }
-    let result = emerge_atoms_inner(cli, raw_atoms, opts.nodeps).await;
+    let result = emerge_atoms_inner(cli, raw_atoms, opts.nodeps, opts.depgraph_flags).await;
     if !opts.use_override.is_empty() {
         // SAFETY: see above.
         unsafe {
@@ -199,7 +203,12 @@ pub(crate) async fn emerge_atoms(
     result
 }
 
-async fn emerge_atoms_inner(cli: &cli::Cli, raw_atoms: &[String], nodeps: bool) -> Result<()> {
+async fn emerge_atoms_inner(
+    cli: &cli::Cli,
+    raw_atoms: &[String],
+    nodeps: bool,
+    depgraph_flags_override: Option<crate::cli::DepgraphFlags>,
+) -> Result<()> {
     let resolved = cli.repo_path();
     let repo_path = camino::Utf8Path::new(&resolved);
     if !repo_path.is_dir() {
@@ -244,6 +253,10 @@ async fn emerge_atoms_inner(cli: &cli::Cli, raw_atoms: &[String], nodeps: bool) 
     } else {
         cli::DepgraphFormat::Pretty
     };
+    let depgraph_flags = depgraph_flags_override
+        .as_ref()
+        .map(|f| (f.deep, f.newuse))
+        .unwrap_or((cli.depgraph_flags.deep, cli.depgraph_flags.newuse));
     let outcome = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
         repo_path,
         atoms: &atoms,
@@ -257,7 +270,7 @@ async fn emerge_atoms_inner(cli: &cli::Cli, raw_atoms: &[String], nodeps: bool) 
         roots: &roots,
         onlydeps: cli.onlydeps,
         with_bdeps: cli.with_bdeps,
-        deep: cli.deep,
+        deep: depgraph_flags.0,
         nodeps,
     })
     .await?;
@@ -795,6 +808,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             atom,
             format,
             autosolve_use,
+            depgraph_flags,
         } => {
             let resolved = globals.repo_path();
             let repo_path = camino::Utf8Path::new(&resolved);
@@ -822,7 +836,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 roots: &roots,
                 onlydeps: globals.onlydeps,
                 with_bdeps: globals.with_bdeps,
-                deep: globals.deep,
+                deep: depgraph_flags.deep || globals.depgraph_flags.deep,
                 nodeps: globals.nodeps,
             })
             .await?;

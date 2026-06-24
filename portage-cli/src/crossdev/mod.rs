@@ -22,10 +22,18 @@ use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use portage_repo::{MakeConf, ReposConf, Repository};
 
-use crate::cli::{Cli, CrossdevArgs};
+use crate::cli::{Cli, CrossdevArgs, DepgraphFlags};
 use crate::style::{C_LABEL, C_PKG};
 use crate::util::write_if_absent;
 use target::CrossTarget;
+
+/// Merge depgraph flags from args into globals, with args taking precedence.
+fn merge_depgraph_flags(globals: &Cli, args: &CrossdevArgs) -> DepgraphFlags {
+    DepgraphFlags {
+        deep: args.depgraph_flags.deep || globals.depgraph_flags.deep,
+        newuse: args.depgraph_flags.newuse || globals.depgraph_flags.newuse,
+    }
+}
 
 /// The overlay name crossdev uses — one overlay holds every `cross-*` category.
 const OVERLAY_NAME: &str = "crossdev";
@@ -40,7 +48,7 @@ pub async fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
         return init_target(&target, globals);
     }
     if args.setup {
-        return setup(&target, globals).await;
+        return setup(&target, globals, args).await;
     }
     bail!(
         "em crossdev does setup only for now — pass --init-target to lay down the \
@@ -58,7 +66,7 @@ pub async fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
 /// [`StagePlan`](stages::StagePlan) through the shared merge path
 /// ([`crate::emerge_atoms`]) — per-step `USE` override + `--nodeps`. With `-p`
 /// each step prints its plan instead of building.
-async fn setup(target: &CrossTarget, globals: &Cli) -> Result<()> {
+async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Result<()> {
     // `-p` only previews the staged builds — don't write the overlay/sysroot.
     if !globals.pretend {
         init_target(target, globals)?;
@@ -89,12 +97,14 @@ async fn setup(target: &CrossTarget, globals: &Cli) -> Result<()> {
         )
         .ok();
         out.flush().ok();
+        let merged_flags = merge_depgraph_flags(globals, args);
         crate::emerge_atoms(
             globals,
             &step.atoms,
             crate::EmergeOpts {
                 use_override: &step.use_override,
                 nodeps: step.nodeps,
+                depgraph_flags: Some(merged_flags.clone()),
             },
         )
         .await?;
