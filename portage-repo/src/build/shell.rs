@@ -1590,33 +1590,25 @@ impl EbuildShell {
                         .append(true)
                         .open(log)
                         .and_then(|mut f| std::io::Write::write_all(&mut f, marker.as_bytes()));
-                    // A non-zero phase exit is a build failure. Portage's
-                    // ebuild.sh wraps each phase (`__ebuild_phase`) so a failed
-                    // command aborts via `die`; brush's `run_string` does *not*
-                    // treat a non-zero exit as an error (only `die` sets the
-                    // shared flag `run_phase` checks below), so append `|| die`
-                    // to convert a failed `emake`/`econf`/etc. into an abort.
-                    // `DieFlag::raise` keeps the first message, so an explicit
-                    // `die "msg"` inside the phase is preserved. Redirection
-                    // binds tighter than `||`, so the group's exit status (the
-                    // phase's) feeds the `||`.
+                    // A phase aborts only via `die` (the shared flag checked
+                    // below), matching portage: the build helpers self-die on
+                    // failure (`emake`/`econf`/`unpack`/the install helpers) and
+                    // `eapply`/explicit `die` raise it directly. We deliberately
+                    // do NOT treat the phase function's *trailing* exit status as
+                    // fatal — many stock phases legitimately end on a non-zero
+                    // command (e.g. binutils' `find … -exec rmdir {} +` to trim
+                    // empty dirs), which portage tolerates.
                     if *quiet {
-                        format!(
-                            "{{ {func_name} ; }} >> {log} 2>&1 || die \"failed (non-zero exit)\"",
-                        )
+                        format!("{{ {func_name} ; }} >> {log} 2>&1")
                     } else {
                         // The process-sub body may be polled after the phase
                         // (and even after the build tree is cleaned up); cd
                         // out of the cwd it cloned so the lazy `tee` spawn
                         // never starts from a deleted ${S}.
-                        format!(
-                            "{{ {func_name} ; }} > >(cd / && tee -a {log}) 2>&1 || die \"failed (non-zero exit)\"",
-                        )
+                        format!("{{ {func_name} ; }} > >(cd / && tee -a {log}) 2>&1")
                     }
                 }
-                None => {
-                    format!("{{ {func_name} ; }} || die \"failed (non-zero exit)\"")
-                }
+                None => func_name.to_string(),
             };
             self.run_string(&invocation).await?;
             // `die` aborts the phase even when it ran in a subshell or a
@@ -2286,13 +2278,13 @@ cache-formats = md5-dict
     }
 
     #[tokio::test]
-    async fn phase_with_nonzero_exit_aborts() {
-        // Portage wraps each phase (`__ebuild_phase`) so a non-zero exit
-        // aborts the build via die; `run_phase` must do the same — a bare
-        // `emake`/`econf` failure (no explicit `|| die`) must surface as an
-        // Err, not be swallowed by brush's `run_string`. Regression for the
-        // cross-toolchain case where a failed `src_compile` was silently
-        // followed by `src_install`, merging a partial image.
+    async fn phase_aborts_on_die_not_on_trailing_exit() {
+        // Portage aborts a phase only via `die` (helpers self-die; `eapply` /
+        // explicit `die` raise it), NOT from the phase function's trailing exit
+        // status. `run_phase` must match: a phase ending on a benign non-zero
+        // command (e.g. binutils' `find … -exec rmdir {} +`) must NOT abort,
+        // while an explicit `die` must. Regression for the cross-toolchain
+        // binutils `src_install` that ends on a non-zero `find … rmdir`.
         let dir = tempdir().unwrap();
         let repo_path = dir.path().join("repo");
         std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
@@ -2317,25 +2309,35 @@ cache-formats = md5-dict
         let work = dir.path().join("work");
 
         // A first, succeeding phase sources the ebuild and captures the
-        // baseline, so the second phase below runs the function body only.
+        // baseline, so the phases below run the function body only.
         shell
             .run_phase(&ebuild, "setup", &work, std::path::Path::new("/"))
             .await
             .unwrap();
 
-        // Define a phase that fails without an explicit `die` (mimics
-        // `emake` returning non-zero). run_phase must convert this into Err.
+        // A phase ending on a non-zero command (no `die`) is tolerated — it
+        // must NOT abort the build.
         shell
-            .run_string("src_compile() { return 1; }")
+            .run_string("src_compile() { true; false; }")
+            .await
+            .unwrap();
+        shell
+            .run_phase(&ebuild, "compile", &work, std::path::Path::new("/"))
+            .await
+            .expect("a benign trailing non-zero must not abort the phase");
+
+        // An explicit `die` (as the helpers raise on failure) must abort.
+        shell
+            .run_string("src_test() { die \"boom\"; }")
             .await
             .unwrap();
         let err = shell
-            .run_phase(&ebuild, "compile", &work, std::path::Path::new("/"))
+            .run_phase(&ebuild, "test", &work, std::path::Path::new("/"))
             .await
-            .expect_err("a non-zero phase exit must abort the build");
+            .expect_err("an explicit die must abort the build");
         let msg = format!("{err}");
         assert!(
-            msg.contains("die") && msg.contains("src_compile"),
+            msg.contains("die") && msg.contains("src_test"),
             "expected the die/phase name in the error, got: {msg}"
         );
     }

@@ -26,6 +26,11 @@ impl builtins::Command for UnpackCommand {
         &self,
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
+        // unpack self-dies on failure so a bare `unpack` aborts the
+        // build without the phase driver having to treat the phase's exit status
+        // as fatal. The per-archive "die:" diagnostics are printed in the
+        // blocking task below; this only raises the shared flag.
+        let die_flag = context.shared::<super::die::DieFlag>().ok().cloned();
         let shell = context.shell;
 
         let get = |var: &str| {
@@ -92,6 +97,12 @@ impl builtins::Command for UnpackCommand {
         })
         .await
         .unwrap_or(1);
+
+        if exit != 0
+            && let Some(flag) = &die_flag
+        {
+            flag.raise("unpack failed");
+        }
 
         Ok(brush_core::ExecutionResult::new(exit))
     }
