@@ -1527,9 +1527,9 @@ mod tests {
     /// A dropped `||` branch must keep a *multi-slot* sibling as an alternative.
     /// Regression for glibc's `BDEPEND=|| ( >=sys-devel/gcc-6.2
     /// >=llvm-runtimes/libgcc-18 )`: gcc is multi-slot (a `SlotChoice` virtual),
-    /// llvm-runtimes/libgcc is masked for the arch (dropped). The dropped branch
-    /// was recorded with no alternatives — because sibling collection skipped
-    /// virtual nodes — so autounmask falsely reported it as needing an unmask.
+    /// > llvm-runtimes/libgcc is masked for the arch (dropped). The dropped branch
+    /// > was recorded with no alternatives — because sibling collection skipped
+    /// > virtual nodes — so autounmask falsely reported it as needing an unmask.
     #[test]
     fn dropped_or_branch_keeps_multislot_sibling() {
         let mut repo = InMemoryRepository::new();

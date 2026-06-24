@@ -13,6 +13,7 @@
 mod binutils;
 mod clang;
 mod compiler;
+mod env_d;
 mod linker;
 mod profile;
 mod repos;
@@ -21,6 +22,7 @@ use anyhow::Result;
 use camino::Utf8PathBuf;
 
 use crate::cli::{Cli, SelectCommand};
+use crate::style::{C_HOST, C_PREFIX};
 
 /// Dispatch `em select <module> <action>`.
 pub fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
@@ -48,4 +50,51 @@ fn config_portage_dir(globals: &Cli) -> Utf8PathBuf {
     }
     // Fall back to system root
     Utf8PathBuf::from("/etc/portage")
+}
+
+/// Check if we're in a prefix/local context (--local or --prefix without --config-root).
+pub fn is_prefix_context(globals: &Cli) -> bool {
+    let roots = globals.roots();
+    roots.config().is_none() && roots.config_overlay().is_some()
+}
+
+/// Format a source label for display in prefix context.
+pub fn source_label(is_host: bool) -> String {
+    if is_host {
+        format!("{C_HOST} (host){C_HOST:#}")
+    } else {
+        format!("{C_PREFIX} (prefix){C_PREFIX:#}")
+    }
+}
+
+/// Get CHOST from make.conf.
+pub fn get_chost(globals: &Cli) -> Result<String, anyhow::Error> {
+    let make_conf_path = config_portage_dir(globals).join("make.conf");
+    let system_make_conf = Utf8PathBuf::from("/etc/make.conf");
+
+    let paths_to_check = if system_make_conf.is_file() {
+        vec![system_make_conf, make_conf_path]
+    } else {
+        vec![make_conf_path]
+    };
+
+    for path in paths_to_check {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.starts_with("CHOST=") {
+                    let mut chost = line.trim_start_matches("CHOST=").trim().to_string();
+                    let needs_strip =
+                        (chost.starts_with('"') && chost.ends_with('"'))
+                            || (chost.starts_with("'") && chost.ends_with("'"));
+                    if needs_strip {
+                        chost = chost[1..chost.len() - 1].to_string();
+                    }
+                    return Ok(chost);
+                }
+            }
+        }
+    }
+    let arch = globals.arch.as_str();
+    Ok(format!("{arch}-unknown-linux-gnu"))
 }

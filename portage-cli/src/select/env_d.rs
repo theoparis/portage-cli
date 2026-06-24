@@ -1,0 +1,406 @@
+//! Generic env.d-based profile selection module.
+//!
+//! This module provides a shared implementation for `eselect`-like modules that
+//! manage profiles via env.d directories (gcc, binutils, linker).
+
+use std::collections::BTreeMap;
+use std::io::Write as _;
+
+use anyhow::{Context, Result, bail};
+use camino::{Utf8Path, Utf8PathBuf};
+
+use super::{config_portage_dir, get_chost, is_prefix_context, source_label};
+use crate::cli::Cli;
+use crate::style::C_STAR;
+
+/// Trait for env.d-based profile selection modules.
+pub trait EnvDProfile: Sized + 'static {
+    /// The module name for display purposes.
+    fn module_name() -> &'static str;
+
+    /// The subdirectory name under env.d/ (e.g., "gcc", "binutils", "linker").
+    fn env_d_subdir() -> &'static str;
+
+    /// The prefix for the global environment file (e.g., "04gcc-", "05binutils", "06linker").
+    /// If empty, no per-target suffix is used.
+    fn global_env_prefix() -> &'static str;
+
+    /// The variable name to look for in profiles to extract the target (e.g., "CTARGET", "TARGET").
+    fn target_var_name() -> &'static str;
+
+    /// Additional environment variable prefixes to extract from profiles (e.g., ["LD="] for linker).
+    fn extra_env_vars() -> &'static [&'static str] {
+        &[]
+    }
+}
+
+/// Base directory for env.d files.
+pub fn env_d_dir<T: EnvDProfile>(globals: &Cli) -> Utf8PathBuf {
+    let config_portage = config_portage_dir(globals);
+
+    // config_portage_dir returns ${EPREFIX}/etc/portage
+    // env.d is a sibling directory: ${EPREFIX}/etc/env.d
+    if let Some(parent) = config_portage.parent() {
+        let config_env_dir = parent.join(format!("env.d/{}", T::env_d_subdir()));
+        if config_env_dir.is_dir() {
+            return config_env_dir;
+        }
+    }
+
+    // Fall back to system location
+    let system_dir = Utf8PathBuf::from(format!("/etc/env.d/{}", T::env_d_subdir()));
+    if system_dir.is_dir() {
+        return system_dir;
+    }
+
+    // If neither exists, return the config-root env.d location (will be created on first use)
+    config_portage
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join(format!("env.d/{}", T::env_d_subdir()))
+}
+
+/// Path to the current profile config file.
+fn current_config_path<T: EnvDProfile>(globals: &Cli, target: &str) -> Utf8PathBuf {
+    let system_path = Utf8PathBuf::from(format!("/etc/env.d/{}/config-{}", T::env_d_subdir(), target));
+    if system_path.is_file() {
+        return system_path;
+    }
+    // config file is at ${EPREFIX}/etc/env.d/<subdir>/config-{target}
+    config_portage_dir(globals)
+        .parent()
+        .unwrap_or(Utf8Path::new("/"))
+        .join(format!("env.d/{}/config-{}", T::env_d_subdir(), target))
+}
+
+/// Path to the global environment file.
+fn global_env_path<T: EnvDProfile>(globals: &Cli, target: &str) -> Utf8PathBuf {
+    if T::global_env_prefix().is_empty() {
+        let system_path = Utf8PathBuf::from(format!("/etc/env.d/{}", T::env_d_subdir()));
+        if system_path.is_file() || system_path.parent().is_some_and(|p| p.is_dir()) {
+            return system_path;
+        }
+        config_portage_dir(globals)
+            .parent()
+            .unwrap_or(Utf8Path::new("/"))
+            .join(format!("env.d/{}", T::env_d_subdir()))
+    } else {
+        let system_path = Utf8PathBuf::from(format!(
+            "/etc/env.d/{}{}",
+            T::global_env_prefix(),
+            target
+        ));
+        if system_path.is_file() || system_path.parent().is_some_and(|p| p.is_dir()) {
+            return system_path;
+        }
+        config_portage_dir(globals)
+            .parent()
+            .unwrap_or(Utf8Path::new("/"))
+            .join(format!("env.d/{}{}", T::global_env_prefix(), target))
+    }
+}
+
+/// A profile with its target.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Profile<T: EnvDProfile> {
+    pub name: String,
+    pub target: String,
+    /// Whether this profile is from the host system or the current config root
+    pub is_host: bool,
+    /// The module type marker
+    _marker: std::marker::PhantomData<T>,
+}
+
+/// List all profiles, grouped by target.
+fn list_all_profiles<T: EnvDProfile>(globals: &Cli) -> Result<BTreeMap<String, Vec<Profile<T>>>> {
+    let mut profiles_by_target: BTreeMap<String, Vec<Profile<T>>> = BTreeMap::new();
+
+    // Check if we're in a prefix/local context
+    let is_prefix_context = is_prefix_context(globals);
+
+    // Collect profiles from the current config root (prefix/local)
+    let prefix_base_dir = env_d_dir::<T>(globals);
+    if prefix_base_dir.is_dir() {
+        collect_profiles::<T>(&prefix_base_dir, &mut profiles_by_target, false)?;
+    }
+
+    // If in prefix context, also check system location
+    if is_prefix_context {
+        let system_dir = Utf8PathBuf::from(format!("/etc/env.d/{}", T::env_d_subdir()));
+        if system_dir.is_dir() {
+            collect_profiles::<T>(&system_dir, &mut profiles_by_target, true)?;
+        }
+    }
+
+    for profiles in profiles_by_target.values_mut() {
+        profiles.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
+    Ok(profiles_by_target)
+}
+
+/// Helper to collect profiles from a directory.
+fn collect_profiles<T: EnvDProfile>(
+    base_dir: &Utf8PathBuf,
+    profiles_by_target: &mut BTreeMap<String, Vec<Profile<T>>>,
+    is_host: bool,
+) -> Result<()> {
+    for entry in std::fs::read_dir(base_dir)? {
+        let entry = entry?;
+        let Ok(path) = Utf8PathBuf::from_path_buf(entry.path()) else {
+            continue;
+        };
+        let name = path.file_name().unwrap_or_default().to_string();
+
+        // Skip config files
+        if name.starts_with("config-") {
+            continue;
+        }
+
+        // Skip non-profile files
+        if name.ends_with(".conf") || name.is_empty() || !name.contains(char::is_numeric) {
+            continue;
+        }
+
+        // Read the profile to get the target variable
+        let target: Option<String> = {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let mut found = None;
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.starts_with(T::target_var_name()) {
+                        let target_var = T::target_var_name();
+                        let mut target = line
+                            .trim_start_matches(target_var)
+                            .trim()
+                            .to_string();
+                        let needs_strip =
+                            (target.starts_with('"') && target.ends_with('"'))
+                                || (target.starts_with("'") && target.ends_with("'"));
+                        if needs_strip {
+                            target = target[1..target.len() - 1].to_string();
+                        }
+                        found = Some(target);
+                        break;
+                    }
+                }
+                found
+            } else {
+                None
+            }
+        };
+
+        // If no target found, try to extract from profile name
+        let profile_target = target.unwrap_or_else(|| {
+            if let Some(pos) = name.rfind('-') {
+                let version_part = &name[pos + 1..];
+                if version_part.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    return name[..pos].to_string();
+                }
+            }
+            name.clone()
+        });
+
+        profiles_by_target
+            .entry(profile_target.clone())
+            .or_default()
+            .push(Profile {
+                name: name.clone(),
+                target: profile_target,
+                is_host,
+                _marker: std::marker::PhantomData,
+            });
+    }
+    Ok(())
+}
+
+/// Get the current profile for a target.
+fn get_current_profile<T: EnvDProfile>(globals: &Cli, target: &str) -> Option<String> {
+    let config_path = current_config_path::<T>(globals, target);
+    if let Ok(content) = std::fs::read_to_string(&config_path) {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("CURRENT=") {
+                return Some(line.trim_start_matches("CURRENT=").trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Set the profile for a target.
+fn set_profile<T: EnvDProfile>(
+    globals: &Cli,
+    target: &str,
+    profile: &str,
+    base_dir: &Utf8PathBuf,
+) -> Result<()> {
+    let config_path = current_config_path::<T>(globals, target);
+
+    let mut profile_path = base_dir.join(profile);
+
+    if !profile_path.is_file() {
+        let target_dir = base_dir.join(target);
+        let target_profile_path = target_dir.join(profile);
+        if target_profile_path.is_file() {
+            profile_path = target_profile_path;
+        }
+    }
+
+    if !profile_path.is_file() {
+        bail!("{} profile '{}' not found", T::module_name(), profile);
+    }
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent))?;
+    }
+
+    std::fs::write(&config_path, format!("CURRENT={}\n", profile))
+        .with_context(|| format!("writing {}", config_path))?;
+
+    let profile_content = std::fs::read_to_string(&profile_path)
+        .with_context(|| format!("reading {}", profile_path))?;
+
+    let global_env_path = global_env_path::<T>(globals, target);
+    let mut env_content = format!("# Autogenerated by 'em select {}'.\n", T::module_name());
+
+    let all_env_vars: Vec<&str> = [
+        "PATH=", "LDPATH=", "MANPATH=", "INFOPATH=", "ROOTPATH=",
+    ]
+    .into_iter()
+    .chain(T::extra_env_vars().iter().copied())
+    .collect();
+
+    for line in profile_content.lines() {
+        let line = line.trim();
+        if all_env_vars.iter().any(|&v| line.starts_with(v)) {
+            env_content.push_str(line);
+            env_content.push('\n');
+        }
+    }
+
+    if let Some(parent) = global_env_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent))?;
+    }
+    std::fs::write(&global_env_path, env_content)
+        .with_context(|| format!("writing {}", global_env_path))?;
+
+    Ok(())
+}
+
+/// Run a list action.
+pub fn run_list<T: EnvDProfile>(globals: &Cli) -> Result<()> {
+    let profiles_by_target = list_all_profiles::<T>(globals)?;
+    let mut out = anstream::stdout();
+
+    if profiles_by_target.is_empty() {
+        println!("No {} profiles found", T::module_name());
+        return Ok(());
+    }
+
+    // Collect all profiles across all targets to calculate total count
+    let all_profiles: Vec<&Profile<T>> = profiles_by_target
+        .values()
+        .flat_map(|profiles| profiles.iter())
+        .collect();
+    let total_count = all_profiles.len();
+    let num_width = total_count.to_string().len();
+
+    let mut n = 1;
+    let mut first = true;
+    for (target, profiles) in &profiles_by_target {
+        let current = get_current_profile::<T>(globals, target);
+
+        if !first {
+            writeln!(out).ok();
+        }
+        first = false;
+
+        for profile in profiles {
+            // For some modules, the CURRENT value might be just the version or the full name
+            let is_current = if let Some(current_name) = &current {
+                profile.name == *current_name
+                    || profile.name.ends_with(&format!("-{}", current_name))
+            } else {
+                false
+            };
+            let num = format!("[{:>width$}]", n, width = num_width);
+            let mut profile_display = if is_current {
+                format!("{}{C_STAR} *{C_STAR:#}", profile.name)
+            } else {
+                profile.name.clone()
+            };
+
+            // Add source label if in prefix context
+            if is_prefix_context(globals) {
+                let label = source_label(profile.is_host);
+                profile_display.push_str(&label);
+            }
+
+            writeln!(out, "  {num} {}", profile_display).ok();
+            n += 1;
+        }
+    }
+
+    Ok(())
+}
+
+/// Run a show action.
+pub fn run_show<T: EnvDProfile>(globals: &Cli, target: &str) -> Result<()> {
+    match get_current_profile::<T>(globals, target) {
+        Some(profile) => println!("{}", profile),
+        None => println!(
+            "(no {} profile set for target '{}')",
+            T::module_name(),
+            target
+        ),
+    }
+    Ok(())
+}
+
+/// Run a set action.
+pub fn run_set<T: EnvDProfile>(
+    globals: &Cli,
+    target: &str,
+    profile: &str,
+    base_dir: &Utf8PathBuf,
+) -> Result<()> {
+    let profiles_by_target = list_all_profiles::<T>(globals)?;
+
+    let resolved_profile = if let Ok(n) = profile.parse::<usize>() {
+        let mut all_profiles: Vec<&Profile<T>> = profiles_by_target
+            .values()
+            .flat_map(|profiles| profiles.iter())
+            .collect();
+        all_profiles.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let idx = n
+            .checked_sub(1)
+            .context("profile numbers start at 1")?;
+        all_profiles
+            .get(idx)
+            .with_context(|| {
+                format!(
+                    "profile number {} out of range (1..={})",
+                    n,
+                    all_profiles.len()
+                )
+            })?
+            .name
+            .clone()
+    } else {
+        profile.to_string()
+    };
+
+    set_profile::<T>(globals, target, &resolved_profile, base_dir)?;
+    println!(">>> {} profile set: {}", T::module_name(), resolved_profile);
+    println!("    for target: {}", target);
+
+    Ok(())
+}
+
+/// Get the default target from CHOST or architecture.
+pub fn get_default_target(globals: &Cli) -> String {
+    get_chost(globals).unwrap_or_else(|_| globals.arch.as_str().to_string() + "-unknown-linux-gnu")
+}

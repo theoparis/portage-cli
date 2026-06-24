@@ -9,18 +9,16 @@ use std::io::Write as _;
 use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
 
-use super::config_portage_dir;
+use super::{config_portage_dir, is_prefix_context, source_label};
 use crate::cli::{ClangAction, Cli};
-use crate::style::{C_HOST, C_PREFIX, C_STAR};
+use crate::style::C_STAR;
 
 /// Base directory for LLVM installations.
 fn llvm_base_dir(globals: &Cli) -> Utf8PathBuf {
     // Check if we're in a prefix/local context
-    let roots = globals.roots();
-    let is_prefix_context = roots.config().is_none() && roots.config_overlay().is_some();
-
-    if is_prefix_context {
+    if is_prefix_context(globals) {
         // For prefix, LLVM would be under EPREFIX/usr/lib/llvm
+        let roots = globals.roots();
         if let Some(eprefix) = roots.eprefix() {
             return eprefix.join("usr/lib/llvm");
         }
@@ -50,8 +48,7 @@ fn list_all_clang_slots(globals: &Cli) -> Result<Vec<ClangSlot>> {
     let mut slots: Vec<ClangSlot> = Vec::new();
 
     // Check if we're in a prefix/local context
-    let roots = globals.roots();
-    let is_prefix_context = roots.config().is_none() && roots.config_overlay().is_some();
+    let is_prefix_context = is_prefix_context(globals);
 
     // Collect slots from the current config root (prefix/local)
     let prefix_llvm_dir = llvm_base_dir(globals);
@@ -241,14 +238,8 @@ fn list(globals: &Cli) -> Result<()> {
         }
 
         // Add source label if in prefix context
-        let roots = globals.roots();
-        let is_prefix_context = roots.config().is_none() && roots.config_overlay().is_some();
-        if is_prefix_context {
-            let label = if slot.is_host {
-                format!("{C_HOST} (host){C_HOST:#}")
-            } else {
-                format!("{C_PREFIX} (prefix){C_PREFIX:#}")
-            };
+        if is_prefix_context(globals) {
+            let label = source_label(slot.is_host);
             slot_display.push_str(&label);
         }
 
