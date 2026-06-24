@@ -13,6 +13,7 @@
 //! crossdev), `em --local crossdev <t>` targets `~/.gentoo/usr/<CTARGET>`, and
 //! `em --prefix DIR`/`--root DIR` retarget under `DIR`.
 
+mod multilib;
 mod stages;
 mod target;
 
@@ -230,7 +231,7 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
     let sysroot = sysroot(target, globals);
 
     write_overlay(target, &overlay, &gentoo_path)?;
-    write_cross_env(target, globals)?;
+    write_cross_env(target, globals, &gentoo_path)?;
     ensure_repos_conf(globals, &overlay)?;
     write_sysroot_config(target, &sysroot, &gentoo_path)?;
     write_sysroot_repos_conf(&sysroot, &gentoo_path, &overlay)?;
@@ -367,12 +368,18 @@ fn make_conf_body(target: &CrossTarget, _sysroot: &Utf8Path) -> String {
 /// config root's `etc/portage` (where the host-side `cross-*` builds read it).
 ///
 /// Each env file carries the collision-safety crossdev sets on every cross
-/// package: `SYMLINK_LIB=no` and a `COLLISION_IGNORE` for the build-id tree, so
-/// several cross toolchains can coexist on one host. The full per-ABI multilib
-/// block crossdev's `load_multilib_env` emits (CHOST_*/LIBDIR_*/ABI/…) is
-/// arch-specific and deferred to the build stages.
-fn write_cross_env(target: &CrossTarget, globals: &Cli) -> Result<()> {
-    let env_header = format!(
+/// package (`SYMLINK_LIB=no`, a `COLLISION_IGNORE` for the build-id tree) plus
+/// the per-ABI multilib block from [`multilib`] (crossdev's `load_multilib_env`):
+/// the target ABI's `CFLAGS_<abi>` (`-mabi=lp64d -march=rv64gc`) is what lets the
+/// libc build for `<CTARGET>` instead of inheriting the host CFLAGS. em owns these
+/// generated files (like crossdev, which regenerates them each run), so they are
+/// rewritten rather than preserved.
+fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Result<()> {
+    let eclass_dir = gentoo.join("eclass");
+    let host_ml = multilib::query(&host_chost(), &eclass_dir)?;
+    let target_ml = multilib::query(&target.tuple, &eclass_dir)?;
+
+    let header = format!(
         "CTARGET={}\nSYMLINK_LIB=no\nCOLLISION_IGNORE=\"${{COLLISION_IGNORE}} /usr/lib/debug/.build-id\"\n",
         target.tuple
     );
@@ -385,13 +392,26 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli) -> Result<()> {
 
     let mut mappings = String::new();
     for (_, pkg) in target.packages() {
-        write_if_absent(&env_dir.join(format!("{pkg}.conf")), &env_header)?;
+        let body = format!(
+            "{header}{}",
+            multilib::env_block(&host_ml, &target_ml, is_target_package(pkg))
+        );
+        let conf = env_dir.join(format!("{pkg}.conf"));
+        std::fs::write(&conf, &body).with_context(|| format!("writing {conf}"))?;
         mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
     }
 
     let pe_dir = portage.join("package.env");
     std::fs::create_dir_all(&pe_dir).with_context(|| format!("creating {pe_dir}"))?;
-    write_if_absent(&pe_dir.join(&category), &mappings)
+    let pe = pe_dir.join(&category);
+    std::fs::write(&pe, &mappings).with_context(|| format!("writing {pe}"))
+}
+
+/// Whether `pkg` compiles code for `<CTARGET>` (libc, kernel headers, runtimes —
+/// crossdev's `K|L`) so its env uses the target ABI, vs a host tool
+/// (`binutils`/`gcc`/the clang wrapper) that runs on `CBUILD` and uses the host ABI.
+fn is_target_package(pkg: &str) -> bool {
+    !matches!(pkg, "binutils" | "gcc" | "clang-crossdev-wrappers")
 }
 
 /// The host `CHOST` (= the target's `CBUILD`), read from the host `make.conf`.
