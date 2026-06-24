@@ -24,6 +24,18 @@ use camino::Utf8PathBuf;
 use crate::cli::{Cli, SelectCommand};
 use crate::style::{C_HOST, C_PREFIX};
 
+/// Activate the newest binutils profile built into this root for `target`
+/// (the `binutils-config` half of `crossdev --setup`'s toolchain activation).
+pub fn activate_binutils(globals: &Cli, target: &str) -> Result<bool> {
+    binutils::activate_latest(globals, target)
+}
+
+/// Activate the newest gcc profile built into this root for `target` (the
+/// `gcc-config` half). Run after [`activate_binutils`].
+pub fn activate_compiler(globals: &Cli, target: &str) -> Result<bool> {
+    compiler::activate_latest(globals, target)
+}
+
 /// Dispatch `em select <module> <action>`.
 pub fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
     match command {
@@ -84,9 +96,8 @@ pub fn get_chost(globals: &Cli) -> Result<String, anyhow::Error> {
                 let line = line.trim();
                 if line.starts_with("CHOST=") {
                     let mut chost = line.trim_start_matches("CHOST=").trim().to_string();
-                    let needs_strip =
-                        (chost.starts_with('"') && chost.ends_with('"'))
-                            || (chost.starts_with("'") && chost.ends_with("'"));
+                    let needs_strip = (chost.starts_with('"') && chost.ends_with('"'))
+                        || (chost.starts_with("'") && chost.ends_with("'"));
                     if needs_strip {
                         chost = chost[1..chost.len() - 1].to_string();
                     }

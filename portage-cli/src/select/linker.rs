@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 
-use super::{env_d, Cli};
+use super::{Cli, env_d};
 use crate::cli::LinkerAction;
 
 /// Linker-specific profile type.
