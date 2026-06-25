@@ -38,6 +38,7 @@ anstream = "1"
 anstyle = "1"
 colorchoice-clap = { workspace = true }
 camino = { workspace = true }
+ldconfig = "0.1.1"
 gentoo-core = { workspace = true }
 portage-atom = { workspace = true }
 portage-atom-pubgrub = { workspace = true }

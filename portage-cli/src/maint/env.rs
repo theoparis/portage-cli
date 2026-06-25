@@ -117,23 +117,44 @@ pub fn env_update(root: &Utf8Path) -> Result<()> {
         }
         std::fs::write(etc.join("ld.so.conf").as_std_path(), conf).context("writing ld.so.conf")?;
 
-        // Refresh the cache; best-effort (needs write access, and ldconfig
-        // may be absent on non-glibc roots).
-        let status = if root == "/" {
-            std::process::Command::new("ldconfig").status()
-        } else {
-            std::process::Command::new("ldconfig")
-                .arg("-r")
-                .arg(root.as_std_path())
-                .status()
-        };
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => eprintln!("env-update: ldconfig exited with {s}"),
-            Err(e) => eprintln!("env-update: ldconfig not run: {e}"),
+        // Refresh `${root}/etc/ld.so.cache`. Best-effort (glibc only; needs
+        // write access). We use the `ldconfig` library rather than shelling to
+        // the host binary: it reads each library's ELF arch, so it writes a
+        // correct cache even for a foreign-arch `--root` (a cross stage), and
+        // doesn't depend on an `ldconfig` being installed/on PATH.
+        if let Err(e) = refresh_ld_cache(root) {
+            eprintln!("env-update: ld.so.cache not refreshed: {e:#}");
         }
     }
 
+    Ok(())
+}
+
+/// Rebuild `${root}/etc/ld.so.cache` from `${root}/etc/ld.so.conf` (or the
+/// default search dirs), updating the soname symlinks as glibc's `ldconfig`
+/// does. Arch-correct for foreign roots — the scanner reads each ELF.
+fn refresh_ld_cache(root: &Utf8Path) -> Result<()> {
+    use ldconfig::{Cache, SearchPaths};
+
+    let conf = root.join("etc/ld.so.conf");
+    let search = if conf.as_std_path().exists() {
+        SearchPaths::from_file(&conf, Some(root))?
+    } else {
+        // Re-root the default dirs (/lib, /usr/lib, …) under `root`.
+        let dirs = SearchPaths::default()
+            .iter()
+            .map(|d| root.join(d.strip_prefix("/").unwrap_or(d)))
+            .collect::<Vec<_>>();
+        SearchPaths::new(dirs)
+    };
+    let cache = Cache::builder()
+        .update_symlinks(true)
+        .dry_run(false)
+        .prefix(root)
+        .build(&search)?;
+    cache
+        .write_to_file(root.join("etc/ld.so.cache"))
+        .context("writing ld.so.cache")?;
     Ok(())
 }
 
