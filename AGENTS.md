@@ -58,8 +58,11 @@ cargo msrv verify                  # Verifies the rust-version declared in Cargo
 - `chore:` — maintenance (dependencies, tooling)
 
 When a commit was significantly assisted by an AI tool, note it with an
-`Assisted-by:` trailer (e.g. `Assisted-by: Claude (Anthropic)`) rather than a
-`Co-Authored-By:` trailer.
+`Assisted-by:` trailer rather than a `Co-Authored-By:` trailer. Use the kernel's
+format (`AGENT_NAME:MODEL_VERSION`, colon-separated, e.g.
+`Assisted-by: Maki:glm-5.2`). Only list *specialized* analysis tools after the
+model version if any were used; basic dev tools (git, cargo, editors) are not
+listed. The agent never adds a `Signed-off-by` (DCO) — that is the human's.
 
 ## MSRV
 
