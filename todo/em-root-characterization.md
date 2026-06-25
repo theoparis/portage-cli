@@ -164,3 +164,32 @@ fork. Two ways out:
 NOTE: em currently sets `SYSROOT=ROOT` for this case (shell.rs: build_sysroot
 None → EROOT), which is why glibc builds against `ROOT/usr/include` (so the
 minimal set needed os-headers built into ROOT first). Path B would flip that.
+
+### DECISION (2026-06-25): SYSROOT=ROOT, break the loop like crossdev
+
+Chose **path A (SYSROOT=ROOT, self-hosting)**. Key user insight: a native
+self-hosting stage1 into ROOT is **near-equivalent to the crossdev toolchain
+bootstrap** — same circular `glibc ↔ gcc` cycle (gcc needs a libc, libc needs a
+compiler), broken the **same staged way**. So reuse the crossdev machinery rather
+than inventing a parallel one. The two should converge: crossdev = `CHOST≠CBUILD`
+into `/usr/<chost>`; native stage1 = `CHOST==CBUILD` into `--root`.
+
+Implementation direction:
+- Reuse `crossdev::stages` (`StagePlan`/`StageStep`, the `GCC_DISABLE_STAGE{1,2}`
+  USE overrides, `--nodeps` headers-only steps): binutils → os-headers →
+  libc-headers (`headers-only`, `--nodeps`) → gcc-stage1 (no-cxx/no-libc USE) →
+  libc → gcc-stage2. Generalize it from `cross-<tuple>/*` atoms to the native
+  `sys-devel/{binutils,gcc}` / `sys-libs/glibc` when `CHOST==CBUILD`. The
+  stage1-vs-stage2 gcc behaviour is auto-detected by toolchain.eclass from
+  whether libc is present, exactly as in crossdev — so the same step USE flags
+  apply.
+- The staged toolchain breaks the cycle and forces glibc/headers **before**
+  gcc/libxcrypt in ROOT, which is exactly what the pre-flight (pos: glibc@103
+  after libxcrypt@99/gcc@100) was failing on.
+- After the toolchain stage, the rest of `packages.build` builds against the
+  in-ROOT toolchain in topological order (the solver handles that part once the
+  cycle is pre-broken).
+
+So: factor the crossdev `setup()` staged-bootstrap so it can target a native
+`--root` (a `em` stage1 entry point), reusing `stages.rs`. Cross and native then
+share one bootstrap driver.
