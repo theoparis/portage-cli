@@ -147,14 +147,23 @@ impl Fetcher {
             if !candidate.exists() {
                 continue;
             }
-            if let Some(entry) = manifest_entry {
-                if entry.verify_file(candidate.as_std_path()).is_ok() {
-                    return Ok(FetchStatus::AlreadyPresent);
-                }
-            } else if candidate.is_file() {
+            let valid = match manifest_entry {
+                Some(entry) => entry.verify_file(candidate.as_std_path()).is_ok(),
                 // No manifest entry to verify against — treat as present.
-                return Ok(FetchStatus::AlreadyPresent);
+                None => candidate.is_file(),
+            };
+            if !valid {
+                continue;
             }
+            // Found in a read-only distdir, not the writable DISTDIR: expose it
+            // in DISTDIR (portage symlinks RO distfiles in) so unpack/eapply —
+            // which only look in DISTDIR — find it. Without this, em reports
+            // "already present" for a file the build then can't open (e.g.
+            // bash's `bash53-NNN` patches under /var/cache/distfiles).
+            if dir != &self.distdir {
+                link_into_distdir(&candidate, &dest);
+            }
+            return Ok(FetchStatus::AlreadyPresent);
         }
 
         if df.urls.is_empty() {
@@ -420,4 +429,53 @@ fn manifest_entry_for<'a>(manifest: &'a Manifest, filename: &str) -> Option<&'a 
             false
         }
     })
+}
+
+/// Expose a distfile found in a read-only distdir under the writable `dest`
+/// (in DISTDIR), so the build's unpack/eapply — which only consult DISTDIR —
+/// can open it. Best-effort, mirroring portage: prefer a symlink to the RO
+/// copy, fall back to a hard link, then a copy; replaces any stale entry.
+fn link_into_distdir(src: &Utf8Path, dest: &Utf8Path) {
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent.as_std_path());
+    }
+    let _ = std::fs::remove_file(dest.as_std_path());
+    if std::os::unix::fs::symlink(src.as_std_path(), dest.as_std_path()).is_ok() {
+        return;
+    }
+    if std::fs::hard_link(src.as_std_path(), dest.as_std_path()).is_ok() {
+        return;
+    }
+    let _ = std::fs::copy(src.as_std_path(), dest.as_std_path());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_into_distdir_symlinks_ro_copy_and_replaces_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = Utf8Path::from_path(tmp.path()).unwrap();
+        let ro = base.join("ro");
+        let dist = base.join("dist");
+        std::fs::create_dir_all(ro.as_std_path()).unwrap();
+        std::fs::create_dir_all(dist.as_std_path()).unwrap();
+
+        let src = ro.join("bash53-001");
+        std::fs::write(src.as_std_path(), b"PATCH").unwrap();
+        let dest = dist.join("bash53-001");
+
+        // Fresh DISTDIR: a symlink to the RO copy is created and readable.
+        link_into_distdir(&src, &dest);
+        let meta = std::fs::symlink_metadata(dest.as_std_path()).unwrap();
+        assert!(meta.file_type().is_symlink(), "should be a symlink");
+        assert_eq!(std::fs::read(dest.as_std_path()).unwrap(), b"PATCH");
+
+        // A stale DISTDIR entry is replaced (not left pointing elsewhere).
+        std::fs::remove_file(dest.as_std_path()).unwrap();
+        std::fs::write(dest.as_std_path(), b"STALE").unwrap();
+        link_into_distdir(&src, &dest);
+        assert_eq!(std::fs::read(dest.as_std_path()).unwrap(), b"PATCH");
+    }
 }
