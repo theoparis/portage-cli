@@ -829,30 +829,32 @@ freshly-bootstrapped `riscv64-unknown-linux-gnu-{gcc,g++}` compile C and C++ to
 First real test of the `<CTARGET>-emerge` path: `em --local --cross
 riscv64-unknown-linux-gnu sys-apps/less -p` resolves the full chain correctly
 (zlib, ncurses, readline, bzip2, libpcre2, less → all into the sysroot,
-`CHOST=riscv64 CBUILD=aarch64`). Building the leaf `sys-libs/zlib` exposes two
-bugs in the cross-emerge path (NOT the toolchain — the prefix gcc compiles
-C/C++/static to RISC-V fine standalone):
+`CHOST=riscv64 CBUILD=aarch64`).
 
-1. **Double multilib ABI pass.** zlib (multilib-minimal) runs `.default` *and*
-   `.lp64d` — the `.default` pass even completes `src_install`. A single-ABI
-   riscv target should run **once** (lp64d). Likely the cross `package.env`
-   (`ABI=lp64d MULTILIB_ABIS=lp64d`) is **not applied** for `--cross`: that
-   `package.env` lives under `~/.gentoo/etc/portage`, but `--cross` reads config
-   from the *sysroot* (`PORTAGE_CONFIGROOT == ROOT == <sysroot>`), whose
-   make.conf sets no `MULTILIB_ABIS`, so the profile default (`default`) leaks in.
-2. **gcc SIGSEGV on the `.lp64d` pass.** zlib's `configure` test compile
-   `( $CC -c $CFLAGS $test.c )` segfaults (rc=139, fresh PID each run) → "Compiler
-   error reporting is too harsh". The prefix gcc does **not** segfault standalone
-   with any of the obvious flag combos (`-mabi=lp64d -march=rv64gc -O3 …`,
-   doubled `-march`, `-fPIC`), so it is **environment-triggered** inside the
-   `.lp64d` multilib pass. A `usr/bin` gcc wrapper was never hit (the build
-   resolves gcc via the gcc-config `GCC_PATH`/`gcc-bin` dir, not `usr/bin`), so
-   capturing the exact failing argv+env needs wrapping `gcc-bin/15/…-gcc` (or
-   `cc1`) directly — that's the next diagnostic.
+**ROOT CAUSE + FIX (2026-06-25, `3907b91`): the prefix cross toolchain wasn't on
+the `--cross` build PATH.** The `<chost>-*` wrappers (`crossdev --setup`) live in
+`<EROOT>/usr/bin` = `~/.gentoo/usr/bin`, which is under `$HOME` and so stripped by
+em's build-PATH sanitiser; and `--cross` sets `eprefix=None` (cli.rs:295,326) so
+the prefix bashrc PATH hook never runs. A debug dump confirmed the cross build's
+PATH was `.em-helpers:/usr/bin:/opt/bin:/usr/lib/llvm/*` with **`CC=[]`** and
+`riscv64-…-gcc` not found. zlib then either fell back to host gcc or its
+configure test compile SIGSEGV'd (red herring — the gcc is fine; the prior
+`.default`+`.lp64d` "double pass" was also a misread of an **accumulated**
+build.log across my reruns: a clean run does a single `.lp64d` pass, and
+`MULTILIB_ABIS=lp64d` *is* set correctly from the sysroot's `lp64d` profile).
 
-Also note `--cross` sets `eprefix=None` (cli.rs:295,326), so for `--local --cross`
-the prefix `bashrc` PATH hook does not fire — fine here only because the prefix
-`gcc-bin` is reachable via gcc-config; revisit when generalizing.
+Fix in `shell.rs`'s cross-toolchain block: when `CHOST≠CBUILD` and the
+`<chost>-gcc` wrapper exists at `build_config_root` (the sysroot
+`<EROOT>/usr/<tuple>`) grandparent `bin`, prepend that dir to the build PATH and
+set `CC/CXX/AR/…/STRIP` to the **absolute** `<bin>/<chost>-<tool>`. Absolute
+because em's own post-`src_install` estrip runs the tool from em's process (host
+PATH, no `$HOME` prefix bin) — a bare name failed with
+`riscv64-…-strip: No such file or directory`. Host crossdev (toolchain in
+`/usr/bin`) keeps the bare `${CHOST}-<tool>`.
+
+Result: `em --local --cross riscv64-unknown-linux-gnu sys-libs/zlib` → EXIT=0,
+1 object stripped, `libz.so.1.3.2 = ELF … UCB RISC-V, RVC, double-float ABI`,
+merged into the sysroot VDB. (Full `sys-apps/less` chain build: in progress.)
 
 **Progress (2026-06-22) — toolchain-package build shell VERIFIED; eclass
 resolution corrected.** Two findings while bringing up the Stage-C driver:
