@@ -710,6 +710,63 @@ invalid option -- 'p'`; no `libc.so`/`libc.a` in the sysroot). Two driver bugs:
 Completion criterion (unchanged): `<CTARGET>-gcc hello.c` → `file a.out` reports
 `ELF … RISC-V`. The *build* pipeline is done; these two are merge/activation.
 
+### libc step (5) now BUILDS — root cause was a brush `export VAR+=` bug (2026-06-25)
+
+The full cross glibc (step 5) had been dying with `glibc cannot be compiled
+without optimization`: `setup_flags` emptied CFLAGS, so the final value was just
+`-Wno-unused-command-line-argument` (no `-O`). Earlier suspicion fell on the
+multilib CFLAGS weave and on flag-o-matic's `strip-unsupported-flags` stripping
+`-O3` — both were **wrong leads**. The multilib `package.env` is correct
+(`ABI=lp64d`, `CFLAGS_lp64d='-mabi=lp64d -march=rv64gc'`, committed in 09f03d2),
+and a logging-CC probe inside the real build proved `strip-unsupported-flags`
+**keeps** `-O3` (the `-Werror -O3 -xc -c` probe returns rc=0).
+
+Root cause: **brush mis-parsed `export NAME+=value` as a plain assignment**,
+discarding the prior value. flag-o-matic's `append-cflags` is literally
+`export CFLAGS+=" $*"` (flag-o-matic.eclass:310), so glibc's
+`append-flags -Wno-unused-command-line-argument` (the *last* line of
+`setup_flags`) wiped `-O3 -pipe` and left only the appended flag. A bare
+`NAME+=value` appended fine; only the `export`/declaration form was broken —
+which is why it stayed invisible until a cross libc exercised it. Minimal repro:
+
+    X="-O3 -pipe"; export X+=" -Wno-foo"   # brush: X=[ -Wno-foo]   bash: X=[-O3 -pipe -Wno-foo]
+
+Fix in the brush fork (`brush-builtins/src/export.rs`): the parsed-`Assignment`
+branch ignored `assignment.append`; the runtime-split `String` branch already
+honored it. Now, when `assignment.append` and the variable exists, it does
+`base_var_mut().assign(value, true)` (mirrors `declare`/`local`); a missing
+variable falls through (append-to-nothing == plain assign). Added three
+`export.yaml` compat cases (append to existing / already-exported / unset); full
+`brush-compat-tests` = 2097 passed, 0 failed. em picks up the fork via
+`.cargo/config.toml` `[patch]`.
+
+Result: `em --local --nodeps cross-riscv64-unknown-linux-gnu/glibc` → EXIT=0,
+CFLAGS now `-O3 -pipe -Wno-unused-command-line-argument`, and
+`usr/riscv64-unknown-linux-gnu/lib64/libc.so.6` =
+`ELF 64-bit LSB shared object, UCB RISC-V, RVC, double-float ABI`. **The libc
+step is no longer a blocker.** (Brush fork fix not yet pushed / rev not yet
+bumped in `portage-repo/Cargo.toml` — do that before CI relies on it.)
+
+Two non-fatal merge-time errors surfaced after a successful build (cosmetic,
+track separately): the OLD glibc's `pkg_prerm` failed —
+`environment.old: syntax error at end of input` then `command not found:
+pkg_prerm` (the saved env of the replaced package doesn't reload cleanly in the
+carried shell), and a postinst `failed to redirect to ~/.gentoo//etc/hosts`
+(getent/nscd touching a nonexistent prefix `/etc/hosts`). Neither stopped the
+merge.
+
+### NEXT blocker: gcc can't link — sysroot CRT in `usr/lib64`, gcc looks in `usr/lib`
+
+With libc installed, `riscv64-...-gcc hello.c` now fails at link, not compile:
+`ld: cannot find Scrt1.o`. gcc's `-print-sysroot` is correct
+(`~/.gentoo/usr/riscv64-unknown-linux-gnu`) but `-print-file-name=Scrt1.o`
+doesn't resolve it — the CRT objects are at `<sysroot>/usr/lib64/Scrt1.o`
+(lp64d → LIBDIR=lib64) while gcc-stage1 searches `<sysroot>/usr/lib`. This is
+the expected gcc-stage1 limitation: it was built `--without-headers` and lacks
+the correct multilib osdir mapping. **Building gcc-stage2 (step 6) against the
+installed glibc is what wires the lib64 search path** — that is the next thing
+to run/verify toward the `file a.out == RISC-V` criterion.
+
 **Progress (2026-06-22) — toolchain-package build shell VERIFIED; eclass
 resolution corrected.** Two findings while bringing up the Stage-C driver:
 
