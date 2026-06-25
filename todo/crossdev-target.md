@@ -1,11 +1,13 @@
 # Crossdev `{target}` — build a cross sysroot + compiler(s)
 
-STATUS: **GCC toolchain bootstrap BUILDS end to end** (`em --local crossdev -t
-riscv64-unknown-linux-gnu --setup` → `EXIT=0`, all 6 staged steps; see the
-2026-06-22 smoke-test section below). Remaining: the built toolchain is **not yet
-functional** (stale binutils install → missing `as`/`ld` wrappers; gcc-config/
-binutils-config activation) — clean-slate reinstall + validate `file` → RISC-V is
-the next milestone. Goal: make `em` act as a `{target}-emerge` that actually
+STATUS: **GCC toolchain bootstrap WORKS — produces a functional RISC-V cross
+compiler** (2026-06-25). `riscv64-unknown-linux-gnu-{gcc,g++}` compile C and C++
+(dynamic + static) to `ELF … UCB RISC-V` executables. Three bugs were fixed to
+get here: the brush `export +=` append bug (cross libc `-O3` loss), em's wrong
+`ESYSROOT` for `cross-*` builds (gcc-stage2 `--with-build-sysroot`), and the
+missing `lib64/<abi> -> .` osdir compat symlink. See the 2026-06-25 sections
+below. Remaining: a full clean `em --local crossdev --setup` end-to-end run to
+confirm the in-flow symlink creation; activation/wrapper polish. Goal: make `em` act as a `{target}-emerge` that actually
 *builds* a cross toolchain and sysroot for a foreign `CHOST` (`CBUILD ≠ CHOST`),
 covering **both** the GCC and the **LLVM/Clang** toolchain models. Target libc is
 the standard choice (glibc / musl, and LLVM libc only as a generic option).
@@ -755,17 +757,58 @@ carried shell), and a postinst `failed to redirect to ~/.gentoo//etc/hosts`
 (getent/nscd touching a nonexistent prefix `/etc/hosts`). Neither stopped the
 merge.
 
-### NEXT blocker: gcc can't link — sysroot CRT in `usr/lib64`, gcc looks in `usr/lib`
+### NEXT blocker: missing `lib64/lp64d -> .` osdir compat symlink — ROOT-CAUSED + FIX VERIFIED (2026-06-25)
 
-With libc installed, `riscv64-...-gcc hello.c` now fails at link, not compile:
-`ld: cannot find Scrt1.o`. gcc's `-print-sysroot` is correct
-(`~/.gentoo/usr/riscv64-unknown-linux-gnu`) but `-print-file-name=Scrt1.o`
-doesn't resolve it — the CRT objects are at `<sysroot>/usr/lib64/Scrt1.o`
-(lp64d → LIBDIR=lib64) while gcc-stage1 searches `<sysroot>/usr/lib`. This is
-the expected gcc-stage1 limitation: it was built `--without-headers` and lacks
-the correct multilib osdir mapping. **Building gcc-stage2 (step 6) against the
-installed glibc is what wires the lib64 search path** — that is the next thing
-to run/verify toward the `file a.out == RISC-V` criterion.
+With libc installed, `riscv64-...-gcc hello.c` fails at *link*: `ld: cannot find
+Scrt1.o`. Root-caused by comparing against the working **system** crossdev
+toolchain (identical sysroot layout, gcc-16 links fine):
+
+- gcc (both ours and the system's) searches `<sysroot>/usr/lib64/lp64d/` for the
+  CRT/libc (it's in the gcc-config `MULTIOSDIRS`; `gcc-abi-map` maps riscv
+  `lp64d → lp64d`).
+- glibc installs the CRTs/libc to **bare** `<sysroot>/usr/lib64/` — because
+  `multilib_env` gives the **DEFAULT_ABI** the un-suffixed libdir
+  (`LIBDIR_lp64d=lib64`, while non-default `lp64 → lib64/lp64`). glibc's
+  `src_install` uses `get_abi_LIBDIR ${DEFAULT_ABI}` and never makes the
+  suffixed dir; with `SYMLINK_LIB=no` no `lib`-style symlink is made either.
+- The working system sysroot bridges the gap with two **untracked** compat
+  symlinks (not in any VDB CONTENTS, not made by the crossdev script, glibc, or
+  an obvious gcc-ebuild line): `usr/lib64/lp64d -> .` and `lib64/lp64d -> .`.
+
+**Verified fix:** creating those two symlinks makes the *existing* gcc-stage1
+compile **and link** `hello.c` → `ELF 64-bit … UCB RISC-V` PIE executable — the
+completion criterion, met. (And it's what unblocks the gcc-stage2 self-build,
+whose `xgcc` hit `configure: error: Link tests are not allowed after
+GCC_NO_EXECUTABLES` for the same reason — it couldn't link a target executable.)
+
+The symlink was necessary but **not sufficient**: with it present, the *installed*
+gcc links, but a clean `gcc-stage2` self-build still died at the target
+`libbacktrace` configure (`GCC_NO_EXECUTABLES`). An `ld`-shim trace cracked the
+*real* second bug — see below.
+
+**Second root cause: em set `ESYSROOT` wrong for `cross-*` builds — FIXED
+(2026-06-25).** The build-tree `xgcc` was passing `--sysroot=~/.gentoo` (the
+EPREFIX) to `ld`, so the target CRT/`libc` were searched under the *host*
+`~/.gentoo/usr/lib`. Source: `toolchain.eclass:1537` passes
+`--with-build-sysroot="${ESYSROOT}"`, and em computed `ESYSROOT = SYSROOT+EPREFIX
+= ~/.gentoo` for the cross gcc build (SYSROOT stays host `/`). For a
+`cross-<tuple>/*` package the target deps live in the **cross sysroot**, so
+`ESYSROOT` must be `${EPREFIX}/usr/<tuple>`. Fixed in `shell.rs` (the `ESYSROOT`
+computation special-cases a `cross-` `CATEGORY`); `SYSROOT` stays host so the gcc
+host parts still build natively.
+
+**Both fixes landed; toolchain BUILDS END-TO-END (2026-06-25):**
+- `shell.rs`: `ESYSROOT = ${EPREFIX}/usr/<tuple>` for `cross-*` packages.
+- `crossdev/mod.rs`: `link_abi_osdirs()` creates `<sysroot>/{,usr/}<LIBDIR_default>/<DEFAULT_ABI> -> .`
+  after the libc step (the default ABI's bare-libdir → suffixed-osdir bridge),
+  using `multilib::query`.
+
+Result: `em --local --nodeps cross-…/gcc` (gcc-stage2) → EXIT=0, installs, and
+`riscv64-unknown-linux-gnu-{gcc,g++}` compile **C, C++ (dynamic + static)** to
+`ELF 64-bit … UCB RISC-V` executables. **Completion criterion met.** Remaining:
+run a full clean `em --local crossdev --setup` end-to-end (all 6 steps) to confirm
+em creates the symlink in-flow (the validations above had the symlink created by
+hand before the ESYSROOT fix existed).
 
 **Progress (2026-06-22) — toolchain-package build shell VERIFIED; eclass
 resolution corrected.** Two findings while bringing up the Stage-C driver:

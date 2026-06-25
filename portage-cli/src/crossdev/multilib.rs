@@ -32,6 +32,16 @@ impl MultilibEnv {
             .next()
             .unwrap_or(&self.default_abi)
     }
+
+    /// The default ABI (`DEFAULT_ABI`).
+    pub fn default_abi(&self) -> &str {
+        &self.default_abi
+    }
+
+    /// `LIBDIR_<abi>` for `abi`, if multilib.eclass defined one.
+    pub fn libdir(&self, abi: &str) -> Option<&str> {
+        self.vars.get(&format!("LIBDIR_{abi}")).map(String::as_str)
+    }
 }
 
 /// Run multilib.eclass's `multilib_env` for `tuple` (crossdev's

@@ -117,6 +117,12 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
         // gcc-stage1 builds at a later step.
         if !globals.pretend {
             activate_toolchain(target, globals, step)?;
+            // After the full libc lands (not the headers-only bootstrap step),
+            // bridge the ABI osdir so the next gcc step (gcc-stage2) can link
+            // target code against the freshly installed libc.
+            if step.label == "libc" {
+                link_abi_osdirs(target, globals)?;
+            }
         }
     }
 
@@ -412,6 +418,41 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
 /// (`binutils`/`gcc`/the clang wrapper) that runs on `CBUILD` and uses the host ABI.
 fn is_target_package(pkg: &str) -> bool {
     !matches!(pkg, "binutils" | "gcc" | "clang-crossdev-wrappers")
+}
+
+/// Create the ABI osdir compatibility symlinks the libc leaves out, so the cross
+/// gcc finds the target CRT/libc.
+///
+/// `multilib.eclass` gives the **default ABI** the *un-suffixed* libdir (riscv
+/// `LIBDIR_lp64d=lib64`, vs non-default `lp64 → lib64/lp64`), and glibc installs
+/// its CRTs/`libc.so` straight into that bare `lib64`. But gcc searches the
+/// ABI-suffixed osdir (`lib64/lp64d`), so without a bridge `<CTARGET>-gcc` (and
+/// the gcc-stage2 self-build) fails with `cannot find Scrt1.o`. A real crossdev
+/// sysroot carries `lib64/lp64d -> .` (and `usr/lib64/lp64d -> .`) — untracked
+/// compat symlinks no package owns; em creates them here after the libc lands.
+fn link_abi_osdirs(target: &CrossTarget, globals: &Cli) -> Result<()> {
+    let sysroot = sysroot(target, globals);
+    let gentoo = main_repo(globals)?;
+    let ml = multilib::query(&target.tuple, &gentoo.path().join("eclass"))?;
+    let default_abi = ml.default_abi();
+    // Only the default ABI is bare-named (`lib64` rather than `lib64/<abi>`);
+    // the others already install into their suffixed osdir, which gcc finds.
+    let Some(libdir) = ml.libdir(default_abi) else {
+        return Ok(());
+    };
+    if libdir.contains('/') || default_abi.is_empty() || default_abi == "default" {
+        return Ok(());
+    }
+    for base in [sysroot.clone(), sysroot.join("usr")] {
+        let dir = base.join(libdir);
+        if !dir.is_dir() {
+            continue;
+        }
+        let link = dir.join(default_abi);
+        symlink_force(Utf8Path::new("."), &link)?;
+        println!("    osdir compat: {link} -> .");
+    }
+    Ok(())
 }
 
 /// The host `CHOST` (= the target's `CBUILD`), read from the host `make.conf`.

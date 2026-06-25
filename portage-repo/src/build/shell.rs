@@ -1426,7 +1426,26 @@ impl EbuildShell {
             // deps — while SYSROOT stays `/`, so cmake/autotools do NOT pass
             // `--sysroot` and the compiler keeps host glibc (features.h). They
             // are equal (no EPREFIX) for host / ROOT-offset `--prefix` builds.
-            let esysroot = if eprefix.is_empty() {
+            //
+            // A `cross-<tuple>/*` host toolchain tool (binutils/gcc, which run on
+            // CBUILD and emit code for <tuple>) references the *target* deps in
+            // the cross sysroot `<EPREFIX>/usr/<tuple>`. toolchain.eclass passes
+            // ESYSROOT through as gcc's `--with-build-sysroot`, so it must be the
+            // cross sysroot or the build-tree `xgcc` looks for the target CRT/libc
+            // under host `<EPREFIX>/usr/lib` and the gcc-stage2 self-build dies
+            // with `cannot find Scrt1.o` / `GCC_NO_EXECUTABLES` (only bites in a
+            // prefix, where EPREFIX is a real path that overrides the configured
+            // cross --with-sysroot). The *target* packages (glibc/headers — they
+            // install INTO the sysroot and build their own `${ESYSROOT}$(alt_prefix)`
+            // paths) must keep the standard ESYSROOT=SYSROOT+EPREFIX, else the
+            // alt_prefix doubles the `/usr/<tuple>` offset. SYSROOT stays host so
+            // the host parts build natively.
+            let cross_host_tool = category
+                .strip_prefix("cross-")
+                .filter(|_| matches!(pn, "binutils" | "gcc" | "gdb" | "clang-crossdev-wrappers"));
+            let esysroot = if let Some(tuple) = cross_host_tool {
+                format!("{}/usr/{}/", eprefix.trim_end_matches('/'), tuple)
+            } else if eprefix.is_empty() {
                 sysroot.clone()
             } else {
                 format!("{}/{}/", sysroot_trimmed, eprefix.trim_start_matches('/'))
