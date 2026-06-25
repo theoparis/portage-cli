@@ -805,10 +805,24 @@ host parts still build natively.
 
 Result: `em --local --nodeps cross-…/gcc` (gcc-stage2) → EXIT=0, installs, and
 `riscv64-unknown-linux-gnu-{gcc,g++}` compile **C, C++ (dynamic + static)** to
-`ELF 64-bit … UCB RISC-V` executables. **Completion criterion met.** Remaining:
-run a full clean `em --local crossdev --setup` end-to-end (all 6 steps) to confirm
-em creates the symlink in-flow (the validations above had the symlink created by
-hand before the ESYSROOT fix existed).
+`ELF 64-bit … UCB RISC-V` executables. **Completion criterion met.**
+
+**ESYSROOT scope fix (regression caught in the first full `--setup`):** the cross
+sysroot ESYSROOT must apply to **host cross-tools only** (`binutils`/`gcc`/`gdb`/
+`clang-crossdev-wrappers`). A blanket `cross-*` rule broke the **glibc** step —
+glibc builds `--with-headers=${ESYSROOT}$(alt_prefix)/usr/include` with
+`alt_prefix=/usr/<tuple>`, so ESYSROOT=cross-sysroot **doubled** the offset
+(`…/usr/<tuple>//usr/<tuple>/usr/include`) and the kernel-header check failed.
+Target packages keep the standard `ESYSROOT=SYSROOT+EPREFIX`. (Same split as
+[`is_target_package`].)
+
+**END-TO-END VALIDATED (2026-06-25):** a full clean `em --local crossdev -t
+riscv64-unknown-linux-gnu --setup` (osdir symlinks removed first) → `SETUP_EXIT=0`,
+all 6 steps from scratch (binutils → kernel headers → libc headers → gcc-stage1 →
+libc → gcc-stage2), em creates the osdir symlinks in-flow after the libc step
+(`osdir compat: …/lib64/lp64d -> .`), `>>> cross toolchain … ready`. The
+freshly-bootstrapped `riscv64-unknown-linux-gnu-{gcc,g++}` compile C and C++ to
+`ELF … UCB RISC-V` executables. **The crossdev GCC bootstrap is complete.**
 
 **Progress (2026-06-22) — toolchain-package build shell VERIFIED; eclass
 resolution corrected.** Two findings while bringing up the Stage-C driver:
