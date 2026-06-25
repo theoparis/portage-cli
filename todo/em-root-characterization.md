@@ -105,3 +105,26 @@ item 2 — unsatisfied-BROOT/DEPEND scheduling).
 
 First validation target (minimal, chroot-able): `virtual/os-headers glibc bash
 coreutils baselayout` → 16-pkg plan, builds; chroot test pending.
+
+## Stage1 host arm64 — WORKING chroot (2026-06-25)
+
+Minimal stage1 (`virtual/os-headers glibc bash coreutils baselayout` + deps) into
+`/var/tmp/stage1-arm64` → `sudo chroot` runs **bash 5.3.15**, `ls /bin`,
+`uname -mo` (aarch64). Three em bugs fixed to get a *self-contained* root:
+
+- **RO-distdir not linked into DISTDIR** (`8a9558b`) — bash's `bash53-NNN`
+  patches were in the host RO `/var/cache/distfiles`; fetch said "already
+  present" but never exposed them in DISTDIR → `eapply` failed. Now symlinked in.
+- **info `dir` collision** (`f34e046`) — stripped from images.
+- **`usev !flag` ignored the `!` negation** (`ae42693`) — the "host-satisfied-dep"
+  libcap-for-ls case turned out to be THIS: coreutils' `$(usev !caps
+  --disable-libcap)` emitted nothing, configure autodetected the host libcap, and
+  `ls` needed a `libcap.so.2` absent from the ROOT. Fixed → `ls` needs only
+  libc+loader.
+
+The `glibc needs virtual/os-headers` pre-flight is **by design** (glibc builds
+against headers in the ROOT sysroot; SYSROOT=ROOT for a `--root` build), so the
+bootstrap virtuals must be listed explicitly — exactly what `packages.build`
+does; not a bug. (A stage1 still links seed libs for anything not yet in the
+ROOT — catalyst's stage2 rebuild is what makes it fully self-hosting; out of
+scope here.)
