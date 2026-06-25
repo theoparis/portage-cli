@@ -53,7 +53,11 @@ impl builtins::Command for UsevCommand {
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         let shell = context.shell;
         if use_flag_enabled(shell, &self.flag) {
-            let out = self.true_val.as_deref().unwrap_or(&self.flag);
+            // Default output is the flag name without any leading `!`.
+            let out = self
+                .true_val
+                .as_deref()
+                .unwrap_or_else(|| self.flag.strip_prefix('!').unwrap_or(&self.flag));
             let _ = writeln!(context.params.stdout(shell), "{out}");
             Ok(brush_core::ExecutionResult::success())
         } else {
@@ -190,8 +194,39 @@ pub(crate) fn use_flag_enabled<SE: brush_core::ShellExtensions>(
     shell: &brush_core::Shell<SE>,
     flag: &str,
 ) -> bool {
-    shell
-        .env_str("USE")
-        .map(|use_val| use_val.split_whitespace().any(|f| f == flag))
-        .unwrap_or(false)
+    flag_in_use(shell.env_str("USE").as_deref().unwrap_or(""), flag)
+}
+
+/// Whether `flag` is satisfied by the space-separated `use_str`.
+///
+/// PMS 12.3.5/6/7: a leading `!` negates — `use !foo` is true when `foo` is
+/// *disabled*. Without this, e.g. coreutils' `$(usev !caps --disable-libcap)`
+/// never emits `--disable-libcap`, so configure autodetects and links the host's
+/// libcap despite `USE=-caps` (a from-scratch ROOT then lacks it).
+fn flag_in_use(use_str: &str, flag: &str) -> bool {
+    let (name, negate) = match flag.strip_prefix('!') {
+        Some(rest) => (rest, true),
+        None => (flag, false),
+    };
+    let present = use_str.split_whitespace().any(|f| f == name);
+    present ^ negate
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flag_in_use;
+
+    #[test]
+    fn plain_and_negated_flags() {
+        let use_str = "acl nls xattr";
+        // Plain: present vs absent.
+        assert!(flag_in_use(use_str, "acl"));
+        assert!(!flag_in_use(use_str, "caps"));
+        // Negated: true when the flag is disabled (the coreutils `!caps` case).
+        assert!(flag_in_use(use_str, "!caps"));
+        assert!(!flag_in_use(use_str, "!acl"));
+        // Empty USE.
+        assert!(!flag_in_use("", "acl"));
+        assert!(flag_in_use("", "!acl"));
+    }
 }
