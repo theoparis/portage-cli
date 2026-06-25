@@ -1,10 +1,32 @@
 # Distfile fetching — reliability (recurring build-killer)
 
-STATUS: **OPEN, fix soon.** Distfile problems keep aborting real builds
-(cross-emerge `less` → libpcre2; from-scratch stage1 → bash). Two *distinct*
-root causes, found 2026-06-25.
+STATUS: **bash root cause FIXED (`8a9558b`); facet B (fetch hardening) open.**
 
-## A. Dynamically-built `SRC_URI` extracted as EMPTY (the worse one)
+## 0. RO-distdir file not exposed in DISTDIR — FIXED 2026-06-25 (the bash killer)
+
+The real cause of the bash `eapply: patch failed: …/bash53-001` failure: the
+patch lives in the host **read-only** distdir `/var/cache/distfiles`, em's fetch
+fast-path found it there and returned `AlreadyPresent`, but never linked it into
+the writable DISTDIR (`~/.cache/distfiles`) where unpack/eapply look. So em
+reported "already present" for a file the build couldn't open — and because the
+fetch genuinely succeeded, the fail-fast `bail!` never fired (it surfaced late at
+`eapply`). Fixed in `fetch.rs::fetch_distfile`: when the valid copy is in a RO
+distdir, symlink it into DISTDIR (hard-link/copy fallback), as portage does.
+Unit-tested. Verified: bash builds and **runs in the stage1 chroot**.
+
+## A. Dynamically-built `SRC_URI` extracted as EMPTY (separate; seen once)
+
+NOTE: the `fetch: nothing to fetch (SRC_URI is empty)` seen in the *full* stage1
+run did NOT reproduce when building bash alone (em then computed the full 1527-char
+SRC_URI correctly, all eclasses inherited, PLEVEL=15) — so this is likely a
+phase-sourced/metadata-mode caching artifact (an earlier sourcing left SRC_URI
+empty and the fetch reused it via `is_phase_sourced`), not a brush eval bug
+(brush computes bash's `${my_urls[*]}` SRC_URI identically to bash). Re-check if
+it recurs; otherwise lower priority than thought.
+
+Original notes (kept for the metadata angle):
+
+`app-shells/bash-5.3_p15` builds `SRC_URI` in global scope:
 
 `app-shells/bash-5.3_p15` builds `SRC_URI` in global scope:
 
