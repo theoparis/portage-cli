@@ -50,15 +50,23 @@ fn vdb_roots_for<SE: brush_core::ShellExtensions>(
 }
 
 /// Best installed cpv matching `atom` across any of `vdb_paths`.
-fn best_match_any(vdb_paths: &[std::path::PathBuf], atom: &str) -> Option<portage_atom::Cpv> {
+fn best_match_any(
+    vdb_paths: &[std::path::PathBuf],
+    atom: &str,
+    parent_use: &std::collections::HashSet<String>,
+) -> Option<portage_atom::Cpv> {
     vdb_paths
         .iter()
-        .filter_map(|p| best_match(p, atom))
+        .filter_map(|p| best_match(p, atom, parent_use))
         .max_by(|a, b| a.version.cmp(&b.version))
 }
 
 /// Best installed cpv matching `atom` in the VDB at `vdb_path`, if any.
-fn best_match(vdb_path: &std::path::Path, atom: &str) -> Option<portage_atom::Cpv> {
+fn best_match(
+    vdb_path: &std::path::Path,
+    atom: &str,
+    parent_use: &std::collections::HashSet<String>,
+) -> Option<portage_atom::Cpv> {
     let dep = portage_atom::Dep::parse(atom).ok()?;
     let vdb_path = camino::Utf8Path::from_path(vdb_path)?;
     let vdb = portage_vdb::Vdb::open(vdb_path).ok()?;
@@ -70,13 +78,81 @@ fn best_match(vdb_path: &std::path::Path, atom: &str) -> Option<portage_atom::Cp
             continue;
         }
         let slot = pkg.slot_main().ok();
-        if dep.matches_cpv(cpv, slot.as_deref())
-            && best.as_ref().is_none_or(|b| cpv.version > b.version)
+        if !dep.matches_cpv(cpv, slot.as_deref()) {
+            continue;
+        }
+        // The atom's USE-dependency (`[headers-only(-)]`, `[ssl,-debug]`, …) must
+        // match the *installed* package's recorded USE, or e.g. toolchain.eclass's
+        // `has_version glibc[headers-only(-)]` matches a full glibc as if it were
+        // headers-only and builds gcc `--disable-shared`. matches_cpv only checks
+        // cpn/version/slot, so evaluate the USE constraints here against the VDB.
+        if let Some(use_deps) = &dep.use_deps
+            && !use_deps.is_empty()
         {
+            let installed_use: std::collections::HashSet<String> =
+                pkg.use_flags().unwrap_or_default().into_iter().collect();
+            let installed_iuse: std::collections::HashSet<String> = pkg
+                .iuse()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|f| f.trim_start_matches(['+', '-']).to_string())
+                .collect();
+            if !use_deps_satisfied(use_deps, &installed_use, &installed_iuse, parent_use) {
+                continue;
+            }
+        }
+        if best.as_ref().is_none_or(|b| cpv.version > b.version) {
             best = Some(cpv.clone());
         }
     }
     best
+}
+
+/// Whether every USE-dependency in `use_deps` holds for an installed package
+/// with the given active `installed_use` / declared `installed_iuse`, relative
+/// to the querying package's `parent_use` (PMS 8.3.4). A flag absent from IUSE
+/// resolves through its `(+)`/`(-)` default; absent and undefaulted means the
+/// constraint cannot be satisfied.
+fn use_deps_satisfied(
+    use_deps: &[portage_atom::UseDep],
+    installed_use: &std::collections::HashSet<String>,
+    installed_iuse: &std::collections::HashSet<String>,
+    parent_use: &std::collections::HashSet<String>,
+) -> bool {
+    use portage_atom::{UseDefault, UseDepKind};
+    use_deps.iter().all(|ud| {
+        let flag = ud.flag.as_str();
+        // The dependency flag's state on the installed package.
+        let state = if installed_iuse.contains(flag) {
+            Some(installed_use.contains(flag))
+        } else {
+            match ud.default {
+                Some(UseDefault::Enabled) => Some(true),
+                Some(UseDefault::Disabled) => Some(false),
+                None => None,
+            }
+        };
+        let parent = parent_use.contains(flag);
+        match ud.kind {
+            UseDepKind::Enabled => state == Some(true),
+            UseDepKind::Disabled => state == Some(false),
+            UseDepKind::Conditional => !parent || state == Some(true),
+            UseDepKind::ConditionalInverse => parent || state == Some(true),
+            UseDepKind::Equal => state == Some(parent),
+            UseDepKind::EqualInverse => state == Some(!parent),
+        }
+    })
+}
+
+/// The querying package's active USE flags (the "parent" for conditional USE
+/// deps), from the build shell's `USE`.
+fn parent_use<SE: brush_core::ShellExtensions>(
+    shell: &brush_core::Shell<SE>,
+) -> std::collections::HashSet<String> {
+    shell
+        .env_str("USE")
+        .map(|s| s.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
 }
 
 /// `has_version [-b|-d|-r] <atom>` — exit 0 when an installed package
@@ -105,7 +181,7 @@ impl builtins::Command for HasVersionCommand {
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         let vdbs = vdb_roots_for(context.shell, self.broot, self.sysroot);
-        let found = best_match_any(&vdbs, &self.atom).is_some();
+        let found = best_match_any(&vdbs, &self.atom, &parent_use(context.shell)).is_some();
         Ok(brush_core::ExecutionResult::new(u8::from(!found)))
     }
 }
@@ -135,7 +211,7 @@ impl builtins::Command for BestVersionCommand {
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         let vdbs = vdb_roots_for(context.shell, self.broot, self.sysroot);
-        match best_match_any(&vdbs, &self.atom) {
+        match best_match_any(&vdbs, &self.atom, &parent_use(context.shell)) {
             Some(cpv) => {
                 let shell = context.shell;
                 let _ = writeln!(context.params.stdout(shell), "{cpv}");
@@ -143,5 +219,124 @@ impl builtins::Command for BestVersionCommand {
             }
             None => Ok(brush_core::ExecutionResult::new(1)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::use_deps_satisfied;
+    use portage_atom::UseDep;
+    use std::collections::HashSet;
+
+    fn set(flags: &[&str]) -> HashSet<String> {
+        flags.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn deps(atom_use: &str) -> Vec<UseDep> {
+        // Parse the `[...]` body of an atom into UseDeps.
+        let dep = portage_atom::Dep::parse(&format!("cat/pkg[{atom_use}]")).unwrap();
+        dep.use_deps.unwrap()
+    }
+
+    #[test]
+    fn headers_only_default_disabled_matches_installed_state() {
+        let iuse = set(&["headers-only", "multilib", "ssp"]);
+        let parent = set(&[]);
+        // Full glibc: headers-only OFF → `[headers-only(-)]` must NOT match.
+        let full = set(&["multilib", "ssp"]);
+        assert!(!use_deps_satisfied(
+            &deps("headers-only(-)"),
+            &full,
+            &iuse,
+            &parent
+        ));
+        // Headers-only glibc: headers-only ON → matches.
+        let hdrs = set(&["headers-only", "ssp"]);
+        assert!(use_deps_satisfied(
+            &deps("headers-only(-)"),
+            &hdrs,
+            &iuse,
+            &parent
+        ));
+    }
+
+    #[test]
+    fn enabled_and_disabled_kinds() {
+        let iuse = set(&["ssl", "debug"]);
+        let parent = set(&[]);
+        let installed = set(&["ssl"]);
+        assert!(use_deps_satisfied(&deps("ssl"), &installed, &iuse, &parent));
+        assert!(use_deps_satisfied(
+            &deps("-debug"),
+            &installed,
+            &iuse,
+            &parent
+        ));
+        assert!(use_deps_satisfied(
+            &deps("ssl,-debug"),
+            &installed,
+            &iuse,
+            &parent
+        ));
+        assert!(!use_deps_satisfied(
+            &deps("debug"),
+            &installed,
+            &iuse,
+            &parent
+        ));
+        assert!(!use_deps_satisfied(
+            &deps("-ssl"),
+            &installed,
+            &iuse,
+            &parent
+        ));
+    }
+
+    #[test]
+    fn missing_flag_uses_default_else_unsatisfiable() {
+        let iuse = set(&["other"]);
+        let parent = set(&[]);
+        let installed = set(&[]);
+        // Flag absent from IUSE: (+) → enabled, (-) → disabled.
+        assert!(use_deps_satisfied(
+            &deps("foo(+)"),
+            &installed,
+            &iuse,
+            &parent
+        ));
+        assert!(!use_deps_satisfied(
+            &deps("foo(-)"),
+            &installed,
+            &iuse,
+            &parent
+        ));
+        // Absent and undefaulted → cannot be satisfied (neither enabled nor disabled).
+        assert!(!use_deps_satisfied(
+            &deps("foo"),
+            &installed,
+            &iuse,
+            &parent
+        ));
+        assert!(!use_deps_satisfied(
+            &deps("-foo"),
+            &installed,
+            &iuse,
+            &parent
+        ));
+    }
+
+    #[test]
+    fn conditional_and_equal_relative_to_parent() {
+        let iuse = set(&["x"]);
+        let on = set(&["x"]);
+        let off = set(&[]);
+        // [x?]: only constrains when parent has x.
+        assert!(use_deps_satisfied(&deps("x?"), &on, &iuse, &set(&["x"])));
+        assert!(!use_deps_satisfied(&deps("x?"), &off, &iuse, &set(&["x"])));
+        assert!(use_deps_satisfied(&deps("x?"), &off, &iuse, &set(&[])));
+        // [x=]: dep flag must equal parent flag.
+        assert!(use_deps_satisfied(&deps("x="), &on, &iuse, &set(&["x"])));
+        assert!(use_deps_satisfied(&deps("x="), &off, &iuse, &set(&[])));
+        assert!(!use_deps_satisfied(&deps("x="), &on, &iuse, &set(&[])));
     }
 }
