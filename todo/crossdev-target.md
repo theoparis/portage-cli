@@ -824,6 +824,36 @@ libc → gcc-stage2), em creates the osdir symlinks in-flow after the libc step
 freshly-bootstrapped `riscv64-unknown-linux-gnu-{gcc,g++}` compile C and C++ to
 `ELF … UCB RISC-V` executables. **The crossdev GCC bootstrap is complete.**
 
+### NEXT: cross-emerging *target* packages (`--cross`) — two issues found (2026-06-25)
+
+First real test of the `<CTARGET>-emerge` path: `em --local --cross
+riscv64-unknown-linux-gnu sys-apps/less -p` resolves the full chain correctly
+(zlib, ncurses, readline, bzip2, libpcre2, less → all into the sysroot,
+`CHOST=riscv64 CBUILD=aarch64`). Building the leaf `sys-libs/zlib` exposes two
+bugs in the cross-emerge path (NOT the toolchain — the prefix gcc compiles
+C/C++/static to RISC-V fine standalone):
+
+1. **Double multilib ABI pass.** zlib (multilib-minimal) runs `.default` *and*
+   `.lp64d` — the `.default` pass even completes `src_install`. A single-ABI
+   riscv target should run **once** (lp64d). Likely the cross `package.env`
+   (`ABI=lp64d MULTILIB_ABIS=lp64d`) is **not applied** for `--cross`: that
+   `package.env` lives under `~/.gentoo/etc/portage`, but `--cross` reads config
+   from the *sysroot* (`PORTAGE_CONFIGROOT == ROOT == <sysroot>`), whose
+   make.conf sets no `MULTILIB_ABIS`, so the profile default (`default`) leaks in.
+2. **gcc SIGSEGV on the `.lp64d` pass.** zlib's `configure` test compile
+   `( $CC -c $CFLAGS $test.c )` segfaults (rc=139, fresh PID each run) → "Compiler
+   error reporting is too harsh". The prefix gcc does **not** segfault standalone
+   with any of the obvious flag combos (`-mabi=lp64d -march=rv64gc -O3 …`,
+   doubled `-march`, `-fPIC`), so it is **environment-triggered** inside the
+   `.lp64d` multilib pass. A `usr/bin` gcc wrapper was never hit (the build
+   resolves gcc via the gcc-config `GCC_PATH`/`gcc-bin` dir, not `usr/bin`), so
+   capturing the exact failing argv+env needs wrapping `gcc-bin/15/…-gcc` (or
+   `cc1`) directly — that's the next diagnostic.
+
+Also note `--cross` sets `eprefix=None` (cli.rs:295,326), so for `--local --cross`
+the prefix `bashrc` PATH hook does not fire — fine here only because the prefix
+`gcc-bin` is reachable via gcc-config; revisit when generalizing.
+
 **Progress (2026-06-22) — toolchain-package build shell VERIFIED; eclass
 resolution corrected.** Two findings while bringing up the Stage-C driver:
 
