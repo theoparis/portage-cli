@@ -74,3 +74,34 @@ previous. This doc is **Tier 1** (the active focus).
 - The firefox closure builds into a `--prefix`/`--local` target (the
   accumulated bashrc recipe in `setup.rs`); this is the baseline that `--root`
   characterization builds on.
+
+## Stage1 from-scratch into `--root` (host arch) — STARTED (2026-06-25)
+
+Goal: build a from-scratch stage1 into an empty `--root` (host arm64 first, so it
+chroot-validates), per Catalyst + crossdev-stages. See [[catalyst-stage1-recipe]].
+
+**Recipe (Catalyst `targets/stage1/chroot.sh`, crossdev-stages `target.rs`):**
+`ROOT=<root>`, seed `/` = toolchain (== `em --root <root> --config-root /`);
+`baselayout` (`USE=build`) first; `emerge --implicit-system-deps=n --oneshot
+<profile packages.build>` with `USE="-* build"` `FEATURES="nodoc noman noinfo"`;
+then `portage`; then `ldconfig -r <root>`.
+
+**ldconfig — DONE (`dc68783`):** `env-update` now writes `${ROOT}/etc/ld.so.cache`
+via the `ldconfig` *library* (lu-zero's crate) instead of shelling to the host
+`ldconfig -r`. Arch-correct (reads each ELF) → works for a foreign-arch `--root`
+too; no host binary dependency.
+
+**Gotcha found: host-satisfied `@system` build deps vs the pre-flight check.**
+`em --root <empty> --config-root / sys-libs/glibc …` fails pre-flight with
+`glibc needs virtual/os-headers` — em host-satisfies `@system` DEPENDs during
+resolution (doesn't pull them into the empty ROOT), but the pre-flight DEPEND
+check requires them present in the ROOT. Adding `sys-kernel/linux-headers` to the
+plan is **not** enough (em doesn't treat the provider as satisfying the virtual,
+and won't auto-pull the virtual); listing `virtual/os-headers` explicitly works.
+Catalyst sidesteps this by listing the whole bootstrap order in `packages.build`.
+The proper fix is emptytree-style ROOT semantics: for a from-scratch ROOT, build
+the DEPEND closure into the ROOT rather than host-satisfying it (ties into Tier-1
+item 2 — unsatisfied-BROOT/DEPEND scheduling).
+
+First validation target (minimal, chroot-able): `virtual/os-headers glibc bash
+coreutils baselayout` → 16-pkg plan, builds; chroot test pending.
