@@ -193,3 +193,42 @@ Implementation direction:
 So: factor the crossdev `setup()` staged-bootstrap so it can target a native
 `--root` (a `em` stage1 entry point), reusing `stages.rs`. Cross and native then
 share one bootstrap driver.
+
+### LANDED (2026-06-25): staged-bootstrap generalized + `em stage1` entry point
+
+The cross-vs-native split is now one typed value, and the two share a driver:
+
+- **`stages::BootstrapKind`** (`{Cross(CrossTarget), Native}`) is the single
+  decision point for "build a toolchain into a fresh root" (addresses the
+  `cross-support-self-review.md` "no single owner" smell for this slice). The
+  ordered step *sequence* is shared; only atom naming differs — cross rewrites
+  the category to `cross-<tuple>`, native keeps the real `::gentoo` category.
+  `toolchain_plan(&BootstrapKind)` replaces `toolchain_plan(&CrossTarget)`.
+- **Shared driver `run_staged`** (`crossdev/mod.rs`): the per-step loop +
+  headers + `emerge_atoms`, with a `post_step` hook. `--setup` (cross) passes
+  `post_step_cross` (activate `<CTARGET>-*` wrappers + ABI osdirs); native
+  passes a no-op. Behaviour-preserving for cross (same `init_target` guard,
+  same steps, same activation).
+- **`em stage1 [atoms]`** (`Applet::Stage1` → `crossdev::stage1`): the native
+  twin of `em crossdev --setup`. Requires `--root <dir>` (bails on `/`). Runs
+  the native staged plan (binutils → headers → libc-headers `--nodeps` →
+  gcc-stage1 → libc → gcc-stage2), then merges any extra atoms topologically
+  against the populated ROOT.
+
+**Verified (`-p` against ::gentoo):** all 6 steps resolve with the right
+overrides — `kernel headers [headers-only]`, `libc headers [--nodeps
+headers-only]`, `gcc-stage1 [-cxx -fortran -go …]`, `gcc-stage2 [-sanitize]`,
+every line `to <ROOT>/` (SYSROOT=ROOT confirmed). 95 tests pass; clippy/fmt
+clean. `cross-support-self-review.md`'s consolidation items (the `detect().active`
+3-axis OR, the `MergeRoot::Target` default) remain open but are not blocked by
+this.
+
+**Remaining to a *running* full stage1 (not yet done):**
+1. The staged steps build for real (drop `-p`) — the minimal hand-built stage1
+   already built binutils/glibc/bash, so the pieces compile; the staged gcc
+   two-stage into `--root` has not been executed end-to-end yet.
+2. The pre-flight failures of the *rest* of packages.build (`acct-group/root`,
+   `e2fsprogs`, `glibc[-crypt]`, `glibc[cet]` ordering) — the staged bootstrap
+   forces glibc/headers first, which should clear the ordering half; the
+   "DEPEND never pulled into ROOT" half (acct-group/root, e2fsprogs) may still
+   need the emptytree-style DEPEND-into-ROOT closure (Tier-1 item 2).

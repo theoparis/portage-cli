@@ -590,6 +590,15 @@ pub enum Applet {
     #[command(about = "Set up a cross-compilation target (sysroot + overlay) — crossdev workalike")]
     Crossdev(CrossdevArgs),
 
+    #[command(about = "Bootstrap a self-hosting stage1 toolchain into --root (native)")]
+    Stage1 {
+        /// Extra atoms to merge after the staged toolchain (e.g. the rest of
+        /// packages.build), in normal topological order against the populated
+        /// ROOT. Requires `--root <dir>`.
+        #[arg(trailing_var_arg = true)]
+        atoms: Vec<String>,
+    },
+
     #[command(about = "Safe configuration file updates (dispatch-conf)")]
     Dispatch,
 

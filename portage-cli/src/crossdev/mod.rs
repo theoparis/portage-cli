@@ -5,8 +5,13 @@
 //! `repos.conf` entry), the cross sysroot `make.conf`, and the **direct**
 //! `make.profile` symlink (`eselect profile` refuses a foreign arch). `--setup`
 //! additionally derives the ordered [`stages::toolchain_plan`] bootstrap
-//! (binutils → headers → gcc-stage1 → libc → gcc-stage2); driving each step
-//! through the merge path is the remaining work (see todo/crossdev-target.md).
+//! (binutils → headers → gcc-stage1 → libc → gcc-stage2) and runs each step
+//! through the shared merge path.
+//!
+//! The staged-bootstrap driver ([`run_staged`]) and the [`stages::BootstrapKind`]
+//! plan are shared with **native stage1** ([`stage1`]): a self-hosting stage1
+//! into `--root` (`CHOST == CBUILD`) is the same `glibc ↔ gcc` cycle as a cross
+//! toolchain, broken the same staged way — see `todo/em-root-characterization.md`.
 //!
 //! The install location follows em's root model: the sysroot is
 //! `<EROOT>/usr/<CTARGET>`, so `em crossdev <t>` targets `/usr/<CTARGET>` (like
@@ -72,7 +77,7 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
     if !globals.pretend {
         init_target(target, globals)?;
     }
-    let plan = stages::toolchain_plan(target);
+    let plan = stages::toolchain_plan(&stages::BootstrapKind::Cross(target.clone()));
     let mut out = anstream::stdout();
     let verb = if globals.pretend { "Plan" } else { "Bootstrap" };
     writeln!(
@@ -83,6 +88,55 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
     )
     .ok();
 
+    let post_step = {
+        let target = target.clone();
+        move |step: &stages::StageStep| post_step_cross(&target, globals, step)
+    };
+    run_staged(
+        &plan,
+        globals,
+        merge_depgraph_flags(globals, args),
+        post_step,
+    )
+    .await?;
+
+    if !globals.pretend {
+        writeln!(
+            out,
+            "\n>>> cross toolchain {} ready in {}/usr/{}",
+            target.tuple,
+            globals.roots().merge_root(),
+            target.tuple,
+        )
+        .ok();
+    }
+    Ok(())
+}
+
+/// Cross post-step hook: activate the freshly-built toolchain
+/// (`<CTARGET>-*` wrappers via `binutils-config`/`gcc-config`), and after the
+/// full libc lands (not the headers-only bootstrap step) bridge the ABI osdir
+/// symlinks so the next gcc step links target code against it.
+fn post_step_cross(target: &CrossTarget, globals: &Cli, step: &stages::StageStep) -> Result<()> {
+    activate_toolchain(target, globals, step)?;
+    if step.label == "libc" {
+        link_abi_osdirs(target, globals)?;
+    }
+    Ok(())
+}
+
+/// Run each step of a staged [`stages::StagePlan`] through the shared merge path
+/// ([`crate::emerge_atoms`]), printing per-step progress. `post_step` fires
+/// after each *built* step (skipped under `-p`) for flavour-specific activation
+/// — cross activates `<CTARGET>-*` wrappers + ABI osdirs; native is a no-op.
+/// This is the shared driver both `--setup` (cross) and `stage1` (native) run.
+async fn run_staged(
+    plan: &stages::StagePlan,
+    globals: &Cli,
+    depgraph_flags: crate::cli::DepgraphFlags,
+    post_step: impl Fn(&stages::StageStep) -> Result<()>,
+) -> Result<()> {
+    let mut out = anstream::stdout();
     for (i, step) in plan.steps.iter().enumerate() {
         // Flush the step header before building so progress shows immediately
         // (and survives the `process::exit` on a step that needs config changes,
@@ -98,43 +152,20 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
         )
         .ok();
         out.flush().ok();
-        let merged_flags = merge_depgraph_flags(globals, args);
         crate::emerge_atoms(
             globals,
             &step.atoms,
             crate::EmergeOpts {
                 use_override: &step.use_override,
                 nodeps: step.nodeps,
-                depgraph_flags: Some(merged_flags.clone()),
+                depgraph_flags: Some(depgraph_flags.clone()),
             },
         )
         .await?;
 
-        // Activate the toolchain into *this* root after the step that built it —
-        // the eclass `pkg_postinst` runs the host's `binutils-config`/`gcc-config`,
-        // which target `/`, so a `--local`/`--prefix` toolchain stays inert without
-        // this. binutils first (gcc's cross `as`/`ld` come from it), before
-        // gcc-stage1 builds at a later step.
         if !globals.pretend {
-            activate_toolchain(target, globals, step)?;
-            // After the full libc lands (not the headers-only bootstrap step),
-            // bridge the ABI osdir so the next gcc step (gcc-stage2) can link
-            // target code against the freshly installed libc.
-            if step.label == "libc" {
-                link_abi_osdirs(target, globals)?;
-            }
+            post_step(step)?;
         }
-    }
-
-    if !globals.pretend {
-        writeln!(
-            out,
-            "\n>>> cross toolchain {} ready in {}/usr/{}",
-            target.tuple,
-            globals.roots().merge_root(),
-            target.tuple,
-        )
-        .ok();
     }
     Ok(())
 }
@@ -174,6 +205,56 @@ fn step_flags(step: &stages::StageStep) -> String {
     } else {
         format!("  [{}]", parts.join(" "))
     }
+}
+
+/// `em stage1`: bootstrap a self-hosting stage1 toolchain into `--root`
+/// (`CHOST == CBUILD`, `SYSROOT == ROOT`). The native twin of the crossdev
+/// `--setup`: the same staged `glibc ↔ gcc` cycle-breaker (binutils → headers →
+/// gcc-stage1 → libc → gcc-stage2), but with plain `::gentoo` atoms and none of
+/// the cross overlay/wrapper/sysroot-make.conf ceremony — the host profile and
+/// make.conf configure it (`--config-root /` by default).
+///
+/// Requires `--root <dir>` (a stage1 into `/` is meaningless). The staged
+/// pre-breaking of the cycle is what lets the rest of the plan solve
+/// topologically afterwards: any extra atoms are merged in normal dependency
+/// order against the now-populated ROOT once the toolchain steps land. With `-p`
+/// each step prints its plan instead of building.
+pub(crate) async fn stage1(globals: &Cli, atoms: &[String]) -> Result<()> {
+    let merge_root = globals.roots().merge_root().to_owned();
+    if merge_root.as_str() == "/" {
+        bail!(
+            "em stage1 needs --root <dir>: a self-hosting stage1 into / is \
+             meaningless (use the host toolchain directly, or pass --root <empty>)"
+        );
+    }
+    let plan = stages::toolchain_plan(&stages::BootstrapKind::Native);
+    let mut out = anstream::stdout();
+    let verb = if globals.pretend { "Plan" } else { "Bootstrap" };
+    writeln!(
+        out,
+        "\n{C_LABEL}{verb} native stage1{C_LABEL:#} into {merge_root} — {} steps:",
+        plan.steps.len()
+    )
+    .ok();
+    run_staged(&plan, globals, globals.depgraph_flags.clone(), |_| Ok(())).await?;
+    if !globals.pretend {
+        writeln!(out, "\n>>> stage1 toolchain ready in {merge_root}").ok();
+    }
+    // After the cycle is pre-broken, the rest of packages.build / extra atoms
+    // solve topologically against the in-ROOT toolchain.
+    if !atoms.is_empty() {
+        crate::emerge_atoms(
+            globals,
+            atoms,
+            crate::EmergeOpts {
+                use_override: &[],
+                nodeps: false,
+                depgraph_flags: None,
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// `EROOT`/prefix the overlay, `repos.conf`, and `package.env` are written under
