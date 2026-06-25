@@ -854,7 +854,26 @@ PATH, no `$HOME` prefix bin) — a bare name failed with
 
 Result: `em --local --cross riscv64-unknown-linux-gnu sys-libs/zlib` → EXIT=0,
 1 object stripped, `libz.so.1.3.2 = ELF … UCB RISC-V, RVC, double-float ABI`,
-merged into the sysroot VDB. (Full `sys-apps/less` chain build: in progress.)
+merged into the sysroot VDB.
+
+**Chain verified + a second bug found (2026-06-25, `13c7599`).** With the PATH
+fix the `less` chain cross-builds `ncurses readline editor-wrapper bzip2`
+(libpcre2 only stopped on a transient **distfile fetch** failure, not cross). The
+one real blocker was `ncurses[cxx]`'s `libncurses++.so`:
+`relocation R_RISCV_TPREL_HI20 … recompile with -fPIC` — it pulled the **static**
+`libstdc++.a` because the cross gcc had **only** static libstdc++. Root cause: an
+em `has_version` bug — `best_match` matched cpn/version/slot and **ignored the
+`[...]` USE-dependency**, so toolchain.eclass's
+`has_version "${needed_libc}[headers-only(-)]"` matched the *full* glibc as
+headers-only and configured gcc `--disable-shared`. Fixed: `has_version`/
+`best_version` now evaluate USE-deps against the installed VDB USE/IUSE
+(PMS 8.3.4, with `(+)/(-)` defaults), unit-tested. After the fix the cross gcc
+builds `--enable-shared`; `g++ -print-file-name=libstdc++.so` resolves the shared
+lib, and C++ shared libraries cross-compile.
+
+Remaining cross-emerge polish (lower priority): the cosmetic merge-time
+`pkg_prerm`/`environment.old` errors on replaced packages; `--prefix` (non-local)
+cross validation; and surfacing a proper `<CTARGET>-emerge` wrapper.
 
 **Progress (2026-06-22) — toolchain-package build shell VERIFIED; eclass
 resolution corrected.** Two findings while bringing up the Stage-C driver:
