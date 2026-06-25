@@ -232,3 +232,60 @@ this.
    forces glibc/headers first, which should clear the ordering half; the
    "DEPEND never pulled into ROOT" half (acct-group/root, e2fsprogs) may still
    need the emptytree-style DEPEND-into-ROOT closure (Tier-1 item 2).
+
+### First real build attempt (2026-06-25) — reframe + findings
+
+Ran `em --root /var/tmp/stage1-native --config-root / stage1` for real. **It
+failed at step 1 (binutils) on the pre-flight, not a build error.** The
+investigation clarified the model and surfaced the real blocker.
+
+**Reframe (the key insight — keep this): native stage1 is a *special case of
+crossdev*, with `CHOST == CBUILD`.** The crossdev staged bootstrap builds a
+**basis** (binutils → headers → gcc → libc) into the sysroot; for native the
+sysroot collapses to `ROOT`. That basis then **satisfies** the DEPEND of the
+rest of packages.build, which builds against the in-ROOT toolchain. The
+committed `em stage1` driver (`8fd2963`) IS this model — do NOT pivot away from
+it. (An earlier note in this doc mused that "native has a host seed so there's
+no cycle, staging doesn't fit" — that's wrong/misleading: the host seed at
+`BROOT=/` provides *build tools*, but the staged basis is what makes the *target
+ROOT* self-consistent, exactly as a cross sysroot is. Same machinery.)
+
+**Why the build failed — `debuginfod` pulls the whole closure:**
+`em -p sys-devel/binutils` into an empty root pulls **47 packages** (glibc, pam,
+curl, openssl…) — genuine transitive deps, not `@system`: `binutils[debuginfod]
+→ dev-libs/elfutils[debuginfod] → net-misc/curl → … → sys-libs/glibc`. Cross
+`cross-<tuple>/binutils` does **not** do this — so the crossdev staged bootstrap
+worked (RISC-V gcc validated) but native step 1 explodes. `debuginfod` is the
+specific USE flag (+default in binutils `IUSE="+debuginfod"`) that drags in the
+heavy runtime/tooling closure.
+
+**The pre-flight gate that blocks it** (`preflight.rs:33`): each plan entry's
+`DEPEND` is checked against `Avail = VDB(base) ∪ VDB(target)`. For a
+`--root <empty>` build `base == target == <empty>`, so glibc's `DEPEND` on
+`virtual/os-headers` is unsatisfied (it *is* on the host `/`, host-satisfied
+during resolution, but absent from the empty ROOT). The os-headers step IS in
+the staged plan — but binutils' closure pulls glibc *inside step 1*, before the
+staged os-headers step has run.
+
+**The two intertwined problems to solve (both within the staged model):**
+1. **Stage USE must match crossdev's.** Native binutils keeps `+debuginfod`;
+   cross binutils gets it forced off (the `cross-*` USE set crossdev pins —
+   `package.use.force/cross-*`). A native staged step needs the **same minimal
+   USE** crossdev uses for each component, or step 1 is not "just binutils" but
+   "binutils + its entire native closure." Investigate how crossdev's USE
+   forcing applies (the `write_cross_env` / multilib block in `crossdev/mod.rs`,
+   plus a likely binutils/gcc `-debuginfod -multitarget …` stage USE set) and
+   apply the native analogue in `stages.rs` `Native` steps.
+2. **DEPEND-into-ROOT vs host-satisfy (the Tier-1 item-2 fork, still open).**
+   Even with minimal stage USE, the rest of packages.build hits DEPENDs the host
+   has but the ROOT lacks (`acct-group/root`, `e2fsprogs`). The staged basis
+   fixes *ordering* (glibc before libxcrypt/gcc); it does not by itself pull
+   every DEPEND into ROOT. Decide: (a) pull the full DEPEND closure into ROOT +
+   topologically order it (self-hosting, the "heavier fix" in
+   `nonemptytree-bdeps-gap.md`), or (b) the staged basis satisfies most, and
+   the residual is bounded. The first real build never got far enough to tell.
+
+**Cleaned up:** `/var/tmp/stage1-native` + logs removed. Build env is ready
+(aarch64, 128 cores, 255 GB, host gcc 16.1, distfiles present, MAKEOPTS=-j80).
+**Next session:** start with problem 1 (native stage USE = crossdev's component
+USE), re-run step 1, then confront problem 2 as it surfaces.
