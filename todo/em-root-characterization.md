@@ -128,3 +128,39 @@ bootstrap virtuals must be listed explicitly — exactly what `packages.build`
 does; not a bug. (A stage1 still links seed libs for anything not yet in the
 ROOT — catalyst's stage2 rebuild is what makes it fully self-hosting; out of
 scope here.)
+
+## Full `packages.build` stage1 — blocked on DEPEND-into-ROOT (design fork, 2026-06-25)
+
+`em --root /var/tmp/stage1-full --config-root / --oneshot <packages.build>` (147-pkg
+closure incl. the toolchain) fails the **pre-flight** with:
+
+```
+util-linux  needs: acct-group/root
+libarchive  needs: sys-fs/e2fsprogs[abi_*(-)?]
+libxcrypt   needs: sys-libs/glibc[-crypt(-)]
+gcc         needs: sys-libs/glibc[cet(-)?]
+```
+
+Root cause: em host-satisfies `DEPEND` against the host VDB during resolution, so
+(a) some real DEPENDs (`acct-group/root`, `e2fsprogs`) are never pulled into the
+plan, and (b) the DEPEND edges that *are* pulled don't constrain ordering —
+**glibc lands at plan pos 103, after its dependents libxcrypt (99) and gcc
+(100)**. The pre-flight (correctly, for `SYSROOT=ROOT`) requires each DEPEND in an
+*earlier* plan entry, so it flags these.
+
+This is the long-noted "build the DEPEND closure into the ROOT vs host-satisfy"
+fork. Two ways out:
+
+- **A. SYSROOT=ROOT (self-hosting stage1):** make resolution pull the full
+  DEPEND closure into ROOT *and* topologically order it (glibc first). Bigger
+  resolver change; yields a more self-consistent root (the minimal hand-built
+  stage1 already showed this works — binaries linked ROOT libs).
+- **B. SYSROOT=/ (catalyst model):** for a native `--root --config-root /` build,
+  set SYSROOT to the seed `/` so DEPEND is host-satisfied for the *build* (the
+  pre-flight then passes via the host VDB). Binaries link seed libs → not
+  self-consistent → needs a stage2 rebuild-in-chroot, exactly as catalyst does.
+  Smaller change, matches the canonical stage1.
+
+NOTE: em currently sets `SYSROOT=ROOT` for this case (shell.rs: build_sysroot
+None → EROOT), which is why glibc builds against `ROOT/usr/include` (so the
+minimal set needed os-headers built into ROOT first). Path B would flip that.
