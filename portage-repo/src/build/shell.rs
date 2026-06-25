@@ -1110,33 +1110,64 @@ impl EbuildShell {
 
         // Cross toolchain selection. When building for a foreign CHOST (cross:
         // CHOST and CBUILD both set and differing) and the prefixed compiler is
-        // on PATH, export the toolchain vars as `${CHOST}-<tool>` unless the
+        // reachable, export the toolchain vars as `${CHOST}-<tool>` unless the
         // ebuild env already set them. This mirrors `tc-getCC`/`tc-getPROG`
         // (toolchain-funcs.eclass), but proactively: em sets it up front so even
         // ebuilds that build with a raw `./configure` (not `$(tc-getCC)`) — e.g.
         // sys-libs/zlib — pick up the cross compiler instead of the host `gcc`,
         // which otherwise silently yields a host-arch artifact. Native builds
         // (CBUILD unset, or CHOST == CBUILD) are untouched.
+        //
+        // For `--cross` into a `--local` prefix the `<chost>-*` wrappers
+        // (`crossdev --setup`) live in `<EROOT>/usr/bin`, which is under $HOME and
+        // thus stripped from the sanitised build PATH — and the prefix bashrc PATH
+        // hook does not run (EPREFIX unset under `--cross`). The cross sysroot is
+        // `<EROOT>/usr/<tuple>` (== build_config_root), so the toolchain bin is its
+        // grandparent `bin`; expose it on PATH so the whole toolchain
+        // (gcc/g++/ld/as/…) resolves. Host crossdev (toolchain in `/usr/bin`) is
+        // already on PATH, so this is a no-op there.
         if let (Some(chost), Some(cbuild)) = (
             self.get_var("CHOST").filter(|s| !s.is_empty()),
             self.get_var("CBUILD").filter(|s| !s.is_empty()),
         ) && chost != cbuild
-            && program_on_path(&format!("{chost}-gcc"))
         {
-            for (var, tool) in [
-                ("CC", "gcc"),
-                ("CXX", "g++"),
-                ("AR", "ar"),
-                ("NM", "nm"),
-                ("RANLIB", "ranlib"),
-                ("STRIP", "strip"),
-                ("OBJCOPY", "objcopy"),
-                ("OBJDUMP", "objdump"),
-                ("READELF", "readelf"),
-                ("LD", "ld"),
-            ] {
-                if self.get_var(var).filter(|s| !s.is_empty()).is_none() {
-                    self.set_var(var, &format!("{chost}-{tool}"));
+            let prefix_bin = self
+                .build_config_root
+                .as_deref()
+                .and_then(Utf8Path::parent)
+                .map(|usr| usr.join("bin"))
+                .filter(|bin| bin.join(format!("{chost}-gcc")).is_file());
+            if let Some(bin) = &prefix_bin {
+                let path = self.get_var("PATH").unwrap_or_default();
+                if !path.split(':').any(|p| p == bin.as_str()) {
+                    self.set_var("PATH", &format!("{bin}:{path}"));
+                }
+            }
+            if prefix_bin.is_some() || program_on_path(&format!("{chost}-gcc")) {
+                for (var, tool) in [
+                    ("CC", "gcc"),
+                    ("CXX", "g++"),
+                    ("AR", "ar"),
+                    ("NM", "nm"),
+                    ("RANLIB", "ranlib"),
+                    ("STRIP", "strip"),
+                    ("OBJCOPY", "objcopy"),
+                    ("OBJDUMP", "objdump"),
+                    ("READELF", "readelf"),
+                    ("LD", "ld"),
+                ] {
+                    if self.get_var(var).filter(|s| !s.is_empty()).is_none() {
+                        // Use the absolute prefix path when known: em's own
+                        // post-`src_install` estrip (and any helper) runs the tool
+                        // outside the build shell, with the host process PATH that
+                        // lacks the $HOME prefix bin — a bare `${CHOST}-strip` then
+                        // fails. A bare name is fine for host crossdev (on PATH).
+                        let val = match &prefix_bin {
+                            Some(bin) => format!("{bin}/{chost}-{tool}"),
+                            None => format!("{chost}-{tool}"),
+                        };
+                        self.set_var(var, &val);
+                    }
                 }
             }
         }
