@@ -57,6 +57,10 @@ cargo msrv verify                  # Verifies the rust-version declared in Cargo
 - `ci:` — CI/CD changes
 - `chore:` — maintenance (dependencies, tooling)
 
+When a commit was significantly assisted by an AI tool, note it with an
+`Assisted-by:` trailer (e.g. `Assisted-by: Claude (Anthropic)`) rather than a
+`Co-Authored-By:` trailer.
+
 ## MSRV
 
 Until the first complete release, the workspace tracks **latest stable**
