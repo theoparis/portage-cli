@@ -12,8 +12,11 @@ and the privilege half of [[build-clean-env]].
 Shipped the simplest correct slice (model B below), all in `main()` — no scheduler
 or flock changes, since the whole build+merge stays in one process:
 
-- `privilege.rs` — `Backend{RealRoot,Fakeroost}` + `detect()` (RealRoot when
-  euid==0 or already inside a session, else Fakeroost) + `maybe_supervise()`.
+- `privilege.rs` — `Backend{RealRoot,Fakeroost,Sudo}` + `detect()` (RealRoot when
+  euid==0 or already inside a session; else the `EM_PRIVILEGE`-requested backend,
+  default Fakeroost) + `maybe_supervise()`. `EM_PRIVILEGE=sudo` re-execs `sudo -E
+  em …` for **real** root (genuine root-owned tree + real setuid, catalyst-style);
+  opt-in only, never auto-selected. `EM_PRIVILEGE=none` disables wrapping.
 - `main()` calls `fakeroost::init()` first (before the tokio runtime), then for an
   unprivileged *building* invocation (`will_build`: emerge merge path +
   `ebuild`/`crossdev`/`toolchain`, not `--pretend`) re-execs em once under
@@ -39,9 +42,8 @@ or flock changes, since the whole build+merge stays in one process:
 
 Deltas from the design: umbrella session instead of the per-package `__worker`
 (deferred optimisation — keeps the resolver out of ptrace, enables independent
-parallel sessions); only RealRoot+Fakeroost backends (sudo/fakeroot/hakoniwa still
-behind the seam); name→uid:gid resolution against the *target* passwd/group still
-open (facet 2 of [[stage-build-shakeout]]).
+parallel sessions); RealRoot+Fakeroost+Sudo backends done, fakeroot/hakoniwa still
+behind the seam. Facet 2 (target-passwd name resolution) is done (`907d914`).
 
 ---
 Original design (the target end-state):

@@ -14,10 +14,10 @@ here briefly for context). Updated 2026-06-26.
   EPERM workarounds are now inert (fakeroost fakes getuid→0). **Validated**:
   `sys-apps/util-linux` merges unprivileged into `stage1-base` (the setuid-`mount`
   chown wall is cleared). ✅ Facet 2 — `fowners` resolves owner names to numeric
-  uid:gid against the target passwd/group. Remaining: the binpkg/stage tar
-  in-session (real `root:root` artifacts), and the sudo/fakeroot/hakoniwa backends
-  + per-package `__worker`. [[fakeroot-privilege-backends]]
-  [[stage-build-shakeout]]
+  uid:gid against the target passwd/group. ✅ `EM_PRIVILEGE=sudo` backend (real
+  root, opt-in). Remaining: the binpkg/stage tar in-session (real `root:root`
+  artifacts — next), and the fakeroot/hakoniwa backends + per-package `__worker`.
+  [[fakeroot-privilege-backends]] [[stage-build-shakeout]]
 - 🟡 **`em stages`** — stage1 (`baselayout` + `packages.build`, built with the
   ROOT `<chost>-gcc` + SYSROOT=ROOT) → stage3 (`--emptytree @system`). No stage2
   (em builds a fresh toolchain, crossdev model). Needs `packages.build` ingestion
