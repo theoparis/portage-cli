@@ -26,6 +26,14 @@ or flock changes, since the whole build+merge stays in one process:
   confirms supervision is universal.
 - Verified: `fakeroost` works on this kernel (`chown 0:0` unprivileged → `stat`
   reports `0:0`); em re-execs only on build paths, transparently.
+- **Validated on the real wall (2026-06-27)**: `em --root /var/tmp/stage1-base
+  sys-apps/util-linux` unprivileged — the package's own Makefile
+  `chown root:root .../bin/mount` (the install-exec-hook that previously killed
+  the build) now runs faked, util-linux merges (in VDB), and `mount` lands setuid
+  (`-rwsr-xr-x`). On-disk owner is the build user (live unprivileged merge keeps
+  it; the faked root owner is session-only — real `root:root` needs the in-session
+  tar). This clears the wall that blocked `sys-apps/portage` and the self-extending
+  `@system` base.
 
 Deltas from the design: umbrella session instead of the per-package `__worker`
 (deferred optimisation — keeps the resolver out of ptrace, enables independent

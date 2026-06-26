@@ -11,10 +11,12 @@ here briefly for context). Updated 2026-06-26.
   `sys-apps/portage` → no self-extending base. **v1 landed**: an unprivileged
   building invocation re-execs once under a fakeroost (ptrace+seccomp) umbrella
   session, so chown/setuid succeed and the merge records ownership; the three
-  EPERM workarounds are now inert (fakeroost fakes getuid→0). Remaining: prove on
-  a real `@system` run, then target-passwd name resolution (facet 2), the binpkg/
-  stage tar in-session, and the sudo/fakeroot/hakoniwa backends + per-package
-  `__worker`. [[fakeroot-privilege-backends]] [[stage-build-shakeout]]
+  EPERM workarounds are now inert (fakeroost fakes getuid→0). **Validated**:
+  `sys-apps/util-linux` merges unprivileged into `stage1-base` (the setuid-`mount`
+  chown wall is cleared). Remaining: target-passwd name resolution (facet 2, in
+  progress), the binpkg/stage tar in-session, and the sudo/fakeroot/hakoniwa
+  backends + per-package `__worker`. [[fakeroot-privilege-backends]]
+  [[stage-build-shakeout]]
 - 🟡 **`em stages`** — stage1 (`baselayout` + `packages.build`, built with the
   ROOT `<chost>-gcc` + SYSROOT=ROOT) → stage3 (`--emptytree @system`). No stage2
   (em builds a fresh toolchain, crossdev model). Needs `packages.build` ingestion
