@@ -46,12 +46,26 @@ Pipeline **toolchain → stage1 → stage3** — it **skips stage2**:
 - **stage3** (`update`→`update_stage3`): refresh the cross toolchain, then
   `ROOT=$1 <tuple>-emerge -k -e @world` (emptytree rebuild into ROOT), then
   `ldconfig -r`.
-- No stage2 — the cross toolchain is already independent (built by crossdev on
-  the host), so there is nothing to self-rebuild. **This is the key lesson for
-  em**: with our own clean toolchain we can likely go toolchain → stage1 →
-  stage3 and skip stage2. BUT our `em toolchain` is built by the *host seed*
-  compiler, so a stage2-style `bootstrap.sh` rebuild is the rigorous way to
-  guarantee no seed leakage. Decide per-use (fast path vs. provably clean).
+- No stage2 — the cross toolchain is a freshly-built, independent compiler, so
+  there is nothing to self-rebuild.
+
+**em == crossdev, NOT catalyst (corrected).** stage2 (`bootstrap.sh`) is *not* a
+native-vs-cross requirement — it is an artifact of catalyst's stage1 *reusing the
+seed's existing compiler* without building a fresh one first (seed libs/CFLAGS
+can leak in; stage2 converges it). `em toolchain --setup` builds a **fresh**
+binutils/glibc/gcc into the ROOT (SYSROOT=ROOT; gcc links the ROOT's own glibc),
+exactly like crossdev builds a fresh cross toolchain into its sysroot — and the
+ROOT gets a host-usable `<ROOT>/usr/bin/<chost>-gcc`, the same shape as crossdev's
+`<tuple>-gcc`. "Built by the host gcc" is true of the cross toolchain too and is
+*not* seed leakage. So em follows the crossdev pipeline: **toolchain → stage1 →
+stage3, no stage2.**
+
+The only *real* native-vs-cross difference is sysroot isolation, and it is NOT
+about stage2: cross gets it for free (host libs are the wrong arch, can't link by
+accident); native is same-arch, so `em stages` must be **disciplined** — build the
+stages with the ROOT's own `<chost>-gcc` and `SYSROOT=ROOT` (the crossdev
+mechanism, same arch), never the host `/usr/bin/gcc`, so a host lib never silently
+satisfies a stage build. With that discipline native is identical to crossdev.
 
 ## `em stages` — proposed design (NOT built)
 
@@ -60,8 +74,8 @@ Map the above onto em primitives we already have:
 | stage | action | em today |
 |-------|--------|----------|
 | toolchain | `baselayout→binutils→os-headers→glibc→gcc` into ROOT | `em toolchain --setup` ✅ |
-| stage1 | `baselayout` (USE=build, --nodeps) + `packages.build` (USE="-* build") into empty ROOT, via a toolchain/seed | `em --root @system`/`packages.build` resolves exist; needs the `packages.build` set + USE wiring |
-| stage2 | `bootstrap.sh`-style toolchain self-rebuild (native only) | none — could reuse `em toolchain` *inside* the stage1 root |
+| stage1 | `baselayout` (USE=build, --nodeps) + `packages.build` (USE="-* build") into empty ROOT, built with the **ROOT's `<chost>-gcc` + SYSROOT=ROOT** (crossdev-style) | `em --root @system`/`packages.build` resolves exist; needs the `packages.build` set, USE wiring, and pointing CC at the ROOT toolchain |
+| ~~stage2~~ | not needed — em builds a fresh toolchain first (crossdev model), so no `bootstrap.sh` self-rebuild | n/a |
 | stage3 | `emerge -e @system`/@world — emptytree rebuild | `em --root <r> --emptytree @system` (engine exists) |
 | stage4 | stage3 + extra packages/config | `em --root <r> <atoms>` after stage3 |
 
@@ -75,11 +89,15 @@ Open design questions:
    Blocks a faithful stage1.
 3. **`--implicit-system-deps=n`** (catalyst) ≈ em's `--with-bdeps=n` +
    not auto-pulling the full @system closure. Confirm the mapping.
-4. **CLI shape**: `em stages stage1|stage2|stage3|stage4 --root <dir>` (and a
-   `--seed`/`--toolchain` selector?), or `em stages --to stage3`. Probably a
-   `stages` subcommand with per-stage actions mirroring catalyst's chroot.sh.
-5. **stage2 reuse**: a native stage2 is literally `em toolchain --setup`
-   re-run *inside* (chrooted to) the stage1 root. Could share the same plan.
+4. **CLI shape**: `em stages stage1|stage3|stage4 --root <dir>` (no stage2 —
+   crossdev model), or `em stages --to stage3`. Probably a `stages` subcommand
+   with per-stage actions mirroring crossdev-stages (toolchain → stage1 →
+   stage3).
+5. **Use the ROOT toolchain, not the host's.** The critical native discipline:
+   stage builds must invoke the ROOT's `<chost>-gcc` with `SYSROOT=ROOT` (the
+   crossdev mechanism), so no host lib leaks in. em already sets `CC=<bin>/<chost>-
+   <tool>` + sysroot for `--cross`; the same wiring should drive native stages
+   off the in-ROOT toolchain. This is what makes stage2 unnecessary.
 
 ## Binhosts — fast stage3/stage4 assembly (NEW, important)
 
