@@ -754,7 +754,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             .await
         }
         Applet::Atom { atoms } => run_atom(atoms),
-        Applet::Select { command } => select::run(command, globals),
+        Applet::Select { command } => select::run(command, globals).await,
         Applet::Setup => setup::bootstrap(&globals.roots()),
         Applet::Crossdev(args) => crossdev::run(args, globals).await,
         Applet::Toolchain(args) => crossdev::toolchain(args, globals).await,

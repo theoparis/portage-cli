@@ -737,6 +737,14 @@ pub enum SelectCommand {
         #[command(subcommand)]
         action: ClangAction,
     },
+    #[command(
+        visible_alias = "mirror",
+        about = "Manage Gentoo distfile mirrors (mirrorselect workalike)"
+    )]
+    Mirrors {
+        #[command(subcommand)]
+        action: MirrorAction,
+    },
 }
 
 /// `em select profile <action>`.
@@ -865,6 +873,35 @@ pub enum ClangAction {
     Set {
         /// LLVM slot to activate (e.g., `22` or `1` for list number).
         slot: String,
+    },
+}
+
+/// `em select mirrors <action>` — mirrorselect workalike for `GENTOO_MIRRORS`.
+#[derive(Subcommand)]
+pub enum MirrorAction {
+    /// List available Gentoo distfile mirrors (marks those already selected).
+    List {
+        /// Keep only mirrors in this ISO country code (e.g. `US`, `DE`).
+        #[arg(short, long)]
+        country: Option<String>,
+        /// Keep only mirrors in this region (e.g. `Europe`, `North America`).
+        #[arg(short, long)]
+        region: Option<String>,
+    },
+    /// Show the currently configured `GENTOO_MIRRORS` value.
+    Show,
+    /// Set `GENTOO_MIRRORS`.
+    Set {
+        /// Explicit mirror URLs to use. If omitted, mirrors are picked from
+        /// `--country`/`--region` instead.
+        #[arg(value_name = "URL")]
+        urls: Vec<String>,
+        /// Use every mirror in this ISO country code.
+        #[arg(short, long)]
+        country: Option<String>,
+        /// Use every mirror in this region.
+        #[arg(short, long)]
+        region: Option<String>,
     },
 }
 

@@ -6,8 +6,10 @@
 
 pub mod error;
 pub mod fetch;
+pub mod mirrors;
 pub mod resolver;
 
 pub use error::{Error, Result};
 pub use fetch::{FetchConfig, FetchStatus, FetchStrategy, Fetcher};
+pub use mirrors::{Endpoint, Mirror, MirrorList, default_mirror_list};
 pub use resolver::{Distfile, DistfileResolver, collect_filenames};

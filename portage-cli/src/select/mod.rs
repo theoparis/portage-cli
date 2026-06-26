@@ -9,12 +9,14 @@
 //! - [`binutils`] — `binutils-config`/`eselect binutils` workalike for binutils profile selection.
 //! - [`linker`] — linker profile selection for ld, lld, mold, etc.
 //! - [`clang`] — LLVM/clang slot selection.
+//! - [`mirrors`] — `mirrorselect` workalike for managing GENTOO_MIRRORS.
 
 mod binutils;
 mod clang;
 mod compiler;
 mod env_d;
 mod linker;
+mod mirrors;
 mod profile;
 mod repos;
 
@@ -37,7 +39,7 @@ pub fn activate_compiler(globals: &Cli, target: &str) -> Result<bool> {
 }
 
 /// Dispatch `em select <module> <action>`.
-pub fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
+pub async fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
     match command {
         SelectCommand::Profile { action } => profile::run(action, globals),
         SelectCommand::Repository { action } => repos::run(action, globals),
@@ -45,6 +47,7 @@ pub fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
         SelectCommand::Binutils { action } => binutils::run(action, globals),
         SelectCommand::Linker { action } => linker::run(action, globals),
         SelectCommand::Clang { action } => clang::run(action, globals),
+        SelectCommand::Mirrors { action } => mirrors::run(action, globals).await,
     }
 }
 

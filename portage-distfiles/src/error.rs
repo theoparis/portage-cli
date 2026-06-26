@@ -27,6 +27,9 @@ pub enum Error {
 
     #[error("manifest error: {0}")]
     Manifest(String),
+
+    #[error("failed to parse mirror list: {0}")]
+    MirrorParse(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
