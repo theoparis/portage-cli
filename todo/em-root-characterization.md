@@ -415,8 +415,19 @@ This was the long-feared "DEPEND-into-ROOT vs host-satisfy" fork — and it turn
 out to be a one-line root conflation, not a deep resolver redesign or a path-A/B
 schism. SYSROOT=ROOT (path A) just needed the trim to agree with the shell.
 
-**Native stage1 toolchain: DONE.** baselayout → binutils → os-headers → glibc →
-gcc all build into a fresh `--root`, no manual steps. Remaining (lower priority):
-the rest of `packages.build` beyond the toolchain (acct-group/root, e2fsprogs,
-util-linux ordering) — re-test now that DEPEND-into-ROOT is fixed; the glibc
-post-install `/etc/hosts` redirect noise (cosmetic).
+**Native toolchain: DONE.** baselayout → binutils → os-headers → glibc → gcc all
+build into a fresh `--root`, no manual steps. Capstone verified: a fully
+automated run produced gcc-16.1.1 in the ROOT that compiles + links a working
+aarch64 binary against the ROOT libc.
+
+**Renamed the applet (2026-06-26): `em stage1` → `em toolchain --setup`.** It was
+always the *toolchain* primitive, not a catalyst "stage1" — keep the two
+separate. The stage *production* (stage1 `packages.build`, stage2 bootstrap,
+stage3 `--emptytree @system`, stage4) lives in the planned `em stages` — see
+**`todo/em-stages-and-binhosts.md`** (which also captures what catalyst and
+crossdev-stages do, and the binhost work needed to assemble stage3/stage4 fast).
+
+Remaining (lower priority): the rest of `packages.build` beyond the toolchain
+(acct-group/root, e2fsprogs, util-linux ordering) — re-test now that
+DEPEND-into-ROOT is fixed; the glibc post-install `/etc/hosts` redirect noise
+(cosmetic).
