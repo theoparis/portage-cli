@@ -209,10 +209,12 @@ fn step_flags(step: &stages::StageStep) -> String {
 
 /// `em stage1`: bootstrap a self-hosting stage1 toolchain into `--root`
 /// (`CHOST == CBUILD`, `SYSROOT == ROOT`). The native twin of the crossdev
-/// `--setup`: the same staged `glibc ↔ gcc` cycle-breaker (binutils → headers →
-/// gcc-stage1 → libc → gcc-stage2), but with plain `::gentoo` atoms and none of
-/// the cross overlay/wrapper/sysroot-make.conf ceremony — the host profile and
-/// make.conf configure it (`--config-root /` by default).
+/// `--setup`, sharing its staged driver but with the *native* plan (binutils →
+/// os-headers → full glibc → full gcc): the seed compiler at `BROOT=/` builds
+/// glibc directly, so there is no two-stage gcc (that is cross-only — see
+/// [`stages`]). Plain `::gentoo` atoms, none of the cross
+/// overlay/wrapper/sysroot-make.conf ceremony — the host profile and make.conf
+/// configure it (`--config-root /` by default).
 ///
 /// Requires `--root <dir>` (a stage1 into `/` is meaningless). The staged
 /// pre-breaking of the cycle is what lets the rest of the plan solve

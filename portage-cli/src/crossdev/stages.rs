@@ -3,20 +3,26 @@
 //! A [`StagePlan`] is a curated, *ordered* list of builds that the dependency
 //! solver cannot produce on its own, because the steps break a bootstrap
 //! chicken-and-egg cycle (a compiler needs a libc; a libc needs a compiler).
-//! The same step *sequence* serves two flavours ([`BootstrapKind`]):
+//! Two flavours ([`BootstrapKind`]) break that cycle differently:
 //!
 //! - **cross** — the toolchain bootstrap into the crossdev prefix
-//!   (`/usr/<chost>`), atoms under the `cross-<tuple>` overlay;
+//!   (`/usr/<chost>`), atoms under the `cross-<tuple>` overlay. There is no
+//!   compiler for `CTARGET` yet, so it needs the classic two-stage bootstrap:
+//!   binutils → headers → libc-headers (`--nodeps`) → gcc-stage1 → libc →
+//!   gcc-stage2.
 //! - **native** — a self-hosting stage1 into `--root` (`CHOST == CBUILD`), plain
-//!   `::gentoo` atoms. A native stage1 is the same `glibc ↔ gcc` cycle as a
-//!   cross toolchain, broken the same staged way — so the two share one driver
+//!   `::gentoo` atoms. The seed compiler at `BROOT=/` already targets this arch,
+//!   so it builds *full* glibc directly and a single full gcc links against it:
+//!   binutils → os-headers → glibc → gcc. The two-stage split is cross-only —
+//!   `toolchain.eclass` gates every stage1 affordance on `is_crosscompile`, so a
+//!   native gcc is always `--enable-shared` and *requires* a full in-ROOT libc
 //!   (see `todo/em-root-characterization.md`).
 //!
 //! Each step is one `em`-equivalent merge with a per-step USE override and the
 //! `--nodeps` / `headers-only` bootstrap flags crossdev uses (`/usr/bin/crossdev`
 //! `doemerge` loop). em owns only the ordering + USE/flags here; the
-//! stage1-vs-stage2 gcc *behaviour* is auto-detected by `toolchain.eclass` from
-//! whether the libc is present in the prefix yet, exactly as under crossdev.
+//! stage1-vs-stage2 gcc *behaviour* (cross) is auto-detected by
+//! `toolchain.eclass` from whether the libc is present in the prefix yet.
 
 use super::target::{CrossTarget, Libc};
 
@@ -85,8 +91,9 @@ pub enum BootstrapKind {
     /// resolve to the `cross-<tuple>` overlay category.
     Cross(CrossTarget),
     /// Native self-hosting stage1 into `--root` (`CBUILD == CHOST`): atoms keep
-    /// their real `::gentoo` category. GCC two-stage, glibc, with kernel
-    /// headers. (A native LLVM stage1 has the same shape but is not yet wired.)
+    /// their real `::gentoo` category. Single full gcc (the seed compiler builds
+    /// glibc — no two-stage split), with kernel headers. (A native LLVM stage1
+    /// has the same shape but is not yet wired.)
     Native,
 }
 
@@ -187,7 +194,7 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
         return StagePlan { steps };
     }
 
-    // GCC model: the classic two-stage bootstrap.
+    // GCC model: binutils first (shared by both flavours).
     //
     // Native binutils installs into the (empty) ROOT, so its optional
     // `debuginfod` dep would drag elfutils → curl → … → glibc into this first
@@ -205,6 +212,45 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
         use_override: binutils_use,
         nodeps: false,
     });
+
+    // Native and cross break the glibc ↔ gcc cycle differently:
+    //
+    // Native (`CHOST == CBUILD`) already has a working seed compiler at
+    // `BROOT=/`, so the seed builds the *full* target glibc directly and a single
+    // full gcc then links against it. The two-stage split is not just unnecessary
+    // here, it is impossible: `toolchain.eclass` gates every stage1 affordance
+    // (`--without-headers`, `--disable-shared` for a headers-only libc) on
+    // `is_crosscompile`, so a native gcc is always `--enable-shared` and *requires*
+    // a full libc in the ROOT (a headers-only glibc makes libgcc_s.so fail to link,
+    // `cannot find crti.o`). So: binutils → os-headers → full glibc → full gcc.
+    if let BootstrapKind::Native = kind {
+        if kind.has_kernel() {
+            steps.push(StageStep {
+                label: "kernel headers".into(),
+                atoms: vec![kind.kernel_headers_atom()],
+                use_override: owned(&["headers-only"]),
+                nodeps: false,
+            });
+        }
+        steps.push(StageStep {
+            label: "libc".into(),
+            atoms: vec![atom("sys-libs", kind.libc_pkg())],
+            use_override: vec![],
+            nodeps: false,
+        });
+        steps.push(StageStep {
+            label: "gcc".into(),
+            atoms: vec![atom("sys-devel", "gcc")],
+            use_override: owned(GCC_DISABLE),
+            nodeps: false,
+        });
+        return StagePlan { steps };
+    }
+
+    // Cross has no compiler for CTARGET yet, so it needs the classic two-stage
+    // bootstrap: kernel headers → libc *headers* (--nodeps) → gcc-stage1 (a
+    // freestanding C compiler, `--disable-shared` via is_crosscompile) → full
+    // libc → gcc-stage2.
     if kind.has_kernel() {
         steps.push(StageStep {
             label: "kernel headers".into(),
@@ -314,21 +360,14 @@ mod tests {
     }
 
     #[test]
-    fn native_plan_uses_real_categories_and_is_gcc_glibc() {
-        // A native stage1 (CHOST == CBUILD) uses plain ::gentoo atoms: no
-        // cross-* overlay category. Same GCC two-stage + glibc sequence as cross.
+    fn native_plan_is_seed_built_single_stage_gcc() {
+        // A native stage1 (CHOST == CBUILD) uses plain ::gentoo atoms (no cross-*
+        // overlay) and — unlike cross — has NO two-stage gcc: the seed compiler
+        // builds full glibc, then a single full gcc links against it.
+        // toolchain.eclass gates all stage1 affordances on is_crosscompile, so a
+        // native gcc is always --enable-shared and needs a full libc present.
         let plan = toolchain_plan(&BootstrapKind::Native);
-        assert_eq!(
-            labels(&plan),
-            [
-                "binutils",
-                "kernel headers",
-                "libc headers",
-                "gcc-stage1",
-                "libc",
-                "gcc-stage2",
-            ]
-        );
+        assert_eq!(labels(&plan), ["binutils", "kernel headers", "libc", "gcc"]);
         // Real categories, no `cross-` rewrite.
         let atoms: Vec<&str> = plan
             .steps
@@ -339,20 +378,15 @@ mod tests {
         // Native merges the virtual (registers it in the ROOT VDB for glibc's
         // DEPEND), not the bare linux-headers provider.
         assert_eq!(atoms[1], "virtual/os-headers");
+        assert_eq!(atoms[2], "sys-libs/glibc");
+        assert_eq!(atoms[3], "sys-devel/gcc");
         assert!(atoms.iter().all(|a| !a.starts_with("cross-")));
-        // libc is glibc, in sys-libs.
-        assert_eq!(plan.steps[2].atoms[0], "sys-libs/glibc");
-        assert_eq!(plan.steps[4].atoms[0], "sys-libs/glibc");
-        // The staged USE overrides still apply (stage1 drops cxx).
-        assert!(plan.steps[3].use_override.contains(&"-cxx".to_string()));
-        assert!(!plan.steps[5].use_override.contains(&"-cxx".to_string()));
-        // The libc-headers cycle-breaker is still --nodeps + headers-only.
-        assert!(plan.steps[2].nodeps);
-        assert!(
-            plan.steps[2]
-                .use_override
-                .contains(&"headers-only".to_string())
-        );
+        // The full libc step is a real build — not headers-only, not --nodeps.
+        assert!(!plan.steps[2].nodeps);
+        assert!(plan.steps[2].use_override.is_empty());
+        // The single gcc is full (keeps cxx — only GCC_DISABLE applies, no STAGE1).
+        assert!(!plan.steps[3].use_override.contains(&"-cxx".to_string()));
+        assert!(plan.steps[3].use_override.contains(&"-vtv".to_string()));
         // Native binutils drops debuginfod (else its elfutils→…→glibc closure
         // explodes step 1 into the empty ROOT).
         assert!(

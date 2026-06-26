@@ -322,3 +322,54 @@ Filed as a separate gap (low priority — the staged toolchain doesn't need `-*`
 **Next:** run step 1 (and the staged plan) for real into `--root` (drop `-p`),
 then hit problem 2 (DEPEND-into-ROOT vs host-satisfy) as the rest of
 packages.build surfaces it.
+
+### Real staged run (2026-06-26): steps 1–3 fixed; gcc-stage1 exposed the big one
+
+Ran the full staged plan for real into `/var/tmp/stage1-native`. It walked
+further each fix:
+
+- **Step 1 binutils** — built (7 pkgs, `-debuginfod`). Problem 1 confirmed end-to-end.
+- **Step 2 kernel headers** — *first* failed step 3 pre-flight `glibc needs:
+  virtual/os-headers`: the step built `sys-kernel/linux-headers` (the provider),
+  but glibc DEPENDs on the *virtual*, which em host-satisfies and never put in
+  ROOT. **Fixed**: native kernel-headers step now merges `virtual/os-headers`
+  (pulls linux-headers AND registers the virtual in the ROOT VDB). Step 3 then
+  passed.
+- **Step 3 libc headers** — glibc (headers-only) merged. (Minor non-fatal noise:
+  `failed to redirect to <root>/etc/hosts: No such file` from glibc post-install
+  — the ROOT has no `/etc/hosts`; didn't block the merge. Low-priority cleanup.)
+- **Step 4 gcc-stage1** — **FAILED at link**: `ld: cannot find crti.o` while
+  building `libgcc_s.so`. gcc configured `--enable-shared`.
+
+### THE REFRAME WAS WRONG ABOUT GCC STAGING (2026-06-26)
+
+Root cause is structural, not a bug: **`toolchain.eclass` gates *every* stage1
+affordance on `is_crosscompile`** (eclass lines 1404–1505). The
+`--without-headers` / `--disable-shared` / headers-only-libc handling all live
+inside `if is_crosscompile`; the `else` (native, `CHOST==CBUILD`) branch is
+unconditionally `--enable-shared`. So a native gcc built against a *headers-only*
+glibc tries to link `libgcc_s.so` and dies on the missing `crti.o`. There is **no
+native headers-only/stage1 path** in the eclass.
+
+Consequence: the "native stage1 ≈ crossdev with `CHOST==CBUILD`" equivalence
+holds for *ordering* but **breaks at the gcc two-stage split**. The split is a
+cross-only artifact — cross needs gcc-stage1 because it has *no compiler for
+CTARGET yet*. Native already has one: the **seed compiler at `BROOT=/`** targets
+this arch, so it builds **full glibc directly**, and a single **full gcc** then
+links against the now-complete ROOT libc. (This is exactly why the earlier
+minimal hand-built stage1 — os-headers → glibc → coreutils, *no gcc-stage1* —
+worked.) The earlier doc musing that "native has a host seed, no cycle, staging
+doesn't fit" was right about *gcc staging* specifically, even though the
+ordering-as-staged-basis framing is still correct.
+
+**Fix (`stages.rs`): the native GCC plan is now 4 steps —**
+`binutils → os-headers → glibc (full) → gcc (full, GCC_DISABLE only, keeps cxx)`.
+The headers-only libc + gcc-stage1 + gcc-stage2 steps are now cross-only
+(`if is_crosscompile`-shaped branch in `toolchain_plan`). Cross is unchanged.
+`em stage1` driver and `run_staged` are unchanged — only the native plan shape.
+
+**Next:** real run of the 4-step native plan into a fresh `--root` to validate
+full glibc + single full gcc land and link. If gcc clears, the native toolchain
+bootstrap is done and the focus moves to problem 2 (the rest of packages.build:
+DEPEND-into-ROOT for `acct-group/root`, `e2fsprogs`, ordering of
+`glibc[-crypt]`/`glibc[cet]`).
