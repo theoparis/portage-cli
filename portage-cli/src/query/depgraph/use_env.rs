@@ -186,19 +186,25 @@ async fn compute_use_env(
         config.set(flag, UseFlagState::Disabled);
     }
 
-    let mut package_use: Vec<(Dep, Vec<UseOverride>)> = stack
-        .package_use()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(dep, flags)| (dep, flags.iter().map(|f| UseOverride::parse(f)).collect()))
-        .collect();
-    package_use.extend(load_package_use(portage_dir.join("package.use").as_str()));
-    // User config overlay (e.g. `--local`'s ~/.gentoo/etc/portage), applied
-    // last so it overrides per flag — lets an unprivileged user set package.use
-    // without writing the host /etc/portage.
+    // Per-package USE from the profile, then `/etc/portage`, then the config
+    // overlay. Collected as raw tokens so the USE_EXPAND colon form is expanded
+    // once, against the live keys, before parsing to `UseOverride`.
+    let expand_keys = &expand;
+    let expand_values = |key: &str| split_var(key);
+    let mut raw_package_use: Vec<(Dep, Vec<String>)> = stack.package_use().unwrap_or_default();
+    raw_package_use.extend(load_package_use(portage_dir.join("package.use").as_str()));
     if let Some(overlay) = config_overlay {
-        package_use.extend(load_package_use(overlay.join("package.use").as_str()));
+        raw_package_use.extend(load_package_use(overlay.join("package.use").as_str()));
     }
+    let package_use: Vec<(Dep, Vec<UseOverride>)> = raw_package_use
+        .into_iter()
+        .map(|(dep, flags)| {
+            (
+                dep,
+                expand_use_expand_colon(&flags, expand_keys, &expand_values),
+            )
+        })
+        .collect();
 
     // Mask sources, in portage's order: the repo-global `profiles/package.mask`
     // (applies regardless of profile), the profile chain (with `-atom` removals
@@ -265,7 +271,10 @@ fn effective_accept_keywords(
     parse(&[arch, testing])
 }
 
-fn load_package_use(path: &str) -> Vec<(Dep, Vec<UseOverride>)> {
+/// Load `package.use` as raw `(atom, [token])` lines: `#` comments, optionally
+/// a directory (children summed in lexical order). Tokens stay verbatim —
+/// USE_EXPAND `KEY:` groups are expanded later by [`expand_use_expand_colon`].
+fn load_package_use(path: &str) -> Vec<(Dep, Vec<String>)> {
     let p = std::path::Path::new(path);
     if !p.exists() {
         return Vec::new();
@@ -299,13 +308,65 @@ fn load_package_use(path: &str) -> Vec<(Dep, Vec<UseOverride>)> {
             let Ok(dep) = Dep::parse(atom_str) else {
                 continue;
             };
-            let flags: Vec<UseOverride> = parts.map(UseOverride::parse).collect();
+            let flags: Vec<String> = parts.map(str::to_string).collect();
             if !flags.is_empty() {
                 result.push((dep, flags));
             }
         }
     }
     result
+}
+
+/// Expand the `USE_EXPAND:` colon form in `package.use` tokens to interned
+/// overrides (portage(5): a USE_EXPAND name followed by `:` makes every
+/// subsequent value a member of that group, e.g. `cat/pkg L10N: de en` ⇒
+/// `l10n_de l10n_en`, `cat/pkg L10N: -de` ⇒ disable `l10n_de`). A bare `-*`
+/// inside a group clears its live values (`expand_values` returns the group's
+/// current members) before the trailing values rebuild it
+/// (`PYTHON_TARGETS: -* python2_7` ⇒ only `python_targets_python2_7`).
+///
+/// Only keys present in `use_expand` start a group; any other token — including
+/// one that merely ends in `:` — is parsed as an ordinary flag, so plain flags
+/// and a bare `-*` keep working.
+fn expand_use_expand_colon(
+    tokens: &[String],
+    use_expand: &[String],
+    expand_values: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<UseOverride> {
+    let mut out: Vec<UseOverride> = Vec::with_capacity(tokens.len());
+    let mut group: Option<&str> = None;
+    for tok in tokens {
+        if let Some(key) = tok.strip_suffix(':')
+            && use_expand.iter().any(|k| k == key)
+        {
+            group = Some(key);
+            continue;
+        }
+        let Some(key) = group else {
+            out.push(UseOverride::parse(tok));
+            continue;
+        };
+        let prefix = key.to_lowercase();
+        if tok == "-*" {
+            // Clear the group's live values; the tokens after rebuild it.
+            for v in expand_values(key) {
+                out.push(UseOverride {
+                    flag: Interned::intern(&format!("{prefix}_{v}")),
+                    enable: false,
+                });
+            }
+        } else {
+            let (enable, val) = match tok.strip_prefix('-') {
+                Some(v) => (false, v),
+                None => (true, tok.as_str()),
+            };
+            out.push(UseOverride {
+                flag: Interned::intern(&format!("{prefix}_{val}")),
+                enable,
+            });
+        }
+    }
+    out
 }
 
 /// Load `package.accept_keywords` / `package.keywords`: `(atom, [tokens])` per
@@ -437,4 +498,96 @@ pub(super) fn load_dep_list(path: &str) -> Vec<Dep> {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_use_expand_colon;
+    use portage_atom_pubgrub::UseOverride;
+
+    /// Expected override shorthand.
+    fn ov(s: &str) -> UseOverride {
+        UseOverride::parse(s)
+    }
+
+    #[test]
+    fn colon_form_expands_values() {
+        // `cat/pkg L10N: de en` ⇒ l10n_de l10n_en; a plain flag is untouched.
+        let keys = ["L10N".to_string()];
+        let none = |_: &str| Vec::new();
+        let out = expand_use_expand_colon(
+            &["foo".into(), "L10N:".into(), "de".into(), "en".into()],
+            &keys,
+            &none,
+        );
+        assert_eq!(out, vec![ov("foo"), ov("l10n_de"), ov("l10n_en")]);
+    }
+
+    #[test]
+    fn colon_form_negates_value() {
+        let keys = ["L10N".to_string()];
+        let none = |_: &str| Vec::new();
+        let out = expand_use_expand_colon(&["L10N:".into(), "-de".into()], &keys, &none);
+        assert_eq!(out, vec![ov("-l10n_de")]);
+    }
+
+    #[test]
+    fn colon_form_dash_star_clears_group_defaults() {
+        // `PYTHON_TARGETS: -* python2_7` clears the live defaults (python3_13)
+        // then adds python2_7 — the documented "pin a single impl" pattern.
+        let keys = ["PYTHON_TARGETS".to_string()];
+        let defaults = |k: &str| {
+            (k == "PYTHON_TARGETS")
+                .then(|| vec!["python3_13".to_string()])
+                .unwrap_or_default()
+        };
+        let out = expand_use_expand_colon(
+            &["PYTHON_TARGETS:".into(), "-*".into(), "python2_7".into()],
+            &keys,
+            &defaults,
+        );
+        assert_eq!(
+            out,
+            vec![
+                ov("-python_targets_python3_13"),
+                ov("python_targets_python2_7")
+            ]
+        );
+    }
+
+    #[test]
+    fn colon_form_switches_group_mid_line() {
+        // A new `KEY:` switches the active group; both groups expand.
+        let keys = ["L10N".to_string(), "PYTHON_TARGETS".to_string()];
+        let none = |_: &str| Vec::new();
+        let out = expand_use_expand_colon(
+            &[
+                "L10N:".into(),
+                "de".into(),
+                "PYTHON_TARGETS:".into(),
+                "python3_13".into(),
+            ],
+            &keys,
+            &none,
+        );
+        assert_eq!(out, vec![ov("l10n_de"), ov("python_targets_python3_13")]);
+    }
+
+    #[test]
+    fn colon_form_ignores_unknown_key() {
+        // A `:` suffix on something that isn't a USE_EXPAND key is parsed as a
+        // plain flag (left intact, interned verbatim).
+        let keys = ["L10N".to_string()];
+        let none = |_: &str| Vec::new();
+        let out = expand_use_expand_colon(&["WEIRD:".into(), "x".into()], &keys, &none);
+        assert_eq!(out, vec![ov("WEIRD:"), ov("x")]);
+    }
+
+    #[test]
+    fn colon_form_passes_through_plain_flags() {
+        let keys = ["L10N".to_string()];
+        let none = |_: &str| Vec::new();
+        let out = expand_use_expand_colon(&["nls".into(), "-debug".into()], &keys, &none);
+        assert_eq!(out, vec![ov("nls"), ov("-debug")]);
+    }
 }

@@ -14,8 +14,9 @@ here briefly for context). Updated 2026-06-26.
   unprivileged model). **The decision point.** [[stage-build-shakeout]]
 - 🟡 **`em stages`** — stage1 (`baselayout` + `packages.build`, built with the
   ROOT `<chost>-gcc` + SYSROOT=ROOT) → stage3 (`--emptytree @system`). No stage2
-  (em builds a fresh toolchain, crossdev model). Needs `packages.build` ingestion,
-  the `-*` USE gap below, and the CLI. [[em-stages-and-binhosts]]
+  (em builds a fresh toolchain, crossdev model). Needs `packages.build` ingestion
+  and the CLI (the `package.use` `-*` colon gap below is now closed).
+  [[em-stages-and-binhosts]]
 - ✅ **`USE="-*"` clear-all** — now honoured across the USE/USE_EXPAND
   incremental merge (profile→globals→conf→env layers) and the shell-state read,
   so catalyst's `USE="-* build"` collapses the closure as expected.
@@ -23,9 +24,11 @@ here briefly for context). Updated 2026-06-26.
   (`AcceptLicense::from_tokens` clears allow_all+allowed+denied;
   `AcceptToken::ClearAll` resets the accept decision, global and per-package).
 - 🟡 **Remaining `-*` gaps are feature work, not patches:**
-  - `package.use` `-*` — the documented form is the USE_EXPAND colon syntax
-    (`L10N: -* en`), which isn't parsed at all; plain `-*` is rare. Needs colon
-    parsing + USE_EXPAND-aware clearing + a `UseOverride` type change.
+  - ✅ `package.use` USE_EXPAND colon form (`L10N: -* en`,
+    `PYTHON_TARGETS: -* python2_7`) — `expand_use_expand_colon` (use_env.rs) parses
+    `KEY:` group headers against the live USE_EXPAND keys, expands values to
+    interned `UseOverride`s (no String detour), and treats a `-*` inside a group as
+    "clear the group's live values, then trailing values rebuild it".
   - `ACCEPT_KEYWORDS` `-arch` removal still dropped (additive ArchAccept model).
   - `ACCEPT_PROPERTIES`/`ACCEPT_RESTRICT`/`PORTAGE_CHECKSUM_FILTER` — the vars
     themselves are unimplemented (zero refs); their GLEP-23 `*`/`-*` is moot
