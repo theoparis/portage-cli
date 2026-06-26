@@ -6,12 +6,15 @@ here briefly for context). Updated 2026-06-26.
 
 ## Stage building (the active goal: a real stage3)
 
-- 🔴 **Privilege / fakeroot for stage builds.** `sys-apps/util-linux`'s own
+- 🟡 **Privilege / fakeroot for stage builds.** `sys-apps/util-linux`'s own
   Makefile `chown root:root .../bin/mount` fails unprivileged → blocks
   `sys-apps/portage` → no self-extending base. A full `@system` stage with setuid
-  binaries needs **root or fakeroot** (catalyst runs as root). Decide: run `em` as
-  root for stages (simplest, root-owned tree) vs integrate fakeroot (keep the
-  unprivileged model). **The decision point.** [[stage-build-shakeout]]
+  binaries needs a fake/real root. **Designed**: one `PrivilegeBackend` selected
+  automatically when unprivileged, carved at a new `em __worker` boundary
+  (= `build_and_merge`), with auto-detected fakeroost (pure-Rust, default) /
+  fakeroot / sudo / hakoniwa backends; the three EPERM-swallow workarounds
+  collapse into "record ownership". [[fakeroot-privilege-backends]]
+  [[stage-build-shakeout]]
 - 🟡 **`em stages`** — stage1 (`baselayout` + `packages.build`, built with the
   ROOT `<chost>-gcc` + SYSROOT=ROOT) → stage3 (`--emptytree @system`). No stage2
   (em builds a fresh toolchain, crossdev model). Needs `packages.build` ingestion

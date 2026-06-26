@@ -1,0 +1,245 @@
+# Unprivileged builds: consolidate the chown workarounds behind a privilege backend
+
+STATUS: **design (2026-06-26), code-confirmed.** Replace the three ad-hoc
+EPERM-swallow workarounds with one `PrivilegeBackend`, selected automatically when
+unprivileged. Goal: a correct root-owned `@system` stage3 (setuid `mount`,
+`root:root`, file caps) without running em as root. Supersedes the "decision
+point" in [[stage-build-shakeout]] and the privilege half of [[build-clean-env]].
+
+## The problem (one root cause, three patches)
+
+Unprivileged builds cannot `chown` to root/foreign users. Today this is swallowed
+in three places, each of which **discards** the intended ownership instead of
+recording it — so the merged tree / binpkg / stage carries wrong ids, no setuid,
+no file capabilities:
+
+1. `build/stubs.rs` — bash `chown()`/`chgrp()` overrides return success on EPERM
+   when non-root. Only catches chowns run *directly in ebuild bash*.
+2. `build/commands/install.rs` `FownersCommand` — `fowners` shells to `chown`,
+   swallows EPERM when non-root (`efdeb37`).
+3. `build/commands/inst_owner.rs` — `PORTAGE_INST_UID/GID` default to the process
+   uid in unprivileged mode so `install -o <self>` succeeds.
+
+The deepest case escapes all three: util-linux's *own* Makefile
+`chown root:root .../bin/mount` is a child-process chown, not interceptable by a
+bash function. A real fake-root layer is required.
+
+## What portage does (confirmed, portage-3.0.79)
+
+- `FEATURES=fakeroot`, and only when `uid != 0` **and** `fakeroot_capable`
+  (`/usr/bin/fakeroot` exists+executable) — `config.py:1492`, `doebuild.py:2098`.
+- `process.spawn_fakeroot` (`process.py:172`) runs:
+  `fakeroot -s ${T}/fakeroot.state -i ${T}/fakeroot.state -- bash -c <cmd>`.
+- The **`-s`/`-i` state file is the crux**: portage spawns each phase as a
+  *separate* `fakeroot` process, so the faked-ownership table must be **saved
+  after install and re-loaded for qmerge/misc-functions** to carry ownership
+  across the phase boundary (`MiscFunctionsProcess.py:47`, `EbuildPhase.py:124`).
+- Applied to the install + merge phases only (not compile); orthogonal to the
+  sandbox (`free`/`sesandbox`/`droppriv`) and `userpriv`.
+- **Opt-in**: not in default FEATURES — a root merge does real chowns; fakeroot is
+  the unprivileged / `ebuild` / binpkg path. em's directive is more aggressive:
+  **auto-enable whenever unprivileged** (a deliberate divergence, noted below).
+
+So portage = the external libfakeroot binary + a per-build state file. Backend
+"fakeroot (system)" below mirrors it exactly; the others improve on it.
+
+## fakeroost (confirmed from source: koca-build/fakeroost 0.1.1)
+
+A **ptrace + seccomp** supervisor, pure Rust — *not* an LD_PRELOAD shim (so it
+fakes ownership even for static binaries and under Docker's default seccomp).
+
+- API: `fakeroost::init()` as the **first line of `main`** — detects the
+  `__FAKEROOST_SUPERVISE` re-exec marker; a normal launch returns immediately, the
+  supervisor launch runs the trace loop and exits with the child's status.
+  `FakerootCommandExt::fakeroot()` on `std::process::Command` rewrites it to
+  re-exec **our own binary** (`/proc/self/exe`) in supervisor mode, which then
+  forks+traces the real target.
+- **Whole-tree coverage**: the supervisor sets
+  `PTRACE_O_TRACEFORK|TRACEVFORK|TRACECLONE`, so every descendant is auto-traced
+  and shares **one** `OwnershipTable`. → covers em's **in-process** merge *and*
+  every child (`make`/`install`/`chown`/eclass `chown 0:0`) in one session.
+- Faked syscalls: `chown/lchown/fchown/fchownat` (record, skip real),
+  `stat/lstat/fstat/newfstatat/statx` (overlay faked uid/gid/mode/rdev/nlink),
+  `getuid/geteuid/...`→0, `setuid/.../capset`→success, `mknod/mknodat`
+  (placeholder + record), `*xattr` (security.capability + ACLs), `chmod` (record +
+  real). `unlink`/`rename` evict the table entry.
+- Keyed by **(dev, inode)** — survives hardlinks/renames. Untracked ⇒ "owned by
+  root" (real mode/rdev/nlink preserved).
+- **No state save/load across processes** (no `-s/-i` equivalent): the table lives
+  for the supervised run only.
+
+## Why em is a *better* fit than portage's split model
+
+em runs install **and** qmerge in **one** process — one carried build shell,
+`build_and_merge` → `run_inner` over phases `[…, install, qmerge]` (`ebuild.rs:136`,
+[[build-clean-env]]). So a single supervised worker holds install+qmerge in **one
+in-memory table** — em needs **no `fakeroot.state` file** that portage requires
+only because it spawns phases separately. The one requirement: the qmerge copy
+(em's in-process `std::fs` at `ebuild.rs:1285`) must run *inside* the supervised
+worker so the faked image-owner is visible and the chown into ROOT is recorded.
+
+## `__worker`: the single entry point
+
+`ebuild::build_and_merge` (`ebuild.rs:136`) is already the per-package
+build+merge unit, and every argument is serializable except one:
+
+| arg | worker flag |
+|-----|-------------|
+| `ebuild_path` | `--ebuild <path>` |
+| `use_flags: &[Interned]` | `--use "a b c"` |
+| `work_base` / `root` / `distdir` / `config_root` / `sysroot` / `eprefix` | matching flags |
+| `quiet` | `--quiet` |
+| `merge_gate: &Mutex` | **cross-process** flock on `work_base/.merge.lock`, held around qmerge |
+
+Introduce a hidden `em __worker …` subcommand (mirroring the existing `em __helper`
+precedent at `cli.rs:415`) whose body is one `build_and_merge` call. The dispatch
+in `merge_sequential` (`main.rs:447`) and `merge_parallel` (`main.rs:583`) changes
+from *call `build_and_merge` in-process* to *build the `em __worker` `Command`, let
+the backend decorate it, spawn, await*. The `--jobs` scheduler (`Scheduler`,
+`main.rs:483`) is untouched — it already awaits child build subprocesses.
+
+`em`'s `main` gains `fakeroost::init()` as its first statement (a no-op unless this
+exe was re-exec'd as the supervisor); the tokio `merge_gate` Mutex becomes an
+flock so qmerge stays globally serial across worker *processes*.
+
+## The `PrivilegeBackend` trait — the one seam
+
+```
+trait PrivilegeBackend {
+    /// Spawnable command for one `em __worker` unit, wrapped in whatever
+    /// provides root (fake or real) for the whole worker process tree.
+    fn worker_command(&self, em_exe: &Path, args: &WorkerArgs) -> Command;
+}
+```
+
+`detect()`: `euid==0` ⇒ `RealRoot`; else the configured backend, default **auto =
+best available**. All backends converge on how `em __worker` is launched:
+
+| backend | launch | family |
+|---|---|---|
+| **RealRoot** (root / `--jobs` in-proc) | `em __worker` (or keep in-process); real chowns | — |
+| **fakeroost** *(default unpriv.)* | `Command::new(em).arg("__worker").fakeroot()` + `init()` in `main` | fake+acct |
+| **fakeroot** (system) | `fakeroot -s/-i <state> -- em __worker` (portage's exact recipe) | fake+acct |
+| **sudo** | `sudo em __worker` — real root, real setuid | real-in-box |
+| **hakoniwa** | spawn `em __worker` in a userns sandbox, build-user→0 map (`~/Sources/hakoniwa`) | real-in-box |
+
+"fake+accounting" (fakeroot/fakeroost) vs "real-in-a-box" (sudo/hakoniwa) are two
+families behind the same `worker_command`. Auto-detect order when unprivileged:
+fakeroost (pure-Rust, always linked) → fakeroot (binary on PATH) → hakoniwa
+(userns available) → sudo (allowed) → degraded warn.
+
+## What collapses once a backend records ownership
+
+- `FownersCommand`: drop the EPERM-swallow → always real `chown` (faked + recorded);
+  still resolve owner *name*→uid:gid against the **target** passwd/group (the second
+  facet in [[stage-build-shakeout]]), then chown numerically.
+- `stubs.rs` `chown`/`chgrp` overrides: **delete** — child chowns are faked for real.
+- `inst_owner.rs`: back to portage's `0:0` default (the faker grants root).
+- `ebuild.rs:1285` merge: **add** the missing chown — set each ROOT file's owner to
+  its image-file owner (real when privileged, faked otherwise). This is a genuine
+  gap even for **root** installs today: the copy never chowns, so non-root-owned
+  files (`acct-user/*` dirs, etc.) land owned by whoever ran em. Ownership is **not**
+  recorded in `CONTENTS` (it has no owner/mode field — like portage); it is captured
+  at *archive* time instead — see Q1.
+
+## Q1 RESOLVED — artifact ownership is captured at archive time, not stored
+
+`CONTENTS` has **no** owner/mode field (confirmed: `portage_vdb::ContentsEntry` =
+`{kind, path, md5, mtime, target}`, like portage), and fakeroost has **no**
+cross-process state. So ownership cannot be reconstructed after a worker exits —
+it must be read by the **archiver while it runs inside the fakeroost session** that
+recorded the chowns. The resolution is therefore about *scoping the session to
+cover the archiver*, and it splits by artifact:
+
+- **Live unprivileged install** (`em --root <prefix>`): no artifact. fakeroost only
+  stops the chown-EPERM death; on-disk files stay build-user owned (fine for a user
+  prefix). Per-worker session suffices, nothing to preserve.
+- **binpkg** (`em -b`): build the archive from the **image `${D}`** at end of
+  `src_install`, *inside the same worker session* (the image already carries the
+  faked chowns). Exactly portage's model (it packs the binpkg under fakeroot).
+  → binpkg is the **canonical, durable carrier of ownership** (GPKG stores it in tar).
+- **stage3** (`em stages`): do **not** tar a live unprivileged ROOT (its on-disk
+  owners are build-user). Instead **assemble from binpkgs**: extract the
+  already-correctly-owned binpkgs into a fresh ROOT and tar it, all under **one
+  short umbrella fakeroost session** covering only extract+tar. Decouples the
+  per-package builds (each a quick, parallel session) from the stage pack (one
+  session over re-pack), and matches catalyst's "seed + packages → stage".
+
+So no ownership store is added anywhere; the binpkg is the intermediate that holds
+it, and every tar runs in-session. Detail in "Future: tar / binpkg" below.
+
+## Open implementation questions
+
+1. **Parallel workers each have their own table.** Independent is fine: each writes
+   root:root into the shared ROOT; a later worker stat-ing those files gets the
+   "untracked ⇒ root" default — correct for the common case. Only non-root-owned
+   installed files (rare) could be misread cross-worker. Acceptable; revisit if it
+   bites.
+2. **Merge gate cross-process**: flock on `work_base/.merge.lock` vs a parent-held
+   semaphore. flock is simplest and survives worker crashes.
+3. **Worker arg round-trip**: `WorkerArgs` must fully reconstruct `build_and_merge`
+   input; confirm the worker re-derives FEATURES/EPREFIX from `--config-root`
+   rather than the parent's in-memory state.
+4. **RealRoot stays in-process** (no spawn) for speed; spawn only when faking.
+5. **fakeroost robustness on the 128-core `@system` run**: ptrace adds a per-syscall
+   trap on the filtered set — measure overhead vs build cost; confirm it survives
+   the heavy `make -j` trees.
+
+## Future: tar / binpkg / stage artifacts (none exist yet)
+
+`em -b`/`--buildpkg`, `--getbinpkg(only)` are **parsed flags with no
+implementation** (`cli.rs:88-101`); there is **no archive-creation code** in the
+tree. This is greenfield and is where Q1's "capture at archive time" lands.
+
+### What the archiver must preserve (the fakeroost-specific traps)
+
+fakeroost fakes ownership in its table, not on disk, so a naive `std::fs` walk sees
+the *real* (build-user, placeholder) files. Correct output requires the archiver to
+read through faked `stat`/`getxattr`, which only happens **in-session**. It must emit:
+
+- **owner/gid** numeric, from faked `stat` (`--numeric-owner`; untracked ⇒ 0:0).
+- **mode + setuid/setgid bits** (so `mount`/`ping` keep their bits).
+- **device nodes**: fakeroost stores `mknod` as a *placeholder regular file* plus a
+  recorded `(type, rdev)`; faked `stat` returns the char/block mode+rdev. The
+  archiver must emit a real device-node tar entry **from the faked stat**, not copy
+  the placeholder. (A plain copy would ship a 0-byte regular file.)
+- **file capabilities / ACLs**: fakeroost fakes `security.capability` and ACL
+  xattrs via `*setxattr`; the archiver must read them with faked `getxattr`
+  (`tar --xattrs`, pax format).
+- **hardlinks** (em's merge already tracks `(dev,ino)` at `ebuild.rs:1273`),
+  symlinks, mtime.
+
+→ Two implementation options:
+- **(a) shell out to GNU `tar --numeric-owner --xattrs --format=pax`** inside the
+  session — handles owners/devnodes/caps/hardlinks/ACLs natively, least code.
+- **(b) a Rust archiver** (the `tar` crate doesn't do xattrs/devnodes out of the
+  box) — more control, more code. Start with (a); revisit if a dependency-free
+  static em matters.
+
+### Format
+
+Target **GPKG** (Gentoo's current default: an outer tar of `image.tar` +
+`metadata.tar`, each optionally `zstd`/`gzip`, optional GPG per
+`BINPKG_GPG_*`/`BINPKG_COMPRESS`). The legacy xpak `.tbz2` (tarball + appended
+metadata blob) is read-only-compat territory; don't emit it. The binhost
+`Packages` index and `--getbinpkg` consumer are tracked separately in
+[[em-stages-and-binhosts]] / PENDING.md (binhost section).
+
+### Where it slots in
+
+- **binpkg**: a new step in the worker between `install` and `qmerge`, gated on
+  `buildpkg`, packing `${D}` → `${PKGDIR}/<cat>/<pf>.gpkg` *within the worker's
+  fakeroost session*. Metadata tar = the VDB env/`*.ebuild`/`USE`/deps em already
+  computes for the VDB write.
+- **stage3**: `em stages` final step = extract the selected binpkgs into a clean
+  ROOT + emit the stage tar, under **one umbrella fakeroost session** (Q1). Ties
+  into the privilege backend the same way — `em __stage-pack` could be a second
+  worker-like entry point decorated by `worker_command`.
+
+### Privileged path
+
+Under `RealRoot`/`sudo`/`hakoniwa` the on-disk owners are already real (root, or
+ns-mapped root), so the archiver needs no fakeroost session — option (a) `tar` just
+works. The fakeroost path is the only one needing the in-session constraint; the
+trait hides that (the archiver always runs via `worker_command`, which is a no-op
+wrapper for RealRoot).
