@@ -1,9 +1,11 @@
 # Unprivileged builds: consolidate the chown workarounds behind a privilege backend
 
-STATUS: **v1 landed (2026-06-27)** — umbrella fakeroost session; design below.
-Goal: a correct root-owned `@system` stage3 (setuid `mount`, `root:root`, file
-caps) without running em as root. Supersedes the "decision point" in
-[[stage-build-shakeout]] and the privilege half of [[build-clean-env]].
+STATUS: **v1 landed (2026-06-27)** — umbrella fakeroost session + merge chown +
+facet-2 name resolution, all validated on `sys-apps/util-linux`. **Next: tar/binpkg
+(not started)** — see "START HERE next session" near the end. Goal: a correct
+root-owned `@system` stage3 (setuid `mount`, `root:root`, file caps) without
+running em as root. Supersedes the "decision point" in [[stage-build-shakeout]]
+and the privilege half of [[build-clean-env]].
 
 ## Implemented — v1 (umbrella session)
 
@@ -281,3 +283,45 @@ ns-mapped root), so the archiver needs no fakeroost session — option (a) `tar`
 works. The fakeroost path is the only one needing the in-session constraint; the
 trait hides that (the archiver always runs via `worker_command`, which is a no-op
 wrapper for RealRoot).
+
+### START HERE next session (tar/binpkg — not started)
+
+Context recap: `em -b`/`--buildpkg`/`--getbinpkg` are parsed-but-unimplemented
+flags; there is **no archiver and no binpkg consumer** in the tree. The privilege
+work (fakeroost umbrella, merge chown, facet 2) is done and validated, so the
+in-session ownership the archiver needs is already there — `${D}` carries faked
+`root:root` during `src_install`.
+
+Steps, in order:
+
+1. **Read the GPKG spec first** — `~/Sources/portage-3.0.79/lib/portage/gpkg.py`
+   (and GLEP 78). Nail the exact container: outer **uncompressed** tar whose members
+   are `<basename>/gpkg-1` (format marker), `<basename>/metadata.tar.<c>`,
+   `<basename>/image.tar.<c>` (+ optional `.sig`), the per-member checksums, and how
+   `<basename>` is formed. Don't guess the byte layout — em's GPKG must be readable
+   by the host's real portage (the validation gate).
+2. **image.tar** — option (a): shell to `tar --numeric-owner --xattrs
+   --format=pax -C "${D}" .`, run **in the fakeroost session** so owner/devnode/cap
+   reads are faked. Compress per `BINPKG_COMPRESS` (default `zstd`; `tar --zstd` or
+   the `zstd` binary). Confirm setuid bits + `security.capability` survive.
+3. **metadata.tar** — reuse the VDB metadata em already computes for the merge:
+   `capture_environment` (→ `environment.bz2`), `CONTENTS`, and the xpak field set
+   (`PF CATEGORY USE *DEPEND SLOT KEYWORDS IUSE repository …`). Find the VDB writer
+   in `portage-cli/src/vdb.rs` + `ebuild.rs` and factor the field emission so binpkg
+   and VDB share it.
+4. **Assemble the container** + write to `${PKGDIR}/<cat>/<pf>.gpkg` (resolve
+   `PKGDIR`, default `/var/cache/binpkgs`).
+5. **Wire `--buildpkg`**: a new step in `run_inner`'s phase list between `install`
+   and `qmerge` (`ebuild.rs:148`), gated on `cli.buildpkg`. It runs inside the same
+   worker → already under the fakeroost session.
+6. **Validate**: `em -b --root /var/tmp/stage1-base sys-apps/util-linux`
+   unprivileged → inspect `image.tar` (`tar -tvf` shows `root/root` + setuid
+   `mount`), then confirm the host's real portage reads it (`qtbsdtar`/gpkg tooling,
+   or `emerge -K`/`--usepkgonly` against `PKGDIR`).
+
+Open decisions to settle while reading gpkg.py: compression default + whether to
+shell `tar --zstd` vs pipe `zstd`; whether to emit the `.sig`/Manifest checksums
+now or defer signing (`BINPKG_GPG_*`); exact `<basename>` and `gpkg-1` marker
+content. Deferred: the `--getbinpkg` **consumer** and the `Packages` index
+(`em maint binhost`) — see [[em-stages-and-binhosts]]. stage3 re-pack (`em stages`
++ `em __stage-pack`) comes after the per-package binpkg works.

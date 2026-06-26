@@ -81,7 +81,11 @@ here briefly for context). Updated 2026-06-26.
 
 ## Binhosts (fast stage3/stage4) [[em-stages-and-binhosts]]
 
-- 🔴 Producer: confirm `em -b` PKGDIR + `em maint binhost` `Packages` index (GPKG).
+- 🔴 Producer: **`em -b` GPKG writer — the next task** (`em -b` is a no-op flag
+  today; no archiver exists). Pack `${D}` in the fakeroost session for correct
+  `root:root`/setuid/caps. Full plan + start-here steps in
+  [[fakeroot-privilege-backends]] § "START HERE next session". Then the
+  `em maint binhost` `Packages` index.
 - 🔴 Consumer: remote `--getbinpkg` over `PORTAGE_BINHOST` (http(s) fetch + index).
 - 🔴 Binpkg reuse/rebuild via the solver's USE/ABI/slot machinery.
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.
