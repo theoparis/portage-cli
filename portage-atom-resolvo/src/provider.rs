@@ -1328,6 +1328,7 @@ impl resolvo::DependencyProvider for PortageDependencyProvider {
             locked: self.locked.get(&name).copied(),
             hint_dependencies_available: HintDependenciesAvailable::All,
             excluded: Vec::new(),
+            ..Default::default()
         })
     }
 
