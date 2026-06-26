@@ -92,7 +92,7 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
     // DEPEND providers can appear after their consumer in install order (e.g.
     // bootstrap `gcc-11` after `gcc-16`), so every other plan entry is checked.
     for (j, (consumer, consumer_ver)) in cand.order.iter().enumerate() {
-        if j == cand.index || consumer.is_virtual() {
+        if j == cand.index {
             continue;
         }
         let Some(cache) = repo::find_cache(cand.ctx.data, consumer, consumer_ver) else {

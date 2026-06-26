@@ -60,9 +60,6 @@ pub fn trim_within_run_bdepend(
 fn runtime_required_cpns(order: &[(PortagePackage, Version)], ctx: &TrimCtx<'_>) -> HashSet<Cpn> {
     let mut out = HashSet::new();
     for (pkg, ver) in order {
-        if pkg.is_virtual() {
-            continue;
-        }
         let Some(cache) = repo::find_cache(ctx.data, pkg, ver) else {
             continue;
         };
@@ -115,9 +112,6 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
     }
 
     for (j, (consumer, consumer_ver)) in cand.order.iter().enumerate().skip(cand.index + 1) {
-        if consumer.is_virtual() {
-            continue;
-        }
         let avail = avail_for_consumer(j, cand.kept, cand.kept_indices, cand.ctx.roots);
         let Some(cache) = repo::find_cache(cand.ctx.data, consumer, consumer_ver) else {
             continue;
