@@ -46,7 +46,9 @@ subcommands corresponding to the traditional tools.
 | `glsa` | `glsa-check` | Stub |
 | `log` | `genlop` | Stub |
 | `grep` | `egreplite` | Stub |
-| `select` | `eselect` | Stub |
+| `select` | `eselect` | Partial — `profile`, `repository`, `compiler`, `binutils`, `linker`, `clang` |
+| `crossdev` | `crossdev` | Working — cross sysroot/overlay setup + staged toolchain bootstrap |
+| `toolchain` | — | Working — native self-hosting toolchain bootstrap into `--root` |
 | `dispatch` | `dispatch-conf` | Stub |
 | `etc` | `etc-update` | Stub |
 | `env` | `env-update` | Stub |
@@ -142,6 +144,32 @@ Metadata cache entries are parsed in parallel (jwalk + chunked `spawn_blocking`)
   `@preserved-rebuild` is accepted as long as the name is known).
 - `all`, `binhost`, `cleanconfmem`, `cleanresume`, `logs`, `merges`,
   `movebin`, `sync` — not implemented.
+
+---
+
+## Cross-compilation & toolchains
+
+`em` understands the multi-root model (`docs/root-model.md`): a build reads its
+config from one root (`--config-root`) and installs into another (`--root`),
+with build tools resolved against the host (`BROOT`). On top of that it can
+bootstrap toolchains and assemble stages.
+
+- **`em crossdev -t <tuple> --init-target`** lays down a cross sysroot + overlay
+  (a `crossdev` workalike); **`--setup`** then runs the staged
+  `binutils → headers → gcc-stage1 → libc → gcc-stage2` bootstrap into
+  `/usr/<tuple>`. Validated end-to-end for `riscv64-unknown-linux-gnu`.
+- **`em toolchain --setup --root <dir>`** bootstraps a *native* self-hosting
+  toolchain (`CHOST == CBUILD`) into an empty root —
+  `baselayout → binutils → os-headers → glibc → gcc`. Unlike cross there is no
+  two-stage gcc: the host (seed) compiler builds full glibc directly and a single
+  full gcc links against it. Verified: a fully automated run produces a
+  `gcc-16.1` in the root that compiles and links a working binary against the
+  root's own libc.
+
+The native toolchain and the cross bootstrap share one staged driver
+(`crossdev::stages`), differing only in atom naming and how the `glibc ↔ gcc`
+cycle is broken. Stage *production* (stage1 `packages.build`, stage3
+`--emptytree @system`) is the next layer — see `todo/em-stages-and-binhosts.md`.
 
 ---
 
