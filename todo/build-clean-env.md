@@ -49,4 +49,4 @@ lifecycle to portage `bin/phase-functions.sh` / `bin/misc-functions.sh`
 Instrument the cross glibc build shell (`use headers-only`, `${USE}`) on a
 reinstall to settle whether the headers-only result is a USE-application bug in
 the carried shell or a downstream effect of the missing cross `as`/`ld`
-([[select-binutils]]). Then add `noclean`/`keeptemp` FEATURES parity.
+([[select-toolchain]]). Then add `noclean`/`keeptemp` FEATURES parity.

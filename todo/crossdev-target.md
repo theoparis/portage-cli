@@ -682,7 +682,7 @@ invalid option -- 'p'`; no `libc.so`/`libc.a` in the sysroot). Two driver bugs:
      `binutils-bin/<VER>`, then `usr/bin/<T>-<tool>`) and `gcc-config`
      (`usr/bin/<T>-<tool>` → `<GCC_PATH>/<T>-<tool>` + `<T>-cc`), all rooted at
      `<EPREFIX>` so `--local`/`--prefix` link their own binaries. See
-     [[select-binutils]], [[select-compiler]]. Unit-tested.
+     [[select-toolchain]]. Unit-tested.
    - `crossdev --setup` now calls `select::activate_{binutils,compiler}` after the
      binutils/gcc steps (`activate_toolchain`, EPREFIX-aware), so the prefix gets
      activated instead of the host `/` that the eclass `pkg_postinst`'s
