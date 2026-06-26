@@ -68,6 +68,46 @@ backoff, and resumable/partial-download handling. Confirm em walks
 `mirror://` → `GENTOO_MIRRORS` and the upstream URLs in order, and honours
 `thirdpartymirrors`.
 
+## C. Three concrete bugs from the @system stage build (2026-06-26)
+
+The `em --root @system` shakeout ([[stage-build-shakeout]]) failed popt/tar/psmisc
+— not flakiness, three distinct bugs:
+
+1. **No GENTOO_MIRRORS fallback — FIXED (`e0bae58`).** `gentoo_mirrors_list()`
+   read only the env + `/etc/portage/make.conf`, never `make.globals` (where the
+   default `GENTOO_MIRRORS="http://distfiles.gentoo.org"` lives). make.conf rarely
+   overrides it → empty mirror list → a distfile whose upstream URL failed had no
+   fallback (popt: `error decoding response body` on ftp.rpm.org). Now reads
+   make.globals last. Verified popt fetches.
+2. **Success-after-fallback still marked failed — OPEN.** tar: `HTTP 404` on
+   `alpha.gnu.org`, then `fetch: tar-1.35.tar.xz ok` on a later URL — yet the
+   package was still reported failed. The per-distfile result accounting treats an
+   earlier URL's error as the file's outcome even when a subsequent URL succeeded
+   (or the two-distfile/sig case is mis-aggregated). Trace `fetch_distfile`'s
+   `last_err`/return vs the caller's per-file pass/fail in `ebuild.rs`.
+3. **Corrupt partial cached, never refetched — OPEN.** psmisc: a 139431-byte file
+   (expected 432208 — an HTML/truncated body) sat in DISTDIR; `fetch_builtin`
+   treats any existing file as a resumable partial and Ranges from its end,
+   appending garbage → manifest verify fails forever. On verify failure of a
+   "resumed" file, discard it and do one fresh (non-Range) download (portage
+   removes and refetches). Guard: only resume when a prior byte-prefix is
+   plausible; otherwise truncate.
+
+## D. `em select mirrors` (NEW) — `eselect mirror` / mirrorselect workalike
+
+A first-class way to pick/rank GENTOO_MIRRORS, in the `em select` family
+([[select-toolchain]]). `eselect mirror` lists the official mirror set and writes
+`GENTOO_MIRRORS` to make.conf; `mirrorselect -s N` benchmarks and picks the
+fastest. Shape:
+- `em select mirrors list` — the official mirror list (from the gentoo repo's
+  `profiles/thirdpartymirrors` / the mirrors metadata, or the releng list).
+- `em select mirrors set <url>...` / `--country <CC>` — write GENTOO_MIRRORS.
+- `em select mirrors rank [-n N]` — benchmark candidates (latency/throughput),
+  write the fastest N (mirrorselect's job).
+Ties into the C.1 fix: with a curated, ranked mirror list the upstream-URL
+failures above mostly vanish. Reuses the env.d/make.conf write plumbing the other
+select modules already have (but GENTOO_MIRRORS is a make.conf var, not env.d).
+
 ## Fix direction
 
 1. **Make SRC_URI extraction capture computed values** (facet A) — the metadata
