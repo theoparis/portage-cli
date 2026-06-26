@@ -54,7 +54,36 @@ bugs. See [[distfile-fetch-reliability]] (investigating next):
 - **psmisc**: a **truncated 139431-byte** file (expected 432208) cached in
   DISTDIR, fails manifest verify forever — **corrupt partial not discarded/refetched**.
 
-## Base state
-`/var/tmp/stage1-base`: 148 pkgs incl. gcc/glibc/bash/make/sandbox. Missing
-python/portage (python blocked the chain → now fixed) and the fowners/fetch
-casualties. Re-run after fowners lands to get a complete self-extending base.
+## UPDATE 2026-06-26 — fixes landed, base at 160; the wall is privilege
+
+After CBUILD (`50081f2`), fowners (`efdeb37`), and GENTOO_MIRRORS/make.globals
+(`e0bae58`): re-ran `@system` into `/var/tmp/stage1-base` → **160 pkgs, python
+built** (CBUILD validated end-to-end), pam/eselect/popt now merge. 3 of 70
+remain, and they expose the boundary:
+
+1. **util-linux — the fakeroot/privilege wall (blocks portage).** util-linux's
+   *own* Makefile `install-exec-hook-mount` runs `chown root:root …/bin/mount`
+   (setuid mount); unprivileged → `Operation not permitted`. This is **not** em's
+   `fowners` (fixed) — it is the package's direct chown. portage RDEPENDs
+   `sys-apps/util-linux`, so this blocks the self-extending base. A full `@system`
+   stage with setuid binaries fundamentally needs **root or fakeroot**, exactly as
+   catalyst runs stage builds as root. Options: (a) run `em` as root for stage
+   builds (simplest, gives a real root-owned stage3); (b) integrate fakeroot
+   (intercept/record chown unprivileged) — bigger, preserves the unprivileged
+   model. The fowners fix only covers em's builtin; package-internal chowns need
+   one of these. **This is the decision point for a real stage3.**
+2. **bash — re-merge over a read-only file.** `copy image/usr/bin/bashbug →
+   ROOT/usr/bin/bashbug: Permission denied`: the existing dest is mode 0555 (no
+   write bit) and em's merge writes over it without `unlink`/chmod first. Portage
+   unlinks before installing. Only bites on *re*-merge (a fresh root is fine).
+   Clean fix: unlink (or chmod +w) the destination before overwriting.
+3. **psmisc — fetch, two layered issues.** sourceforge returns a ~139 KB
+   error/redirect page (not the tarball); the GENTOO_MIRRORS fallback now fires
+   (the make.globals fix works) but builds the **flat** `distfiles/<file>` path,
+   which 404s — modern mirrors use the **hashed** layout (`distfiles/<hash>/<file>`
+   per the mirror `layout.conf`). See [[distfile-fetch-reliability]] — the mirror
+   URL must honour the mirror layout, not assume flat.
+
+Net: the unprivileged path reaches ~160/163; setuid/privileged packages
+(util-linux) need root/fakeroot. For a real (root-owned) stage3, run `em` as root
+— then `fowners` and Makefile chowns both work and the tree is properly owned.
