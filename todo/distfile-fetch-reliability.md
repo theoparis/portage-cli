@@ -92,6 +92,24 @@ The `em --root @system` shakeout ([[stage-build-shakeout]]) failed popt/tar/psmi
    "resumed" file, discard it and do one fresh (non-Range) download (portage
    removes and refetches). Guard: only resume when a prior byte-prefix is
    plausible; otherwise truncate.
+4. **Mirror URL uses the flat layout, 404s on modern mirrors — OPEN.** After the
+   C.1 fix the GENTOO_MIRRORS fallback fires, but `resolver.rs` builds
+   `{mirror}/distfiles/{filename}` (flat). `distfiles.gentoo.org` now serves the
+   **content-hash layout** (`distfiles/${blake2b[0:2]}/${filename}`, per the
+   mirror's `layout.conf` `[structure] = content-hash …` / `filename-hash`), so
+   the flat URL → **HTTP 404** (psmisc 2nd run). Honour the mirror layout: read
+   the gentoo repo's distfiles `layout.conf` (or compute the BLAKE2B prefix from
+   the manifest hash) and build the hashed path; keep flat as a fallback for old
+   mirrors.
+5. **sourceforge SRC_URI yields an error/HTML body — OPEN.** A *fresh*
+   `https://downloads.sourceforge.net/psmisc/psmisc-23.7.tar.xz` returned a
+   ~139 KB body (HTML/redirect "file not found" page), failing manifest verify —
+   i.e. em isn't getting the real file from the SF redirect. Either the builtin
+   client doesn't follow SF's `Location:`/JS redirect to a project mirror, or it
+   accepts a `text/html` error body as the download. Detect: a 2xx whose
+   Content-Type is HTML, or whose size is wildly below the manifest, is not the
+   distfile → treat as a failure and move to the next URL (don't cache it — cf.
+   C.3). Combined with C.4 (working mirror path), psmisc fetches.
 
 ## D. `em select mirrors` (NEW) — `eselect mirror` / mirrorselect workalike
 
