@@ -1083,6 +1083,20 @@ impl builtins::Command for FownersCommand {
                 .status();
             match st {
                 Ok(s) if s.success() => Ok(()),
+                // An unprivileged build cannot chown to root or a group it is not
+                // in (`fowners :shadow`, `fowners root:portage` — pam, eselect):
+                // chown returns EPERM. Portage treats this as non-fatal in
+                // unprivileged mode (the file keeps the build user's ownership;
+                // the real ids are applied by a privileged merge or a stage's tar
+                // `--owner`). A privileged (root) build must still die — there a
+                // chown failure is a genuine error.
+                _ if !rustix::process::getuid().is_root() => {
+                    eprintln!(
+                        "fowners: cannot set ownership '{}' (unprivileged build) — leaving as-is",
+                        raw.first().map(String::as_str).unwrap_or("")
+                    );
+                    Ok(())
+                }
                 _ => Err("fowners failed".to_string()),
             }
         })
