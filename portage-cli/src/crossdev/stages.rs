@@ -135,14 +135,10 @@ impl BootstrapKind {
     }
 
     /// The kernel-headers step atom. Native merges the `virtual/os-headers` meta
-    /// rather than `sys-kernel/linux-headers` directly: glibc DEPENDs on the
-    /// *virtual*, and a SYSROOT=ROOT build must find that virtual installed *in*
-    /// the ROOT (the host-installed one doesn't count). Merging the virtual pulls
-    /// the linux-headers provider AND registers `virtual/os-headers` in the ROOT
-    /// VDB, so the next (libc-headers) step's pre-flight is satisfied. Cross
-    /// builds the provider directly — its overlay carries no `virtual/*`, and the
-    /// cross toolchain's DEPENDs resolve against the host, where the virtual is
-    /// already present.
+    /// (glibc DEPENDs on the virtual, which must be installed *in* a SYSROOT=ROOT
+    /// build — merging it registers the virtual plus the linux-headers provider in
+    /// the ROOT VDB). Cross builds the provider directly: no `virtual/*` in its
+    /// overlay, and its DEPENDs resolve against the host where the virtual exists.
     fn kernel_headers_atom(&self) -> String {
         match self {
             BootstrapKind::Cross(_) => self.atom("sys-kernel", "linux-headers"),
@@ -195,16 +191,10 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
         return StagePlan { steps };
     }
 
-    // GCC model.
-    //
-    // Native lays down baselayout first — it provides the `/lib`, `/usr/lib` FS
-    // skeleton that gcc's startfile osdir resolution needs:
-    // `-print-multi-os-directory` is `../lib64`, so gcc looks for CRT objects at
-    // `<sysroot>/usr/lib/../lib64`, but glibc installs `crti.o` into `usr/lib64`
-    // and a from-scratch ROOT has no `usr/lib` for the `..` to resolve through
-    // (gcc otherwise dies `cannot find crti.o` linking libgcc_s.so). Catalyst
-    // merges baselayout first likewise. Cross doesn't need it — the sysroot
-    // libdir is bridged by `link_abi_osdirs` after the libc step instead.
+    // Native: baselayout first for the `/usr/lib` skeleton. gcc's startfile osdir
+    // is `../lib64`, so it resolves CRT objects via `<sysroot>/usr/lib/../lib64`,
+    // which a fresh ROOT can't traverse without `/usr/lib` (→ `cannot find
+    // crti.o`). Cross bridges the libdir with `link_abi_osdirs` instead.
     if let BootstrapKind::Native = kind {
         steps.push(StageStep {
             label: "baselayout".into(),
@@ -214,14 +204,9 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
         });
     }
 
-    // binutils (shared by both flavours).
-    //
-    // Native binutils installs into the (empty) ROOT, so its optional
-    // `debuginfod` dep would drag elfutils → curl → … → glibc into this first
-    // step, before the staged toolchain exists — 47 packages instead of 7, and
-    // the pulled-in glibc then trips the pre-flight on os-headers. Cross binutils
-    // is host-rooted (`CBUILD`), so those deps are already satisfied on `/` — it
-    // keeps the flag. Disable it only for native; a stage1 doesn't need it.
+    // Native binutils drops `debuginfod`: into the empty ROOT it would pull
+    // elfutils → curl → … → glibc (47 pkgs vs 7) and trip the os-headers
+    // pre-flight. Cross is host-rooted, so those deps are satisfied — keep it.
     let binutils_use = match kind {
         BootstrapKind::Native => owned(&["-debuginfod"]),
         _ => vec![],
@@ -233,16 +218,10 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
         nodeps: false,
     });
 
-    // Native and cross break the glibc ↔ gcc cycle differently:
-    //
-    // Native (`CHOST == CBUILD`) already has a working seed compiler at
-    // `BROOT=/`, so the seed builds the *full* target glibc directly and a single
-    // full gcc then links against it. The two-stage split is not just unnecessary
-    // here, it is impossible: `toolchain.eclass` gates every stage1 affordance
-    // (`--without-headers`, `--disable-shared` for a headers-only libc) on
-    // `is_crosscompile`, so a native gcc is always `--enable-shared` and *requires*
-    // a full libc in the ROOT (a headers-only glibc makes libgcc_s.so fail to link,
-    // `cannot find crti.o`). So: binutils → os-headers → full glibc → full gcc.
+    // Native breaks the glibc ↔ gcc cycle with the seed compiler (`BROOT=/`),
+    // which builds full glibc directly; a single full gcc links against it. No
+    // two-stage split — `toolchain.eclass` gates that on `is_crosscompile`, so a
+    // native gcc is always `--enable-shared` and needs a full in-ROOT libc.
     if let BootstrapKind::Native = kind {
         if kind.has_kernel() {
             steps.push(StageStep {
