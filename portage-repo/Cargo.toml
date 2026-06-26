@@ -26,28 +26,28 @@ gentoo-core = { workspace = true }
 # Pinned to a fork commit for reproducible CI (we don't commit Cargo.lock);
 # bump when intentionally updating brush. Local dev overrides to a worktree
 # via .cargo/config.toml.
-brush-core = { git = "https://github.com/lu-zero/brush.git", rev = "7d3bbdda", features = ["experimental-parser"] }
-brush-builtins = { git = "https://github.com/lu-zero/brush.git", rev = "7d3bbdda" }
-brush-parser = { git = "https://github.com/lu-zero/brush.git", rev = "7d3bbdda" }
+brush-core = { workspace = true, features = ["experimental-parser"] }
+brush-builtins = { workspace = true }
+brush-parser = { workspace = true }
 clap = { workspace = true }
-tokio = { version = "1", features = ["rt"] }
-regex = "1"
+tokio = { workspace = true, features = ["rt"] }
+regex = { workspace = true }
 thiserror = { workspace = true }
-jwalk = "0.8.1"
-flume = "0.12.0"
-blake2 = "0.11.0-rc.5"
-sha2 = "0.11"
-hex = "0.4"
-roxmltree = "0.21.1"
-itertools = "0.14.0"
-dhat = { version = "0.3.3", optional = true }
-mimalloc = { version = "0.1.50", optional = true }
+jwalk = { workspace = true }
+flume = { workspace = true }
+blake2 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+roxmltree = { workspace = true }
+itertools = { workspace = true }
+dhat = { workspace = true, optional = true }
+mimalloc = { workspace = true, optional = true }
 camino = { workspace = true }
 papaya = { workspace = true }
-md5 = "0.7"
-winnow = { version = "1", features = ["parser"] }
+md5 = { workspace = true }
+winnow = { workspace = true, features = ["parser"] }
 rustix = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { version = "1", features = ["macros"] }
+tokio = { workspace = true, features = ["macros"] }

@@ -12,7 +12,7 @@ categories = ["data-structures", "memory-management"]
 
 [dependencies]
 papaya = { workspace = true, optional = true }
-boxcar = { version = "0.2", optional = true }
+boxcar = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 lasso = { workspace = true, optional = true }
 symbol_table = { workspace = true, optional = true }

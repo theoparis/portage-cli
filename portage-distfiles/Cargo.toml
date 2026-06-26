@@ -14,18 +14,18 @@ publish = false
 
 [dependencies]
 portage-metadata = { workspace = true }
-portage-repo = { path = "../portage-repo" }
+portage-repo = { workspace = true }
 camino = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["rt", "process", "fs", "io-util"] }
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
-futures-util = "0.3"
-blake2 = "0.11.0-rc.5"
-sha2 = "0.11"
-hex = "0.4"
+tokio = { workspace = true, features = ["rt", "process", "fs", "io-util"] }
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+blake2 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 # Reused transitively via portage-repo; parsed directly here for distfiles.xml.
-roxmltree = "0.21.1"
+roxmltree = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = { workspace = true }

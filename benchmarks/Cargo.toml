@@ -34,15 +34,15 @@ pubgrub = { workspace = true }
 resolvo = { workspace = true }
 # Pinned so CI (no sibling pkgcraft worktree) can resolve it; local
 # benchmarking overrides this to the worktree via .cargo/config.toml.
-pkgcraft = { git = "https://github.com/pkgcraft/pkgcraft.git", rev = "b9fb45eb1995a6b9750f21312cda5e95bfbbe1bb" }
+pkgcraft = { workspace = true }
 clap = { workspace = true }
 camino = { workspace = true }
 mimalloc = { workspace = true, optional = true }
-dhat = { version = "0.3.3", optional = true }
+dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-tokio = { version = "1", features = ["rt"] }
+tokio = { workspace = true, features = ["rt"] }
 
 [[bench]]
 name = "dep_parsing"

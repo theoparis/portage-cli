@@ -13,18 +13,18 @@ categories = ["development-tools"]
 [dependencies]
 gentoo-core = { workspace = true }
 thiserror = { workspace = true }
-tracing = "0.1"
+tracing = { workspace = true }
 serde = { workspace = true, optional = true }
 tempfile = { workspace = true }
-reqwest = { version = "0.13", features = ["rustls", "stream"] }
+reqwest = { workspace = true }
 bon = { workspace = true }
-tokio = { version = "1.0", features = ["fs", "io-util"] }
-futures = "0.3"
+tokio = { workspace = true, features = ["fs", "io-util"] }
+futures = { workspace = true }
 
 [dev-dependencies]
-serde_json = "1.0"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { version = "1.0", features = ["full"] }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tokio = { workspace = true, features = ["full"] }
 
 [features]
 default = []
