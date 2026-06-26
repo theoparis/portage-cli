@@ -1,10 +1,40 @@
 # Unprivileged builds: consolidate the chown workarounds behind a privilege backend
 
-STATUS: **design (2026-06-26), code-confirmed.** Replace the three ad-hoc
-EPERM-swallow workarounds with one `PrivilegeBackend`, selected automatically when
-unprivileged. Goal: a correct root-owned `@system` stage3 (setuid `mount`,
-`root:root`, file caps) without running em as root. Supersedes the "decision
-point" in [[stage-build-shakeout]] and the privilege half of [[build-clean-env]].
+STATUS: **v1 landed (2026-06-27)** — umbrella fakeroost session; design below.
+Goal: a correct root-owned `@system` stage3 (setuid `mount`, `root:root`, file
+caps) without running em as root. Supersedes the "decision point" in
+[[stage-build-shakeout]] and the privilege half of [[build-clean-env]].
+
+## Implemented — v1 (umbrella session)
+
+Shipped the simplest correct slice (model B below), all in `main()` — no scheduler
+or flock changes, since the whole build+merge stays in one process:
+
+- `privilege.rs` — `Backend{RealRoot,Fakeroost}` + `detect()` (RealRoot when
+  euid==0 or already inside a session, else Fakeroost) + `maybe_supervise()`.
+- `main()` calls `fakeroost::init()` first (before the tokio runtime), then for an
+  unprivileged *building* invocation (`will_build`: emerge merge path +
+  `ebuild`/`crossdev`/`toolchain`, not `--pretend`) re-execs em once under
+  fakeroost (`EM_PRIVILEGE_ACTIVE` guards against re-supervising). The whole run —
+  resolve, all builds, all merges — shares one ptrace+seccomp ownership table.
+- `ebuild.rs` merge now `lchown`s each merged path to its image owner
+  (`preserve_owner`) — a real gap even for **root** installs before this.
+- The three EPERM workarounds are **kept** but now **inert under fakeroost**: each
+  guards on `getuid`/`geteuid`/`EUID`, which fakeroost fakes to 0, so they take the
+  privileged branch (real/faked chown, `0:0` default). They remain as graceful
+  degradation when fakeroost is unavailable; remove once a real `@system` run
+  confirms supervision is universal.
+- Verified: `fakeroost` works on this kernel (`chown 0:0` unprivileged → `stat`
+  reports `0:0`); em re-execs only on build paths, transparently.
+
+Deltas from the design: umbrella session instead of the per-package `__worker`
+(deferred optimisation — keeps the resolver out of ptrace, enables independent
+parallel sessions); only RealRoot+Fakeroost backends (sudo/fakeroot/hakoniwa still
+behind the seam); name→uid:gid resolution against the *target* passwd/group still
+open (facet 2 of [[stage-build-shakeout]]).
+
+---
+Original design (the target end-state):
 
 ## The problem (one root cause, three patches)
 

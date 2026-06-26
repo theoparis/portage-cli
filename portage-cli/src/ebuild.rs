@@ -1205,6 +1205,7 @@ fn walk_image(
                 // Preserve the link's own mtime (std follows symlinks; this
                 // does not), so the on-disk time matches CONTENTS.
                 set_symlink_times(&write_path, &meta);
+                preserve_owner(&write_path, &meta);
                 let mtime = meta
                     .modified()
                     .ok()
@@ -1220,6 +1221,7 @@ fn walk_image(
             } else if meta.is_dir() {
                 std::fs::create_dir_all(dest_path.as_std_path())
                     .with_context(|| format!("mkdir {dest_path}"))?;
+                preserve_owner(&dest_path, &meta);
                 contents.push(ContentsEntry {
                     kind: ContentsKind::Dir,
                     path: installed,
@@ -1300,6 +1302,7 @@ fn walk_image(
                         hardlinks.insert(inode, write_path.clone());
                     }
                 }
+                preserve_owner(&write_path, &meta);
 
                 total_size += meta.len();
                 let mtime = meta
@@ -1323,6 +1326,18 @@ fn walk_image(
         size: total_size,
         protected,
     })
+}
+
+/// Set the merged path's owner to the image entry's uid/gid (`lchown`, so a
+/// symlink's own ownership is set, not its target). Succeeds as real root and
+/// under a fake root (fakeroost records the intended owner); a genuinely
+/// unprivileged merge can't set foreign ownership, so the error is ignored and
+/// the file keeps the build user — portage's unprivileged behaviour. portage
+/// preserves image ownership on merge; em did not, so even a *root* install left
+/// non-root-owned files (`acct-user/*` dirs) owned by the invoking user.
+fn preserve_owner(path: &Utf8Path, meta: &std::fs::Metadata) {
+    use std::os::unix::fs::MetadataExt;
+    let _ = std::os::unix::fs::lchown(path.as_std_path(), Some(meta.uid()), Some(meta.gid()));
 }
 
 async fn capture_environment(

@@ -8,6 +8,7 @@ mod package_env;
 mod pkg;
 mod postprocess;
 mod preflight;
+mod privilege;
 mod query;
 mod regen;
 mod search;
@@ -98,8 +99,12 @@ fn expand_sets(raw: &[String], config_root: Option<&Utf8Path>, eroot: &Utf8Path)
     out
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Must be the first thing in main: on a fakeroost supervisor re-exec this
+    // runs the trace loop and exits; on a normal launch it is a no-op. Kept ahead
+    // of the tokio runtime so the supervisor never spins one up.
+    fakeroost::init();
+
     // Portage's ebuild.sh sets `umask 022` before running any phase; mirror it
     // so file and directory modes under ${D} and the build tree match a real
     // merge regardless of the invoking shell's umask. The install helpers
@@ -112,16 +117,18 @@ async fn main() {
     let cli = cli::Cli::parse();
     cli.color.write_global();
 
-    let result = match &cli.applet {
-        Some(applet) => run_applet(applet, &cli).await,
-        None => {
-            if cli.atoms.is_empty() {
-                eprintln!("em: no atoms or applet specified. Use --help for usage.");
-                std::process::exit(1);
-            }
-            run_emerge(&cli).await
-        }
-    };
+    // An unprivileged build re-execs once under a fake root so chown/setuid
+    // succeed; the wrapped child returns here with `EM_PRIVILEGE_ACTIVE` set and
+    // proceeds normally. Nothing to wrap ⇒ proceed in-process.
+    if let Some(code) = privilege::maybe_supervise(&cli) {
+        std::process::exit(code);
+    }
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build the tokio runtime");
+    let result = runtime.block_on(run(&cli));
 
     if let Err(e) = result {
         // `process::exit` does not flush buffered stdout (the resolver's plan /
@@ -135,6 +142,20 @@ async fn main() {
             eprintln!("error: {e:#}");
         }
         std::process::exit(1);
+    }
+}
+
+/// Dispatch one parsed invocation to its applet or the default emerge path.
+async fn run(cli: &cli::Cli) -> Result<()> {
+    match &cli.applet {
+        Some(applet) => run_applet(applet, cli).await,
+        None => {
+            if cli.atoms.is_empty() {
+                eprintln!("em: no atoms or applet specified. Use --help for usage.");
+                std::process::exit(1);
+            }
+            run_emerge(cli).await
+        }
     }
 }
 
