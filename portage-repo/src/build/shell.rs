@@ -1108,6 +1108,18 @@ impl EbuildShell {
             }
         }
 
+        // Default CBUILD to CHOST when unset, as portage does (`portageq envvar
+        // CBUILD` yields CHOST on a native system even with no CBUILD in
+        // make.conf). Without it `econf` omits `--build`, so configure sees
+        // `--host` alone, leaves `cross_compiling=maybe`, and strict packages
+        // (python) `die` "Cross compiling required --host and --build" on a plain
+        // native `--root` build.
+        if let Some(chost) = self.get_var("CHOST").filter(|s| !s.is_empty())
+            && self.get_var("CBUILD").filter(|s| !s.is_empty()).is_none()
+        {
+            self.set_var("CBUILD", &chost);
+        }
+
         // Cross toolchain selection. When building for a foreign CHOST (cross:
         // CHOST and CBUILD both set and differing) and the prefixed compiler is
         // reachable, export the toolchain vars as `${CHOST}-<tool>` unless the
