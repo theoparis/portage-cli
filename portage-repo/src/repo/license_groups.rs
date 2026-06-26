@@ -98,7 +98,13 @@ impl AcceptLicense {
                 .map_or((false, token.as_str()), |r| (true, r));
             if raw == "*" {
                 if deny {
-                    // `-*` is not meaningful; ignore.
+                    // `-*` is the incremental clear-all (GLEP 23 / make.conf(5)):
+                    // discard every license accepted *and* denied so far, so
+                    // later tokens rebuild from empty (e.g. `-* @FREE` ⇒ only
+                    // the FREE-group licenses are accepted).
+                    out.allow_all = false;
+                    out.allowed.clear();
+                    out.denied.clear();
                     continue;
                 }
                 out.allow_all = true;
@@ -255,6 +261,24 @@ OSI Apache-2.0
         let acc = AcceptLicense::from_tokens(&["*".into(), "-MIT".into()], &reg);
         assert!(acc.accepts("GPL-2"));
         assert!(!acc.accepts("MIT"));
+    }
+
+    #[test]
+    fn accept_license_dash_star_clears_accumulated() {
+        let reg = LicenseGroupRegistry::default();
+        // `-*` discards everything accumulated so far (allows and the `*`
+        // allow-all), so later tokens rebuild from empty: only BSD is accepted.
+        let acc = AcceptLicense::from_tokens(
+            &["*".into(), "MIT".into(), "-*".into(), "BSD".into()],
+            &reg,
+        );
+        assert!(acc.accepts("BSD"), "BSD added after the clear-all");
+        assert!(!acc.accepts("MIT"), "MIT cleared by -*");
+        assert!(
+            !acc.allow_all,
+            "the `*` allow-all is cleared too, so unknowns are not accepted"
+        );
+        assert!(!acc.accepts("GPL-2"), "nothing else is accepted after -*");
     }
 
     /// Regression: a conditional `LICENSE` must be evaluated with the package's
