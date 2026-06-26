@@ -47,6 +47,10 @@ pub(super) enum AcceptToken {
     AnyTesting,
     /// `**` — accept regardless of keywords (even an unkeyworded/live ebuild).
     Any,
+    /// `-*` — incremental clear-all: discard every accept accumulated so far,
+    /// so later tokens rebuild from empty (make.conf(5), applied to the
+    /// incremental `ACCEPT_KEYWORDS`). The mirror of ebuild `KEYWORDS=-*`.
+    ClearAll,
 }
 
 impl AcceptToken {
@@ -58,6 +62,7 @@ impl AcceptToken {
             "**" => Some(Self::Any),
             "~*" => Some(Self::AnyTesting),
             "*" => Some(Self::AnyStable),
+            "-*" => Some(Self::ClearAll),
             _ if tok.starts_with('-') => None,
             _ => match tok.strip_prefix('~') {
                 Some(arch) => Some(Self::Testing(Interned::intern(arch))),
@@ -82,6 +87,10 @@ impl ArchAccept {
     /// Fold one token's contribution, relative to the target `arch`.
     fn add(&mut self, tok: AcceptToken, arch: Interned<DefaultInterner>) {
         match tok {
+            // `-*` clear-all: reset to accepting nothing; later tokens rebuild.
+            AcceptToken::ClearAll => {
+                *self = Self::default();
+            }
             // testing is a superset of stable, so accepting it implies stable.
             AcceptToken::Any => {
                 self.any = true;
@@ -1087,6 +1096,51 @@ mod tests {
         // A testing merge is never "stable" for use.stable.* gating.
         assert!(global.is_stable(&stable, &foo, None));
         assert!(!per.is_stable(&testing, &foo, None));
+    }
+
+    #[test]
+    fn accept_keywords_dash_star_clears_global() {
+        let arch = Arch::intern("arm64");
+        let tok = |s: &str| AcceptToken::parse(s).unwrap();
+        let kws = |s: &str| Keyword::parse_line(s).unwrap();
+        let testing = kws("~arm64");
+        let offarch = kws("x86"); // wrong arch ⇒ only accepted via `**`/`*`
+        let foo = Cpv::parse("dev-libs/foo-1").unwrap();
+
+        // `**` alone accepts even a wrong-arch package. `-*` clears that, so the
+        // trailing `~arm64` rebuilds testing+stable for arm64 only — the wrong
+        // arch is no longer accepted.
+        let star_star = AcceptKeywords::from_global(&arch, &["**"]);
+        assert!(
+            star_star.accepts(&offarch, &foo, None),
+            "** accepts any keyword"
+        );
+        let acc = AcceptKeywords::from_global(&arch, &["**", "-*", "~arm64"]);
+        assert!(
+            acc.accepts(&testing, &foo, None),
+            "~arm64 re-added after -*"
+        );
+        assert!(
+            !acc.accepts(&offarch, &foo, None),
+            "** was cleared by -*, so a wrong-arch keyword is rejected again"
+        );
+        assert!(AcceptToken::parse("-*").is_some(), "-* parses, not dropped");
+
+        // Per-package `-*` resets the global decision for that package only.
+        let bar = Cpv::parse("dev-libs/bar-1").unwrap();
+        let per = AcceptKeywords::new(
+            &arch,
+            &[tok("**")],
+            vec![(dep("dev-libs/foo"), vec![tok("-*")])],
+        );
+        assert!(
+            !per.accepts(&offarch, &foo, None),
+            "foo: global ** cleared by the per-package -*"
+        );
+        assert!(
+            per.accepts(&offarch, &bar, None),
+            "bar keeps the global ** accept"
+        );
     }
 
     #[test]
