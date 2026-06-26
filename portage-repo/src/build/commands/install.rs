@@ -51,6 +51,93 @@ fn under_ed(ed: &Path, rel: &str) -> PathBuf {
     ed.join(rel.trim_start_matches('/'))
 }
 
+fn is_numeric(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Look up `name` in a colon-separated `passwd`/`group` database, returning the
+/// requested 0-based fields. `passwd` rows are `name:pw:uid:gid:…`, `group` rows
+/// `name:pw:gid:…`; missing file or absent name ⇒ `None`.
+fn db_lookup(path: &Path, name: &str, fields: &[usize]) -> Option<Vec<String>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let cols: Vec<&str> = line.split(':').collect();
+        if cols.first() == Some(&name) {
+            return fields
+                .iter()
+                .map(|&i| cols.get(i).map(|s| s.to_string()))
+                .collect();
+        }
+    }
+    None
+}
+
+/// Resolve an `fowners` owner spec (`user[:group]`) to numeric `uid[:gid]`
+/// against the *target* `pwdb_etc` (`<ESYSROOT|EROOT>/etc`), mirroring portage's
+/// `__resolve_owner`. Numeric components pass through; a name is looked up in
+/// `passwd` (uid + primary gid) or `group` (gid). A trailing `:` uses the user's
+/// primary group. A name absent from the target db is a hard error (portage
+/// `__helpers_die`) — better than chowning to a different host id or failing
+/// cryptically.
+fn resolve_owner(owner: &str, pwdb_etc: &Path) -> Result<String, String> {
+    let (user, group) = match owner.split_once(':') {
+        Some((u, g)) => (u, Some(g)),
+        None => (owner, None),
+    };
+
+    let mut uid = String::new();
+    let mut primary_gid: Option<String> = None;
+    if !user.is_empty() {
+        if is_numeric(user) {
+            uid = user.to_string();
+        } else {
+            let got = db_lookup(&pwdb_etc.join("passwd"), user, &[2, 3]).and_then(|v| {
+                match (v.first().cloned(), v.get(1).cloned()) {
+                    (Some(u), Some(g)) if is_numeric(&u) => Some((u, g)),
+                    _ => None,
+                }
+            });
+            let (u, g) = got.ok_or_else(|| {
+                format!(
+                    "fowners: invalid user in {}/passwd: {owner}",
+                    pwdb_etc.display()
+                )
+            })?;
+            uid = u;
+            primary_gid = Some(g);
+        }
+    }
+
+    let gid = match group {
+        None => String::new(),
+        Some("") => {
+            // `user:` ⇒ chown to the user's primary group.
+            let pg = primary_gid.filter(|s| is_numeric(s)).ok_or_else(|| {
+                format!(
+                    "fowners: invalid primary group for {user} in {}/passwd: {owner}",
+                    pwdb_etc.display()
+                )
+            })?;
+            format!(":{pg}")
+        }
+        Some(g) if is_numeric(g) => format!(":{g}"),
+        Some(g) => {
+            let gid = db_lookup(&pwdb_etc.join("group"), g, &[2])
+                .and_then(|v| v.into_iter().next())
+                .filter(|s| is_numeric(s))
+                .ok_or_else(|| {
+                    format!(
+                        "fowners: invalid group in {}/group: {owner}",
+                        pwdb_etc.display()
+                    )
+                })?;
+            format!(":{gid}")
+        }
+    };
+
+    Ok(format!("{uid}{gid}"))
+}
+
 /// PMS `get_libdir`: `LIBDIR_${ABI}` if multilib, else `CONF_LIBDIR`, else `lib`.
 fn get_libdir<SE: brush_core::ShellExtensions>(shell: &brush_core::Shell<SE>) -> String {
     let abi = var(shell, "ABI", "");
@@ -1061,18 +1148,45 @@ impl builtins::Command for FownersCommand {
         let env = super::context_env(&context);
         let ed = ed(context.shell);
         let raw = self.args.clone();
+        // Resolve owner names against the *target* passwd/group, as portage does:
+        // `<ESYSROOT|EROOT>/etc/{passwd,group}` during install. Gate on the target
+        // root being an offset (non-`/`); for a host install the system chown
+        // resolves against the same db, so the name is passed through.
+        let pwdb_root = {
+            let esysroot = var(context.shell, "ESYSROOT", "");
+            if esysroot.is_empty() {
+                var(context.shell, "EROOT", "")
+            } else {
+                esysroot
+            }
+        };
+        let gate = {
+            let sysroot = var(context.shell, "SYSROOT", "");
+            let r = if sysroot.is_empty() {
+                var(context.shell, "ROOT", "")
+            } else {
+                sysroot
+            };
+            !r.trim_end_matches('/').is_empty()
+        };
+        let pwdb_etc = PathBuf::from(pwdb_root.trim_end_matches('/')).join("etc");
         Ok(run_blocking(&context, move || {
             // Leading `-*` are options; the first non-option is the owner
-            // (unprefixed), the rest are paths under ${ED}. Mirrors portage's
-            // fowners (minus its numeric-uid-gid resolution from the target
-            // passwd/group — owner is passed to chown verbatim).
+            // (unprefixed, resolved to numeric uid:gid against the target db),
+            // the rest are paths under ${ED}. Mirrors portage's fowners.
             let mut cmd_args: Vec<std::ffi::OsString> = Vec::new();
             let mut got_owner = false;
             for arg in &raw {
-                let is_opt = arg.starts_with('-');
-                if is_opt || !got_owner {
-                    got_owner |= !is_opt;
+                if arg.starts_with('-') {
                     cmd_args.push(arg.into());
+                } else if !got_owner {
+                    got_owner = true;
+                    let owner = if gate {
+                        resolve_owner(arg, &pwdb_etc)?
+                    } else {
+                        arg.clone()
+                    };
+                    cmd_args.push(owner.into());
                 } else {
                     cmd_args.push(under_ed(&ed, arg).into_os_string());
                 }
@@ -1401,6 +1515,50 @@ pub(crate) fn register_install_builtins<SE: brush_core::ShellExtensions>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pwdb() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("etc")).unwrap();
+        std::fs::write(
+            dir.path().join("etc/passwd"),
+            "root:x:0:0:root:/root:/bin/bash\nportage:x:250:250:portage:/var/tmp/portage:/sbin/nologin\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("etc/group"),
+            "root:x:0:\nshadow:x:18:\nportage:x:250:\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolve_owner_matches_portage() {
+        let dir = pwdb();
+        let etc = dir.path().join("etc");
+        // root:root -> 0:0 (numeric and name agree).
+        assert_eq!(resolve_owner("root:root", &etc).unwrap(), "0:0");
+        // name -> target numeric id (250, not whatever the host has).
+        assert_eq!(resolve_owner("portage:portage", &etc).unwrap(), "250:250");
+        // group-only name (`root:shadow`, pam/eselect) -> uid:gid.
+        assert_eq!(resolve_owner("root:shadow", &etc).unwrap(), "0:18");
+        // user only -> just uid.
+        assert_eq!(resolve_owner("portage", &etc).unwrap(), "250");
+        // `:group` -> chgrp form.
+        assert_eq!(resolve_owner(":shadow", &etc).unwrap(), ":18");
+        // numeric components pass through untouched.
+        assert_eq!(resolve_owner("0:18", &etc).unwrap(), "0:18");
+        // trailing `:` uses the user's primary group from passwd.
+        assert_eq!(resolve_owner("portage:", &etc).unwrap(), "250:250");
+    }
+
+    #[test]
+    fn resolve_owner_absent_name_is_error() {
+        let dir = pwdb();
+        let etc = dir.path().join("etc");
+        assert!(resolve_owner("nobody:nogroup", &etc).is_err());
+        assert!(resolve_owner("root:nogroup", &etc).is_err());
+    }
 
     #[test]
     fn man_section_takes_first_char_of_suffix() {
