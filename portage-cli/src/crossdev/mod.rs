@@ -9,9 +9,10 @@
 //! through the shared merge path.
 //!
 //! The staged-bootstrap driver ([`run_staged`]) and the [`stages::BootstrapKind`]
-//! plan are shared with **native stage1** ([`stage1`]): a self-hosting stage1
-//! into `--root` (`CHOST == CBUILD`) is the same `glibc ↔ gcc` cycle as a cross
-//! toolchain, broken the same staged way — see `todo/em-root-characterization.md`.
+//! plan are shared with the **native toolchain** ([`toolchain`], `em toolchain
+//! --setup`): a self-hosting toolchain into `--root` (`CHOST == CBUILD`) is the
+//! same `glibc ↔ gcc` cycle as a cross toolchain, broken the same staged way —
+//! see `todo/em-root-characterization.md`.
 //!
 //! The install location follows em's root model: the sysroot is
 //! `<EROOT>/usr/<CTARGET>`, so `em crossdev <t>` targets `/usr/<CTARGET>` (like
@@ -207,25 +208,31 @@ fn step_flags(step: &stages::StageStep) -> String {
     }
 }
 
-/// `em stage1`: bootstrap a self-hosting stage1 toolchain into `--root`
-/// (`CHOST == CBUILD`, `SYSROOT == ROOT`). The native twin of the crossdev
-/// `--setup`, sharing its staged driver but with the *native* plan (baselayout →
-/// binutils → os-headers → full glibc → full gcc): the seed compiler at
-/// `BROOT=/` builds glibc directly, so there is no two-stage gcc (that is
-/// cross-only — see [`stages`]). Plain `::gentoo` atoms, none of the cross
-/// overlay/wrapper/sysroot-make.conf ceremony — the host profile and make.conf
-/// configure it (`--config-root /` by default).
+/// `em toolchain --setup`: bootstrap a self-hosting native toolchain into
+/// `--root` (`CHOST == CBUILD`, `SYSROOT == ROOT`). The native twin of the
+/// crossdev `--setup`, sharing its staged driver but with the *native* plan
+/// (baselayout → binutils → os-headers → full glibc → full gcc): the seed
+/// compiler at `BROOT=/` builds glibc directly, so there is no two-stage gcc
+/// (that is cross-only — see [`stages`]). Plain `::gentoo` atoms, none of the
+/// cross overlay/wrapper/sysroot-make.conf ceremony — the host profile and
+/// make.conf configure it (`--config-root /` by default).
 ///
-/// Requires `--root <dir>` (a stage1 into `/` is meaningless). The staged
-/// pre-breaking of the cycle is what lets the rest of the plan solve
-/// topologically afterwards: any extra atoms are merged in normal dependency
-/// order against the now-populated ROOT once the toolchain steps land. With `-p`
-/// each step prints its plan instead of building.
-pub(crate) async fn stage1(globals: &Cli, atoms: &[String]) -> Result<()> {
+/// This is the *toolchain* primitive only — the compiler the stages build
+/// against. The actual stage production (stage1 `packages.build`, stage3
+/// `--emptytree @system`) lives in `em stages` (see
+/// `todo/em-stages-and-binhosts.md`). Requires `--root <dir>` (a toolchain into
+/// `/` is meaningless). With `-p` each step prints its plan instead of building.
+pub(crate) async fn toolchain(args: &crate::cli::ToolchainArgs, globals: &Cli) -> Result<()> {
+    if !args.setup {
+        bail!(
+            "em toolchain does setup only for now — pass --setup to bootstrap the \
+             native toolchain into --root"
+        );
+    }
     let merge_root = globals.roots().merge_root().to_owned();
     if merge_root.as_str() == "/" {
         bail!(
-            "em stage1 needs --root <dir>: a self-hosting stage1 into / is \
+            "em toolchain --setup needs --root <dir>: a native toolchain into / is \
              meaningless (use the host toolchain directly, or pass --root <empty>)"
         );
     }
@@ -234,27 +241,13 @@ pub(crate) async fn stage1(globals: &Cli, atoms: &[String]) -> Result<()> {
     let verb = if globals.pretend { "Plan" } else { "Bootstrap" };
     writeln!(
         out,
-        "\n{C_LABEL}{verb} native stage1{C_LABEL:#} into {merge_root} — {} steps:",
+        "\n{C_LABEL}{verb} native toolchain{C_LABEL:#} into {merge_root} — {} steps:",
         plan.steps.len()
     )
     .ok();
-    run_staged(&plan, globals, globals.depgraph_flags.clone(), |_| Ok(())).await?;
+    run_staged(&plan, globals, args.depgraph_flags.clone(), |_| Ok(())).await?;
     if !globals.pretend {
-        writeln!(out, "\n>>> stage1 toolchain ready in {merge_root}").ok();
-    }
-    // After the cycle is pre-broken, the rest of packages.build / extra atoms
-    // solve topologically against the in-ROOT toolchain.
-    if !atoms.is_empty() {
-        crate::emerge_atoms(
-            globals,
-            atoms,
-            crate::EmergeOpts {
-                use_override: &[],
-                nodeps: false,
-                depgraph_flags: None,
-            },
-        )
-        .await?;
+        writeln!(out, "\n>>> native toolchain ready in {merge_root}").ok();
     }
     Ok(())
 }

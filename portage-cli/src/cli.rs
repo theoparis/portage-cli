@@ -590,14 +590,10 @@ pub enum Applet {
     #[command(about = "Set up a cross-compilation target (sysroot + overlay) — crossdev workalike")]
     Crossdev(CrossdevArgs),
 
-    #[command(about = "Bootstrap a self-hosting stage1 toolchain into --root (native)")]
-    Stage1 {
-        /// Extra atoms to merge after the staged toolchain (e.g. the rest of
-        /// packages.build), in normal topological order against the populated
-        /// ROOT. Requires `--root <dir>`.
-        #[arg(trailing_var_arg = true)]
-        atoms: Vec<String>,
-    },
+    #[command(
+        about = "Bootstrap a self-hosting native toolchain into --root (the stages' compiler)"
+    )]
+    Toolchain(ToolchainArgs),
 
     #[command(about = "Safe configuration file updates (dispatch-conf)")]
     Dispatch,
@@ -636,6 +632,25 @@ pub struct CrossdevArgs {
     /// Print the derived target configuration and exit (no writes).
     #[arg(long)]
     pub show_target_cfg: bool,
+
+    #[command(flatten)]
+    pub depgraph_flags: DepgraphFlags,
+}
+
+/// `em toolchain` — bootstrap a self-hosting native toolchain into `--root`.
+///
+/// The native twin of `crossdev --setup` (`CHOST == CBUILD`): the staged
+/// `baselayout → binutils → os-headers → glibc → gcc` bootstrap that produces a
+/// working compiler + libc in a fresh ROOT. This is the *toolchain* primitive —
+/// the compiler the `em stages` production (stage1 `packages.build`, stage3
+/// `--emptytree @system`) then builds against. Kept separate from the stages on
+/// purpose (catalyst/crossdev-stages do the same: toolchain, then the stages).
+#[derive(clap::Args, Debug, Clone)]
+pub struct ToolchainArgs {
+    /// Build and install the toolchain into `--root` (the only action for now;
+    /// required, mirroring `crossdev --setup`).
+    #[arg(long)]
+    pub setup: bool,
 
     #[command(flatten)]
     pub depgraph_flags: DepgraphFlags,

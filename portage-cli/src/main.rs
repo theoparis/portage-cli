@@ -736,7 +736,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
         Applet::Select { command } => select::run(command, globals),
         Applet::Setup => setup::bootstrap(&globals.roots()),
         Applet::Crossdev(args) => crossdev::run(args, globals).await,
-        Applet::Stage1 { atoms } => crossdev::stage1(globals, atoms).await,
+        Applet::Toolchain(args) => crossdev::toolchain(args, globals).await,
         Applet::Dispatch => {
             eprintln!("dispatch-conf");
             bail!("not implemented: dispatch-conf")
