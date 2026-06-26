@@ -19,12 +19,19 @@ here briefly for context). Updated 2026-06-26.
 - ✅ **`USE="-*"` clear-all** — now honoured across the USE/USE_EXPAND
   incremental merge (profile→globals→conf→env layers) and the shell-state read,
   so catalyst's `USE="-* build"` collapses the closure as expected.
-- 🟡 **Other `-*`/`*` wildcards still partial.** `use.mask`/`use.force` correctly
-  take only per-flag `-` (no `-*` wildcard per portage(5)). Still open:
-  `package.use` `-*` (coupled with the unimplemented USE_EXPAND `KEY:` colon
-  form); `ACCEPT_KEYWORDS -\*` (PMS DisabledAll, dropped in `AcceptToken::parse`);
-  `ACCEPT_LICENSE`/`ACCEPT_PROPERTIES`/`ACCEPT_RESTRICT`/`PORTAGE_CHECKSUM_FILTER`
-  `*` & `-*` (GLEP 23). [[em-root-characterization]]
+- ✅ **`ACCEPT_LICENSE`/`ACCEPT_KEYWORDS` `-*`** — clear-all now honoured
+  (`AcceptLicense::from_tokens` clears allow_all+allowed+denied;
+  `AcceptToken::ClearAll` resets the accept decision, global and per-package).
+- 🟡 **Remaining `-*` gaps are feature work, not patches:**
+  - `package.use` `-*` — the documented form is the USE_EXPAND colon syntax
+    (`L10N: -* en`), which isn't parsed at all; plain `-*` is rare. Needs colon
+    parsing + USE_EXPAND-aware clearing + a `UseOverride` type change.
+  - `ACCEPT_KEYWORDS` `-arch` removal still dropped (additive ArchAccept model).
+  - `ACCEPT_PROPERTIES`/`ACCEPT_RESTRICT`/`PORTAGE_CHECKSUM_FILTER` — the vars
+    themselves are unimplemented (zero refs); their GLEP-23 `*`/`-*` is moot
+    until the vars exist.
+  - `use.mask`/`use.force` correctly take only per-flag `-` (no `-*`, portage(5)).
+  [[em-root-characterization]]
 - 🟡 **Native toolchain activation via `em select`.** `em toolchain --setup`
   writes env.d profiles but no `usr/bin/<chost>-gcc` wrappers (post_step is a
   no-op). Blocker: `select/env_d.rs` is config-root-keyed, must be merge-root-aware
