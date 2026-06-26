@@ -8,7 +8,7 @@
 //! `todo/fakeroot-privilege-backends.md`), so the existing in-process merge gate
 //! still serialises qmerge.
 //!
-//! Backend selection (`EM_PRIVILEGE`, default `auto`):
+//! Backend selection (`--privilege`, or `EM_PRIVILEGE`; default `auto`):
 //! - `auto`/`fakeroost` — pure-Rust ptrace+seccomp fake root (no privilege). The
 //!   default: ownership is faked in-session, on-disk stays the build user.
 //! - `sudo` — re-exec under `sudo` for *real* root (real root-owned tree + real
@@ -19,7 +19,7 @@
 //! Already root ⇒ no wrapping (real chowns in-process). Per-package `__worker`
 //! sessions and the fakeroot/hakoniwa backends slot in behind [`Backend`] later.
 
-use crate::cli::{Applet, Cli};
+use crate::cli::{Applet, Cli, Privilege};
 
 /// Marker set on a wrapped re-exec so the inner process does not re-wrap.
 const ACTIVE_ENV: &str = "EM_PRIVILEGE_ACTIVE";
@@ -37,28 +37,17 @@ pub enum Backend {
 
 impl Backend {
     /// Pick the backend for this process: [`RealRoot`](Self::RealRoot) when
-    /// euid==0 or already inside a wrapped session; otherwise the one requested
-    /// via `EM_PRIVILEGE`, defaulting to fakeroost.
-    pub fn detect() -> Self {
+    /// euid==0 or already inside a wrapped session; otherwise map the `--privilege`
+    /// request (`auto` ⇒ fakeroost).
+    pub fn detect(requested: Privilege) -> Self {
         if rustix::process::geteuid().is_root() || already_active() {
             return Backend::RealRoot;
         }
-        requested().unwrap_or(Backend::Fakeroost)
-    }
-}
-
-/// Backend explicitly requested via `EM_PRIVILEGE`. Unset/unknown ⇒ `None` (auto).
-fn requested() -> Option<Backend> {
-    match std::env::var("EM_PRIVILEGE")
-        .ok()?
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "fakeroost" => Some(Backend::Fakeroost),
-        "sudo" => Some(Backend::Sudo),
-        "none" | "off" => Some(Backend::RealRoot),
-        _ => None,
+        match requested {
+            Privilege::Auto | Privilege::Fakeroost => Backend::Fakeroost,
+            Privilege::Sudo => Backend::Sudo,
+            Privilege::None => Backend::RealRoot,
+        }
     }
 }
 
@@ -90,7 +79,7 @@ pub fn maybe_supervise(cli: &Cli) -> Option<i32> {
     if !will_build(cli) {
         return None;
     }
-    match Backend::detect() {
+    match Backend::detect(cli.privilege) {
         Backend::RealRoot => None,
         Backend::Fakeroost => Some(reexec_fakeroost()),
         Backend::Sudo => Some(reexec_sudo()),

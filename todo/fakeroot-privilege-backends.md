@@ -13,10 +13,11 @@ Shipped the simplest correct slice (model B below), all in `main()` — no sched
 or flock changes, since the whole build+merge stays in one process:
 
 - `privilege.rs` — `Backend{RealRoot,Fakeroost,Sudo}` + `detect()` (RealRoot when
-  euid==0 or already inside a session; else the `EM_PRIVILEGE`-requested backend,
-  default Fakeroost) + `maybe_supervise()`. `EM_PRIVILEGE=sudo` re-execs `sudo -E
-  em …` for **real** root (genuine root-owned tree + real setuid, catalyst-style);
-  opt-in only, never auto-selected. `EM_PRIVILEGE=none` disables wrapping.
+  euid==0 or already inside a session; else map the request, default Fakeroost) +
+  `maybe_supervise()`. Selected by the global `--privilege <auto|fakeroost|sudo|
+  none>` flag (clap, env `EM_PRIVILEGE`, so it shows in `--help`). `sudo` re-execs
+  `sudo -E em …` for **real** root (root-owned tree + real setuid, catalyst-style),
+  opt-in only / never auto-selected; `none` disables wrapping.
 - `main()` calls `fakeroost::init()` first (before the tokio runtime), then for an
   unprivileged *building* invocation (`will_build`: emerge merge path +
   `ebuild`/`crossdev`/`toolchain`, not `--pretend`) re-execs em once under

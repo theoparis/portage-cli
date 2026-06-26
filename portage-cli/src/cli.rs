@@ -64,6 +64,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub local: bool,
 
+    /// How an unprivileged build gets root for chown/setuid: auto (fakeroost),
+    /// fakeroost, sudo (real root), or none. Ignored when already root.
+    #[arg(long, value_enum, default_value_t = Privilege::Auto, global = true, env = "EM_PRIVILEGE")]
+    pub privilege: Privilege,
+
     /// Search package names, like emerge --search (each argument is a pattern)
     #[arg(short = 's', long)]
     pub search: bool,
@@ -1082,6 +1087,20 @@ pub enum LogCommand {
     List { limit: Option<u32> },
     #[command(about = "Show merge times for a package")]
     Time { atom: Option<String> },
+}
+
+/// How an unprivileged build gets root for `chown`/setuid (see `--privilege`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Privilege {
+    /// fakeroost when unprivileged, real chowns when already root (default).
+    #[default]
+    Auto,
+    /// Pure-Rust ptrace+seccomp fake root; ownership faked in-session.
+    Fakeroost,
+    /// Re-exec under `sudo` for real root (root-owned tree, real setuid).
+    Sudo,
+    /// No wrapping; run unprivileged (chowns best-effort, may not stick).
+    None,
 }
 
 /// Output format for `em query depgraph`.
