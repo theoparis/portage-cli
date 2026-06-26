@@ -16,9 +16,15 @@ here briefly for context). Updated 2026-06-26.
   ROOT `<chost>-gcc` + SYSROOT=ROOT) → stage3 (`--emptytree @system`). No stage2
   (em builds a fresh toolchain, crossdev model). Needs `packages.build` ingestion,
   the `-*` USE gap below, and the CLI. [[em-stages-and-binhosts]]
-- 🔴 **em ignores `USE="-*"`.** The clear-all wildcard isn't honoured, so
-  catalyst's `USE="-* build"` stage USE can't be expressed through em. Blocks a
-  faithful stage1. [[em-root-characterization]] [[em-stages-and-binhosts]]
+- ✅ **`USE="-*"` clear-all** — now honoured across the USE/USE_EXPAND
+  incremental merge (profile→globals→conf→env layers) and the shell-state read,
+  so catalyst's `USE="-* build"` collapses the closure as expected.
+- 🟡 **Other `-*`/`*` wildcards still partial.** `use.mask`/`use.force` correctly
+  take only per-flag `-` (no `-*` wildcard per portage(5)). Still open:
+  `package.use` `-*` (coupled with the unimplemented USE_EXPAND `KEY:` colon
+  form); `ACCEPT_KEYWORDS -\*` (PMS DisabledAll, dropped in `AcceptToken::parse`);
+  `ACCEPT_LICENSE`/`ACCEPT_PROPERTIES`/`ACCEPT_RESTRICT`/`PORTAGE_CHECKSUM_FILTER`
+  `*` & `-*` (GLEP 23). [[em-root-characterization]]
 - 🟡 **Native toolchain activation via `em select`.** `em toolchain --setup`
   writes env.d profiles but no `usr/bin/<chost>-gcc` wrappers (post_step is a
   no-op). Blocker: `select/env_d.rs` is config-root-keyed, must be merge-root-aware
