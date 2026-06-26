@@ -13,7 +13,8 @@
 //! - **native** — a self-hosting stage1 into `--root` (`CHOST == CBUILD`), plain
 //!   `::gentoo` atoms. The seed compiler at `BROOT=/` already targets this arch,
 //!   so it builds *full* glibc directly and a single full gcc links against it:
-//!   binutils → os-headers → glibc → gcc. The two-stage split is cross-only —
+//!   baselayout → binutils → os-headers → glibc → gcc. The two-stage split is
+//!   cross-only —
 //!   `toolchain.eclass` gates every stage1 affordance on `is_crosscompile`, so a
 //!   native gcc is always `--enable-shared` and *requires* a full in-ROOT libc
 //!   (see `todo/em-root-characterization.md`).
@@ -194,7 +195,26 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
         return StagePlan { steps };
     }
 
-    // GCC model: binutils first (shared by both flavours).
+    // GCC model.
+    //
+    // Native lays down baselayout first — it provides the `/lib`, `/usr/lib` FS
+    // skeleton that gcc's startfile osdir resolution needs:
+    // `-print-multi-os-directory` is `../lib64`, so gcc looks for CRT objects at
+    // `<sysroot>/usr/lib/../lib64`, but glibc installs `crti.o` into `usr/lib64`
+    // and a from-scratch ROOT has no `usr/lib` for the `..` to resolve through
+    // (gcc otherwise dies `cannot find crti.o` linking libgcc_s.so). Catalyst
+    // merges baselayout first likewise. Cross doesn't need it — the sysroot
+    // libdir is bridged by `link_abi_osdirs` after the libc step instead.
+    if let BootstrapKind::Native = kind {
+        steps.push(StageStep {
+            label: "baselayout".into(),
+            atoms: vec![atom("sys-apps", "baselayout")],
+            use_override: owned(&["build"]),
+            nodeps: false,
+        });
+    }
+
+    // binutils (shared by both flavours).
     //
     // Native binutils installs into the (empty) ROOT, so its optional
     // `debuginfod` dep would drag elfutils → curl → … → glibc into this first
@@ -367,30 +387,36 @@ mod tests {
         // toolchain.eclass gates all stage1 affordances on is_crosscompile, so a
         // native gcc is always --enable-shared and needs a full libc present.
         let plan = toolchain_plan(&BootstrapKind::Native);
-        assert_eq!(labels(&plan), ["binutils", "kernel headers", "libc", "gcc"]);
+        assert_eq!(
+            labels(&plan),
+            ["baselayout", "binutils", "kernel headers", "libc", "gcc"]
+        );
         // Real categories, no `cross-` rewrite.
         let atoms: Vec<&str> = plan
             .steps
             .iter()
             .flat_map(|s| s.atoms.iter().map(|a| a.as_str()))
             .collect();
-        assert_eq!(atoms[0], "sys-devel/binutils");
+        // baselayout first: lays down the /usr/lib skeleton for gcc's osdir.
+        assert_eq!(atoms[0], "sys-apps/baselayout");
+        assert!(plan.steps[0].use_override.contains(&"build".to_string()));
+        assert_eq!(atoms[1], "sys-devel/binutils");
         // Native merges the virtual (registers it in the ROOT VDB for glibc's
         // DEPEND), not the bare linux-headers provider.
-        assert_eq!(atoms[1], "virtual/os-headers");
-        assert_eq!(atoms[2], "sys-libs/glibc");
-        assert_eq!(atoms[3], "sys-devel/gcc");
+        assert_eq!(atoms[2], "virtual/os-headers");
+        assert_eq!(atoms[3], "sys-libs/glibc");
+        assert_eq!(atoms[4], "sys-devel/gcc");
         assert!(atoms.iter().all(|a| !a.starts_with("cross-")));
         // The full libc step is a real build — not headers-only, not --nodeps.
-        assert!(!plan.steps[2].nodeps);
-        assert!(plan.steps[2].use_override.is_empty());
+        assert!(!plan.steps[3].nodeps);
+        assert!(plan.steps[3].use_override.is_empty());
         // The single gcc is full (keeps cxx — only GCC_DISABLE applies, no STAGE1).
-        assert!(!plan.steps[3].use_override.contains(&"-cxx".to_string()));
-        assert!(plan.steps[3].use_override.contains(&"-vtv".to_string()));
+        assert!(!plan.steps[4].use_override.contains(&"-cxx".to_string()));
+        assert!(plan.steps[4].use_override.contains(&"-vtv".to_string()));
         // Native binutils drops debuginfod (else its elfutils→…→glibc closure
-        // explodes step 1 into the empty ROOT).
+        // explodes the binutils step into the empty ROOT).
         assert!(
-            plan.steps[0]
+            plan.steps[1]
                 .use_override
                 .contains(&"-debuginfod".to_string())
         );
