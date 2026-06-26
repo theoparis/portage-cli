@@ -597,12 +597,20 @@ impl ProfileEnv {
 
 /// Merge space-separated flag lists with incremental semantics.
 ///
-/// Tokens prefixed with `-` remove previously accumulated tokens.
+/// Tokens prefixed with `-` remove previously accumulated tokens. The special
+/// token `-*` is the incremental *clear-all* (make.conf(5): "Clearing these
+/// variables requires a clear-all as in: `export USE=-*`"): it discards every
+/// flag accumulated so far, so later tokens rebuild from empty.
 pub(crate) fn merge_flag_lists<'a>(iter: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut acc: Vec<String> = Vec::new();
     for val in iter {
         for token in val.split_whitespace() {
+            if token == "-*" {
+                seen.clear();
+                acc.clear();
+                continue;
+            }
             if let Some(name) = token.strip_prefix('-') {
                 if seen.remove(name) {
                     acc.retain(|f| f != name);
@@ -627,6 +635,15 @@ pub(crate) fn merge_flag_lists_signed<'a>(iter: impl Iterator<Item = &'a str>) -
     let mut state: HashMap<String, bool> = HashMap::new();
     for val in iter {
         for token in val.split_whitespace() {
+            // `-*` is the incremental clear-all (make.conf(5)): discard every
+            // flag accumulated so far across the profile→globals→conf→env
+            // layers, then let later tokens rebuild from empty. It is consumed
+            // here and never emitted, so it does not leak into the next layer.
+            if token == "-*" {
+                order.clear();
+                state.clear();
+                continue;
+            }
             let (name, enabled) = match token.strip_prefix('-') {
                 Some(n) => (n.to_string(), false),
                 None => (token.to_string(), true),
@@ -806,6 +823,46 @@ mod tests {
     #[test]
     fn parse_profile_desc_too_few_fields() {
         assert!(ProfileDesc::parse("amd64 some/path").is_err());
+    }
+
+    // --- incremental merge (`-*` clear-all) tests ---
+
+    #[test]
+    fn merge_flag_lists_dash_star_clears_accumulated() {
+        // `-*` discards everything seen so far; later tokens rebuild from empty.
+        let out = merge_flag_lists(["foo bar".into(), "-* baz".into()].into_iter());
+        assert_eq!(out, vec!["baz".to_string()]);
+    }
+
+    #[test]
+    fn merge_flag_lists_dash_star_within_one_layer() {
+        let out = merge_flag_lists(["foo -* bar".into()].into_iter());
+        assert_eq!(out, vec!["bar".to_string()]);
+    }
+
+    #[test]
+    fn merge_flag_lists_dash_star_alone_empties() {
+        let out = merge_flag_lists(["foo bar".into(), "-*".into()].into_iter());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn merge_flag_lists_signed_dash_star_clears_and_is_consumed() {
+        // The signed USE merge must clear accumulated state on `-*` and NOT
+        // emit the token (it must not leak into the next layer on re-merge).
+        let out = merge_flag_lists_signed(["foo -bar".into(), "-* build".into()].into_iter());
+        assert_eq!(out, vec!["build".to_string()]);
+        assert!(
+            !out.iter().any(|t| t == "-*" || t == "*"),
+            "-* must be consumed, not emitted"
+        );
+    }
+
+    #[test]
+    fn merge_flag_lists_signed_dash_star_then_disable_survives() {
+        // After a clear-all, a subsequent disable is a fresh explicit disable.
+        let out = merge_flag_lists_signed(["a".into(), "-* -debug".into()].into_iter());
+        assert_eq!(out, vec!["-debug".to_string()]);
     }
 
     // --- ProfileStack tests ---

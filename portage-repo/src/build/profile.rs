@@ -418,6 +418,14 @@ fn collect_use_flags(shell: &EbuildShell) -> CollectedUse {
     let mut disabled: Vec<String> = Vec::new();
 
     for token in use_str.split_whitespace() {
+        // `-*` clear-all (make.conf(5)): discard everything gathered so far.
+        // The merge step normally resolves it before this string is built, but
+        // honour it here too so a raw `-*` in the USE value is handled.
+        if token == "-*" {
+            flags.clear();
+            disabled.clear();
+            continue;
+        }
         if let Some(name) = token.strip_prefix('-') {
             flags.retain(|f| f != name);
             if !disabled.iter().any(|f| f == name) {
@@ -576,6 +584,29 @@ mod tests {
         let disabled: Vec<&str> = resolved.disabled.iter().map(|f| f.as_str()).collect();
         assert!(enabled.contains(&"cxx"), "cxx re-enabled by child");
         assert!(!disabled.contains(&"cxx"), "no longer disabled");
+    }
+
+    #[tokio::test]
+    async fn use_flags_dash_star_clears_accumulated() {
+        // The catalyst stage1 form `USE="-* build"`: a child layer clears
+        // everything the parent accumulated, then rebuilds from empty.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let parent = make_profile(&dir, "parent", &[]);
+        std::fs::write(parent.join("make.defaults"), "USE=\"foo bar debuginfod\"\n").unwrap();
+        let child = make_profile(&dir, "child", &["../parent"]);
+        std::fs::write(child.join("make.defaults"), "USE=\"-* build\"\n").unwrap();
+        let stack = ProfileStack::build(child).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let resolved = stack.use_flags(&mut shell, &[]).await.unwrap();
+        let enabled: Vec<&str> = resolved.enabled.iter().map(|f| f.as_str()).collect();
+        assert!(enabled.contains(&"build"), "build survives the clear-all");
+        assert!(!enabled.contains(&"foo"), "foo cleared by -*");
+        assert!(!enabled.contains(&"bar"), "bar cleared by -*");
+        assert!(
+            !enabled.contains(&"debuginfod"),
+            "debuginfod cleared by -* (the reported symptom)"
+        );
     }
 
     #[tokio::test]
