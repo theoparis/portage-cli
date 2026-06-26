@@ -368,8 +368,55 @@ The headers-only libc + gcc-stage1 + gcc-stage2 steps are now cross-only
 (`if is_crosscompile`-shaped branch in `toolchain_plan`). Cross is unchanged.
 `em stage1` driver and `run_staged` are unchanged — only the native plan shape.
 
-**Next:** real run of the 4-step native plan into a fresh `--root` to validate
-full glibc + single full gcc land and link. If gcc clears, the native toolchain
-bootstrap is done and the focus moves to problem 2 (the rest of packages.build:
-DEPEND-into-ROOT for `acct-group/root`, `e2fsprogs`, ordering of
-`glibc[-crypt]`/`glibc[cet]`).
+**Real run validated (2026-06-26):** the 4-step native plan built into a fresh
+`/var/tmp/stage1-native` through baselayout → binutils → os-headers → full glibc,
+then gcc. gcc first failed `cannot find crti.o` (next item), then built fully
+(gcc-16.1.1 + CHOST wrappers in the ROOT) once the FS skeleton + libcrypt were in
+place. Two more fixes landed from this run:
+
+### crti.o / baselayout (2026-06-26, FIXED)
+
+Even with full glibc in ROOT, gcc died `ld: cannot find crti.o` linking
+libgcc_s.so. gcc's `-print-multi-os-directory` is `../lib64`, so it resolves CRT
+startfiles via `<sysroot>/usr/lib/../lib64`; glibc installs `crti.o` into
+`usr/lib64`, but a from-scratch ROOT has no `usr/lib` dir for the `..` to resolve
+through. `baselayout` provides that skeleton (`dir /usr/lib`, `dir /lib`) — the
+earlier minimal stage1 worked only because it included baselayout. **Fix:** native
+plan merges `sys-apps/baselayout` (USE=build) first (5 steps now), as catalyst does.
+
+### Problem 2 RESOLVED — and it was NOT virtuals (2026-06-26)
+
+The gcc step then failed the **pre-flight** `gcc needs: virtual/libcrypt`. Long
+investigation (Luca pushed back hard: "we shouldn't treat virtual in special
+ways") — and he was right. The chain:
+
+- gcc's DEPEND virtuals: libcrypt, libiconv, libintl, zlib. Three of the four are
+  **pulled** into ROOT; only `virtual/libcrypt` is dropped. So NOT blanket virtual
+  special-casing.
+- The discriminator: `virtual/libcrypt` is gcc's **only DEPEND-only** dep (not
+  also in RDEPEND). gmp/mpfr/mpc/zlib/libintl/libiconv are all in gcc RDEPEND →
+  never eligible for the DEPEND trim → pulled. libcrypt is DEPEND-only → trimmed.
+- Root cause (`depgraph/mod.rs`): the host-config-stage DEPEND trim
+  (`trim_sysroot_satisfied_depend`) ran with `roots.sysroot()` = the **config
+  root `/`**, not the build sysroot. em builds a from-scratch offset with
+  `SYSROOT = ROOT` (base == target → `build_sysroot()` is `None`), so DEPEND must
+  be satisfied in the ROOT. The trim checked the host and dropped any host-installed
+  DEPEND-only dep. libcrypt (provider libxcrypt, host-installed) was just the lone
+  casualty in the toolchain.
+- **Fix (`e4ceba0`):** pass `build_sysroot().or(target)` to the trim — no-op for a
+  from-scratch ROOT, only `--prefix` (base != target) trims against a real build
+  sysroot. gcc -p now pulls virtual/libcrypt + libxcrypt; **@system parity
+  unchanged (181 == 181)**.
+- **Cleanup (`55a0b5e`):** removed the dead `is_virtual()` skips in the dep trims
+  (proven dead — removing them changed nothing; the sysroot fix is what mattered).
+  Virtuals are now treated as ordinary packages there. [[no-slop-comments]]
+
+This was the long-feared "DEPEND-into-ROOT vs host-satisfy" fork — and it turned
+out to be a one-line root conflation, not a deep resolver redesign or a path-A/B
+schism. SYSROOT=ROOT (path A) just needed the trim to agree with the shell.
+
+**Native stage1 toolchain: DONE.** baselayout → binutils → os-headers → glibc →
+gcc all build into a fresh `--root`, no manual steps. Remaining (lower priority):
+the rest of `packages.build` beyond the toolchain (acct-group/root, e2fsprogs,
+util-linux ordering) — re-test now that DEPEND-into-ROOT is fixed; the glibc
+post-install `/etc/hosts` redirect noise (cosmetic).
