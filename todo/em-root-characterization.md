@@ -289,3 +289,36 @@ staged os-headers step has run.
 (aarch64, 128 cores, 255 GB, host gcc 16.1, distfiles present, MAKEOPTS=-j80).
 **Next session:** start with problem 1 (native stage USE = crossdev's component
 USE), re-run step 1, then confront problem 2 as it surfaces.
+
+### Problem 1 FIXED (2026-06-26): `-debuginfod` on the native binutils step
+
+Pinned it down empirically (`em -p --root <empty> sys-devel/binutils`):
+`debuginfod` (binutils `IUSE="+debuginfod"`) is the lone closure-puller —
+**47 packages with it, 7 without** (`elfutils → libarchive → curl → openssl →
+gnutls → … → glibc`). gcc by contrast is only 16 in isolation (genuine deps,
+shrinks once the staged binutils/glibc are in ROOT), and no other native step
+explodes. So crossdev's "component USE set" framing was a red herring — crossdev
+keeps `BUSE=""` and never disables debuginfod; cross binutils simply doesn't pull
+the closure because it is **host-rooted** (`ROOT=/`, deps already installed).
+Native binutils installs into the *empty* ROOT, so the same flag drags the whole
+runtime closure in — and the pulled-in glibc was what tripped the os-headers
+pre-flight.
+
+Fix (`stages.rs`): the `binutils` step's `use_override` is `["-debuginfod"]` for
+`BootstrapKind::Native`, empty for `Cross` (behaviour-preserving; cross keeps the
+flag, host-satisfied). Verified: `em stage1 -p` step 1 is now the 7-pkg
+internally-consistent closure (zlib → virtual/zlib, gentoo-functions,
+binutils-config, xz → zstd → binutils) — no glibc, no os-headers pre-flight trip.
+The remaining 6 are genuine binutils build deps and order correctly within the
+step.
+
+**Side finding — em ignores `USE="-*"`:** `USE="-* build"` (catalyst's stage1
+USE) did NOT collapse the closure (binutils still showed `debuginfod`), while
+`USE="-debuginfod"` did. So em's env-USE handling doesn't implement the `-*`
+clear-all wildcard. The catalyst `-* build` recipe would therefore not work
+through em as-is; the targeted per-step disable is the right lever here regardless.
+Filed as a separate gap (low priority — the staged toolchain doesn't need `-*`).
+
+**Next:** run step 1 (and the staged plan) for real into `--root` (drop `-p`),
+then hit problem 2 (DEPEND-into-ROOT vs host-satisfy) as the rest of
+packages.build surfaces it.

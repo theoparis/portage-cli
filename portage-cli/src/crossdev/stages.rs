@@ -172,10 +172,21 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
     }
 
     // GCC model: the classic two-stage bootstrap.
+    //
+    // Native binutils installs into the (empty) ROOT, so its optional
+    // `debuginfod` dep would drag elfutils → curl → … → glibc into this first
+    // step, before the staged toolchain exists — 47 packages instead of 7, and
+    // the pulled-in glibc then trips the pre-flight on os-headers. Cross binutils
+    // is host-rooted (`CBUILD`), so those deps are already satisfied on `/` — it
+    // keeps the flag. Disable it only for native; a stage1 doesn't need it.
+    let binutils_use = match kind {
+        BootstrapKind::Native => owned(&["-debuginfod"]),
+        _ => vec![],
+    };
     steps.push(StageStep {
         label: "binutils".into(),
         atoms: vec![atom("sys-devel", "binutils")],
-        use_override: vec![],
+        use_override: binutils_use,
         nodeps: false,
     });
     if kind.has_kernel() {
@@ -318,5 +329,22 @@ mod tests {
                 .use_override
                 .contains(&"headers-only".to_string())
         );
+        // Native binutils drops debuginfod (else its elfutils→…→glibc closure
+        // explodes step 1 into the empty ROOT).
+        assert!(
+            plan.steps[0]
+                .use_override
+                .contains(&"-debuginfod".to_string())
+        );
+    }
+
+    #[test]
+    fn cross_binutils_keeps_debuginfod() {
+        // Cross binutils is host-rooted, so its debuginfod deps are
+        // host-satisfied — no need to force the flag off (behaviour-preserving).
+        let t = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let plan = toolchain_plan(&BootstrapKind::Cross(t));
+        assert_eq!(plan.steps[0].label, "binutils");
+        assert!(plan.steps[0].use_override.is_empty());
     }
 }
