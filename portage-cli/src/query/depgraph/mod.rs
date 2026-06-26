@@ -565,9 +565,16 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         reinstall_cpns: &reinstall_cpns,
     };
     if host_config_stage {
+        // The trim drops DEPEND already satisfied on the *build* sysroot
+        // (ESYSROOT), which is what the build links against. For a from-scratch
+        // offset (`--root`, base == target) the shell builds with SYSROOT = ROOT,
+        // so DEPEND must be satisfied in the ROOT, not the host config root —
+        // `build_sysroot()` is `None` there, which we map to the target so the
+        // trim is a no-op (nothing host-satisfied). Only a `--prefix` overlay
+        // (base != target) has a distinct build sysroot to trim against.
         order = depend_trim::trim_sysroot_satisfied_depend(
             order,
-            roots.sysroot(),
+            roots.build_sysroot().or(Some(cross.target.as_path())),
             cross.target.as_path(),
             &trim_ctx,
         );
