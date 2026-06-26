@@ -1420,7 +1420,11 @@ fn gentoo_mirrors_list() -> Vec<String> {
     {
         return val.split_whitespace().map(str::to_owned).collect();
     }
-    for candidate in [DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF] {
+    // make.conf rarely sets GENTOO_MIRRORS — the default
+    // (`http://distfiles.gentoo.org`) lives in make.globals, so include it last.
+    // Without it the mirror list is empty and a distfile whose upstream URL fails
+    // has no fallback (the popt/tar fetch failures in the @system stage build).
+    for candidate in [DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF, MAKE_GLOBALS] {
         let p = Utf8Path::new(candidate);
         if p.exists()
             && let Ok(mc) = MakeConf::load(p)
@@ -1431,6 +1435,10 @@ fn gentoo_mirrors_list() -> Vec<String> {
     }
     vec![]
 }
+
+/// Portage's shipped defaults; the source of `GENTOO_MIRRORS` when neither the
+/// environment nor make.conf overrides it.
+const MAKE_GLOBALS: &str = "/usr/share/portage/config/make.globals";
 
 fn read_fetch_commands() -> (Option<String>, Option<String>) {
     for candidate in [DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF] {
