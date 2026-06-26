@@ -125,6 +125,22 @@ impl BootstrapKind {
             BootstrapKind::Native => "glibc",
         }
     }
+
+    /// The kernel-headers step atom. Native merges the `virtual/os-headers` meta
+    /// rather than `sys-kernel/linux-headers` directly: glibc DEPENDs on the
+    /// *virtual*, and a SYSROOT=ROOT build must find that virtual installed *in*
+    /// the ROOT (the host-installed one doesn't count). Merging the virtual pulls
+    /// the linux-headers provider AND registers `virtual/os-headers` in the ROOT
+    /// VDB, so the next (libc-headers) step's pre-flight is satisfied. Cross
+    /// builds the provider directly — its overlay carries no `virtual/*`, and the
+    /// cross toolchain's DEPENDs resolve against the host, where the virtual is
+    /// already present.
+    fn kernel_headers_atom(&self) -> String {
+        match self {
+            BootstrapKind::Cross(_) => self.atom("sys-kernel", "linux-headers"),
+            BootstrapKind::Native => "virtual/os-headers".to_string(),
+        }
+    }
 }
 
 /// The staged toolchain-bootstrap plan for `kind`: the ordered crossdev
@@ -149,7 +165,7 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
         if kind.has_kernel() {
             steps.push(StageStep {
                 label: "kernel headers".into(),
-                atoms: vec![atom("sys-kernel", "linux-headers")],
+                atoms: vec![kind.kernel_headers_atom()],
                 use_override: owned(&["headers-only"]),
                 nodeps: false,
             });
@@ -192,7 +208,7 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
     if kind.has_kernel() {
         steps.push(StageStep {
             label: "kernel headers".into(),
-            atoms: vec![atom("sys-kernel", "linux-headers")],
+            atoms: vec![kind.kernel_headers_atom()],
             use_override: owned(&["headers-only"]),
             nodeps: false,
         });
@@ -259,6 +275,12 @@ mod tests {
             "{:?}",
             plan.steps[0].atoms
         );
+        // Cross builds the linux-headers provider directly (no virtual/* in the
+        // overlay; the cross DEPENDs resolve against the host).
+        assert_eq!(
+            plan.steps[1].atoms[0],
+            "cross-riscv64-unknown-linux-gnu/linux-headers"
+        );
         // libc headers step is the --nodeps cycle-breaker.
         let libc_headers = &plan.steps[2];
         assert!(libc_headers.nodeps);
@@ -314,7 +336,9 @@ mod tests {
             .flat_map(|s| s.atoms.iter().map(|a| a.as_str()))
             .collect();
         assert_eq!(atoms[0], "sys-devel/binutils");
-        assert_eq!(atoms[1], "sys-kernel/linux-headers");
+        // Native merges the virtual (registers it in the ROOT VDB for glibc's
+        // DEPEND), not the bare linux-headers provider.
+        assert_eq!(atoms[1], "virtual/os-headers");
         assert!(atoms.iter().all(|a| !a.starts_with("cross-")));
         // libc is glibc, in sys-libs.
         assert_eq!(plan.steps[2].atoms[0], "sys-libs/glibc");
