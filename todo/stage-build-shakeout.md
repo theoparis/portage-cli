@@ -30,11 +30,12 @@ string verbatim. Two facets:
    merge). em has none, so any package that `fowners` to a foreign user fails.
    This will hit MANY packages, not just these two — it just happens these were
    the first in @system to fowners to root/other.
-2. **Name resolution against the wrong root.** Even privileged, the owner is
-   resolved against the **host** `/etc/passwd`+`/etc/group`, not the ROOT's
-   (where `acct-user/*`/`acct-group/*` installed the ids). Portage resolves
-   uid:gid from the *target* passwd/group then chowns numerically. A name absent
-   on the host fails; a name with a different id on the host chowns wrong.
+2. ✅ **Name resolution against the wrong root** (FIXED — facet 2,
+   `907d914`). `fowners` now resolves `user[:group]` to numeric uid:gid against
+   the target `<ESYSROOT|EROOT>/etc/{passwd,group}` (gated on an offset root) and
+   chowns numerically, mirroring portage's `__resolve_owner`; the faking is the
+   fakeroost session [[fakeroot-privilege-backends]]. Was: owner resolved against
+   the **host** db, so a name absent on the host failed or chowned wrong.
 
 Fix direction: resolve owner→uid:gid against `${ROOT}` (or `${EROOT}`)
 passwd/group, and do the chown under fakeroot semantics (record ownership in the
