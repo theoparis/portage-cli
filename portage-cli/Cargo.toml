@@ -55,6 +55,7 @@ md5 = { workspace = true }
 bzip2 = { workspace = true }
 rustix = { workspace = true }
 fakeroost = { workspace = true }
+hakoniwa = { workspace = true }
 humansize = { workspace = true }
 humantime = { workspace = true }
 serde_json = { workspace = true }

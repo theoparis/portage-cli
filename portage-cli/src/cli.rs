@@ -65,7 +65,8 @@ pub struct Cli {
     pub local: bool,
 
     /// How an unprivileged build gets root for chown/setuid: auto (fakeroost),
-    /// fakeroost, sudo (real root), or none. Ignored when already root.
+    /// fakeroost, hakoniwa (userns mapped root), sudo (real root), or none.
+    /// Ignored when already root.
     #[arg(long, value_enum, default_value_t = Privilege::Auto, global = true, env = "EM_PRIVILEGE")]
     pub privilege: Privilege,
 
@@ -1097,6 +1098,8 @@ pub enum Privilege {
     Auto,
     /// Pure-Rust ptrace+seccomp fake root; ownership faked in-session.
     Fakeroost,
+    /// User-namespace sandbox with build-user→0 map; real chowns in-box.
+    Hakoniwa,
     /// Re-exec under `sudo` for real root (root-owned tree, real setuid).
     Sudo,
     /// No wrapping; run unprivileged (chowns best-effort, may not stick).

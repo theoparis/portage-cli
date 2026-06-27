@@ -2,7 +2,7 @@
 
 Open items from the toolchain → stage → binhost work, grouped. Each links to the
 file with the detail. Status: 🔴 not started · 🟡 partial/decided · ✅ done (kept
-here briefly for context). Updated 2026-06-26.
+here briefly for context). Updated 2026-06-27.
 
 ## Stage building (the active goal: a real stage3)
 
@@ -15,9 +15,11 @@ here briefly for context). Updated 2026-06-26.
   `sys-apps/util-linux` merges unprivileged into `stage1-base` (the setuid-`mount`
   chown wall is cleared). ✅ Facet 2 — `fowners` resolves owner names to numeric
   uid:gid against the target passwd/group. ✅ `EM_PRIVILEGE=sudo` backend (real
-  root, opt-in). Remaining: the binpkg/stage tar in-session (real `root:root`
-  artifacts — next), and the fakeroot/hakoniwa backends + per-package `__worker`.
-  [[fakeroot-privilege-backends]] [[stage-build-shakeout]]
+  root, opt-in). ✅ `EM_PRIVILEGE=hakoniwa` umbrella sketch (userns mapped root,
+  `hakoniwa` 1.7.1; not wall-tested yet). Remaining: the binpkg/stage tar
+  in-session (real `root:root` artifacts — next), fakeroot (system) backend,
+  auto-detect chain, and per-package `__worker`. [[fakeroot-privilege-backends]]
+  [[stage-build-shakeout]]
 - 🟡 **`em stages`** — stage1 (`baselayout` + `packages.build`, built with the
   ROOT `<chost>-gcc` + SYSROOT=ROOT) → stage3 (`--emptytree @system`). No stage2
   (em builds a fresh toolchain, crossdev model). Needs `packages.build` ingestion

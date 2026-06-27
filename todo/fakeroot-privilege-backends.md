@@ -1,7 +1,8 @@
 # Unprivileged builds: consolidate the chown workarounds behind a privilege backend
 
-STATUS: **v1 landed (2026-06-27)** — umbrella fakeroost session + merge chown +
-facet-2 name resolution, all validated on `sys-apps/util-linux`. **Next: tar/binpkg
+STATUS: **v1.1 landed (2026-06-27)** — umbrella fakeroost session + merge chown +
+facet-2 name resolution, all validated on `sys-apps/util-linux`; **hakoniwa backend
+sketched** (opt-in `--privilege hakoniwa`, not yet wall-tested). **Next: tar/binpkg
 (not started)** — see "START HERE next session" near the end. Goal: a correct
 root-owned `@system` stage3 (setuid `mount`, `root:root`, file caps) without
 running em as root. Supersedes the "decision point" in [[stage-build-shakeout]]
@@ -12,12 +13,13 @@ and the privilege half of [[build-clean-env]].
 Shipped the simplest correct slice (model B below), all in `main()` — no scheduler
 or flock changes, since the whole build+merge stays in one process:
 
-- `privilege.rs` — `Backend{RealRoot,Fakeroost,Sudo}` + `detect()` (RealRoot when
-  euid==0 or already inside a session; else map the request, default Fakeroost) +
-  `maybe_supervise()`. Selected by the global `--privilege <auto|fakeroost|sudo|
-  none>` flag (clap, env `EM_PRIVILEGE`, so it shows in `--help`). `sudo` re-execs
-  `sudo -E em …` for **real** root (root-owned tree + real setuid, catalyst-style),
-  opt-in only / never auto-selected; `none` disables wrapping.
+- `privilege.rs` — `Backend{RealRoot,Fakeroost,Hakoniwa,Sudo}` + `detect()` (RealRoot
+  when euid==0 or already inside a session; else map the request, default Fakeroost)
+  + `maybe_supervise()`. Selected by the global `--privilege
+  <auto|fakeroost|hakoniwa|sudo|none>` flag (clap, env `EM_PRIVILEGE`, so it shows
+  in `--help`). `sudo` re-execs `sudo -E em …` for **real** root (root-owned tree +
+  real setuid, catalyst-style), opt-in only / never auto-selected; `none` disables
+  wrapping.
 - `main()` calls `fakeroost::init()` first (before the tokio runtime), then for an
   unprivileged *building* invocation (`will_build`: emerge merge path +
   `ebuild`/`crossdev`/`toolchain`, not `--pretend`) re-execs em once under
@@ -43,8 +45,25 @@ or flock changes, since the whole build+merge stays in one process:
 
 Deltas from the design: umbrella session instead of the per-package `__worker`
 (deferred optimisation — keeps the resolver out of ptrace, enables independent
-parallel sessions); RealRoot+Fakeroost+Sudo backends done, fakeroot/hakoniwa still
-behind the seam. Facet 2 (target-passwd name resolution) is done (`907d914`).
+parallel sessions); RealRoot+Fakeroost+Sudo backends done in v1; **hakoniwa landed
+as an opt-in umbrella sketch in v1.1** (fakeroot system binary + auto-detect chain
+still behind the seam). Facet 2 (target-passwd name resolution) is done (`907d914`).
+
+## Implemented — v1.1 (hakoniwa umbrella sketch)
+
+- Workspace dep `hakoniwa = "1.7.1"` (crates.io release; no git patch).
+- `Backend::Hakoniwa` + `--privilege hakoniwa` / `EM_PRIVILEGE=hakoniwa` (opt-in;
+  `auto` still maps to fakeroost).
+- `reexec_hakoniwa(cli)`: `hakoniwa::Container::new()` with `uidmap(0)`/`gidmap(0)`
+  (build-user→ns root), `rootfs("/")` for RO FHS prefixes, then `bindmount_rw` for
+  the merge root, config overlay, `/tmp`, `/var/tmp`, and prefix-local cache/tmp when
+  `--local`/`--prefix` relocate distfiles.
+- Preflight `userns_available()`: `unprivileged_userns_clone` knob + `newuidmap`/
+  `newgidmap` on `PATH`.
+- Inner em runs with `EM_PRIVILEGE_ACTIVE=hakoniwa`, `getuid()`→0 inside the box —
+  real `chown`/`setuid` syscalls (real-in-a-box family), no `fakeroost::init()` loop.
+- **Not yet validated** on the util-linux wall; bind-mount coverage may need more
+  paths (`/var/cache/portage`, host distdirs, cwd) once exercised.
 
 ---
 Original design (the target end-state):
@@ -164,7 +183,7 @@ best available**. All backends converge on how `em __worker` is launched:
 | **fakeroost** *(default unpriv.)* | `Command::new(em).arg("__worker").fakeroot()` + `init()` in `main` | fake+acct |
 | **fakeroot** (system) | `fakeroot -s/-i <state> -- em __worker` (portage's exact recipe) | fake+acct |
 | **sudo** | `sudo em __worker` — real root, real setuid | real-in-box |
-| **hakoniwa** | spawn `em __worker` in a userns sandbox, build-user→0 map (`~/Sources/hakoniwa`) | real-in-box |
+| **hakoniwa** *(v1.1: umbrella sketch)* | `Container::new().uidmap(0).rootfs("/")` + rw binds → `em …` (`hakoniwa` 1.7.1) | real-in-box |
 
 "fake+accounting" (fakeroot/fakeroost) vs "real-in-a-box" (sudo/hakoniwa) are two
 families behind the same `worker_command`. Auto-detect order when unprivileged:
