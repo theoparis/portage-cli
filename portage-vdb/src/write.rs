@@ -51,6 +51,14 @@ pub struct MergeSpec {
     pub cxxflags: Option<String>,
     /// Linker flags (LDFLAGS).
     pub ldflags: Option<String>,
+    /// Legacy `NEEDED` lines (`<path> <needed,comma>`).
+    pub needed: Vec<String>,
+    /// `NEEDED.ELF.2` lines.
+    pub needed_elf2: Vec<String>,
+    /// `REQUIRES` lines (`<cat>: <sonames>`).
+    pub requires: Vec<String>,
+    /// `PROVIDES` lines (`<cat>: <sonames>`).
+    pub provides: Vec<String>,
     /// Installed file list (built by walking `$D`).
     pub contents: Vec<ContentsEntry>,
     /// Unix timestamp of the build.
@@ -153,6 +161,27 @@ impl Vdb {
         }
         if !spec.inherited.is_empty() {
             write_field("INHERITED", format!("{}\n", spec.inherited.join(" ")))?;
+        }
+
+        // ELF dynamic-link metadata (one line per entry, trailing newline).
+        let lines = |v: &[String]| -> String {
+            if v.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", v.join("\n"))
+            }
+        };
+        if !spec.needed.is_empty() {
+            write_field("NEEDED", lines(&spec.needed))?;
+        }
+        if !spec.needed_elf2.is_empty() {
+            write_field("NEEDED.ELF.2", lines(&spec.needed_elf2))?;
+        }
+        if !spec.requires.is_empty() {
+            write_field("REQUIRES", lines(&spec.requires))?;
+        }
+        if !spec.provides.is_empty() {
+            write_field("PROVIDES", lines(&spec.provides))?;
         }
 
         Ok(InstalledPackage::from_dir(&pkg_dir, spec.cpv.clone()))
@@ -267,6 +296,10 @@ mod tests {
             cflags: None,
             cxxflags: None,
             ldflags: None,
+            needed: vec![],
+            needed_elf2: vec![],
+            requires: vec![],
+            provides: vec![],
             contents: vec![
                 ContentsEntry {
                     kind: ContentsKind::Dir,

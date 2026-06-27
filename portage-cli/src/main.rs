@@ -2,6 +2,7 @@ mod bdepend_avail;
 mod cli;
 mod crossdev;
 mod ebuild;
+mod elfscan;
 mod error;
 mod maint;
 mod package_env;

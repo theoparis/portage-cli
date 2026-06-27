@@ -845,15 +845,24 @@ async fn run_merge(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let counter = vdb.next_counter()?;
+    let elf = crate::elfscan::scan_image(&image_dir);
     let spec = merge_spec_from_env(
         env,
         ebuild.cpv().clone(),
         contents,
+        elf,
         size,
         build_time,
         counter,
     );
     let installed = vdb.register(&spec)?;
+
+    // Copy the ebuild into the VDB entry as `<PF>.ebuild`, as portage does.
+    let pf = format!("{}-{}", ebuild.name(), ebuild.version());
+    let ebuild_dest = installed.path().join(format!("{pf}.ebuild"));
+    if let Err(e) = std::fs::copy(ebuild.path(), ebuild_dest.as_std_path()) {
+        eprintln!("warning: could not copy ebuild into VDB: {e}");
+    }
 
     if let Ok(ref data) = env_dump
         && let Err(e) = write_environment_bz2(&installed, data)
@@ -1454,6 +1463,7 @@ fn merge_spec_from_env(
     env: EbuildEnv,
     cpv: portage_atom::Cpv,
     contents: Vec<ContentsEntry>,
+    elf: crate::elfscan::ElfScan,
     size: u64,
     build_time: u64,
     counter: u64,
@@ -1484,6 +1494,10 @@ fn merge_spec_from_env(
         cflags: env.cflags,
         cxxflags: env.cxxflags,
         ldflags: env.ldflags,
+        needed: elf.needed,
+        needed_elf2: elf.needed_elf2,
+        requires: elf.requires,
+        provides: elf.provides,
         contents,
         build_time,
         size,

@@ -75,6 +75,7 @@ futures = "0.3"
 futures-util = "0.3"
 hex = "0.4"
 hakoniwa = { git = "https://github.com/lu-zero/hakoniwa.git", rev = "5f77bb1" }
+object = "0.36"
 itertools = "0.14.0"
 jwalk = "0.8.1"
 ldconfig = "0.1.1"
