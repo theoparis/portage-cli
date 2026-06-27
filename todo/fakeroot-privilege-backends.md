@@ -64,8 +64,18 @@ still behind the seam). Facet 2 (target-passwd name resolution) is done (`907d91
   real `chown`/`setuid` syscalls (real-in-a-box family), no `fakeroost::init()` loop.
 - **Not yet validated** on the util-linux wall; bind-mount coverage may need more
   paths (`/var/cache/portage`, host distdirs, cwd) once exercised.
-- **2026-06-27 wall-test: FAILS at container setup** — `em --privilege hakoniwa
-  toolchain --setup` re-execs, prints the banner, then dies before any build with:
+- **2026-06-28: WORKING.** `em --privilege hakoniwa toolchain --setup` builds and
+  merges sys-apps/baselayout into the ROOT. Four things were needed: the
+  lu-zero/hakoniwa `.oldproc` rmdir fix (below), `Runctl::RootdirRW` (else the
+  whole root is remounted RO and the rw build binds become RO), subuid/subgid
+  *range* maps (`uidmaps`/`gidmaps`, not a lone `uid→0`), and targeted binds for
+  what `rootfs("/")` omits (/var/db/repos RO, /var/cache/distfiles RW, the em
+  binary) — build scratch lives in the writable ephemeral tmpfs root, so no $HOME
+  bind. em commit `0384088`, hakoniwa fork `5f77bb1`. Remaining: the
+  fakeroost/hakoniwa/sudo benchmark (Q6), now unblocked.
+
+  *(Historic — the bug that blocked it.)* `em --privilege hakoniwa` re-execs,
+  prints the banner, then dies before any build with:
   `hakoniwa: rmdir("/.oldproc-<uuid>") => Device or resource busy (os error 16)`.
   Root cause is in hakoniwa 1.7.1 `runc/unshare.rs`: to swap in a private procfs it
   binds the host `/proc` to `.oldproc-<uuid>`, then (lines 314-315) does a **lazy**
@@ -203,6 +213,43 @@ best available**. All backends converge on how `em __worker` is launched:
 families behind the same `worker_command`. Auto-detect order when unprivileged:
 fakeroost (pure-Rust, always linked) → fakeroot (binary on PATH) → hakoniwa
 (userns available) → sudo (allowed) → degraded warn.
+
+## The "real-in-a-box" family is NOT self-sufficient for packaging metadata (2026-06-28)
+
+Confirmed once hakoniwa actually ran builds: a real userns box (hakoniwa) gets the
+*build* right but **not** the full packaging metadata on its own. Two gaps, both
+inherent to "real, just mapped":
+
+1. **Device nodes.** hakoniwa drops `CAP_MKNOD` and 1.7.x exposes no API to keep it,
+   so a build that `mknod`s a char/block device fails `EPERM` inside the box. (FIFOs
+   and regular files are fine.) Only `sudo` (real root) can really create them.
+   fakeroot/fakeroost *fake* them (regular file + recorded `rdev`/mode) with no priv.
+2. **On-disk ownership is the *mapped* id, not 0:0.** With the subuid/subgid range
+   maps, a `chown 0:0` inside the box lands as the **caller's** uid on disk, and
+   `chown portage` lands as a **subuid** (100000+…). The files only *look* like
+   `0:0`/`portage` from **inside** the box (the userns view). So a stage3/binpkg tar
+   must run **inside** the container to record correct ownership; tar from the host
+   sees the subuid ids. (`sudo` writes real `0:0` on disk; fakeroot fakes `0:0` in
+   its accounting.)
+
+**Implication — fakeroot likely belongs *on top*, for every backend, not as an
+alternative to them.** The clean separation is:
+
+- **session backend** (hakoniwa ≫ fakeroost for speed; sudo when real root is wanted)
+  — fast namespace isolation + a working `/dev`,`/proc`, real parallel builds; and
+- **a metadata layer** that makes ownership + device nodes correct *regardless* of
+  what the host actually stored. fakeroost (or `tar`-inside-the-box for ownership
+  only) is that layer.
+
+So the realistic stack is **fakeroost *inside* hakoniwa**, but scoped: keep
+fakeroost's ptrace cost **off the compile** (where it serialized us into the ground,
+koca-build/fakeroost#7) and wrap only `src_install` + the image/archive step — the
+phases where device nodes and ownership metadata are actually produced. Ownership
+alone can instead be handled by archiving inside the box (no ptrace at all); the
+residual that *requires* the fake layer is device nodes. **TODO**: decide per-phase
+scoping (fakeroost only around `src_install`/`__stage-pack`), and whether ownership
+goes via in-box `tar` (cheap) with fakeroost reserved for `mknod` packages only.
+Ties into [[#future-tar--binpkg--stage-artifacts-none-exist-yet]] and Q1.
 
 ## What collapses once a backend records ownership
 
