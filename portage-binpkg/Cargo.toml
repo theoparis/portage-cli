@@ -1,0 +1,14 @@
+[package]
+name = "portage-binpkg"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.92"
+authors = ["Luca Barbato <lu_zero@gentoo.org>"]
+license = "MIT"
+description = "Gentoo binary package (GPKG) reading and writing — placeholder, under development"
+repository = "https://github.com/lu-zero/portage-cli"
+readme = "README.md"
+keywords = ["gentoo", "portage", "binpkg", "gpkg"]
+categories = ["development-tools", "filesystem"]
+
+[dependencies]

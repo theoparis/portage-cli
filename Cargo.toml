@@ -12,6 +12,7 @@ members = [
     "portage-repo",
     "portage-distfiles",
     "portage-vdb",
+    "portage-binpkg",
     "gentoo-stages",
     "benchmarks",
 ]
