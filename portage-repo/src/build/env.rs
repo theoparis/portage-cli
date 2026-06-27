@@ -44,8 +44,22 @@ pub struct EbuildEnv {
     pub idepend: Option<String>,
     /// Phase functions defined by the ebuild (e.g. `["configure", "install"]`).
     pub defined_phases: Vec<String>,
-    /// Repository name the ebuild was sourced from (EBUILD_REPO), or `None`.
+    /// Repository name the ebuild was sourced from, or `None`.
     pub repository: Option<String>,
+    /// Eclasses inherited by the ebuild (INHERITED), in inherit order.
+    pub inherited: Vec<String>,
+    /// FEATURES active for the build, or `None`.
+    pub features: Option<String>,
+    /// Host triple the package targets (CHOST), or `None`.
+    pub chost: Option<String>,
+    /// Build triple (CBUILD), or `None`.
+    pub cbuild: Option<String>,
+    /// C compiler flags (CFLAGS), or `None`.
+    pub cflags: Option<String>,
+    /// C++ compiler flags (CXXFLAGS), or `None`.
+    pub cxxflags: Option<String>,
+    /// Linker flags (LDFLAGS), or `None`.
+    pub ldflags: Option<String>,
 }
 
 impl EbuildEnv {

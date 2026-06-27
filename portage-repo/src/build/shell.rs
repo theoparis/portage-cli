@@ -1802,8 +1802,32 @@ impl EbuildShell {
             bdepend: get_opt("BDEPEND"),
             pdepend: get_opt("PDEPEND"),
             idepend: get_opt("IDEPEND"),
-            defined_phases: split("DEFINED_PHASES"),
-            repository: get_opt("EBUILD_REPO"),
+            // DEFINED_PHASES is computed by portage (not set by the ebuild) — derive
+            // it from which phase functions the sourced ebuild defines (PMS 7.4),
+            // matching the metadata path's computation.
+            defined_phases: {
+                let mut p: Vec<String> = PHASE_FUNCTIONS
+                    .iter()
+                    .filter(|(name, _)| self.shell.funcs().get(name).is_some())
+                    .map(|(_, phase)| phase.as_str().to_owned())
+                    .collect();
+                p.sort();
+                p
+            },
+            // The repo name lives in `<repo>/profiles/repo_name`, not a shell var.
+            repository: std::fs::read_to_string(
+                self.repo_path.join("profiles/repo_name").as_std_path(),
+            )
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty()),
+            inherited: split("INHERITED"),
+            features: get_opt("FEATURES"),
+            chost: get_opt("CHOST"),
+            cbuild: get_opt("CBUILD"),
+            cflags: get_opt("CFLAGS"),
+            cxxflags: get_opt("CXXFLAGS"),
+            ldflags: get_opt("LDFLAGS"),
         }
     }
 

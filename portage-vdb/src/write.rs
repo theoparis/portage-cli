@@ -37,6 +37,20 @@ pub struct MergeSpec {
     pub defined_phases: Vec<String>,
     /// Repository name (e.g. `"gentoo"`).
     pub repository: Option<String>,
+    /// Inherited eclasses (INHERITED).
+    pub inherited: Vec<String>,
+    /// FEATURES active for the build.
+    pub features: Option<String>,
+    /// Target host triple (CHOST).
+    pub chost: Option<String>,
+    /// Build triple (CBUILD).
+    pub cbuild: Option<String>,
+    /// C compiler flags (CFLAGS).
+    pub cflags: Option<String>,
+    /// C++ compiler flags (CXXFLAGS).
+    pub cxxflags: Option<String>,
+    /// Linker flags (LDFLAGS).
+    pub ldflags: Option<String>,
     /// Installed file list (built by walking `$D`).
     pub contents: Vec<ContentsEntry>,
     /// Unix timestamp of the build.
@@ -120,12 +134,25 @@ impl Vdb {
         write_opt!("PDEPEND", spec.pdepend);
         write_opt!("IDEPEND", spec.idepend);
         write_opt!("repository", spec.repository);
+        write_opt!("FEATURES", spec.features);
+        write_opt!("CHOST", spec.chost);
+        write_opt!("CBUILD", spec.cbuild);
+        write_opt!("CFLAGS", spec.cflags);
+        write_opt!("CXXFLAGS", spec.cxxflags);
+        write_opt!("LDFLAGS", spec.ldflags);
+
+        // PF is the package's full name-version (the VDB dir basename); portage
+        // always records it.
+        write_field("PF", format!("{pf}\n"))?;
 
         if !spec.defined_phases.is_empty() {
             write_field(
                 "DEFINED_PHASES",
                 format!("{}\n", spec.defined_phases.join(" ")),
             )?;
+        }
+        if !spec.inherited.is_empty() {
+            write_field("INHERITED", format!("{}\n", spec.inherited.join(" ")))?;
         }
 
         Ok(InstalledPackage::from_dir(&pkg_dir, spec.cpv.clone()))
@@ -233,6 +260,13 @@ mod tests {
             properties: None,
             defined_phases: vec!["configure".into(), "install".into()],
             repository: Some("gentoo".into()),
+            inherited: vec![],
+            features: None,
+            chost: None,
+            cbuild: None,
+            cflags: None,
+            cxxflags: None,
+            ldflags: None,
             contents: vec![
                 ContentsEntry {
                     kind: ContentsKind::Dir,
