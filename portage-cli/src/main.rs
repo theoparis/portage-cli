@@ -340,6 +340,7 @@ async fn emerge_atoms_inner(
         cli.keep_going,
         cli.emptytree,
         cli.jobs.map(|j| j as usize).unwrap_or(1).max(1),
+        cli.buildpkg,
     )
     .await
 }
@@ -380,18 +381,19 @@ async fn run_merge_plan(
     keep_going: bool,
     emptytree: bool,
     jobs: usize,
+    buildpkg: bool,
 ) -> Result<()> {
     let merge_root = roots.merge_root();
     let total = plan.len();
 
     let (merged, skipped, failures) = if jobs <= 1 {
         merge_sequential(
-            plan, roots, work_base, distdir, quiet, keep_going, emptytree,
+            plan, roots, work_base, distdir, quiet, keep_going, emptytree, buildpkg,
         )
         .await
     } else {
         merge_parallel(
-            plan, blockers, roots, work_base, distdir, quiet, keep_going, emptytree, jobs,
+            plan, blockers, roots, work_base, distdir, quiet, keep_going, emptytree, jobs, buildpkg,
         )
         .await
     };
@@ -433,6 +435,7 @@ async fn run_merge_plan(
 
 /// Sequential build+merge in install order (the `--jobs 1` / default path).
 /// Returns `(merged, skipped, failures)`.
+#[allow(clippy::too_many_arguments)]
 async fn merge_sequential(
     plan: &[query::depgraph::PlannedMerge],
     roots: &cli::Roots,
@@ -441,6 +444,7 @@ async fn merge_sequential(
     quiet: bool,
     keep_going: bool,
     emptytree: bool,
+    buildpkg: bool,
 ) -> (usize, usize, Vec<MergeFailure>) {
     let merge_root = roots.merge_root();
     let total = plan.len();
@@ -476,6 +480,7 @@ async fn merge_sequential(
             roots.build_sysroot(),
             roots.eprefix(),
             None,
+            buildpkg,
         )
         .await
         {
@@ -567,6 +572,7 @@ async fn merge_parallel(
     keep_going: bool,
     emptytree: bool,
     jobs: usize,
+    buildpkg: bool,
 ) -> (usize, usize, Vec<MergeFailure>) {
     let merge_root = roots.merge_root();
     let total = plan.len();
@@ -612,6 +618,7 @@ async fn merge_parallel(
                     roots.build_sysroot(),
                     roots.eprefix(),
                     Some(gate),
+                    buildpkg,
                 )
                 .await;
                 (i, res)

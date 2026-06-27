@@ -123,6 +123,7 @@ pub async fn run(
         sysroot,
         eprefix,
         None,
+        false,
     )
     .await
 }
@@ -144,6 +145,7 @@ pub async fn build_and_merge(
     sysroot: Option<&Utf8Path>,
     eprefix: Option<&Utf8Path>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
+    buildpkg: bool,
 ) -> Result<()> {
     let phases: Vec<String> = [
         "pretend",
@@ -178,6 +180,7 @@ pub async fn build_and_merge(
         sysroot,
         eprefix,
         merge_gate,
+        buildpkg,
     )
     .await
     .with_context(|| format!("build log: {log}"))
@@ -240,6 +243,7 @@ async fn run_inner(
     sysroot: Option<&Utf8Path>,
     eprefix: Option<&Utf8Path>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
+    buildpkg: bool,
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
     let ebuild = Ebuild::from_path(path).with_context(|| format!("loading {ebuild_path}"))?;
@@ -447,6 +451,17 @@ async fn run_inner(
         }
     }
 
+    // Build a binary package from the freshly-merged image + VDB entry, if asked.
+    // Runs after qmerge (VDB + CONTENTS written) and before the build tree is
+    // dropped, inside the same privilege session so ${D} ownership/xattrs are
+    // read correctly.
+    if buildpkg && merge_mode {
+        match build_binpkg(&shell, &ebuild, &work_root, root) {
+            Ok(path) => println!(">>> Created binary package: {path}"),
+            Err(e) => eprintln!("warning: --buildpkg failed for {}: {e:#}", ebuild.cpv()),
+        }
+    }
+
     // Successful merge chain: drop the build tree, keeping build.log
     // (FEATURES=keepwork keeps everything).
     if merge_mode
@@ -475,6 +490,62 @@ fn ed_image_dir(shell: &portage_repo::EbuildShell, work_root: &Utf8Path) -> Utf8
         .filter(|s| !s.is_empty())
         .map(Utf8PathBuf::from)
         .unwrap_or_else(|| work_root.join("image"))
+}
+
+/// Pack the freshly-merged image (`${D}`) + VDB entry into a GPKG under `PKGDIR`
+/// (default `/var/cache/binpkgs`), returning the written path.
+fn build_binpkg(
+    shell: &portage_repo::EbuildShell,
+    ebuild: &Ebuild,
+    work_root: &Utf8Path,
+    root: &Utf8Path,
+) -> Result<Utf8PathBuf> {
+    let cat = ebuild.category();
+    let pf = format!("{}-{}", ebuild.name(), ebuild.version());
+    let image_dir = ed_image_dir(shell, work_root);
+    let vdb_dir = root.join("var/db/pkg").join(cat).join(&pf);
+    anyhow::ensure!(
+        vdb_dir.exists(),
+        "VDB entry {vdb_dir} not found (qmerge did not write it?)"
+    );
+    let pkgdir = shell
+        .get_var("PKGDIR")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/var/cache/binpkgs".to_string());
+    let build_id = next_build_id(&pkgdir, cat, &pf);
+    let out = Utf8PathBuf::from(pkgdir)
+        .join(cat)
+        .join(format!("{pf}-{build_id}.gpkg.tar"));
+    portage_binpkg::write_gpkg(
+        &portage_binpkg::GpkgInput {
+            image_dir: image_dir.as_std_path(),
+            metadata_dir: vdb_dir.as_std_path(),
+            basename: &pf,
+        },
+        out.as_std_path(),
+    )
+    .with_context(|| format!("writing binary package {out}"))?;
+    Ok(out)
+}
+
+/// The next free GPKG build-id for `<cat>/<pf>` in `pkgdir` (portage numbers
+/// rebuilds `<pf>-1`, `<pf>-2`, …); 1 when none exist.
+fn next_build_id(pkgdir: &str, cat: &str, pf: &str) -> u32 {
+    let dir = Utf8PathBuf::from(pkgdir).join(cat);
+    let prefix = format!("{pf}-");
+    let mut max = 0u32;
+    if let Ok(rd) = std::fs::read_dir(dir.as_std_path()) {
+        for e in rd.flatten() {
+            if let Some(rest) = e.file_name().to_string_lossy().strip_prefix(&prefix)
+                && let Some(id) = rest.strip_suffix(".gpkg.tar")
+                && let Ok(n) = id.parse::<u32>()
+            {
+                max = max.max(n);
+            }
+        }
+    }
+    max + 1
 }
 
 fn post_process_after_install(

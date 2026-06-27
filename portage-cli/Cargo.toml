@@ -46,6 +46,7 @@ portage-metadata = { workspace = true }
 portage-repo = { workspace = true }
 portage-distfiles = { workspace = true }
 portage-vdb = { workspace = true }
+portage-binpkg = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 futures-util = { workspace = true }

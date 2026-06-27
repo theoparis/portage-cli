@@ -30,6 +30,7 @@ portage-atom-resolvo = { version = "0.7", path = "portage-atom-resolvo" }
 portage-repo = { path = "portage-repo" }
 portage-distfiles = { path = "portage-distfiles" }
 portage-vdb = { path = "portage-vdb" }
+portage-binpkg = { path = "portage-binpkg" }
 
 # Shared external dependencies
 anyhow = "1"
