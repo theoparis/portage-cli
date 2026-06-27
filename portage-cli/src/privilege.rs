@@ -154,6 +154,12 @@ fn bind_rw(container: &mut hakoniwa::Container, host: &str) {
     }
 }
 
+fn bind_ro(container: &mut hakoniwa::Container, host: &str) {
+    if std::path::Path::new(host).exists() {
+        container.bindmount_ro(host, host);
+    }
+}
+
 /// Writable trees the build touches but `rootfs("/")` leaves out (it only
 /// bind-mounts the usual FHS prefixes read-only).
 fn bind_build_tree(container: &mut hakoniwa::Container, cli: &Cli) {
@@ -167,11 +173,61 @@ fn bind_build_tree(container: &mut hakoniwa::Container, cli: &Cli) {
     }
     bind_rw(container, "/tmp");
     bind_rw(container, "/var/tmp");
+    // `rootfs("/")` binds only the FHS prefixes (/usr, /etc, /bin, /lib*, /sbin) —
+    // not the portage data trees under /var that a build reads/writes. Bind the
+    // ebuild repositories read-only and the distfiles dir read-write (the inner em
+    // fetches into it). The build/merge trees (work_base, merge_root, eprefix) are
+    // bound above; the em binary itself is bound by reexec_hakoniwa.
+    bind_ro(container, "/var/db/repos");
+    bind_rw(container, "/var/cache/distfiles");
     if roots.relocate() {
         let merge = roots.merge_root();
         bind_rw(container, merge.join("var/cache/distfiles").as_ref());
         bind_rw(container, merge.join("var/tmp").as_ref());
     }
+}
+
+/// The `(start, count)` subordinate-id range delegated to the user in
+/// `/etc/subuid`/`/etc/subgid` (first line matching the name or numeric id).
+fn read_subid(name: &str, id: u32, subid_file: &str) -> Option<(u32, u32)> {
+    let content = std::fs::read_to_string(subid_file).ok()?;
+    let id_str = id.to_string();
+    for line in content.lines() {
+        let mut f = line.split(':');
+        let who = f.next()?;
+        if who != name && who != id_str.as_str() {
+            continue;
+        }
+        let start = f.next()?.parse().ok()?;
+        let count = f.next()?.parse().ok()?;
+        return Some((start, count));
+    }
+    None
+}
+
+/// hakoniwa id-map triples `(container_id, host_id, count)`.
+type IdMaps = Vec<(u32, u32, u32)>;
+
+/// Container root → the caller, plus the caller's delegated subuid/subgid range
+/// from container id 1, so real chown/setuid to non-root ids inside the box land
+/// on owned ids (a single `uid→0` map can only own root). Mirrors crossdev-stages.
+fn idmaps_for(id: u32, subid_file: &str) -> IdMaps {
+    let name = std::env::var("USER").unwrap_or_else(|_| id.to_string());
+    let mut maps = vec![(0, id, 1)];
+    if let Some((start, count)) = read_subid(&name, id, subid_file) {
+        maps.push((1, start, count));
+    }
+    maps
+}
+
+/// `(uid_maps, gid_maps)` for the current user (root + delegated subuid/subgid).
+fn id_range_maps() -> (IdMaps, IdMaps) {
+    let uid = rustix::process::getuid().as_raw();
+    let gid = rustix::process::getgid().as_raw();
+    (
+        idmaps_for(uid, "/etc/subuid"),
+        idmaps_for(gid, "/etc/subgid"),
+    )
 }
 
 fn reexec_hakoniwa(cli: &Cli) -> i32 {
@@ -193,15 +249,41 @@ fn reexec_hakoniwa(cli: &Cli) -> i32 {
         }
     };
 
+    use hakoniwa::{Namespace, Runctl};
     let mut container = hakoniwa::Container::new();
-    // Replace Container::new()'s identity map with build-user→0 so chown/setuid
-    // syscalls succeed inside the box (real-in-a-box, not fake accounting).
-    container.uidmap(0).gidmap(0);
+    // Container::new() unshares Mount, User and Pid (and mounts a private /proc).
+    // rootfs("/") binds the FHS prefixes read-only but leaves out /dev and the
+    // tmpfs mounts a build needs. Mirror the working crossdev-stages setup: full
+    // namespace isolation, a minimal devfs, a /dev/shm tmpfs, and allow-new-privs
+    // (builds exec setuid helpers). The writable build trees (merge root, /tmp,
+    // /var/tmp, …) are bound by bind_build_tree.
     if let Err(e) = container.rootfs("/") {
         eprintln!("em: hakoniwa rootfs setup failed: {e}");
         return 1;
     }
+    container
+        .unshare(Namespace::Ipc)
+        .unshare(Namespace::Uts)
+        .unshare(Namespace::Cgroup)
+        .devfsmount("/dev")
+        .tmpfsmount("/dev/shm")
+        // Without RootdirRW hakoniwa remounts the whole container root read-only,
+        // which also forces our rw build binds RO (the build can't create its work
+        // dirs). crossdev-stages sets this for the same reason; the FHS prefixes
+        // from rootfs("/") stay individually read-only regardless.
+        .runctl(Runctl::RootdirRW)
+        .runctl(Runctl::AllowNewPrivs);
+    // Map the caller to container root *and* their delegated subuid/subgid range
+    // (not a single uid→0), so the build can really own files as the various
+    // system users (portage, messagebus, …), not only root.
+    let (uid_maps, gid_maps) = id_range_maps();
+    container.uidmaps(&uid_maps);
+    container.gidmaps(&gid_maps);
     bind_build_tree(&mut container, cli);
+    // The em binary we re-exec: bound by rootfs("/") when installed under /usr,
+    // but a dev build lives outside the FHS prefixes — bind it read-only so the
+    // container can exec it.
+    bind_ro(&mut container, program);
 
     let mut cmd = container.command(program);
     for arg in args {
@@ -218,7 +300,14 @@ fn reexec_hakoniwa(cli: &Cli) -> i32 {
 
     eprintln!(">>> unprivileged build — running under hakoniwa (userns mapped root)");
     match cmd.status() {
-        Ok(status) => status.code,
+        Ok(status) => {
+            // hakoniwa reports container-setup/exec failures via `reason` with a
+            // non-success code — surface it instead of swallowing it.
+            if status.code != 0 && !status.reason.is_empty() {
+                eprintln!("em: hakoniwa: {}", status.reason);
+            }
+            status.code
+        }
         Err(e) => {
             eprintln!("em: failed to start the hakoniwa container: {e}");
             1

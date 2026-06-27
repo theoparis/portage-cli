@@ -72,7 +72,7 @@ flume = "0.12.0"
 futures = "0.3"
 futures-util = "0.3"
 hex = "0.4"
-hakoniwa = "1.7.1"
+hakoniwa = { git = "https://github.com/lu-zero/hakoniwa.git", rev = "5f77bb1" }
 itertools = "0.14.0"
 jwalk = "0.8.1"
 ldconfig = "0.1.1"
