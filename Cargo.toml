@@ -65,7 +65,9 @@ brush-builtins = { git = "https://github.com/lu-zero/brush.git", rev = "7d3bbdda
 brush-core = { git = "https://github.com/lu-zero/brush.git", rev = "7d3bbdda" }
 brush-parser = { git = "https://github.com/lu-zero/brush.git", rev = "7d3bbdda" }
 dhat = "0.3.3"
-fakeroost = "0.1.1"
+# Fork: bad-path mknod/chown/chmod pass through to the kernel instead of aborting
+# the supervised tree (autoconf probes hit this). PR pending upstream koca-build.
+fakeroost = { git = "https://github.com/lu-zero/fakeroost.git", rev = "3f2539f" }
 flume = "0.12.0"
 futures = "0.3"
 futures-util = "0.3"

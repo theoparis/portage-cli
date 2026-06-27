@@ -244,8 +244,21 @@ it, and every tar runs in-session. Detail in "Future: tar / binpkg" below.
    rather than the parent's in-memory state.
 4. **RealRoot stays in-process** (no spawn) for speed; spawn only when faking.
 5. **fakeroost robustness on the 128-core `@system` run**: ptrace adds a per-syscall
-   trap on the filtered set — measure overhead vs build cost; confirm it survives
-   the heavy `make -j` trees.
+   trap on the filtered set — confirm it survives the heavy `make -j` trees.
+   *(2026-06-27: it does — survives the toolchain + libc, after the bad-path
+   passthrough fork fix [[fakeroost-fork]].)*
+6. **Benchmark the backends — fakeroost vs hakoniwa vs sudo (real root).** The
+   2026-06-27 native stage3 smoke showed the fakeroost toolchain (esp. the gcc
+   3-stage bootstrap) running *noticeably* slower than a normal build. Expected:
+   fakeroost is ptrace+seccomp, so every trapped syscall (stat/chown/chmod/mknod/
+   xattr) costs two context switches (entry+exit stop) — and a gcc bootstrap is
+   overwhelmingly `stat()`. hakoniwa (userns, in `Backend::Hakoniwa` already) has
+   ~zero per-syscall overhead; sudo (real root) has none. Measure wall-time of the
+   *same* target (e.g. `em toolchain --setup` into a fresh ROOT, or a fixed
+   `@system` slice) under `--privilege fakeroost` / `hakoniwa` / `sudo`, same
+   `MAKEOPTS`/box. If hakoniwa is close to sudo and far faster than fakeroost, it
+   should likely become the default unprivileged backend (fakeroost staying as the
+   no-userns fallback, e.g. restricted containers). Capture numbers here.
 
 ## Future: tar / binpkg / stage artifacts (none exist yet)
 

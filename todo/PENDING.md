@@ -18,7 +18,11 @@ here briefly for context). Updated 2026-06-27.
   root, opt-in). ✅ `EM_PRIVILEGE=hakoniwa` umbrella sketch (userns mapped root,
   `hakoniwa` 1.7.1; not wall-tested yet). Remaining: the binpkg/stage tar
   in-session (real `root:root` artifacts — next), fakeroot (system) backend,
-  auto-detect chain, and per-package `__worker`. [[fakeroot-privilege-backends]]
+  auto-detect chain, and per-package `__worker`. **Benchmark fakeroost vs hakoniwa
+  vs sudo** — the 2026-06-27 stage3 smoke showed fakeroost (ptrace+seccomp, 2 ctx
+  switches per `stat`/chown/…) much slower on the gcc bootstrap; if hakoniwa
+  (userns, ~no per-syscall cost) lands near sudo it should become the default
+  unprivileged backend. [[fakeroot-privilege-backends]] § Open Q6
   [[stage-build-shakeout]]
 - 🟡 **`em stages`** — stage1 (`baselayout` + `packages.build`, built with the
   ROOT `<chost>-gcc` + SYSROOT=ROOT) → stage3 (`--emptytree @system`). No stage2
