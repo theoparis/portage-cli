@@ -1350,6 +1350,15 @@ impl EbuildShell {
             std::fs::create_dir_all(dir)
                 .map_err(|e| Error::Shell(format!("creating {}: {e}", dir.display())))?;
         }
+        // Anchor the *process* working directory inside the build tree. The brush
+        // shell tracks its own `working_dir` and sets it on each spawned command,
+        // but some eclass helpers (notably autotools' `eautoconf`/`eaclocal`, which
+        // run `autoconf -o configure.sh` etc.) reach the process cwd directly — and
+        // that would otherwise be wherever `em` was launched (e.g. the user's source
+        // checkout), where they drop `aclocal.m4`/`config.h.in`/symlinks. Keep any
+        // such cwd-relative writes in WORKDIR. (Build/merge is sequential by default;
+        // the per-phase `cd "${S}"` still moves the shell into the source tree.)
+        let _ = std::env::set_current_dir(&workdir);
         self.set_var("WORKDIR", &workdir.to_string_lossy());
         // S defaults to ${WORKDIR}/${P}; the ebuild may override it at global
         // scope while sourcing. Only (re)assert the default when about to source,
