@@ -330,8 +330,13 @@ it, and every tar runs in-session. Detail in "Future: tar / binpkg" below.
    - **sudo** (real root): **completed in 21:43** (`/usr/bin/time -v`, exit 0, 23
      pkgs, max RSS 2.26 GB), load ~13 during the gcc bootstrap (real parallelism).
      ≥6× faster than fakeroost, which never finished.
-   - **hakoniwa**: blocked — backend fails at container setup (see v1.1 above);
-     re-run once fixed.
+   - **hakoniwa**: backend now works (v1.1 fixed). A first toolchain benchmark run
+     (2026-06-28) surfaced a *separate* regression — the cwd anchor (`b23ab2f`)
+     pointed the process cwd at WORKDIR, which the post-merge cleanup deletes, so
+     step 2 died `failed to start ebuild shell: ENOENT`. Fixed (`5248e0d`: anchor to
+     work_root); hakoniwa toolchain now proceeds 1→2→building. **Benchmark TODO**:
+     re-run `em --privilege hakoniwa toolchain --setup` to completion for the
+     wall-time vs sudo (21:43) — expected ≈ sudo (userns, ~no per-syscall cost).
    Conclusion so far: fakeroost is correctness-good but throughput-poor; it should
    *not* be the default for heavy builds. Finish the hakoniwa number to decide the
    default (expected ≈ sudo).

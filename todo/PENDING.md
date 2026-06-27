@@ -87,15 +87,24 @@ here briefly for context). Updated 2026-06-27.
 
 ## Binhosts (fast stage3/stage4) [[em-stages-and-binhosts]]
 
-- 🔴 Producer: **`em -b` GPKG writer — the next task** (`em -b` is a no-op flag
-  today; no archiver exists). Pack `${D}` in the fakeroost session for correct
-  `root:root`/setuid/caps. Full plan + start-here steps in
-  [[fakeroot-privilege-backends]] § "START HERE next session". Then the
-  `em maint binhost` `Packages` index.
-- 🔴 Consumer: remote `--getbinpkg` over `PORTAGE_BINHOST` (http(s) fetch + index).
+- ✅ Producer: **`em -b` GPKG writer — DONE** (2026-06-28). New **`portage-binpkg`**
+  crate (published `0.0.1` placeholder on crates.io; `0.1.0` in-tree) with the GLEP 78
+  writer (`write_gpkg`): container = plain tar `<PF>/gpkg-1` → `metadata.tar.zst` →
+  `image.tar.zst` → `Manifest`, image via `tar --xattrs` pax (caps/devnodes),
+  metadata = the VDB dir, `DATA … SHA512 … BLAKE2B` Manifest. `-b/--buildpkg` wired
+  after qmerge (in the privilege session). **Validated: host portage reads,
+  Manifest-verifies, and decompresses em's gpkg.** VDB enrichment 16→30 fields
+  (PF, CHOST/C*FLAGS, FEATURES, INHERITED, DEFINED_PHASES, repository,
+  NEEDED/NEEDED.ELF.2/REQUIRES/PROVIDES via the `object` ELF scan, the `.ebuild`).
+  Remaining VDB fields: `IUSE_EFFECTIVE`, `REPO_REVISIONS`. Then the
+  `em maint binhost` `Packages` index. Commits `2f88678` `0499edc` `72179e9`
+  `65b2438` `359e65b`; format spec in [[fakeroot-privilege-backends]].
+- 🔴 Consumer: remote `--getbinpkg` over `PORTAGE_BINHOST` (http(s) fetch + index) —
+  *transport* is `portage-distfiles`, *format* is `portage-binpkg` (add the reader).
+- 🔴 `Packages` binhost index (`em maint binhost`) — the next binhost step.
 - 🔴 Binpkg reuse/rebuild via the solver's USE/ABI/slot machinery.
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.
-- 🔴 Signing/verify (`BINPKG_GPG_*`) — last.
+- 🔴 Signing/verify (`BINPKG_GPG_*`) — last (lives in `portage-binpkg`).
 
 ## Other open (pre-existing, related)
 
