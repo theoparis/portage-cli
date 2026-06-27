@@ -1,7 +1,5 @@
-use blake2::{Blake2b512, Digest as _};
 use camino::{Utf8Path, Utf8PathBuf};
 use portage_repo::{Manifest, ManifestEntry};
-use sha2::Sha512;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::{Error, Result};
@@ -192,15 +190,7 @@ impl Fetcher {
                     .run_command(cmd_template, url, &df.filename, &dest)
                     .await;
                 if result.is_ok() {
-                    // Verify after command download.
-                    if let Some(entry) = manifest_entry {
-                        entry
-                            .verify_file(dest.as_std_path())
-                            .map_err(|e| Error::Verify {
-                                filename: df.filename.clone(),
-                                reason: e.to_string(),
-                            })?;
-                    }
+                    verify_or_discard(manifest_entry, &dest)?;
                     return Ok(FetchStatus::Downloaded);
                 }
                 last_err = result.err();
@@ -255,20 +245,9 @@ impl Fetcher {
         match &self.config.strategy {
             FetchStrategy::Builtin => self.fetch_builtin(url, dest, manifest_entry).await,
             FetchStrategy::Command(template) => {
-                let r = self
-                    .run_command(template, url, dest.file_name().unwrap_or(""), dest)
-                    .await;
-                if r.is_ok()
-                    && let Some(entry) = manifest_entry
-                {
-                    entry
-                        .verify_file(dest.as_std_path())
-                        .map_err(|e| Error::Verify {
-                            filename: dest.file_name().unwrap_or("?").to_owned(),
-                            reason: e.to_string(),
-                        })?;
-                }
-                r
+                self.run_command(template, url, dest.file_name().unwrap_or(""), dest)
+                    .await?;
+                verify_or_discard(manifest_entry, dest)
             }
         }
     }
@@ -279,108 +258,119 @@ impl Fetcher {
         dest: &Utf8Path,
         manifest_entry: Option<&ManifestEntry>,
     ) -> Result<()> {
-        // Check for a partial file to resume.
-        let existing_size = if dest.exists() {
-            std::fs::metadata(dest.as_std_path())
-                .map(|m| m.len())
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let expected_size = manifest_entry.and_then(dist_size);
+        let existing_size = current_size(dest);
 
-        // If there's a resume command and a partial file, try it first.
-        if existing_size > 0
-            && let Some(resume_tmpl) = &self.config.resume_command
+        // Try to resume a *plausible* partial first (cheap when it is a genuine
+        // prefix). If the resume produces a verified file we are done; otherwise
+        // we fall through. The resume is never trusted on its own.
+        if is_resumable(expected_size, existing_size)
+            && self
+                .resume_partial(url, dest, existing_size, manifest_entry)
+                .await?
         {
-            let r = self
+            return Ok(());
+        }
+
+        // Either there was nothing worth resuming, or the resume did not yield a
+        // valid file. Discard whatever is on disk and download the whole file
+        // fresh — a corrupt/short/HTML leftover must never linger to be Ranged
+        // into on the next URL or run (the psmisc-class failure).
+        let _ = std::fs::remove_file(dest.as_std_path());
+        self.download_full(url, dest, manifest_entry).await
+    }
+
+    /// Resume a partial via `RESUMECOMMAND` (if set) or an HTTP `Range` request.
+    /// Returns `Ok(true)` only when the resumed file verifies against the
+    /// manifest; `Ok(false)` means "couldn't resume — download fresh instead".
+    async fn resume_partial(
+        &self,
+        url: &str,
+        dest: &Utf8Path,
+        existing_size: u64,
+        manifest_entry: Option<&ManifestEntry>,
+    ) -> Result<bool> {
+        if let Some(resume_tmpl) = &self.config.resume_command {
+            let ran = self
                 .run_command(resume_tmpl, url, dest.file_name().unwrap_or(""), dest)
-                .await;
-            if r.is_ok() {
-                if let Some(entry) = manifest_entry {
-                    if entry.verify_file(dest.as_std_path()).is_ok() {
-                        return Ok(());
-                    }
-                    // Verification failed after resume — fall through to fresh download.
-                } else {
-                    return Ok(());
-                }
-            }
-        }
-        // No resume command: use HTTP Range header.
-
-        // Build request, possibly with Range header for resume.
-        let mut req = self.client.get(url);
-        if existing_size > 0 && self.config.resume_command.is_none() {
-            req = req.header("Range", format!("bytes={existing_size}-"));
+                .await
+                .is_ok();
+            return Ok(ran && verify_ok(manifest_entry, dest));
         }
 
-        let response = req.send().await.map_err(|e| Error::Network {
-            url: url.to_owned(),
-            source: e,
-        })?;
+        let response = self
+            .client
+            .get(url)
+            .header("Range", format!("bytes={existing_size}-"))
+            .send()
+            .await
+            .map_err(|e| Error::Network {
+                url: url.to_owned(),
+                source: e,
+            })?;
+
+        // Only a 206 actually continues the partial; a 200 means the server
+        // ignored Range and is resending from byte 0 — let the fresh path own
+        // that (it truncates), and reject an HTML error/redirect body outright.
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT || is_html(&response) {
+            return Ok(false);
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(dest.as_std_path())
+            .await
+            .map_err(|e| Error::Io {
+                path: dest.to_path_buf().into_std_path_buf(),
+                source: e,
+            })?;
+        stream_to_file(url, response, &mut file, dest).await?;
+        Ok(verify_ok(manifest_entry, dest))
+    }
+
+    /// Download the entire file fresh (no `Range`), rejecting obvious non-file
+    /// bodies and verifying against the manifest. A body that fails verification
+    /// is removed so it can't masquerade as a resumable partial next time.
+    async fn download_full(
+        &self,
+        url: &str,
+        dest: &Utf8Path,
+        manifest_entry: Option<&ManifestEntry>,
+    ) -> Result<()> {
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| Error::Network {
+                url: url.to_owned(),
+                source: e,
+            })?;
 
         let status = response.status();
-        // 200 OK (fresh) or 206 Partial Content (resume) are both fine.
         if !status.is_success() {
             return Err(Error::Http {
                 url: url.to_owned(),
                 status: status.as_u16(),
             });
         }
+        // A distfile is never HTML; a 2xx `text/html` body is an error/redirect
+        // page (e.g. a SourceForge "file not found"/mirror picker), not the
+        // archive — caching it would fail verification on every retry forever.
+        if is_html(&response) {
+            return Err(Error::Verify {
+                filename: dest.file_name().unwrap_or("?").to_owned(),
+                reason: "server returned an HTML body, not the distfile".to_owned(),
+            });
+        }
 
-        // Stream body into file, simultaneously feeding SHA512 + BLAKE2B.
-        let resuming = status == reqwest::StatusCode::PARTIAL_CONTENT && existing_size > 0;
-        let mut file = if resuming {
-            tokio::fs::OpenOptions::new()
-                .append(true)
-                .open(dest.as_std_path())
-                .await
-                .map_err(|e| Error::Io {
-                    path: dest.to_path_buf().into_std_path_buf(),
-                    source: e,
-                })?
-        } else {
-            tokio::fs::File::create(dest.as_std_path())
-                .await
-                .map_err(|e| Error::Io {
-                    path: dest.to_path_buf().into_std_path_buf(),
-                    source: e,
-                })?
-        };
-
-        let mut sha512 = Sha512::new();
-        let mut blake2b = Blake2b512::new();
-
-        use futures_util::StreamExt;
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| Error::Network {
-                url: url.to_owned(),
-                source: e,
-            })?;
-            sha512.update(&chunk);
-            blake2b.update(&chunk);
-            file.write_all(&chunk).await.map_err(|e| Error::Io {
+        let mut file = tokio::fs::File::create(dest.as_std_path())
+            .await
+            .map_err(|e| Error::Io {
                 path: dest.to_path_buf().into_std_path_buf(),
                 source: e,
             })?;
-        }
-        file.flush().await.map_err(|e| Error::Io {
-            path: dest.to_path_buf().into_std_path_buf(),
-            source: e,
-        })?;
-
-        // Verify against manifest if available.
-        if let Some(entry) = manifest_entry {
-            entry
-                .verify_file(dest.as_std_path())
-                .map_err(|e| Error::Verify {
-                    filename: dest.file_name().unwrap_or("?").to_owned(),
-                    reason: e.to_string(),
-                })?;
-        }
-
-        Ok(())
+        stream_to_file(url, response, &mut file, dest).await?;
+        verify_or_discard(manifest_entry, dest)
     }
 
     /// Execute a FETCHCOMMAND/RESUMECOMMAND template.
@@ -431,6 +421,95 @@ fn manifest_entry_for<'a>(manifest: &'a Manifest, filename: &str) -> Option<&'a 
     })
 }
 
+/// Current on-disk size of `dest`, or 0 when it is absent or unreadable.
+fn current_size(dest: &Utf8Path) -> u64 {
+    std::fs::metadata(dest.as_std_path())
+        .map(|m| m.len())
+        .unwrap_or(0)
+}
+
+/// The manifest's recorded size for a distfile entry (`None` for non-`Dist`).
+fn dist_size(entry: &ManifestEntry) -> Option<u64> {
+    match entry {
+        ManifestEntry::Dist { size, .. } => Some(*size),
+        _ => None,
+    }
+}
+
+/// A leftover file is a resumable partial only when its size is a *strict*
+/// prefix of the target: present, and smaller than the known manifest size.
+/// Without a known size we never resume (a blind `Range` onto an unknown body is
+/// how a corrupt cache wedges every retry); a complete-but-wrong file (`>=`
+/// expected) is refetched fresh, not appended to.
+fn is_resumable(expected_size: Option<u64>, existing_size: u64) -> bool {
+    matches!(expected_size, Some(exp) if existing_size > 0 && existing_size < exp)
+}
+
+/// Whether a response carries an HTML body — never a distfile, so it's an
+/// error/redirect page to be rejected rather than saved.
+fn is_html(response: &reqwest::Response) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| {
+            ct.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/html")
+        })
+        .unwrap_or(false)
+}
+
+/// Verify `dest` against the manifest if there is an entry; `true` when it passes
+/// (or there is nothing to check against).
+fn verify_ok(manifest_entry: Option<&ManifestEntry>, dest: &Utf8Path) -> bool {
+    match manifest_entry {
+        Some(entry) => entry.verify_file(dest.as_std_path()).is_ok(),
+        None => true,
+    }
+}
+
+/// Verify `dest`; on failure delete it (so it can't be treated as a resumable
+/// partial later) and return the error.
+fn verify_or_discard(manifest_entry: Option<&ManifestEntry>, dest: &Utf8Path) -> Result<()> {
+    if let Some(entry) = manifest_entry
+        && let Err(e) = entry.verify_file(dest.as_std_path())
+    {
+        let _ = std::fs::remove_file(dest.as_std_path());
+        return Err(Error::Verify {
+            filename: dest.file_name().unwrap_or("?").to_owned(),
+            reason: e.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Stream a response body into `file` to completion, then flush.
+async fn stream_to_file(
+    url: &str,
+    response: reqwest::Response,
+    file: &mut tokio::fs::File,
+    dest: &Utf8Path,
+) -> Result<()> {
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| Error::Network {
+            url: url.to_owned(),
+            source: e,
+        })?;
+        file.write_all(&chunk).await.map_err(|e| Error::Io {
+            path: dest.to_path_buf().into_std_path_buf(),
+            source: e,
+        })?;
+    }
+    file.flush().await.map_err(|e| Error::Io {
+        path: dest.to_path_buf().into_std_path_buf(),
+        source: e,
+    })?;
+    Ok(())
+}
+
 /// Expose a distfile found in a read-only distdir under the writable `dest`
 /// (in DISTDIR), so the build's unpack/eapply — which only consult DISTDIR —
 /// can open it. Best-effort, mirroring portage: prefer a symlink to the RO
@@ -452,6 +531,24 @@ fn link_into_distdir(src: &Utf8Path, dest: &Utf8Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_only_strict_size_partials() {
+        // A genuine under-size partial is resumable.
+        assert!(is_resumable(Some(1000), 400));
+        // Nothing on disk yet → download fresh.
+        assert!(!is_resumable(Some(1000), 0));
+        // Complete-but-wrong (corrupt full file) → refetch fresh, don't append.
+        assert!(!is_resumable(Some(1000), 1000));
+        // Over-size garbage → refetch fresh.
+        assert!(!is_resumable(Some(1000), 1500));
+        // Unknown manifest size → never blind-resume.
+        assert!(!is_resumable(None, 400));
+        // The psmisc case: a 139 KB body vs a 432 KB target is *size*-plausible, so
+        // a resume is attempted — but the caller always falls back to a fresh
+        // download (and discards) when that resume fails to verify.
+        assert!(is_resumable(Some(432208), 139065));
+    }
 
     #[test]
     fn link_into_distdir_symlinks_ro_copy_and_replaces_stale() {

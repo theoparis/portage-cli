@@ -1,9 +1,28 @@
 use std::collections::{HashMap, HashSet};
 
+use blake2::{Blake2b512, Digest};
 use portage_metadata::SrcUriEntry;
 use portage_repo::Repository;
 
 use crate::error::{Error, Result};
+
+/// Candidate URLs for a distfile on a Gentoo mirror, in priority order: the
+/// modern content-mirror **filename-hash** layout first, the legacy flat layout
+/// as a fallback for non-conforming mirrors.
+///
+/// `distfiles.gentoo.org`'s `layout.conf` is `filename-hash BLAKE2B 8`: the file
+/// lives under `distfiles/<xx>/<filename>`, where `<xx>` is the first 8 bits (two
+/// hex chars) of `BLAKE2B-512(filename)` — the hash of the *filename string*, not
+/// the file content (GLEP 75; matches portage's `FilenameHashLayout`). The old
+/// flat `distfiles/<filename>` path now 404s on the official mirrors.
+fn gentoo_distfile_urls(mirror: &str, filename: &str) -> Vec<String> {
+    let mirror = mirror.trim_end_matches('/');
+    let sub = format!("{:02x}", Blake2b512::digest(filename.as_bytes())[0]);
+    vec![
+        format!("{mirror}/distfiles/{sub}/{filename}"),
+        format!("{mirror}/distfiles/{filename}"),
+    ]
+}
 
 /// A fully resolved distfile: local filename + all candidate download URLs.
 ///
@@ -71,10 +90,10 @@ impl DistfileResolver {
                 if restriction.as_deref() != Some("mirror") && !url.starts_with("mirror://gentoo/")
                 {
                     for mirror in &self.gentoo_mirrors {
-                        let mirror = mirror.trim_end_matches('/');
-                        let fallback = format!("{mirror}/distfiles/{filename}");
-                        if !urls.contains(&fallback) {
-                            urls.push(fallback);
+                        for fallback in gentoo_distfile_urls(mirror, &filename) {
+                            if !urls.contains(&fallback) {
+                                urls.push(fallback);
+                            }
                         }
                     }
                 }
@@ -97,12 +116,14 @@ impl DistfileResolver {
         if let Some(rest) = url.strip_prefix("mirror://") {
             let (mirror_name, path) = rest.split_once('/').unwrap_or((rest, filename));
             if mirror_name == "gentoo" {
-                // mirror://gentoo/path → GENTOO_MIRRORS with the full path suffix.
-                // Using the path (not just filename) preserves any subdirectory.
+                // mirror://gentoo/[subdir/]file → GENTOO_MIRRORS in filename-hash
+                // layout (hashed-first, flat fallback). The content-mirror layout
+                // keys on the final filename component, not any historical subdir.
+                let fname = path.rsplit('/').next().unwrap_or(path);
                 return self
                     .gentoo_mirrors
                     .iter()
-                    .map(|m| format!("{}/distfiles/{path}", m.trim_end_matches('/')))
+                    .flat_map(|m| gentoo_distfile_urls(m, fname))
                     .collect();
             }
             if let Some(bases) = self.thirdparty.get(mirror_name) {
@@ -214,26 +235,43 @@ mod tests {
         let r = resolver(&["https://mirror.gentoo.org"]);
         let entries = SrcUriEntry::parse("https://example.com/foo-1.0.tar.gz").unwrap();
         let dfs = r.resolve(&entries, &HashSet::new());
+        // Upstream first, then the gentoo mirror in filename-hash layout
+        // (hashed-first) with the flat path as a legacy fallback.
+        let mut expected = vec!["https://example.com/foo-1.0.tar.gz".to_owned()];
+        expected.extend(gentoo_distfile_urls(
+            "https://mirror.gentoo.org",
+            "foo-1.0.tar.gz",
+        ));
+        assert_eq!(dfs[0].urls, expected);
+    }
+
+    #[test]
+    fn mirror_gentoo_uses_filename_hash_layout() {
+        let r = resolver(&["https://mirror.gentoo.org"]);
+        let entries = SrcUriEntry::parse("mirror://gentoo/subdir/foo-1.0.tar.gz").unwrap();
+        let dfs = r.resolve(&entries, &HashSet::new());
+        // Keyed on the filename component, hashed-first then flat — the historical
+        // subdir is dropped (content-mirror layout ignores it).
         assert_eq!(
             dfs[0].urls,
-            [
-                "https://example.com/foo-1.0.tar.gz",
-                "https://mirror.gentoo.org/distfiles/foo-1.0.tar.gz",
-            ]
+            gentoo_distfile_urls("https://mirror.gentoo.org", "foo-1.0.tar.gz")
         );
     }
 
     #[test]
-    fn mirror_gentoo_uses_full_path() {
-        let r = resolver(&["https://mirror.gentoo.org"]);
-        let entries = SrcUriEntry::parse("mirror://gentoo/subdir/foo-1.0.tar.gz").unwrap();
-        let dfs = r.resolve(&entries, &HashSet::new());
-        // Full path preserved, not just filename.
-        assert_eq!(
-            dfs[0].urls,
-            ["https://mirror.gentoo.org/distfiles/subdir/foo-1.0.tar.gz"]
+    fn gentoo_filename_hash_subdir_matches_portage() {
+        // portage's FilenameHashLayout("BLAKE2B", "8"): first 2 hex of
+        // BLAKE2B-512(filename) as the subdir.
+        let urls = gentoo_distfile_urls("https://m", "psmisc-23.7.tar.xz");
+        let sub = format!(
+            "{:02x}",
+            Blake2b512::digest("psmisc-23.7.tar.xz".as_bytes())[0]
         );
-        assert_eq!(dfs[0].urls.len(), 1);
+        assert_eq!(
+            urls[0],
+            format!("https://m/distfiles/{sub}/psmisc-23.7.tar.xz")
+        );
+        assert_eq!(urls[1], "https://m/distfiles/psmisc-23.7.tar.xz");
     }
 
     #[test]
