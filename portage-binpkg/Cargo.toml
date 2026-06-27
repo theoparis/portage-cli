@@ -1,14 +1,22 @@
 [package]
 name = "portage-binpkg"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
-description = "Gentoo binary package (GPKG) reading and writing — placeholder, under development"
+description = "Gentoo binary package (GPKG) reading and writing"
 repository = "https://github.com/lu-zero/portage-cli"
 readme = "README.md"
 keywords = ["gentoo", "portage", "binpkg", "gpkg"]
 categories = ["development-tools", "filesystem"]
 
 [dependencies]
+sha2 = { workspace = true }
+blake2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
