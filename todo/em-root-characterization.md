@@ -60,6 +60,20 @@ previous. This doc is **Tier 1** (the active focus).
    to `/` (`MergeRoot::Host`), not be broot-filtered. This is the offset
    `@system` gap (177 vs 180; `nghttp2/nghttp3/ngtcp2`) — see
    `nonemptytree-bdeps-gap.md`. Reaching 180 == 180 closes Tier 1.
+   - **Concrete build-time bite (2026-06-27, sudo `@system` into
+     `~/.cache/em-testing/toolchain-sudo`).** `sys-apps/systemd-utils` BDEPENDs
+     `dev-python/jinja2`; its meson runs the **ROOT's** `python3` (3.14, freshly
+     built into the offset) and dies `ERROR: python3 is missing modules: jinja2`.
+     The host *has* jinja2 (3.1.6) but for the host python, and `with_bdeps=false`
+     means em never put jinja2 where the build's interpreter can import it. So
+     Tier-1 isn't only a resolver *count* gap — a BDEPEND that's a python module
+     (or any build tool the build actually `exec`s/imports) must be present in the
+     **build environment** the offset build uses. The `@system` smoke reached 153
+     installed before this; distfiles + brush `-v` fixes cleared everything before
+     it. Fix options: pull such BDEPEND into the offset build env, or run the
+     offset build with the host interpreter's site-packages visible to the chosen
+     python impl. Many python-build-time ebuilds (`jinja2`, `sphinx`, `cython`,
+     `setuptools_scm`) will hit this.
 3. **Tier 2 — crossdev on top of Tier 1** (`{target}-emerge`, `CBUILD ≠ CHOST`).
    Same `(cpn, slot, root)` routing as item 2 with a foreign `CHOST`; cross
    already matches `riscv64-emerge -p gcc` (18 pkgs). Reuses Tier 1's

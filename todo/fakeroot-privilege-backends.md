@@ -64,6 +64,20 @@ still behind the seam). Facet 2 (target-passwd name resolution) is done (`907d91
   real `chown`/`setuid` syscalls (real-in-a-box family), no `fakeroost::init()` loop.
 - **Not yet validated** on the util-linux wall; bind-mount coverage may need more
   paths (`/var/cache/portage`, host distdirs, cwd) once exercised.
+- **2026-06-27 wall-test: FAILS at container setup** — `em --privilege hakoniwa
+  toolchain --setup` re-execs, prints the banner, then dies before any build with:
+  `hakoniwa: rmdir("/.oldproc-<uuid>") => Device or resource busy (os error 16)`.
+  Root cause is in hakoniwa 1.7.1 `runc/unshare.rs`: to swap in a private procfs it
+  binds the host `/proc` to `.oldproc-<uuid>`, then (lines 314-315) does a **lazy**
+  `umount2(MNT_DETACH)` immediately followed by `rmdir`. With grok's `rootfs("/")`
+  (the whole host root → a *recursive* `/proc` bind carrying every submount), the
+  detached unmount hasn't settled when the rmdir runs → EBUSY, and the container
+  aborts. Not a bind-coverage gap; the proc-remount teardown races. Fix options:
+  (a) fork hakoniwa to make the `.oldproc` rmdir non-fatal / retry (1-line, mirrors
+  the [[fakeroost-fork]] pattern — after MNT_DETACH the empty dir is harmless);
+  (b) keep the host PID ns: `container.share(Namespace::Pid)` **and** drop the
+  default `procfsmount` (guarded by `MountProcfsEPERM`), so no oldproc dance at all;
+  (c) upstream a fix. Left for grok (owns this backend) per the 2026-06-27 steer.
 
 ---
 Original design (the target end-state):
@@ -259,6 +273,21 @@ it, and every tar runs in-session. Detail in "Future: tar / binpkg" below.
    `MAKEOPTS`/box. If hakoniwa is close to sudo and far faster than fakeroost, it
    should likely become the default unprivileged backend (fakeroost staying as the
    no-userns fallback, e.g. restricted containers). Capture numbers here.
+   *Early numbers (2026-06-27, 128-core arm64, `em toolchain --setup`, `-j80`,
+   targets under `~/.cache/em-testing/`):*
+   - **fakeroost**: killed at **131 min**, still in the gcc-16 bootstrap (never
+     finished). Single `cc1plus` at a time, load ~4 on 128 cores — the
+     single-threaded ptrace supervisor serializes every traced `stat()` from the
+     parallel make. **Impractical for real builds.** (Upstream perf issue filed:
+     koca-build/fakeroost#7.)
+   - **sudo** (real root): **completed in 21:43** (`/usr/bin/time -v`, exit 0, 23
+     pkgs, max RSS 2.26 GB), load ~13 during the gcc bootstrap (real parallelism).
+     ≥6× faster than fakeroost, which never finished.
+   - **hakoniwa**: blocked — backend fails at container setup (see v1.1 above);
+     re-run once fixed.
+   Conclusion so far: fakeroost is correctness-good but throughput-poor; it should
+   *not* be the default for heavy builds. Finish the hakoniwa number to decide the
+   default (expected ≈ sudo).
 
 ## Future: tar / binpkg / stage artifacts (none exist yet)
 

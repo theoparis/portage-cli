@@ -6,8 +6,21 @@ compiler** (2026-06-25). `riscv64-unknown-linux-gnu-{gcc,g++}` compile C and C++
 get here: the brush `export +=` append bug (cross libc `-O3` loss), em's wrong
 `ESYSROOT` for `cross-*` builds (gcc-stage2 `--with-build-sysroot`), and the
 missing `lib64/<abi> -> .` osdir compat symlink. See the 2026-06-25 sections
-below. Remaining: a full clean `em --local crossdev --setup` end-to-end run to
-confirm the in-flow symlink creation; activation/wrapper polish. Goal: make `em` act as a `{target}-emerge` that actually
+below.
+
+**2026-06-27 — clean end-to-end run + clang/rust validated.** `em --privilege none
+--local crossdev -t riscv64-unknown-linux-gnu --setup` ran the full 6-step
+bootstrap (binutils→headers→libc-headers→gcc-stage1→libc→gcc-stage2) into
+`~/.gentoo` in **9:56, unprivileged, exit 0** — confirms the in-flow
+overlay/sysroot/symlink creation. `--privilege none` is the right backend for
+`--local` (files stay user-owned; a cross toolchain `fowners` little so the degrade
+path is fine — fakeroost is far too slow, sudo would leave root-owned files in the
+home prefix). On the em-built sysroot, **all three cross-compile to riscv64**:
+gcc-16 (C/C++, static+dynamic); clang 22 (`--target=riscv64-… --sysroot
+~/.gentoo/usr/riscv64-… --gcc-toolchain ~/.gentoo/usr`); rustup rust
+(`--target riscv64gc-unknown-linux-gnu -C linker=riscv64-…-gcc`). The gentoo system
+`rustc` lacks the riscv64gc std — use the rustup toolchain, which has it. Remaining:
+activation/wrapper polish. Goal: make `em` act as a `{target}-emerge` that actually
 *builds* a cross toolchain and sysroot for a foreign `CHOST` (`CBUILD ≠ CHOST`),
 covering **both** the GCC and the **LLVM/Clang** toolchain models. Target libc is
 the standard choice (glibc / musl, and LLVM libc only as a generic option).
