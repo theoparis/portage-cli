@@ -405,12 +405,31 @@ in-session ownership the archiver needs is already there — `${D}` carries fake
 
 Steps, in order:
 
-1. **Read the GPKG spec first** — `~/Sources/portage-3.0.79/lib/portage/gpkg.py`
-   (and GLEP 78). Nail the exact container: outer **uncompressed** tar whose members
-   are `<basename>/gpkg-1` (format marker), `<basename>/metadata.tar.<c>`,
-   `<basename>/image.tar.<c>` (+ optional `.sig`), the per-member checksums, and how
-   `<basename>` is formed. Don't guess the byte layout — em's GPKG must be readable
-   by the host's real portage (the validation gate).
+1. **GPKG format — reverse-engineered + validated against a real host gpkg
+   (2026-06-28).** Container = a **plain (uncompressed) tar**, all members owned
+   `0/0`, in this **strict order**:
+   1. `<basename>/gpkg-1` — **0-byte** format marker, **must be first**
+      (`gpkg.py` `gpkg_version = "gpkg-1"`; verify reads it first).
+   2. `<basename>/metadata.tar.<c>`
+   3. `<basename>/image.tar.<c>`
+   4. `<basename>/Manifest` — **must be last** ("ignored since at the end").
+   - `<basename>` = the package **PF** (e.g. `gentoo-functions-1.7.6`), i.e.
+     `basename.split("/")[-1]` — *no* category, *no* build-id. The **container
+     filename** is `<PF>-<BUILD_ID>.gpkg.tar` (build-id in the name + `metadata/BUILD_ID`).
+   - `<c>` = `BINPKG_COMPRESS` suffix; **default `zstd` → `.zst`** (make.globals).
+   - **image.tar**: members under the `image/` prefix = the `${D}` tree, ustar/pax,
+     `--numeric-owner` (host writes `root/root`); pax + `--xattrs` for caps/ACLs;
+     real device-node entries; setuid bits preserved.
+   - **metadata.tar**: members under `metadata/` = the VDB entry dir — every xpak
+     field file (`PF CATEGORY SLOT KEYWORDS USE IUSE IUSE_EFFECTIVE *DEPEND RESTRICT
+     LICENSE EAPI DEFINED_PHASES INHERITED FEATURES CHOST CBUILD C*FLAGS LDFLAGS
+     DESCRIPTION HOMEPAGE REPO_REVISIONS repository …`), plus `CONTENTS`,
+     `environment.bz2`, `NEEDED`/`NEEDED.ELF.2`/`REQUIRES`, `SIZE`/`BUILD_TIME`/
+     `BUILD_ID`/`COUNTER`/`BINPKGMD5`, and `<PF>.ebuild`. **em already writes all of
+     these to the VDB during merge** — metadata.tar = tar that dir under `metadata/`.
+   - **Manifest** lines: `DATA <member> <size> SHA512 <hex> BLAKE2B <hex>`, one per
+     container member **including `gpkg-1`** (the 0-byte file has the well-known
+     empty-string SHA512/BLAKE2B). em's `portage-repo::Manifest` already speaks this.
 2. **image.tar** — option (a): shell to `tar --numeric-owner --xattrs
    --format=pax -C "${D}" .`, run **in the fakeroost session** so owner/devnode/cap
    reads are faked. Compress per `BINPKG_COMPRESS` (default `zstd`; `tar --zstd` or
