@@ -185,9 +185,9 @@ dependency graph, per-crate API catalog, and design reference.
 | `portage-atom` | PMS atom parser (`Cpn`, `Cpv`, `Dep`, `Version`) | Published |
 | `portage-metadata` | md5-cache entry parser, EAPI, phases, keywords | Published |
 | `portage-repo` | Repo layout, profiles, metadata cache, ebuild sourcing | Local only |
-| `portage-vdb` | Installed package database reader (`/var/db/pkg`) | Local only |
+| `portage-vdb` | Installed package database reader (`/var/db/pkg`) | Published |
 | `portage-atom-resolvo` | SAT dependency solver (resolvo bridge) | Published |
-| `portage-atom-pubgrub` | Alternative solver (PubGrub bridge) | Local only |
+| `portage-atom-pubgrub` | Alternative solver (PubGrub bridge) | Published |
 | `gentoo-core` | Architecture types | Published |
 | `gentoo-stages` | Stage3 tarball fetch/cache | Published |
 
