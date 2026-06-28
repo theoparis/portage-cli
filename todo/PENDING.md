@@ -190,6 +190,10 @@ here briefly for context). Updated 2026-06-27.
 
 ## Other open (pre-existing, related)
 
+- 🔴 **Parser audit pass** — review the recent burst of parser work (incremental
+  `-*`, package.use/license/accept_keywords, @set expansion, USE-dep eval, IUSE
+  defaults, make.conf sourcing, md5-cache) for PMS/portage faithfulness.
+  [[parser-audit]]
 - 🔴 clang linker config (Option B, `gentoo-linker.cfg`). [[select-toolchain]]
 - See also [[nonemptytree-bdeps-gap]], [[em-emptytree]], [[build-clean-env]],
   [[crossdev-target]], [[cross-support-self-review]] for older open threads.
