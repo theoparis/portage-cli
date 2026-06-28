@@ -14,4 +14,4 @@ pub mod error;
 pub mod gpkg;
 
 pub use error::{Error, Result};
-pub use gpkg::{GpkgInput, read_metadata, write_gpkg};
+pub use gpkg::{GpkgInput, extract_image, read_metadata, write_gpkg};

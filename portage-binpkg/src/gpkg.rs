@@ -157,6 +157,70 @@ fn write_manifest(out: &Path, members: &[(&str, &std::path::PathBuf)]) -> Result
     Ok(())
 }
 
+/// Extract the GPKG container's installed image into `dest` (e.g. `${D}` or a
+/// merge `work_root/image`), stripping the inner `image/` prefix so members land
+/// at `dest/<path>` (e.g. `dest/usr/bin/foo`). Used by the `-k`/`--usepkg`
+/// consumer to merge a pre-built package without compiling. Requires `tar` and
+/// `zstd` on `PATH`.
+pub fn extract_image(container: &Path, dest: &Path) -> Result<()> {
+    let staging = tempfile::Builder::new().prefix("em-gpkg-img-").tempdir()?;
+    let root = staging.path().to_path_buf();
+
+    // Locate the inner `image.tar.<c>` member.
+    let listing = String::from_utf8_lossy(&capture(
+        "tar",
+        Command::new("tar").arg("-tf").arg(container),
+    )?)
+    .into_owned();
+    let member = listing
+        .lines()
+        .map(|l| l.trim_end_matches('/'))
+        .find(|m| {
+            let b = Path::new(m)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            b.starts_with("image.tar")
+        })
+        .ok_or_else(|| {
+            Error::Corrupt(format!("no image.tar.* member in {}", container.display()))
+        })?;
+    let compressed = root.join(member);
+    run(
+        "tar",
+        Command::new("tar")
+            .arg("-xf")
+            .arg(container)
+            .arg("-C")
+            .arg(&root)
+            .arg(member),
+    )?;
+
+    // Decompress to image.tar.
+    let image_tar = root.join("image.tar");
+    let bytes = match compressed.extension().and_then(|e| e.to_str()) {
+        Some("zst") => capture("zstd", Command::new("zstd").arg("-dc").arg(&compressed))?,
+        Some("gz") => capture("gzip", Command::new("gzip").arg("-dc").arg(&compressed))?,
+        _ => std::fs::read(&compressed)?,
+    };
+    std::fs::write(&image_tar, bytes)?;
+
+    // Extract with the `image/` prefix stripped, preserving owners/mode/xattrs.
+    std::fs::create_dir_all(dest)?;
+    run(
+        "tar",
+        Command::new("tar")
+            .arg("--no-same-owner")
+            .arg("--xattrs")
+            .arg("--xattrs-include=*")
+            .arg("--strip-components=1")
+            .arg("-xf")
+            .arg(&image_tar)
+            .arg("-C")
+            .arg(dest),
+    )
+}
+
 fn run(tool: &'static str, cmd: &mut Command) -> Result<()> {
     let status = cmd.status()?;
     if status.success() {
@@ -333,5 +397,50 @@ mod tests {
         // The skipped members must not appear.
         assert!(!out.contains_key("environment.bz2"));
         assert!(!out.contains_key("foo-1.0.ebuild"));
+    }
+
+    /// `extract_image` recovers the image tree with the `image/` prefix stripped
+    /// and the file contents intact.
+    #[test]
+    fn extract_image_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let image = root.join("image");
+        fs::create_dir_all(image.join("usr/bin")).unwrap();
+        fs::write(image.join("usr/bin/hello"), b"#!/bin/sh\necho hi\n").unwrap();
+        fs::create_dir_all(image.join("etc")).unwrap();
+        fs::write(image.join("etc/foo.conf"), b"key=value\n").unwrap();
+
+        let meta = root.join("vdb/foo-1.0");
+        fs::create_dir_all(&meta).unwrap();
+        for (k, v) in [("PF", "foo-1.0"), ("CATEGORY", "app-test"), ("SLOT", "0")] {
+            fs::write(meta.join(k), format!("{v}\n")).unwrap();
+        }
+
+        let container = root.join("app-test/foo-1.0-1.gpkg.tar");
+        fs::create_dir_all(container.parent().unwrap()).unwrap();
+        write_gpkg(
+            &GpkgInput {
+                image_dir: &image,
+                metadata_dir: &meta,
+                basename: "foo-1.0",
+            },
+            &container,
+        )
+        .unwrap();
+
+        let dest = root.join("merged");
+        extract_image(&container, &dest).unwrap();
+
+        // The `image/` prefix is stripped: members land at dest/<path>.
+        assert_eq!(
+            std::fs::read_to_string(dest.join("usr/bin/hello")).unwrap(),
+            "#!/bin/sh\necho hi\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("etc/foo.conf")).unwrap(),
+            "key=value\n"
+        );
     }
 }

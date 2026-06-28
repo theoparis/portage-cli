@@ -26,16 +26,12 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
 use sha1::Digest as _;
 use sha1::Sha1;
 
-use portage_repo::MakeConf;
-
+use crate::binpkg::{read_make_conf_var, resolve_pkgdir};
 use crate::cli::Cli;
-
-const DEFAULT_PKGDIR: &str = "/var/cache/binpkgs";
-const MAKE_GLOBALS: &str = "/usr/share/portage/config/make.globals";
 
 /// Dispatch `em maint binhost`.
 pub fn run(globals: &Cli) -> Result<()> {
@@ -85,48 +81,6 @@ fn index_pkgdir(pkgdir: &Utf8Path, chost: &str) -> Result<(usize, usize)> {
 
     write_index(pkgdir, &header, &entries)?;
     Ok((entries.len(), skipped))
-}
-
-/// Resolve `PKGDIR`: `$PKGDIR` env → `make.conf` (config root) → `make.globals`
-/// → `/var/cache/binpkgs`.
-fn resolve_pkgdir(globals: &Cli) -> Utf8PathBuf {
-    if let Ok(v) = std::env::var("PKGDIR")
-        && !v.trim().is_empty()
-    {
-        return Utf8PathBuf::from(v);
-    }
-    if let Some(v) = read_make_conf_var(globals, "PKGDIR")
-        && !v.is_empty()
-    {
-        return Utf8PathBuf::from(v);
-    }
-    let mg = Utf8Path::new(MAKE_GLOBALS);
-    if mg.exists()
-        && let Ok(mc) = MakeConf::load(mg)
-        && let Some(v) = mc.get("PKGDIR").filter(|s| !s.is_empty())
-    {
-        return Utf8PathBuf::from(v);
-    }
-    Utf8PathBuf::from(DEFAULT_PKGDIR)
-}
-
-/// Read a variable from `make.conf` under the resolved config root.
-fn read_make_conf_var(globals: &Cli, var: &str) -> Option<String> {
-    let cfg_root = globals
-        .roots()
-        .config()
-        .map(|c| c.to_path_buf())
-        .unwrap_or_else(|| Utf8PathBuf::from("/"));
-    for rel in ["etc/portage/make.conf", "etc/make.conf"] {
-        let p = cfg_root.join(rel);
-        if p.exists()
-            && let Ok(mc) = MakeConf::load(&p)
-            && let Some(v) = mc.get(var).filter(|s| !s.is_empty())
-        {
-            return Some(v.to_owned());
-        }
-    }
-    None
 }
 
 /// Recursively enumerate `*.gpkg.tar` container files under `root`, as

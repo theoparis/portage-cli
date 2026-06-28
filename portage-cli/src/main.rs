@@ -1,4 +1,5 @@
 mod bdepend_avail;
+mod binpkg;
 mod cli;
 mod crossdev;
 mod ebuild;
@@ -342,6 +343,8 @@ async fn emerge_atoms_inner(
         cli.emptytree,
         cli.jobs.map(|j| j as usize).unwrap_or(1).max(1),
         cli.buildpkg,
+        cli.usepkg,
+        cli,
     )
     .await
 }
@@ -383,18 +386,58 @@ async fn run_merge_plan(
     emptytree: bool,
     jobs: usize,
     buildpkg: bool,
+    usepkg: bool,
+    globals: &cli::Cli,
 ) -> Result<()> {
     let merge_root = roots.merge_root();
     let total = plan.len();
 
+    // Open the binpkg index once if `-k`/`--usepkg` is set, so the merge loop
+    // can reuse a valid local binpkg instead of building from source.
+    let binpkg_index = if usepkg {
+        let pkgdir = binpkg::resolve_pkgdir(globals);
+        match binpkg::BinpkgIndex::open(pkgdir.as_std_path()) {
+            Ok(idx) => {
+                if idx.len() > 0 {
+                    println!(">>> --usepkg: {} binary package(s) in {pkgdir}", idx.len());
+                }
+                Some(idx)
+            }
+            Err(e) => {
+                eprintln!("warning: --usepkg index unavailable ({pkgdir}): {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let (merged, skipped, failures) = if jobs <= 1 {
         merge_sequential(
-            plan, roots, work_base, distdir, quiet, keep_going, emptytree, buildpkg,
+            plan,
+            roots,
+            work_base,
+            distdir,
+            quiet,
+            keep_going,
+            emptytree,
+            buildpkg,
+            binpkg_index.as_ref(),
         )
         .await
     } else {
         merge_parallel(
-            plan, blockers, roots, work_base, distdir, quiet, keep_going, emptytree, jobs, buildpkg,
+            plan,
+            blockers,
+            roots,
+            work_base,
+            distdir,
+            quiet,
+            keep_going,
+            emptytree,
+            jobs,
+            buildpkg,
+            binpkg_index.as_ref(),
         )
         .await
     };
@@ -446,6 +489,7 @@ async fn merge_sequential(
     keep_going: bool,
     emptytree: bool,
     buildpkg: bool,
+    binpkg_index: Option<&binpkg::BinpkgIndex>,
 ) -> (usize, usize, Vec<MergeFailure>) {
     let merge_root = roots.merge_root();
     let total = plan.len();
@@ -469,22 +513,49 @@ async fn merge_sequential(
             continue;
         }
 
+        // `-k`/`--usepkg`: reuse a valid local binpkg if one matches the cpv and
+        // the desired USE (IUSE-filtered), skipping fetch → compile.
+        let desired_use: Vec<String> = planned
+            .use_flags
+            .iter()
+            .map(|f| f.as_str().to_string())
+            .collect();
+        let reused = binpkg_index.and_then(|idx| idx.find_reusable(&planned.cpv, &desired_use));
+
         println!("\n>>> Emerging ({} of {total}) {}", i + 1, planned.cpv);
-        match ebuild::build_and_merge(
-            &planned.ebuild_path,
-            &planned.use_flags,
-            work_base,
-            merge_root,
-            distdir,
-            quiet,
-            roots.config(),
-            roots.build_sysroot(),
-            roots.eprefix(),
-            None,
-            buildpkg,
-        )
-        .await
-        {
+        let result = if let Some(binpkg_path) = reused {
+            println!(">>> Using binary package: {}", binpkg_path.display());
+            ebuild::merge_binpkg(
+                camino::Utf8Path::from_path(binpkg_path.as_path())
+                    .unwrap_or_else(|| camino::Utf8Path::new("/invalid-binpkg-path")),
+                &planned.ebuild_path,
+                &planned.use_flags,
+                work_base,
+                merge_root,
+                quiet,
+                roots.config(),
+                roots.build_sysroot(),
+                roots.eprefix(),
+                None,
+            )
+            .await
+        } else {
+            ebuild::build_and_merge(
+                &planned.ebuild_path,
+                &planned.use_flags,
+                work_base,
+                merge_root,
+                distdir,
+                quiet,
+                roots.config(),
+                roots.build_sysroot(),
+                roots.eprefix(),
+                None,
+                buildpkg,
+            )
+            .await
+        };
+        match result {
             Ok(()) => merged += 1,
             Err(e) => {
                 eprintln!(">>> Failed to emerge {} — {e:#}", planned.cpv);
@@ -574,6 +645,7 @@ async fn merge_parallel(
     emptytree: bool,
     jobs: usize,
     buildpkg: bool,
+    binpkg_index: Option<&binpkg::BinpkgIndex>,
 ) -> (usize, usize, Vec<MergeFailure>) {
     let merge_root = roots.merge_root();
     let total = plan.len();
@@ -601,27 +673,61 @@ async fn merge_parallel(
                 continue;
             }
             started += 1;
-            println!(
-                ">>> Emerging ({started} of {total}) {} [+{} building]",
-                planned.cpv,
-                inflight.len()
-            );
+            // `-k`/`--usepkg`: reuse a matching local binpkg, skipping the build.
+            let desired_use: Vec<String> = planned
+                .use_flags
+                .iter()
+                .map(|f| f.as_str().to_string())
+                .collect();
+            let reused = binpkg_index.and_then(|idx| idx.find_reusable(&planned.cpv, &desired_use));
+            if let Some(binpkg_path) = &reused {
+                println!(
+                    ">>> Emerging ({started} of {total}) {} [+{} building] (binary)",
+                    planned.cpv,
+                    inflight.len()
+                );
+                println!(">>> Using binary package: {}", binpkg_path.display());
+            } else {
+                println!(
+                    ">>> Emerging ({started} of {total}) {} [+{} building]",
+                    planned.cpv,
+                    inflight.len()
+                );
+            }
             let gate = &merge_gate;
             inflight.push(async move {
-                let res = ebuild::build_and_merge(
-                    &planned.ebuild_path,
-                    &planned.use_flags,
-                    work_base,
-                    merge_root,
-                    distdir,
-                    quiet,
-                    roots.config(),
-                    roots.build_sysroot(),
-                    roots.eprefix(),
-                    Some(gate),
-                    buildpkg,
-                )
-                .await;
+                let res = if let Some(binpkg_path) = reused {
+                    let binpkg_path = camino::Utf8Path::from_path(binpkg_path.as_path())
+                        .unwrap_or_else(|| camino::Utf8Path::new("/invalid-binpkg-path"));
+                    ebuild::merge_binpkg(
+                        binpkg_path,
+                        &planned.ebuild_path,
+                        &planned.use_flags,
+                        work_base,
+                        merge_root,
+                        quiet,
+                        roots.config(),
+                        roots.build_sysroot(),
+                        roots.eprefix(),
+                        Some(gate),
+                    )
+                    .await
+                } else {
+                    ebuild::build_and_merge(
+                        &planned.ebuild_path,
+                        &planned.use_flags,
+                        work_base,
+                        merge_root,
+                        distdir,
+                        quiet,
+                        roots.config(),
+                        roots.build_sysroot(),
+                        roots.eprefix(),
+                        Some(gate),
+                        buildpkg,
+                    )
+                    .await
+                };
                 (i, res)
             });
         }

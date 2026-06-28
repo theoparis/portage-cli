@@ -186,6 +186,58 @@ pub async fn build_and_merge(
     .with_context(|| format!("build log: {log}"))
 }
 
+/// Merge a pre-built binary package (`-k`/`--usepkg`): extract the GPKG's image
+/// into the work tree, then run only the `qmerge` phase (which sources the
+/// ebuild for env/hooks and merges from `work_root/image`). Skips fetch →
+/// compile entirely. The caller has already validated the binpkg is reusable
+/// (version + USE + slot match) via [`crate::binpkg::BinpkgIndex`].
+#[allow(clippy::too_many_arguments)]
+pub async fn merge_binpkg(
+    binpkg_path: &Utf8Path,
+    ebuild_path: &Utf8Path,
+    use_flags: &[portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>],
+    work_base: &Utf8Path,
+    root: &Utf8Path,
+    quiet: bool,
+    config_root: Option<&Utf8Path>,
+    sysroot: Option<&Utf8Path>,
+    eprefix: Option<&Utf8Path>,
+    merge_gate: Option<&tokio::sync::Mutex<()>>,
+) -> Result<()> {
+    let ebuild =
+        Ebuild::from_path(ebuild_path).with_context(|| format!("loading {ebuild_path}"))?;
+    let pf = format!("{}-{}", ebuild.name(), ebuild.version());
+    let work_dir = work_base.join(ebuild.category()).join(pf);
+    let log = work_dir.join("build.log");
+
+    // Extract the binpkg image into work_dir/image — the qmerge phase merges
+    // from ed_image_dir() which resolves to work_root/image.
+    let image_dir = work_dir.join("image");
+    std::fs::create_dir_all(image_dir.as_std_path())
+        .with_context(|| format!("creating {image_dir}"))?;
+    portage_binpkg::extract_image(binpkg_path.as_std_path(), image_dir.as_std_path())
+        .with_context(|| format!("extracting image from {binpkg_path}"))?;
+
+    let phases: Vec<String> = ["qmerge"].iter().map(|s| s.to_string()).collect();
+    run_inner(
+        ebuild_path.as_str(),
+        &phases,
+        Some(&work_dir),
+        None,
+        root,
+        Some(use_flags),
+        None,
+        Some((log.clone(), quiet)),
+        config_root,
+        sysroot,
+        eprefix,
+        merge_gate,
+        false,
+    )
+    .await
+    .with_context(|| format!("merge log: {log}"))
+}
+
 /// Resolve a repo's master repositories (depth-first), so eclasses inherited
 /// from a master are found. Master locations come from `repos.conf` by name,
 /// falling back to a sibling of `repo_root`. Masters that can't be opened are
