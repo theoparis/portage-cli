@@ -344,6 +344,8 @@ async fn emerge_atoms_inner(
         cli.jobs.map(|j| j as usize).unwrap_or(1).max(1),
         cli.buildpkg,
         cli.usepkg,
+        cli.getbinpkg,
+        cli.getbinpkgonly,
         cli,
     )
     .await
@@ -387,19 +389,29 @@ async fn run_merge_plan(
     jobs: usize,
     buildpkg: bool,
     usepkg: bool,
+    getbinpkg: bool,
+    getbinpkgonly: bool,
     globals: &cli::Cli,
 ) -> Result<()> {
     let merge_root = roots.merge_root();
     let total = plan.len();
 
-    // Open the binpkg index once if `-k`/`--usepkg` is set, so the merge loop
-    // can reuse a valid local binpkg instead of building from source.
-    let binpkg_index = if usepkg {
+    // Implication chain (portage actions.py): -g ⇒ --usepkg, -G ⇒ --getbinpkg +
+    // binpkg-only (no source). So both enable local reuse; local overrides remote.
+    let want_local = usepkg || getbinpkg || getbinpkgonly;
+    let want_remote = getbinpkg || getbinpkgonly;
+    let enforce_no_source = getbinpkgonly;
+
+    // Open the local binpkg index once if any binpkg reuse is in effect.
+    let binpkg_index = if want_local {
         let pkgdir = binpkg::resolve_pkgdir(globals);
         match binpkg::BinpkgIndex::open(pkgdir.as_std_path()) {
             Ok(idx) => {
                 if idx.len() > 0 {
-                    println!(">>> --usepkg: {} binary package(s) in {pkgdir}", idx.len());
+                    println!(
+                        ">>> --usepkg: {} local binary package(s) in {pkgdir}",
+                        idx.len()
+                    );
                 }
                 Some(idx)
             }
@@ -410,6 +422,32 @@ async fn run_merge_plan(
         }
     } else {
         None
+    };
+
+    // Fetch each configured remote binhost's Packages index. `-g`/`-G` only.
+    let remote_indices: Vec<binpkg::RemoteBinpkgIndex> = if want_remote {
+        let binhosts = binpkg::portage_binhosts(globals);
+        if binhosts.is_empty() {
+            eprintln!(
+                "warning: --getbinpkg set but no binhost configured (PORTAGE_BINHOST unset, no binrepos.conf)"
+            );
+        }
+        let mut fetched = Vec::new();
+        for base in &binhosts {
+            match portage_distfiles::fetch_index(base).await {
+                Ok(text) => {
+                    let idx = binpkg::RemoteBinpkgIndex::new(&text, base);
+                    println!(">>> --getbinpkg: {} package(s) on {base}", idx.len());
+                    fetched.push(idx);
+                }
+                Err(e) => {
+                    eprintln!("warning: could not fetch binhost index {base}: {e:#}");
+                }
+            }
+        }
+        fetched
+    } else {
+        Vec::new()
     };
 
     let (merged, skipped, failures) = if jobs <= 1 {
@@ -423,6 +461,8 @@ async fn run_merge_plan(
             emptytree,
             buildpkg,
             binpkg_index.as_ref(),
+            &remote_indices,
+            enforce_no_source,
         )
         .await
     } else {
@@ -438,6 +478,8 @@ async fn run_merge_plan(
             jobs,
             buildpkg,
             binpkg_index.as_ref(),
+            &remote_indices,
+            enforce_no_source,
         )
         .await
     };
@@ -490,6 +532,8 @@ async fn merge_sequential(
     emptytree: bool,
     buildpkg: bool,
     binpkg_index: Option<&binpkg::BinpkgIndex>,
+    remote_indices: &[binpkg::RemoteBinpkgIndex],
+    enforce_no_source: bool,
 ) -> (usize, usize, Vec<MergeFailure>) {
     let merge_root = roots.merge_root();
     let total = plan.len();
@@ -513,14 +557,25 @@ async fn merge_sequential(
             continue;
         }
 
-        // `-k`/`--usepkg`: reuse a valid local binpkg if one matches the cpv and
-        // the desired USE (IUSE-filtered), skipping fetch → compile.
         let desired_use: Vec<String> = planned
             .use_flags
             .iter()
             .map(|f| f.as_str().to_string())
             .collect();
+
+        // 1. Local binpkg reuse (`-k`, or `-g`/`-G` where local overrides remote).
         let reused = binpkg_index.and_then(|idx| idx.find_reusable(&planned.cpv, &desired_use));
+
+        // 2. Remote binpkg (`-g`/`-G`): download the first matching binpkg into
+        //    a per-run cache, then merge it. Local already took precedence.
+        let remote_url = reused
+            .is_none()
+            .then(|| {
+                remote_indices
+                    .iter()
+                    .find_map(|idx| idx.find_reusable(&planned.cpv, &desired_use))
+            })
+            .flatten();
 
         println!("\n>>> Emerging ({} of {total}) {}", i + 1, planned.cpv);
         let result = if let Some(binpkg_path) = reused {
@@ -539,6 +594,68 @@ async fn merge_sequential(
                 None,
             )
             .await
+        } else if let Some(url) = remote_url {
+            match fetch_remote_binpkg(&url, work_base).await {
+                Ok(path) => {
+                    println!(">>> Fetched binary package: {url}");
+                    ebuild::merge_binpkg(
+                        &path,
+                        &planned.ebuild_path,
+                        &planned.use_flags,
+                        work_base,
+                        merge_root,
+                        quiet,
+                        roots.config(),
+                        roots.build_sysroot(),
+                        roots.eprefix(),
+                        None,
+                    )
+                    .await
+                }
+                Err(e) => {
+                    eprintln!(">>> Failed to fetch binpkg {url} — {e:#}");
+                    if enforce_no_source {
+                        failures.push(MergeFailure {
+                            cpv: planned.cpv.clone(),
+                            log: work_base.join(&planned.cpv).join("build.log"),
+                            cause: format!("remote binpkg fetch failed: {e:#}"),
+                        });
+                        if !keep_going {
+                            break;
+                        }
+                        continue;
+                    }
+                    // Fall through to a source build.
+                    ebuild::build_and_merge(
+                        &planned.ebuild_path,
+                        &planned.use_flags,
+                        work_base,
+                        merge_root,
+                        distdir,
+                        quiet,
+                        roots.config(),
+                        roots.build_sysroot(),
+                        roots.eprefix(),
+                        None,
+                        buildpkg,
+                    )
+                    .await
+                }
+            }
+        } else if enforce_no_source {
+            eprintln!(
+                ">>> No binary package for {} (local or remote) and --getbinpkgonly is set",
+                planned.cpv
+            );
+            failures.push(MergeFailure {
+                cpv: planned.cpv.clone(),
+                log: work_base.join(&planned.cpv).join("build.log"),
+                cause: "no matching binpkg and source builds disabled (--getbinpkgonly)".into(),
+            });
+            if !keep_going {
+                break;
+            }
+            continue;
         } else {
             ebuild::build_and_merge(
                 &planned.ebuild_path,
@@ -572,6 +689,27 @@ async fn merge_sequential(
         }
     }
     (merged, skipped, failures)
+}
+
+/// Download a remote binpkg from `url` into a per-run cache under `work_base`,
+/// returning the local path. Cached per filename so a retry doesn't re-download.
+async fn fetch_remote_binpkg(
+    url: &str,
+    work_base: &camino::Utf8Path,
+) -> Result<camino::Utf8PathBuf> {
+    let cache_dir = work_base.join("binpkg-cache");
+    tokio::fs::create_dir_all(cache_dir.as_std_path())
+        .await
+        .with_context(|| format!("creating {cache_dir}"))?;
+    // Filename: the last path segment of the URL (e.g. foo-1.0-1.gpkg.tar).
+    let name = url.rsplit('/').next().unwrap_or("binpkg.gpkg.tar");
+    let dest = cache_dir.join(name);
+    if !dest.exists() {
+        portage_distfiles::fetch_binpkg(url, dest.as_std_path())
+            .await
+            .with_context(|| format!("downloading {url}"))?;
+    }
+    Ok(dest)
 }
 
 /// Tracks which plan entries are ready to build given the build-dep `blockers`
@@ -646,6 +784,8 @@ async fn merge_parallel(
     jobs: usize,
     buildpkg: bool,
     binpkg_index: Option<&binpkg::BinpkgIndex>,
+    remote_indices: &[binpkg::RemoteBinpkgIndex],
+    enforce_no_source: bool,
 ) -> (usize, usize, Vec<MergeFailure>) {
     let merge_root = roots.merge_root();
     let total = plan.len();
@@ -673,26 +813,39 @@ async fn merge_parallel(
                 continue;
             }
             started += 1;
-            // `-k`/`--usepkg`: reuse a matching local binpkg, skipping the build.
             let desired_use: Vec<String> = planned
                 .use_flags
                 .iter()
                 .map(|f| f.as_str().to_string())
                 .collect();
             let reused = binpkg_index.and_then(|idx| idx.find_reusable(&planned.cpv, &desired_use));
-            if let Some(binpkg_path) = &reused {
-                println!(
-                    ">>> Emerging ({started} of {total}) {} [+{} building] (binary)",
-                    planned.cpv,
-                    inflight.len()
-                );
-                println!(">>> Using binary package: {}", binpkg_path.display());
+            // Local overrides remote; only look remote when no local match.
+            let remote_url = reused
+                .is_none()
+                .then(|| {
+                    remote_indices
+                        .iter()
+                        .find_map(|idx| idx.find_reusable(&planned.cpv, &desired_use))
+                })
+                .flatten();
+            let tag = if reused.is_some() {
+                " (binary)"
+            } else if remote_url.is_some() {
+                " (binary, remote)"
+            } else if enforce_no_source {
+                " (no binpkg — blocked by --getbinpkgonly)"
             } else {
-                println!(
-                    ">>> Emerging ({started} of {total}) {} [+{} building]",
-                    planned.cpv,
-                    inflight.len()
-                );
+                ""
+            };
+            println!(
+                ">>> Emerging ({started} of {total}) {} [+{} building]{tag}",
+                planned.cpv,
+                inflight.len()
+            );
+            if let Some(p) = reused.as_ref() {
+                println!(">>> Using binary package: {}", p.display());
+            } else if let Some(u) = remote_url.as_ref() {
+                println!(">>> Fetched binary package: {u}");
             }
             let gate = &merge_gate;
             inflight.push(async move {
@@ -712,6 +865,29 @@ async fn merge_parallel(
                         Some(gate),
                     )
                     .await
+                } else if let Some(url) = remote_url {
+                    match fetch_remote_binpkg(&url, work_base).await {
+                        Ok(path) => {
+                            ebuild::merge_binpkg(
+                                &path,
+                                &planned.ebuild_path,
+                                &planned.use_flags,
+                                work_base,
+                                merge_root,
+                                quiet,
+                                roots.config(),
+                                roots.build_sysroot(),
+                                roots.eprefix(),
+                                Some(gate),
+                            )
+                            .await
+                        }
+                        Err(e) => Err(e),
+                    }
+                } else if enforce_no_source {
+                    Err(anyhow::anyhow!(
+                        "no matching binpkg and source builds disabled (--getbinpkgonly)"
+                    ))
                 } else {
                     ebuild::build_and_merge(
                         &planned.ebuild_path,

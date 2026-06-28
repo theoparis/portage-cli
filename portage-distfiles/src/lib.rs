@@ -4,11 +4,13 @@
 //! `DISTDIR`/`PORTAGE_RO_DISTDIRS`, and verifies them against Manifest
 //! checksums.
 
+pub mod binhost;
 pub mod error;
 pub mod fetch;
 pub mod mirrors;
 pub mod resolver;
 
+pub use binhost::{fetch_binpkg, fetch_index};
 pub use error::{Error, Result};
 pub use fetch::{FetchConfig, FetchStatus, FetchStrategy, Fetcher};
 pub use mirrors::{Endpoint, Mirror, MirrorList, default_mirror_list};

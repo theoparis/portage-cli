@@ -109,34 +109,7 @@ impl BinpkgIndex {
     /// Parse a `Packages` file. The first blank-line-separated block is the
     /// header; each later block is one package (`CPV:` required).
     fn parse(text: &str, pkgdir: PathBuf) -> Result<Self> {
-        let mut entries = BTreeMap::new();
-        for block in text.split("\n\n") {
-            let block = block.trim();
-            if block.is_empty() {
-                continue;
-            }
-            // Skip the header block (no CPV key).
-            if !block.lines().any(|l| l.starts_with("CPV:")) {
-                continue;
-            }
-            let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
-            for line in block.lines() {
-                if let Some((k, v)) = line.split_once(": ") {
-                    fields.insert(k, v);
-                }
-            }
-            let Some(&cpv) = fields.get("CPV") else {
-                continue;
-            };
-            entries.insert(
-                cpv.to_string(),
-                BinpkgEntry {
-                    path: fields.get("PATH").copied().unwrap_or("").to_string(),
-                    use_set: split_use(fields.get("USE").copied().unwrap_or("")),
-                    iuse: split_iuse(fields.get("IUSE").copied().unwrap_or("")),
-                },
-            );
-        }
+        let entries = parse_packages_entries(text);
         Ok(Self { entries, pkgdir })
     }
 
@@ -204,6 +177,93 @@ fn split_iuse(s: &str) -> HashSet<String> {
     s.split_whitespace()
         .map(|t| t.trim_start_matches(['+', '-']).to_owned())
         .collect()
+}
+
+/// Parse a `Packages` index into `cpv → entry`. Shared by the local and remote
+/// consumers (the only difference is how `path` is resolved: a local `PKGDIR`
+/// join vs a remote `base_uri` join). The header block (no `CPV:`) is skipped.
+pub fn parse_packages_entries(text: &str) -> BTreeMap<String, BinpkgEntry> {
+    let mut entries = BTreeMap::new();
+    for block in text.split("\n\n") {
+        let block = block.trim();
+        if block.is_empty() || !block.lines().any(|l| l.starts_with("CPV:")) {
+            continue;
+        }
+        let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
+        for line in block.lines() {
+            if let Some((k, v)) = line.split_once(": ") {
+                fields.insert(k, v);
+            }
+        }
+        let Some(&cpv) = fields.get("CPV") else {
+            continue;
+        };
+        entries.insert(
+            cpv.to_string(),
+            BinpkgEntry {
+                path: fields.get("PATH").copied().unwrap_or("").to_string(),
+                use_set: split_use(fields.get("USE").copied().unwrap_or("")),
+                iuse: split_iuse(fields.get("IUSE").copied().unwrap_or("")),
+            },
+        );
+    }
+    entries
+}
+
+/// A remote binhost's `Packages` index, parsed from a fetched index text and a
+/// base URI. Mirrors [`BinpkgIndex`] but resolves each entry's `PATH` to a
+/// download URL instead of a local file — used by `-g`/`--getbinpkg`.
+#[derive(Debug, Clone)]
+pub struct RemoteBinpkgIndex {
+    entries: BTreeMap<String, BinpkgEntry>,
+    base_uri: String,
+}
+
+impl RemoteBinpkgIndex {
+    /// Build from a fetched index body and the binhost base URI (the `sync-uri`
+    /// / `PORTAGE_BINHOST` entry the index was fetched from).
+    pub fn new(index_text: &str, base_uri: &str) -> Self {
+        Self {
+            entries: parse_packages_entries(index_text),
+            base_uri: base_uri.trim_end_matches('/').to_string(),
+        }
+    }
+
+    /// The number of indexed packages (for reporting).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Find a reusable remote binpkg for `cpv`, returning its download URL.
+    /// `None` if the cpv is absent or its USE does not match the desired set
+    /// (same `use_compatible` rule as the local index).
+    pub fn find_reusable(&self, cpv: &str, desired_use: &[String]) -> Option<String> {
+        let entry = self.entries.get(cpv)?;
+        if !use_compatible(&entry.use_set, &entry.iuse, desired_use) {
+            return None;
+        }
+        // portage: download URL = BASE_URI + "/" + PATH. PATH is the per-entry
+        // index field; the binhost's own `URI` header (a server-controlled
+        // override) is not yet honoured — tracked in PENDING.
+        Some(format!("{}/{path}", self.base_uri, path = entry.path))
+    }
+}
+
+/// Resolve the configured remote binhost URIs (`PORTAGE_BINHOST`, legacy
+/// make.conf var, space-separated; `binrepos.conf` is a follow-up). Order is
+/// preserved. Used by `-g`/`--getbinpkg`.
+pub(crate) fn portage_binhosts(globals: &Cli) -> Vec<String> {
+    if let Ok(val) = std::env::var("PORTAGE_BINHOST")
+        && !val.trim().is_empty()
+    {
+        return val.split_whitespace().map(str::to_owned).collect();
+    }
+    if let Some(val) = read_make_conf_var(globals, "PORTAGE_BINHOST")
+        && !val.is_empty()
+    {
+        return val.split_whitespace().map(str::to_owned).collect();
+    }
+    Vec::new()
 }
 
 /// The reuse core: is a binpkg's `USE` (restricted to its `IUSE`) equal to the
@@ -367,5 +427,35 @@ USE: ssl
             idx.find_reusable("app-test/missing-9.9", &desired(&["nls"]))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn remote_index_resolves_to_download_url() {
+        // Same index text as the local case, but resolved against a binhost
+        // base URI → find_reusable returns a URL, not a local path.
+        let text = "\
+VERSION: 0
+PACKAGES: 1
+
+CPV: app-test/foo-1.0
+IUSE: +nls -debug
+PATH: app-test/foo-1.0-1.gpkg.tar
+USE: nls
+";
+        let idx = RemoteBinpkgIndex::new(text, "https://binhost.example/");
+        assert_eq!(idx.len(), 1);
+        // Trailing slash on base_uri is trimmed; URL = base + "/" + PATH.
+        assert_eq!(
+            idx.find_reusable("app-test/foo-1.0", &desired(&["nls"])).unwrap(),
+            "https://binhost.example/app-test/foo-1.0-1.gpkg.tar"
+        );
+        // Stale USE → None (same use_compatible rule as local).
+        assert!(idx
+            .find_reusable("app-test/foo-1.0", &desired(&["nls", "debug"]))
+            .is_none());
+        // Unknown cpv → None.
+        assert!(idx
+            .find_reusable("app-test/missing-9.9", &desired(&["nls"]))
+            .is_none());
     }
 }
