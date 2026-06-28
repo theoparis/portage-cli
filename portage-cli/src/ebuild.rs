@@ -1440,6 +1440,19 @@ fn walk_image(
                 }
 
                 if !linked {
+                    // Portage unlinks the destination before installing. A bare
+                    // `std::fs::copy` opens the existing file O_WRONLY|O_TRUNC,
+                    // which is EACCES when the destination is read-only (e.g.
+                    // bash's mode-0555 `bashbug` on re-merge). Removing first
+                    // lets the copy create a fresh file, which needs only write
+                    // permission on the *directory* (not the file). Ignore
+                    // NotFound (fresh install); any other unlink error falls
+                    // through to `copy`, which surfaces the canonical message.
+                    if let Err(e) = std::fs::remove_file(write_path.as_std_path())
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        let _ = e;
+                    }
                     std::fs::copy(src_path.as_std_path(), write_path.as_std_path())
                         .with_context(|| format!("copy {src_path} → {write_path}"))?;
                     std::fs::set_permissions(write_path.as_std_path(), meta.permissions())
@@ -1774,6 +1787,40 @@ mod tests {
             Some(&*format!("{:x}", md5::compute(b"new\n")))
         );
         assert!(!contents.iter().any(|e| e.path.as_str().contains("._cfg")));
+    }
+
+    #[test]
+    fn walk_image_overwrites_readonly_file() {
+        // Re-merging over an existing read-only file (e.g. bash's mode-0555
+        // bashbug) must not EACCES: the destination is unlinked before copy, so
+        // the copy creates a fresh file (directory write perm is enough).
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let image = Utf8PathBuf::try_from(tmp.path().join("image")).unwrap();
+        let root = Utf8PathBuf::try_from(tmp.path().join("root")).unwrap();
+
+        fs::create_dir_all(root.join("usr/bin").as_std_path()).unwrap();
+        fs::write(root.join("usr/bin/bug").as_std_path(), b"old\n").unwrap();
+        // Make the existing destination read-only (mode 0555).
+        std::fs::set_permissions(
+            root.join("usr/bin/bug").as_std_path(),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+
+        fs::create_dir_all(image.join("usr/bin").as_std_path()).unwrap();
+        fs::write(image.join("usr/bin/bug").as_std_path(), b"new\n").unwrap();
+
+        let WalkResult { contents, .. } = walk_image(&image, &root, &ConfigProtect::none())
+            .expect("re-merge over a read-only file must succeed (unlink before copy)");
+
+        assert_eq!(
+            fs::read(root.join("usr/bin/bug").as_std_path()).unwrap(),
+            b"new\n"
+        );
+        // The image mode is applied after copy; the read-only 0555 dest was
+        // replaced, so the new content is readable.
+        assert!(contents.iter().any(|e| e.path == "/usr/bin/bug"));
     }
 
     #[test]
