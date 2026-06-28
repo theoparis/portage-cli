@@ -124,6 +124,7 @@ pub async fn run(
         eprefix,
         None,
         false,
+        None,
     )
     .await
 }
@@ -181,6 +182,7 @@ pub async fn build_and_merge(
         eprefix,
         merge_gate,
         buildpkg,
+        None,
     )
     .await
     .with_context(|| format!("build log: {log}"))
@@ -210,14 +212,8 @@ pub async fn merge_binpkg(
     let work_dir = work_base.join(ebuild.category()).join(pf);
     let log = work_dir.join("build.log");
 
-    // Extract the binpkg image into work_dir/image — the qmerge phase merges
-    // from ed_image_dir() which resolves to work_root/image.
-    let image_dir = work_dir.join("image");
-    std::fs::create_dir_all(image_dir.as_std_path())
-        .with_context(|| format!("creating {image_dir}"))?;
-    portage_binpkg::extract_image(binpkg_path.as_std_path(), image_dir.as_std_path())
-        .with_context(|| format!("extracting image from {binpkg_path}"))?;
-
+    // The image is extracted inside run_inner (after its clean step) from the
+    // binpkg, then the qmerge phase merges from work_root/image.
     let phases: Vec<String> = ["qmerge"].iter().map(|s| s.to_string()).collect();
     run_inner(
         ebuild_path.as_str(),
@@ -233,6 +229,7 @@ pub async fn merge_binpkg(
         eprefix,
         merge_gate,
         false,
+        Some(binpkg_path),
     )
     .await
     .with_context(|| format!("merge log: {log}"))
@@ -296,6 +293,11 @@ async fn run_inner(
     eprefix: Option<&Utf8Path>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
     buildpkg: bool,
+    // A pre-built GPKG to merge (`-k`): when set, its image is extracted into
+    // work_dir/image *after* the clean step below (so the clean doesn't wipe
+    // it) and the phase list should be just ["qmerge"]. None for a normal
+    // source build.
+    binpkg: Option<&Utf8Path>,
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
     let ebuild = Ebuild::from_path(path).with_context(|| format!("loading {ebuild_path}"))?;
@@ -473,6 +475,18 @@ async fn run_inner(
         }
     }
 
+    // `-k`/`--usepkg`: extract the binpkg image *after* the clean above (which
+    // wipes work_dir/image to defeat stale-${D} leakage on re-emerge). The image
+    // is the authoritative payload here — there is no src_compile to repopulate
+    // it — so it must land between the clean and the qmerge walk.
+    if let (Some(wd), Some(bp)) = (work_dir, binpkg) {
+        let image_dir = wd.join("image");
+        std::fs::create_dir_all(image_dir.as_std_path())
+            .with_context(|| format!("creating {image_dir}"))?;
+        portage_binpkg::extract_image(bp.as_std_path(), image_dir.as_std_path())
+            .with_context(|| format!("extracting image from {bp}"))?;
+    }
+
     for phase in phases {
         // In the merge chain, src_test only runs under FEATURES=test
         // (an explicit `em ebuild … test` always runs it).
@@ -560,10 +574,19 @@ fn build_binpkg(
         vdb_dir.exists(),
         "VDB entry {vdb_dir} not found (qmerge did not write it?)"
     );
-    let pkgdir = shell
-        .get_var("PKGDIR")
+    // PKGDIR precedence: $PKGDIR env (portage honours it) → the shell's resolved
+    // value (make.conf/make.globals) → the default. Must agree with the
+    // consumer's `binpkg::resolve_pkgdir`.
+    let pkgdir = std::env::var("PKGDIR")
+        .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            shell
+                .get_var("PKGDIR")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "/var/cache/binpkgs".to_string());
     let build_id = next_build_id(&pkgdir, cat, &pf);
     let out = Utf8PathBuf::from(pkgdir)
