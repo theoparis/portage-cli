@@ -53,6 +53,8 @@ futures-util = { workspace = true }
 thiserror = { workspace = true }
 mimalloc = { workspace = true, optional = true }
 md5 = { workspace = true }
+sha1 = { workspace = true }
+hex = { workspace = true }
 object = { workspace = true }
 bzip2 = { workspace = true }
 rustix = { workspace = true }

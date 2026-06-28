@@ -14,7 +14,8 @@
 //! image so file capabilities/ACLs and device nodes survive) and compressed with
 //! zstd — the Portage default. Requires `tar` and `zstd` on `PATH`.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use blake2::Blake2b512;
@@ -165,5 +166,172 @@ fn run(tool: &'static str, cmd: &mut Command) -> Result<()> {
             tool,
             code: status.code().unwrap_or(-1),
         })
+    }
+}
+
+/// Run a command and capture its stdout, failing on a non-zero exit.
+fn capture(tool: &'static str, cmd: &mut Command) -> Result<Vec<u8>> {
+    let out = cmd.output()?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(Error::Tool {
+            tool,
+            code: out.status.code().unwrap_or(-1),
+        })
+    }
+}
+
+/// Read the flat VDB-style metadata from a GPKG container's inner
+/// `metadata.tar.<c>`.
+///
+/// Returns a map of *field name → value* for every text member under
+/// `metadata/` (binary or non-field members — `environment.bz2`, the copied
+/// `<PF>.ebuild` — are skipped). Requires `tar` and `zstd` on `PATH`. This is
+/// what [`write_gpkg`] packs into `<basename>/metadata.tar.zst` and what the
+/// binhost `Packages` index and the `-k` consumer read back.
+pub fn read_metadata(container: &Path) -> Result<BTreeMap<String, String>> {
+    let staging = tempfile::Builder::new().prefix("em-gpkg-read-").tempdir()?;
+    let root = staging.path().to_path_buf();
+
+    // 1. Locate the inner `metadata.tar.<c>` member in the container. GNU tar
+    //    lists members relative to the archive root (`<basename>/metadata.tar.zst`).
+    let listing = String::from_utf8_lossy(&capture(
+        "tar",
+        Command::new("tar").arg("-tf").arg(container),
+    )?)
+    .into_owned();
+    let member = listing
+        .lines()
+        .map(|l| l.trim_end_matches('/'))
+        .find(|m| {
+            let b = Path::new(m)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            b.starts_with("metadata.tar")
+        })
+        .ok_or_else(|| {
+            Error::Corrupt(format!(
+                "no metadata.tar.* member in {}",
+                container.display()
+            ))
+        })?;
+    let compressed = root.join(member);
+
+    // 2. Extract just that one member.
+    run(
+        "tar",
+        Command::new("tar")
+            .arg("-xf")
+            .arg(container)
+            .arg("-C")
+            .arg(&root)
+            .arg(member),
+    )?;
+
+    // 3. Decompress it to `metadata.tar`. `metadata.tar` is uncompressed for
+    //    GPKG, but accept a `.zst`/`.gz` suffix in case BINPKG_COMPRESS differs.
+    let metadata_tar: PathBuf = root.join("metadata.tar");
+    let bytes = match compressed.extension().and_then(|e| e.to_str()) {
+        Some("zst") => capture("zstd", Command::new("zstd").arg("-dc").arg(&compressed))?,
+        Some("gz") => capture("gzip", Command::new("gzip").arg("-dc").arg(&compressed))?,
+        _ => std::fs::read(&compressed)?,
+    };
+    std::fs::write(&metadata_tar, bytes)?;
+
+    // 4. Extract `metadata/*` (flat: the writer emits files with no dir entry).
+    run(
+        "tar",
+        Command::new("tar")
+            .arg("--no-same-owner")
+            .arg("-xf")
+            .arg(&metadata_tar)
+            .arg("-C")
+            .arg(&root),
+    )?;
+
+    // 5. Read each field file. Skip binary/large non-field members.
+    let mut map = BTreeMap::new();
+    let meta_dir = root.join("metadata");
+    for entry in std::fs::read_dir(&meta_dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "environment.bz2" || name.ends_with(".ebuild") {
+            continue;
+        }
+        let content = std::fs::read_to_string(entry.path())?;
+        map.insert(name, content.trim_end_matches('\n').to_string());
+    }
+    Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Build a fake `${D}` + VDB-style metadata dir, pack a gpkg, read the
+    /// metadata back — verifying the field files survive the round trip.
+    #[test]
+    fn write_then_read_metadata_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // ${D}: image with a single file and a setuid binary + dir.
+        let image = root.join("image");
+        fs::create_dir_all(image.join("usr/bin")).unwrap();
+        fs::write(image.join("usr/bin/hello"), b"#!/bin/sh\necho hi\n").unwrap();
+        fs::write(image.join("usr/bin/mount"), b"\xff\xfe\x00").unwrap();
+
+        // VDB-style metadata dir (flat field files).
+        let meta = root.join("vdb/foo-1.0");
+        fs::create_dir_all(&meta).unwrap();
+        let fields = [
+            ("PF", "foo-1.0"),
+            ("CATEGORY", "app-test"),
+            ("SLOT", "0"),
+            ("EAPI", "8"),
+            ("USE", "nls -debug"),
+            ("DESCRIPTION", "a test package"),
+            ("repository", "gentoo"),
+            ("BUILD_ID", "1"),
+            ("BUILD_TIME", "1700000000"),
+            ("SIZE", "42"),
+            ("DEPEND", ">=sys-libs/glibc-2.38"),
+        ];
+        for (k, v) in fields {
+            fs::write(meta.join(k), format!("{v}\n")).unwrap();
+        }
+        // A binary + a copied ebuild must be skipped by the reader.
+        fs::write(meta.join("environment.bz2"), b"not real bzip").unwrap();
+        fs::write(meta.join("foo-1.0.ebuild"), b"# ebuild body").unwrap();
+
+        let container = root.join("app-test/foo-1.0-1.gpkg.tar");
+        fs::create_dir_all(container.parent().unwrap()).unwrap();
+        write_gpkg(
+            &GpkgInput {
+                image_dir: &image,
+                metadata_dir: &meta,
+                basename: "foo-1.0",
+            },
+            &container,
+        )
+        .unwrap();
+
+        let out = read_metadata(&container).unwrap();
+        assert_eq!(out.get("PF").map(String::as_str), Some("foo-1.0"));
+        assert_eq!(out.get("CATEGORY").map(String::as_str), Some("app-test"));
+        assert_eq!(out.get("SLOT").map(String::as_str), Some("0"));
+        assert_eq!(out.get("USE").map(String::as_str), Some("nls -debug"));
+        assert_eq!(
+            out.get("DEPEND").map(String::as_str),
+            Some(">=sys-libs/glibc-2.38")
+        );
+        assert_eq!(out.get("repository").map(String::as_str), Some("gentoo"));
+        assert_eq!(out.get("BUILD_ID").map(String::as_str), Some("1"));
+        // The skipped members must not appear.
+        assert!(!out.contains_key("environment.bz2"));
+        assert!(!out.contains_key("foo-1.0.ebuild"));
     }
 }

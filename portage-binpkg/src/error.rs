@@ -16,4 +16,8 @@ pub enum Error {
     /// A path lacked an expected component (parent / file name).
     #[error("invalid path: {0}")]
     BadPath(PathBuf),
+
+    /// The container is missing a required member or is otherwise malformed.
+    #[error("corrupt or incomplete GPKG: {0}")]
+    Corrupt(String),
 }
