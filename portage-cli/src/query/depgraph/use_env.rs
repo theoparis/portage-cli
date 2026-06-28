@@ -537,9 +537,11 @@ mod tests {
         // then adds python2_7 — the documented "pin a single impl" pattern.
         let keys = ["PYTHON_TARGETS".to_string()];
         let defaults = |k: &str| {
-            (k == "PYTHON_TARGETS")
-                .then(|| vec!["python3_13".to_string()])
-                .unwrap_or_default()
+            if k == "PYTHON_TARGETS" {
+                vec!["python3_13".to_string()]
+            } else {
+                Default::default()
+            }
         };
         let out = expand_use_expand_colon(
             &["PYTHON_TARGETS:".into(), "-*".into(), "python2_7".into()],
