@@ -830,19 +830,19 @@ mod tests {
     #[test]
     fn merge_flag_lists_dash_star_clears_accumulated() {
         // `-*` discards everything seen so far; later tokens rebuild from empty.
-        let out = merge_flag_lists(["foo bar".into(), "-* baz".into()].into_iter());
+        let out = merge_flag_lists(["foo bar", "-* baz"].into_iter());
         assert_eq!(out, vec!["baz".to_string()]);
     }
 
     #[test]
     fn merge_flag_lists_dash_star_within_one_layer() {
-        let out = merge_flag_lists(["foo -* bar".into()].into_iter());
+        let out = merge_flag_lists(["foo -* bar"].into_iter());
         assert_eq!(out, vec!["bar".to_string()]);
     }
 
     #[test]
     fn merge_flag_lists_dash_star_alone_empties() {
-        let out = merge_flag_lists(["foo bar".into(), "-*".into()].into_iter());
+        let out = merge_flag_lists(["foo bar", "-*"].into_iter());
         assert!(out.is_empty());
     }
 
@@ -850,7 +850,7 @@ mod tests {
     fn merge_flag_lists_signed_dash_star_clears_and_is_consumed() {
         // The signed USE merge must clear accumulated state on `-*` and NOT
         // emit the token (it must not leak into the next layer on re-merge).
-        let out = merge_flag_lists_signed(["foo -bar".into(), "-* build".into()].into_iter());
+        let out = merge_flag_lists_signed(["foo -bar", "-* build"].into_iter());
         assert_eq!(out, vec!["build".to_string()]);
         assert!(
             !out.iter().any(|t| t == "-*" || t == "*"),
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn merge_flag_lists_signed_dash_star_then_disable_survives() {
         // After a clear-all, a subsequent disable is a fresh explicit disable.
-        let out = merge_flag_lists_signed(["a".into(), "-* -debug".into()].into_iter());
+        let out = merge_flag_lists_signed(["a", "-* -debug"].into_iter());
         assert_eq!(out, vec!["-debug".to_string()]);
     }
 
