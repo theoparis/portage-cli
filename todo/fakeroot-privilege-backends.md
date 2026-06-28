@@ -2,11 +2,18 @@
 
 STATUS: **v1.1 landed (2026-06-27)** — umbrella fakeroost session + merge chown +
 facet-2 name resolution, all validated on `sys-apps/util-linux`; **hakoniwa backend
-sketched** (opt-in `--privilege hakoniwa`, not yet wall-tested). **Next: tar/binpkg
-(not started)** — see "START HERE next session" near the end. Goal: a correct
+sketched** (opt-in `--privilege hakoniwa`, not yet wall-tested). **2026-06-28:
+fakeroost issue #7 fix on PR #8** (`user-notif-hybrid` branch) — stat routed
+through a seccomp `USER_NOTIF` thread pool lifts the supervisor ceiling ~2.7×
+(~100k→~290k stat/s, 3.5×→4.7× parallelism) and now *beats* upstream `fakeroot`
+under concurrency (which goes backwards, 0.68×). Confirms the scoping decision:
+fake-root wraps only `src_install`/archive, not the compile (see Q6). **Binpkg
+producer done (2026-06-28): `em -b` GPKG writer + `read_metadata` reader + `em
+maint binhost` `Packages` index all landed and validated — see
+[[em-stages-and-binhosts]] / PENDING.md (Binhosts).** Goal: a correct
 root-owned `@system` stage3 (setuid `mount`, `root:root`, file caps) without
-running em as root. Supersedes the "decision point" in [[stage-build-shakeout]]
-and the privilege half of [[build-clean-env]].
+running em as root. Supersedes the "decision point" in
+[[stage-build-shakeout]] and the privilege half of [[build-clean-env]].
 
 ## Implemented — v1 (umbrella session)
 
@@ -242,14 +249,30 @@ alternative to them.** The clean separation is:
   only) is that layer.
 
 So the realistic stack is **fakeroost *inside* hakoniwa**, but scoped: keep
-fakeroost's ptrace cost **off the compile** (where it serialized us into the ground,
-koca-build/fakeroost#7) and wrap only `src_install` + the image/archive step — the
-phases where device nodes and ownership metadata are actually produced. Ownership
-alone can instead be handled by archiving inside the box (no ptrace at all); the
-residual that *requires* the fake layer is device nodes. **TODO**: decide per-phase
-scoping (fakeroost only around `src_install`/`__stage-pack`), and whether ownership
-goes via in-box `tar` (cheap) with fakeroost reserved for `mknod` packages only.
-Ties into [[#future-tar--binpkg--stage-artifacts-none-exist-yet]] and Q1.
+fakeroost's ptrace cost **off the compile** and wrap only `src_install` + the
+image/archive step — the phases where device nodes and ownership metadata are
+actually produced. This scoping is right for two independent reasons, both now
+measured (see Q6):
+
+1. **Even with the issue #7 fix, fakeroost still carries a per-trapped-syscall
+   tax** (the USER_NOTIF pool lifted the *ceiling* ~2.7× — 100k→290k stat/s,
+   4.7× effective parallelism — but native is ~50M stat/s; the gap is still
+   ~150×). Wrapping the whole `make -j` tree pays that on every header stat. A
+   compile spends the vast majority of its syscalls in the build, not in install,
+   so scoping fakeroost to `src_install` removes the tax from the hot path.
+
+2. **The original `fakeroot` (LD_PRELOAD) is *worse* — it goes backwards under
+   load** (59k stat/s at 1 worker collapsing to 40k at 128, 0.68× effective
+   parallelism, because its state lives behind a global lock). fakeroost-with-the-
+   fix is strictly better than upstream fakeroot under concurrency, but neither is
+   free. So: don't wrap the build with *any* fake-root layer; wrap only the phase
+   that needs it.
+
+Ownership alone can instead be handled by archiving inside the box (no ptrace at
+all); the residual that *requires* the fake layer is device nodes. **TODO**:
+decide per-phase scoping (fakeroost only around `src_install`/`__stage-pack`),
+and whether ownership goes via in-box `tar` (cheap) with fakeroost reserved for
+`mknod` packages only. Ties into [[#future-tar--binpkg--stage-artifacts-none-exist-yet]] and Q1.
 
 ## What collapses once a backend records ownership
 
@@ -322,14 +345,13 @@ it, and every tar runs in-session. Detail in "Future: tar / binpkg" below.
    no-userns fallback, e.g. restricted containers). Capture numbers here.
    *Early numbers (2026-06-27, 128-core arm64, `em toolchain --setup`, `-j80`,
    targets under `~/.cache/em-testing/`):*
-   - **fakeroost**: killed at **131 min**, still in the gcc-16 bootstrap (never
-     finished). Single `cc1plus` at a time, load ~4 on 128 cores — the
-     single-threaded ptrace supervisor serializes every traced `stat()` from the
-     parallel make. **Impractical for real builds.** (Upstream perf issue filed:
-     koca-build/fakeroost#7.)
+   - **fakeroost** (pre-fix): killed at **131 min**, still in the gcc-16 bootstrap
+     (never finished). Single `cc1plus` at a time, load ~4 on 128 cores — the
+     single-threaded ptrace supervisor serialized every traced `stat()` from the
+     parallel make. (Upstream perf issue: koca-build/fakeroost#7.)
    - **sudo** (real root): **completed in 21:43** (`/usr/bin/time -v`, exit 0, 23
      pkgs, max RSS 2.26 GB), load ~13 during the gcc bootstrap (real parallelism).
-     ≥6× faster than fakeroost, which never finished.
+     ≥6× faster than pre-fix fakeroost, which never finished.
    - **hakoniwa**: backend now works (v1.1 fixed). A first toolchain benchmark run
      (2026-06-28) surfaced a *separate* regression — the cwd anchor (`b23ab2f`)
      pointed the process cwd at WORKDIR, which the post-merge cleanup deletes, so
@@ -337,15 +359,53 @@ it, and every tar runs in-session. Detail in "Future: tar / binpkg" below.
      work_root); hakoniwa toolchain now proceeds 1→2→building. **Benchmark TODO**:
      re-run `em --privilege hakoniwa toolchain --setup` to completion for the
      wall-time vs sudo (21:43) — expected ≈ sudo (userns, ~no per-syscall cost).
-   Conclusion so far: fakeroost is correctness-good but throughput-poor; it should
-   *not* be the default for heavy builds. Finish the hakoniwa number to decide the
-   default (expected ≈ sudo).
 
-## Future: tar / binpkg / stage artifacts (none exist yet)
+   *Synthetic stat benchmark (2026-06-28, 128-core arm64, `bench/run.sh` —
+   `stat-loop` over 512 distinct files, 20k calls/worker, fakeroost at the
+   USER_NOTIF-pool default of 3 servants):*
 
-`em -b`/`--buildpkg`, `--getbinpkg(only)` are **parsed flags with no
-implementation** (`cli.rs:88-101`); there is **no archive-creation code** in the
-tree. This is greenfield and is where Q1's "capture at archive time" lands.
+   | workers | native | fakeroost (#8 fix) | fakeroot (system) |
+   |---:|---:|---:|---:|
+   | 1 | 1.65 M | 56 K | 59 K |
+   | 8 | 7.85 M | 279 K | 44 K |
+   | 16 | 14.8 M | 278 K | 41 K |
+   | 128 | 48.7 M | 259 K | 40 K |
+   | **eff. parallelism** | 29.6× | **4.64×** | **0.68×** |
+
+   Two takeaways:
+   - **fakeroost #8 lifts the ceiling ~2.7× over main** (was ~100 K flat → ~280 K,
+     parallelism 3.5×→4.6×) by routing stat through a seccomp `USER_NOTIF` thread
+     pool instead of the single ptrace loop. So "impractical, never finished" is no
+     longer the whole story — but it's still ~150× behind native on raw stat
+     throughput, and a gcc bootstrap is stat-dominated. So **wrapping the whole
+     build remains the wrong move**; the scoping in the design (fakeroost around
+     `src_install`/archive only, see above) is right.
+   - **The system `fakeroot` (LD_PRELOAD) is *worse* than fakeroost under load**:
+     it goes *backwards* (0.68× effective parallelism — its faked-ownership state
+     is behind a global lock). So if a fake-root layer is needed for an
+     unprivileged build, fakeroost is the better choice, not upstream fakeroot.
+
+   **Updated conclusion**: fakeroost is correctness-good and, with #8, no longer
+   catastrophically slow — but it is still a per-syscall tax that doesn't belong on
+   the compile. The plan stands: **hakoniwa (or sudo) as the build session;
+   fakeroost scoped to `src_install` + archive only** for the ownership/device-node
+   metadata. Finish the hakoniwa wall-time number to confirm it's ≈ sudo and should
+   be the default unprivileged backend; fakeroost stays the no-userns fallback and
+   the metadata layer. **Re-run the gcc wall-time under fakeroost-#8** to get a
+   real (non-synthetic) post-fix number — expect materially better than the 131-min
+   kill but still well behind sudo.
+
+## tar / binpkg / stage artifacts
+
+**Producer done (2026-06-28).** `em -b`/`--buildpkg` writes GPKGs via
+`portage_binpkg::write_gpkg`, `read_metadata` reads them back, and `em maint
+binhost` builds the `Packages` index — all validated against host portage. What
+remains here is the **consumer** (`-k`/`--getbinpkg` reuse) and the **stage3
+re-pack** (`em stages` extract-from-binpkgs under one umbrella session). The
+fakeroost-specific archiver traps below still apply to the *unprivileged* path
+(fakeroost-scoped `src_install`/archive); the privileged path (RealRoot/sudo/
+hakoniwa) just uses `tar` directly. This is where Q1's "capture at archive time"
+landed.
 
 ### What the archiver must preserve (the fakeroost-specific traps)
 
@@ -400,63 +460,57 @@ works. The fakeroost path is the only one needing the in-session constraint; the
 trait hides that (the archiver always runs via `worker_command`, which is a no-op
 wrapper for RealRoot).
 
-### START HERE next session (tar/binpkg — not started)
+### DONE (2026-06-28) — the producer + reader + index
 
-Context recap: `em -b`/`--buildpkg`/`--getbinpkg` are parsed-but-unimplemented
-flags; there is **no archiver and no binpkg consumer** in the tree. The privilege
-work (fakeroost umbrella, merge chown, facet 2) is done and validated, so the
-in-session ownership the archiver needs is already there — `${D}` carries faked
-`root:root` during `src_install`.
+Steps 1–6 below (GPKG format, image.tar, metadata.tar, container assembly,
+`--buildpkg` wiring, validation) all landed. The GPKG container format is
+documented at the top of `portage-binpkg/src/gpkg.rs`; the writer shells to GNU
+`tar`+`zstd` (option (a)); metadata.tar is the VDB dir (em already writes every
+field during merge); `-b`/`--buildpkg` fires after qmerge inside the privilege
+session (`ebuild.rs` `build_binpkg`). Validated: host portage reads,
+Manifest-verifies, and decompresses em's gpkg.
 
-Steps, in order:
+The follow-on that landed in the same session: `read_metadata` (the reader,
+needed by the `-k` consumer and the index) and `em maint binhost` (the `Packages`
+index) — both validated against host portage's `binarytree`. Commits `2f88678`
+`0499edc` `72179e9` `65b2438` `359e65b` (producer), `1b46a62` `413364f`
+(reader + index).
 
-1. **GPKG format — reverse-engineered + validated against a real host gpkg
-   (2026-06-28).** Container = a **plain (uncompressed) tar**, all members owned
-   `0/0`, in this **strict order**:
-   1. `<basename>/gpkg-1` — **0-byte** format marker, **must be first**
-      (`gpkg.py` `gpkg_version = "gpkg-1"`; verify reads it first).
-   2. `<basename>/metadata.tar.<c>`
-   3. `<basename>/image.tar.<c>`
-   4. `<basename>/Manifest` — **must be last** ("ignored since at the end").
-   - `<basename>` = the package **PF** (e.g. `gentoo-functions-1.7.6`), i.e.
-     `basename.split("/")[-1]` — *no* category, *no* build-id. The **container
-     filename** is `<PF>-<BUILD_ID>.gpkg.tar` (build-id in the name + `metadata/BUILD_ID`).
-   - `<c>` = `BINPKG_COMPRESS` suffix; **default `zstd` → `.zst`** (make.globals).
-   - **image.tar**: members under the `image/` prefix = the `${D}` tree, ustar/pax,
-     `--numeric-owner` (host writes `root/root`); pax + `--xattrs` for caps/ACLs;
-     real device-node entries; setuid bits preserved.
-   - **metadata.tar**: members under `metadata/` = the VDB entry dir — every xpak
-     field file (`PF CATEGORY SLOT KEYWORDS USE IUSE IUSE_EFFECTIVE *DEPEND RESTRICT
-     LICENSE EAPI DEFINED_PHASES INHERITED FEATURES CHOST CBUILD C*FLAGS LDFLAGS
-     DESCRIPTION HOMEPAGE REPO_REVISIONS repository …`), plus `CONTENTS`,
-     `environment.bz2`, `NEEDED`/`NEEDED.ELF.2`/`REQUIRES`, `SIZE`/`BUILD_TIME`/
-     `BUILD_ID`/`COUNTER`/`BINPKGMD5`, and `<PF>.ebuild`. **em already writes all of
-     these to the VDB during merge** — metadata.tar = tar that dir under `metadata/`.
-   - **Manifest** lines: `DATA <member> <size> SHA512 <hex> BLAKE2B <hex>`, one per
-     container member **including `gpkg-1`** (the 0-byte file has the well-known
-     empty-string SHA512/BLAKE2B). em's `portage-repo::Manifest` already speaks this.
-2. **image.tar** — option (a): shell to `tar --numeric-owner --xattrs
-   --format=pax -C "${D}" .`, run **in the fakeroost session** so owner/devnode/cap
-   reads are faked. Compress per `BINPKG_COMPRESS` (default `zstd`; `tar --zstd` or
-   the `zstd` binary). Confirm setuid bits + `security.capability` survive.
-3. **metadata.tar** — reuse the VDB metadata em already computes for the merge:
-   `capture_environment` (→ `environment.bz2`), `CONTENTS`, and the xpak field set
-   (`PF CATEGORY USE *DEPEND SLOT KEYWORDS IUSE repository …`). Find the VDB writer
-   in `portage-cli/src/vdb.rs` + `ebuild.rs` and factor the field emission so binpkg
-   and VDB share it.
-4. **Assemble the container** + write to `${PKGDIR}/<cat>/<pf>.gpkg` (resolve
-   `PKGDIR`, default `/var/cache/binpkgs`).
-5. **Wire `--buildpkg`**: a new step in `run_inner`'s phase list between `install`
-   and `qmerge` (`ebuild.rs:148`), gated on `cli.buildpkg`. It runs inside the same
-   worker → already under the fakeroost session.
-6. **Validate**: `em -b --root /var/tmp/stage1-base sys-apps/util-linux`
-   unprivileged → inspect `image.tar` (`tar -tvf` shows `root/root` + setuid
-   `mount`), then confirm the host's real portage reads it (`qtbsdtar`/gpkg tooling,
-   or `emerge -K`/`--usepkgonly` against `PKGDIR`).
+### NEXT — the `-k` consumer (local binpkg reuse)
 
-Open decisions to settle while reading gpkg.py: compression default + whether to
-shell `tar --zstd` vs pipe `zstd`; whether to emit the `.sig`/Manifest checksums
-now or defer signing (`BINPKG_GPG_*`); exact `<basename>` and `gpkg-1` marker
-content. Deferred: the `--getbinpkg` **consumer** and the `Packages` index
-(`em maint binhost`) — see [[em-stages-and-binhosts]]. stage3 re-pack (`em stages`
-+ `em __stage-pack`) comes after the per-package binpkg works.
+The reader + index exist; the remaining piece is the **validity check**: reuse a
+local binpkg only when its version + USE + ABI + (sub)slot match the resolved
+want, reusing the solver's `[flag]`/USE-dep machinery so a stale-USE binpkg is
+rebuilt — matching `emerge -k`. Then `-g`/`--getbinpkg` remote (transport =
+`portage-distfiles`, fetch `Packages.gz`). Last: signing (`BINPKG_GPG_*`) and
+stage3 re-pack (`em stages` extract-from-binpkgs under one umbrella fakeroost
+session — see Q1).
+
+### GPKG container format (reverse-engineered + validated against a real host gpkg)
+
+Container = a **plain (uncompressed) tar**, all members owned `0/0`, in this
+**strict order**:
+
+1. `<basename>/gpkg-1` — **0-byte** format marker, **must be first**
+   (`gpkg.py` `gpkg_version = "gpkg-1"`; verify reads it first).
+2. `<basename>/metadata.tar.<c>`
+3. `<basename>/image.tar.<c>`
+4. `<basename>/Manifest` — **must be last** ("ignored since at the end").
+
+- `<basename>` = the package **PF** (e.g. `gentoo-functions-1.7.6`), i.e.
+  `basename.split("/")[-1]` — *no* category, *no* build-id. The **container
+  filename** is `<PF>-<BUILD_ID>.gpkg.tar` (build-id in the name + `metadata/BUILD_ID`).
+- `<c>` = `BINPKG_COMPRESS` suffix; **default `zstd` → `.zst`** (make.globals).
+- **image.tar**: members under the `image/` prefix = the `${D}` tree, ustar/pax,
+  `--numeric-owner` (host writes `root/root`); pax + `--xattrs` for caps/ACLs;
+  real device-node entries; setuid bits preserved.
+- **metadata.tar**: members under `metadata/` = the VDB entry dir — every xpak
+  field file (`PF CATEGORY SLOT KEYWORDS USE IUSE *DEPEND RESTRICT LICENSE EAPI
+  DEFINED_PHASES INHERITED FEATURES CHOST CBUILD C*FLAGS LDFLAGS DESCRIPTION
+  HOMEPAGE repository …`), plus `CONTENTS`, `environment.bz2`,
+  `NEEDED`/`NEEDED.ELF.2`/`REQUIRES`, `SIZE`/`BUILD_TIME`/`BUILD_ID`/`COUNTER`/
+  `BINPKGMD5`, and `<PF>.ebuild`. **em already writes all of these to the VDB
+  during merge** — metadata.tar = tar that dir under `metadata/`.
+- **Manifest** lines: `DATA <member> <size> SHA512 <hex> BLAKE2B <hex>`, one per
+  container member **including `gpkg-1`** (the 0-byte file has the well-known
+  empty-string SHA512/BLAKE2B). em's `portage-repo::Manifest` already speaks this.

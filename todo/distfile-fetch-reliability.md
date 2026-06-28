@@ -1,8 +1,64 @@
 # Distfile fetching — reliability (recurring build-killer)
 
-STATUS: **bash root cause FIXED (`8a9558b`); facet B fetch hardening DONE
-(2026-06-27): corrupt-partial discard, filename-hash mirror layout, HTML-body
-reject — C.3/C.4/C.5 below. Facet A (computed SRC_URI) still open.**
+STATUS: **all four facets FIXED.** bash root cause `8a9558b`; facet A (computed
+SRC_URI) `2965fa2` (2026-06-15); facet B fetch hardening (C.3/C.4/C.5) 2026-06-27.
+`em select mirrors` (§D) also landed. The §E GENTOO_MIRRORS parity audit
+(2026-06-28) found one fixed gap (iteration order) and several remaining ones.
+
+## E. GENTOO_MIRRORS parity vs portage (audit 2026-06-28)
+
+Audited against `gentoo/portage` `fetch.py` + `make.conf(5). What em matches and
+what it does not:
+
+**Matched:**
+- Read order: env → `make.conf` → `make.globals`, override (not incremental —
+  `GENTOO_MIRRORS` is not in `const.INCREMENTALS`). em: `gentoo_mirrors_list`.
+- `mirror://` scheme token is lowercase-only (case-sensitive). em: `strip_prefix`.
+- filename-hash `BLAKE2B 8` layout (`distfiles/<xx>/<file>`, hash of the
+  *filename*), hashed-first with flat as legacy fallback. Matches gentoo's live
+  `layout.conf`. em: `gentoo_distfile_urls`.
+- `RESTRICT=mirror` suppresses the gentoo-mirror fallback.
+
+**Fixed (2026-06-28):**
+- ✅ **Iteration order.** em used to try the upstream SRC_URI URL first, then
+  GENTOO_MIRRORS; portage does the opposite — mirrors-before-upstream
+  (`make.conf(5)`: "These locations are used to download files before the ones
+  listed in the ebuild scripts"). Now mirrors-first. Reliability win: gentoo's
+  CDN mirrors are tried before flaky upstreams (ftp.gnu.org, sourceforge).
+
+**Remaining gaps (lower priority, tracked here):**
+- 🔴 **No remote `layout.conf` fetch/cache.** em hardcodes `filename-hash BLAKE2B
+  8`; portage fetches `<mirror>/distfiles/layout.conf`, caches it 24h in
+  `$DISTDIR/.mirror-cache.json`, parses `[structure]` (flat / filename-hash /
+  content-hash, uppercase algo names), and falls back to flat on any error. Fine
+  while gentoo's layout is stable; wrong for a mirror that advertises a different
+  layout. `fetch.py:632,733-790`.
+- 🔴 **No `/etc/portage/mirrors` (`CUSTOM_MIRRORS_FILE`).** portage reads this
+  `grabdict`: key `local` adds local/public mirrors; any other key overrides a
+  `mirror://<key>/` set (tried before the official thirdparty list). em reads
+  neither. `fetch.py:986`.
+- 🔴 **No `/`-prefixed filesystem mirrors.** portage treats a `GENTOO_MIRRORS`
+  entry starting with `/` as a mounted distfiles tree (`shutil.copyfile`,
+  layout-aware). em treats it as a URL. `fetch.py:1028-1032,1510-1520`.
+- 🟡 **`RESTRICT=primaryuri` / `RESTRICT=fetch` unhandled.** portage reorders so
+  primaryuri values go first; `fetch` implies mirror-restriction and drops
+  upstream unless `fetch+`/`mirror+` prefixed. em gates only on `mirror`.
+  `fetch.py:883,1063,1119-1121,1189-1191`.
+- 🟡 **`FEATURES=mirror`/`force-mirror`/`lmirror` unhandled.** `force-mirror`
+  drops upstream URIs; `mirror` fetches all of SRC_URI regardless of USE.
+  `fetch.py:883-892,1064`.
+- 🟡 **`mirror+`/`fetch+` URI prefixes unhandled.** `mirror+` forces
+  mirror-routing (bypasses RESTRICT); `fetch+` bypasses RESTRICT=fetch.
+  `fetch.py:1105-1108`.
+- 🔵 **thirdparty mirrors not `random.shuffle`d.** portage shuffles the
+  thirdparty mirror set per-file for load balancing; em preserves list order.
+  `fetch.py:1156`. Intentional divergence (deterministic); revisit if a mirror
+  gets overloaded.
+- 🔵 **`mirror://gentoo/<path>` routing divergence.** portage resolves it via
+  the `thirdpartymirrors` "gentoo" entry (verbatim append → flat
+  `…/distfiles/<path>`); em routes it through the filename-hash layout. Both work
+  (the gentoo mirror serves flat + hashed), and em's is the modern layout, but it
+  is a divergence from portage's literal behaviour.
 
 ## 0. RO-distdir file not exposed in DISTDIR — FIXED 2026-06-25 (the bash killer)
 
@@ -16,17 +72,27 @@ fetch genuinely succeeded, the fail-fast `bail!` never fired (it surfaced late a
 distdir, symlink it into DISTDIR (hard-link/copy fallback), as portage does.
 Unit-tested. Verified: bash builds and **runs in the stage1 chroot**.
 
-## A. Dynamically-built `SRC_URI` extracted as EMPTY (separate; seen once)
+## A. Dynamically-built `SRC_URI` extracted as EMPTY — FIXED (`2965fa2`, 2026-06-15)
 
-NOTE: the `fetch: nothing to fetch (SRC_URI is empty)` seen in the *full* stage1
-run did NOT reproduce when building bash alone (em then computed the full 1527-char
-SRC_URI correctly, all eclasses inherited, PLEVEL=15) — so this is likely a
-phase-sourced/metadata-mode caching artifact (an earlier sourcing left SRC_URI
-empty and the fetch reused it via `is_phase_sourced`), not a brush eval bug
-(brush computes bash's `${my_urls[*]}` SRC_URI identically to bash). Re-check if
-it recurs; otherwise lower priority than thought.
+Root cause: the `fetch` phase called `source_ebuild` again mid-run, re-sourcing
+over an already-sourced shell. Eclass include guards fire on the second pass, so
+the re-source no-op'd every eclass — dropping their global-scope effects. For
+bash that meant the `for ((…))` loop building `my_urls+=( … )` and the
+`${my_urls[*]}` join were lost, leaving `SRC_URI` empty; the build then died in
+`src_prepare` at `eapply: patch failed: …/bash53-001` (file never fetched), and
+because `SRC_URI` was genuinely empty the fail-fast `bail!` never fired — a fetch
+problem surfaced as a late prepare failure.
 
-Original notes (kept for the metadata angle):
+Fix: fetch reads `SRC_URI` from the already-sourced live shell (the `pretend`
+phase runs first in a merge) via `is_phase_sourced`, sourcing only when `fetch`
+runs standalone with nothing sourced yet. Verified live: `em ebuild
+bash-5.3_p15.ebuild fetch` computes the full SRC_URI (tarball + `bash53-001..015`).
+
+Empty `SRC_URI` is otherwise legitimate (84 ebuilds ship `SRC_URI=""` — meta/
+virtual packages), so there is intentionally no fail-fast on an empty value; the
+bug was evaluation correctness, now fixed.
+
+Original notes (kept for the diagnosis trail):
 
 `app-shells/bash-5.3_p15` builds `SRC_URI` in global scope:
 
@@ -115,20 +181,19 @@ The `em --root @system` shakeout ([[stage-build-shakeout]]) failed popt/tar/psmi
    manifest size could be added as a second guard, but the HTML check + manifest
    verify + discard already cover the observed cases.)
 
-## D. `em select mirrors` (NEW) — `eselect mirror` / mirrorselect workalike
+## D. `em select mirrors` — DONE
 
-A first-class way to pick/rank GENTOO_MIRRORS, in the `em select` family
-([[select-toolchain]]). `eselect mirror` lists the official mirror set and writes
-`GENTOO_MIRRORS` to make.conf; `mirrorselect -s N` benchmarks and picks the
-fastest. Shape:
-- `em select mirrors list` — the official mirror list (from the gentoo repo's
-  `profiles/thirdpartymirrors` / the mirrors metadata, or the releng list).
-- `em select mirrors set <url>...` / `--country <CC>` — write GENTOO_MIRRORS.
-- `em select mirrors rank [-n N]` — benchmark candidates (latency/throughput),
-  write the fastest N (mirrorselect's job).
-Ties into the C.1 fix: with a curated, ranked mirror list the upstream-URL
-failures above mostly vanish. Reuses the env.d/make.conf write plumbing the other
-select modules already have (but GENTOO_MIRRORS is a make.conf var, not env.d).
+`eselect mirror` / mirrorselect workalike, in the `em select` family. Landed as
+`select/mirrors.rs`:
+- `em select mirrors list [--country <CC>|--region <R>]` — the official mirror
+  list from Gentoo's structured XML API (`portage_distfiles::MirrorList`), marking
+  those already in `GENTOO_MIRRORS`.
+- `em select mirrors show` — the current `GENTOO_MIRRORS` from make.conf.
+- `em select mirrors set <url>... [--country <CC>|--region <R>]` — write
+  `GENTOO_MIRRORS` to the make.conf the root flags select.
+
+(No `rank`/benchmark subcommand yet — mirrorselect's latency/throughput ranking is
+the one unimplemented piece; lower priority now that mirror selection works.)
 
 ## Fix direction
 
