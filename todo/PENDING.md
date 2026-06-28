@@ -167,6 +167,19 @@ here briefly for context). Updated 2026-06-27.
     Symmetric to the `-G` enforcement now wired.
   - 🔵 **`binpkg-multi-instance` BUILD_ID** — multiple instances per cpv keyed by
     `(cpv, BUILD_ID, …)`. em keys by cpv (one instance). Rare in practice.
+  - 🔴 **Per-package build-env provenance / CFLAGS gating (RVV).** The `Packages`
+    format is `KEY: VALUE` so per-package `CFLAGS`/`CXXFLAGS`/`LDFLAGS`/`CBUILD`/
+    `FEATURES` are syntactically valid, and the data already lives in each GPKG's
+    `metadata.tar` (em writes them during merge). But portage's reader silently
+    drops unknown per-package keys (`SlotDict` filter on `_pkgindex_allowed_pkg_keys`)
+    — so lifting them into em's index is an **em-only extension**, invisible to
+    portage. portage deliberately matches on CHOST+USE+ABI (sonames) only and
+    trusts the operator avoids `-march=native`; that model breaks for
+    **riscv64 RVV variants** — a `-march=...v` binpkg won't run on a core without
+    the V extension, so CHOST+USE match is unsafe. The fix is option 1: write the
+    build-env fields into em's `Packages` and gate `find_reusable` on `-march`
+    (opt-in). Deferred (later) — non-riscv64 CHOST+USE+ABI matching is portage-
+    faithful for now.
 - 🔴 **`em maint binpkg` tooling** — the binhost substrate (Packages index + reader
   + local/remote reuse) now invites `maint` family tools operating uniformly on
   local PKGDIR and remote-cached binpkgs: `verify` (the `BinpkgVerifier` MD5/SHA1/
