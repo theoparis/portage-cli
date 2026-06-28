@@ -31,7 +31,8 @@ fn gentoo_distfile_urls(mirror: &str, filename: &str) -> Vec<String> {
 pub struct Distfile {
     /// The local filename to store in DISTDIR.
     pub filename: String,
-    /// Download URLs in priority order (mirrors expanded, GENTOO_MIRRORS appended).
+    /// Download URLs in priority order — GENTOO_MIRRORS first (mirrors-before-
+    /// upstream, matching portage), then the expanded `mirror://`/upstream URLs.
     pub urls: Vec<String>,
     /// EAPI 8+ restriction: `Some("fetch")` or `Some("mirror")`.
     pub restriction: Option<String>,
@@ -82,19 +83,26 @@ impl DistfileResolver {
 
         raw.into_iter()
             .map(|(url, filename, restriction)| {
-                let mut urls = self.expand_url(&url, &filename);
-                // Append GENTOO_MIRRORS as a final fallback, but only when:
-                // - not mirror-restricted (EAPI 8 `mirror+` prefix), AND
-                // - not mirror://gentoo/ (expand_url already resolved those to
-                //   GENTOO_MIRRORS with the correct full path suffix).
-                if restriction.as_deref() != Some("mirror") && !url.starts_with("mirror://gentoo/")
-                {
+                // Portage tries GENTOO_MIRRORS *before* the upstream SRC_URI URLs
+                // (make.conf(5): "These locations are used to download files before
+                // the ones listed in the ebuild scripts"). GENTOO_MIRRORS are
+                // skipped for mirror-restricted files and for `mirror://gentoo/`
+                // (which `expand_url` already routed through the gentoo mirrors).
+                let mut urls = Vec::new();
+                let use_gentoo_mirrors = restriction.as_deref() != Some("mirror")
+                    && !url.starts_with("mirror://gentoo/");
+                if use_gentoo_mirrors {
                     for mirror in &self.gentoo_mirrors {
-                        for fallback in gentoo_distfile_urls(mirror, &filename) {
-                            if !urls.contains(&fallback) {
-                                urls.push(fallback);
+                        for candidate in gentoo_distfile_urls(mirror, &filename) {
+                            if !urls.contains(&candidate) {
+                                urls.push(candidate);
                             }
                         }
+                    }
+                }
+                for candidate in self.expand_url(&url, &filename) {
+                    if !urls.contains(&candidate) {
+                        urls.push(candidate);
                     }
                 }
                 Distfile {
@@ -231,17 +239,14 @@ mod tests {
     }
 
     #[test]
-    fn direct_url_gets_gentoo_fallback() {
+    fn gentoo_mirrors_tried_before_upstream() {
+        // make.conf(5): GENTOO_MIRRORS "are used to download files before the
+        // ones listed in the ebuild scripts" — mirrors-first, upstream last.
         let r = resolver(&["https://mirror.gentoo.org"]);
         let entries = SrcUriEntry::parse("https://example.com/foo-1.0.tar.gz").unwrap();
         let dfs = r.resolve(&entries, &HashSet::new());
-        // Upstream first, then the gentoo mirror in filename-hash layout
-        // (hashed-first) with the flat path as a legacy fallback.
-        let mut expected = vec!["https://example.com/foo-1.0.tar.gz".to_owned()];
-        expected.extend(gentoo_distfile_urls(
-            "https://mirror.gentoo.org",
-            "foo-1.0.tar.gz",
-        ));
+        let mut expected = gentoo_distfile_urls("https://mirror.gentoo.org", "foo-1.0.tar.gz");
+        expected.push("https://example.com/foo-1.0.tar.gz".to_owned());
         assert_eq!(dfs[0].urls, expected);
     }
 
