@@ -141,9 +141,37 @@ here briefly for context). Updated 2026-06-27.
   byte-identical payload (matching md5sums, populated CONTENTS, no compilation).
   Commits `434ab22` + `5c74a01` (the latter fixed run_inner's clean wiping the
   pre-extracted image). [[em-stages-and-binhosts]]
-- 🔴 Consumer: remote `--getbinpkg` over `PORTAGE_BINHOST` (http(s) fetch + index) —
-  *transport* is `portage-distfiles` (needs the `Packages.gz` fetch path), *format*
-  (the reader) now exists. After `-k` local reuse.
+- ✅ **`-g`/`--getbinpkg` remote consumer — DONE & validated e2e.** Transport
+  (`portage_distfiles::fetch_index` — `Packages.gz` then `Packages`, gzip) +
+  `fetch_binpkg` (streamed download via `.partial` rename). `RemoteBinpkgIndex`
+  (same `use_compatible` rule, resolves to a download URL). `portage_binhosts`
+  reads `PORTAGE_BINHOST`. Merge loop: `-g` implies `-k` (local overrides
+  remote), `-G` is binpkg-only (no source fallback). **Validated**: served
+  `Packages`+gpkg over http, `em -g` merged byte-identical payload; `-G` with no
+  matching binpkg refuses to build. Commit `311d0f1`.
+  - 🔴 **`binrepos.conf`** (modern format) — currently only `PORTAGE_BINHOST`
+    (legacy, deprecated). `binrepos.conf` is INI with `[<name>]`, `sync-uri`,
+    `priority`, `frozen`, `verify-signature`; recursed if a directory (no `.d/`).
+  - 🔴 **`URI` header BASE_URI override** — portage resolves each entry's URL from
+    the index's own `URI` header (server-controlled via
+    `PORTAGE_BINHOST_HEADER_URI`), not the binhost's `sync-uri`. em uses
+    `sync-uri`; both work when they match.
+  - 🟡 **Remote-index freshness** — em fetches the index fresh each run; portage
+    caches at `/var/cache/edb/binhost/<host>/<path>/Packages` with `TTL` +
+    `If-Modified-Since` (304 → reuse). Flagged.
+  - 🟡 **gpkg GPG signature verify** — `binpkg-request-signature` FEATURE / repo
+    `verify-signature=true` (default-on in shipped config) drops remote XPAK and
+    GPG-verifies gpkg at unpack. em accepts unsigned. Last (with signing).
+  - 🟡 **`-K`/`--usepkgonly` enforcement** — local-only binpkg mode, no source.
+    The flag exists but isn't enforced (the merge loop falls through to build).
+    Symmetric to the `-G` enforcement now wired.
+  - 🔵 **`binpkg-multi-instance` BUILD_ID** — multiple instances per cpv keyed by
+    `(cpv, BUILD_ID, …)`. em keys by cpv (one instance). Rare in practice.
+- 🔴 **`em maint binpkg` tooling** — the binhost substrate (Packages index + reader
+  + local/remote reuse) now invites `maint` family tools operating uniformly on
+  local PKGDIR and remote-cached binpkgs: `verify` (the `BinpkgVerifier` MD5/SHA1/
+  size integrity check), `list`/query, prune-old-`BUILD_ID`s (eclean-pkg
+  workalike). None built yet.
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.
 - 🔴 Signing/verify (`BINPKG_GPG_*`) — last (lives in `portage-binpkg`).
 
