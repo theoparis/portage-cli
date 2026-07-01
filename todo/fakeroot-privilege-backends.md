@@ -22,7 +22,12 @@ dump exposed a brush `$'...'` parser bug (a literal `"` swallowed the closing
 quote) — fixed in the fork, `6038e073`. qmerge serialises across worker
 processes on a `work_base/.merge.lock` flock (Q2 as designed). hakoniwa keeps
 the umbrella (no per-syscall tax; container binds must span the run), as does
-`em ebuild … install/qmerge` (no worker seam). Goal: a correct
+`em ebuild … install/qmerge` (no worker seam). Surfaced by the split, not yet
+addressed: (a) `pkg_setup` now runs *unprivileged* in the compile parent —
+portage runs it privileged; an ebuild that needs root-ish checks there will
+diverge; (b) the VDB `environment.bz2` still embeds brush's `declare -f`
+output, whose heredoc bodies don't re-source (fine for em, a compat gap for
+consumers that re-source it — see [[parser-audit]]). Goal: a correct
 root-owned `@system` stage3 (setuid `mount`, `root:root`, file caps) without
 running em as root. Supersedes the "decision point" in
 [[stage-build-shakeout]] and the privilege half of [[build-clean-env]].
@@ -334,10 +339,19 @@ it, and every tar runs in-session. Detail in "Future: tar / binpkg" below.
    installed files (rare) could be misread cross-worker. Acceptable; revisit if it
    bites.
 2. **Merge gate cross-process**: flock on `work_base/.merge.lock` vs a parent-held
-   semaphore. flock is simplest and survives worker crashes.
+   semaphore. flock is simplest and survives worker crashes. *(✅ 2026-07-01:
+   flock landed — taken in `run_inner` around merge/qmerge alongside the
+   in-process gate.)*
 3. **Worker arg round-trip**: `WorkerArgs` must fully reconstruct `build_and_merge`
    input; confirm the worker re-derives FEATURES/EPREFIX from `--config-root`
-   rather than the parent's in-memory state.
+   rather than the parent's in-memory state. *(✅ 2026-07-01: the worker
+   rebuilds profile/package.env/FEATURES from `--config-root`; only the
+   resolved USE and the root paths cross as flags. Cross-phase *shell* state
+   crosses via the `worker-env` variables dump — `declare -f` deliberately
+   excluded (brush's printer doesn't round-trip heredocs, see
+   [[parser-audit]]), so functions defined dynamically *during a phase* —
+   as opposed to by the re-sourced ebuild/eclasses — do not survive into the
+   worker. Rare; revisit if it bites.)*
 4. **RealRoot stays in-process** (no spawn) for speed; spawn only when faking.
 5. **fakeroost robustness on the 128-core `@system` run**: ptrace adds a per-syscall
    trap on the filtered set — confirm it survives the heavy `make -j` trees.

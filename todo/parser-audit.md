@@ -43,6 +43,29 @@ touched:
   `REQUIRED_USE` expr, `SRC_URI` tree. The computed-SRC_URI fix (`2965fa2`) is in;
   spot-check the cache-entry field set against `auxdbkey_order`.
 
+## brush shell parser/printer (surfaced 2026-07-01 by the `__worker` env handoff)
+
+- ✅ **`$'…'` ANSI-C quoting**: a literal `"` in the body made the winnow parser
+  swallow the closing `'` (it went through `parse_balanced_delimiters`, whose
+  construct scanner opened a double-quoted string). Broke sourcing any
+  `declare -p` dump containing `COMP_WORDBREAKS`. Fixed in the fork
+  (`6038e073`, dedicated parser + compat YAML tests); workspace rev bumped.
+- 🟡 **`$"…"` gettext quoting** still goes through the same generic
+  `parse_balanced_delimiters` scanner. Spot-checked OK on the mirror cases
+  (`$"'"`, `$"a'b"`, `$"a\"b"`), so no known bug — but it deserves the same
+  dedicated-parser treatment for the audit pass rather than the construct
+  scanner.
+- 🔴 **`declare -f` printing doesn't round-trip heredocs**: the AST Display
+  wraps nested bodies in the `indenter` crate, which space-indents heredoc
+  bodies *and* the `<<-EOF` delimiter (tabs-only strip ⇒ never terminates), and
+  splits the trailing redirection onto the next line. Any dump containing e.g.
+  `_tc-has-openmp` (toolchain-funcs) is unparseable. em sidesteps it — the
+  `worker-env` handoff dumps variables only — but the VDB `environment.bz2`
+  still embeds it (compat gap for consumers that re-source, and blocks any
+  future function-carrying handoff). Fix belongs in brush's printer: emit
+  heredoc bodies verbatim with the delimiter unindented, escaping the
+  indenting writer.
+
 ## Method
 
 For each: pick 3-5 representative inputs (including the `-*` and USE_EXPAND
