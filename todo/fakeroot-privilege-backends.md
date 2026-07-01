@@ -10,7 +10,19 @@ under concurrency (which goes backwards, 0.68×). Confirms the scoping decision:
 fake-root wraps only `src_install`/archive, not the compile (see Q6). **Binpkg
 producer done (2026-06-28): `em -b` GPKG writer + `read_metadata` reader + `em
 maint binhost` `Packages` index all landed and validated — see
-[[em-stages-and-binhosts]] / PENDING.md (Binhosts).** Goal: a correct
+[[em-stages-and-binhosts]] / PENDING.md (Binhosts).** **Per-package `__worker`
+landed (2026-07-01)**: fakeroost/sudo are now scoped, not umbrellas — the
+parent runs `pretend..compile` un-wrapped, then spawns a wrapped `em __worker`
+for install+qmerge(+binpkg) per package (the Q6 scoping). Cross-phase shell
+state crosses the process boundary via a variables-only `worker-env` dump
+(`declare -p`, readonly filtered; `declare -f` deliberately omitted — brush's
+function printer doesn't round-trip heredocs — the worker re-sources the
+ebuild and `mark_phase_sourced` suppresses the phase loop's re-source). The
+dump exposed a brush `$'...'` parser bug (a literal `"` swallowed the closing
+quote) — fixed in the fork, `6038e073`. qmerge serialises across worker
+processes on a `work_base/.merge.lock` flock (Q2 as designed). hakoniwa keeps
+the umbrella (no per-syscall tax; container binds must span the run), as does
+`em ebuild … install/qmerge` (no worker seam). Goal: a correct
 root-owned `@system` stage3 (setuid `mount`, `root:root`, file caps) without
 running em as root. Supersedes the "decision point" in
 [[stage-build-shakeout]] and the privilege half of [[build-clean-env]].

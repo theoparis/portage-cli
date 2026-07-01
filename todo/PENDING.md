@@ -16,9 +16,18 @@ here briefly for context). Updated 2026-06-27.
   chown wall is cleared). ✅ Facet 2 — `fowners` resolves owner names to numeric
   uid:gid against the target passwd/group. ✅ `EM_PRIVILEGE=sudo` backend (real
   root, opt-in). ✅ `EM_PRIVILEGE=hakoniwa` umbrella sketch (userns mapped root,
-  `hakoniwa` 1.7.1; not wall-tested yet). Remaining: the binpkg/stage tar
+  `hakoniwa` 1.7.1; not wall-tested yet). ✅ **Per-package `__worker` scoping
+  (2026-07-01)**: fakeroost/sudo no longer umbrella the run — the un-wrapped
+  parent runs `pretend..compile`, then a wrapped `em __worker` child runs
+  install+qmerge(+binpkg) per package (Q6: the ptrace tax stays off the
+  compile). Env crosses the process boundary via a variables-only `worker-env`
+  dump (needed a brush `$'...'` parser fix, fork `6038e073`); qmerge is
+  serialised across workers by an flock on `work_base/.merge.lock`; hakoniwa
+  stays an umbrella; `em ebuild … install` keeps the umbrella (no worker seam).
+  Validated: baselayout source build, `-b` producer and `-k` binpkg merge all
+  through the worker. Remaining: the binpkg/stage tar
   in-session (real `root:root` artifacts — next), fakeroot (system) backend,
-  auto-detect chain, and per-package `__worker`. **Benchmark fakeroost vs hakoniwa
+  auto-detect chain. **Benchmark fakeroost vs hakoniwa
   vs sudo** — the 2026-06-27 stage3 smoke showed fakeroost (ptrace+seccomp, 2 ctx
   switches per `stat`/chown/…) much slower on the gcc bootstrap; if hakoniwa
   (userns, ~no per-syscall cost) lands near sudo it should become the default
