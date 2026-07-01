@@ -446,16 +446,19 @@ USE: nls
         assert_eq!(idx.len(), 1);
         // Trailing slash on base_uri is trimmed; URL = base + "/" + PATH.
         assert_eq!(
-            idx.find_reusable("app-test/foo-1.0", &desired(&["nls"])).unwrap(),
+            idx.find_reusable("app-test/foo-1.0", &desired(&["nls"]))
+                .unwrap(),
             "https://binhost.example/app-test/foo-1.0-1.gpkg.tar"
         );
         // Stale USE → None (same use_compatible rule as local).
-        assert!(idx
-            .find_reusable("app-test/foo-1.0", &desired(&["nls", "debug"]))
-            .is_none());
+        assert!(
+            idx.find_reusable("app-test/foo-1.0", &desired(&["nls", "debug"]))
+                .is_none()
+        );
         // Unknown cpv → None.
-        assert!(idx
-            .find_reusable("app-test/missing-9.9", &desired(&["nls"]))
-            .is_none());
+        assert!(
+            idx.find_reusable("app-test/missing-9.9", &desired(&["nls"]))
+                .is_none()
+        );
     }
 }
