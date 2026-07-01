@@ -2,11 +2,16 @@
 //! `chown`/setuid succeed and ownership is recorded, instead of swallowing the
 //! EPERM and losing it.
 //!
-//! When an unprivileged invocation will run build phases, [`maybe_supervise`]
-//! re-execs em once under the selected [`Backend`] and the caller exits with its
-//! status. The whole run then shares one session (the umbrella model in
-//! `todo/fakeroot-privilege-backends.md`), so the existing in-process merge gate
-//! still serialises qmerge.
+//! Fakeroost and sudo are *scoped*, not umbrellas (`todo/
+//! fakeroot-privilege-backends.md` Q6: the ptrace tax / real root must stay off
+//! the compile): the un-wrapped parent runs `pretend..compile`, then
+//! `build_and_merge` delegates install+qmerge(+binpkg) to a wrapped
+//! `em __worker` child per package ([`install_wrap_backend`] /
+//! [`spawn_install_worker`]). Hakoniwa remains an umbrella via
+//! [`maybe_supervise`] (userns has ~no per-syscall cost and the container
+//! binds must cover the whole run), as does `em ebuild … install/qmerge`
+//! (the debug applet runs phases in-process, with no worker seam). qmerge is
+//! serialised across worker processes by an flock in `ebuild.rs`.
 //!
 //! Backend selection (`--privilege`, or `EM_PRIVILEGE`; default `auto`):
 //! - `auto`/`fakeroost` — pure-Rust ptrace+seccomp fake root (no privilege). The
@@ -19,10 +24,15 @@
 //! - `none` — disable wrapping; run unprivileged and let the chown workarounds
 //!   degrade gracefully.
 //!
-//! Already root ⇒ no wrapping (real chowns in-process). Per-package `__worker`
-//! sessions and the fakeroot backend slot in behind [`Backend`] later.
+//! Already root ⇒ no wrapping (real chowns in-process). The fakeroot (system
+//! binary) backend slots in behind [`Backend`] later.
 
 use crate::cli::{Applet, Cli, Privilege};
+
+/// The `--privilege` request parsed from the CLI (flag or `EM_PRIVILEGE` via
+/// clap), recorded by [`maybe_supervise`] so `build_and_merge` — which has no
+/// `Cli` — can pick the worker backend.
+static PRIVILEGE_REQUEST: std::sync::OnceLock<Privilege> = std::sync::OnceLock::new();
 
 /// Marker set on a wrapped re-exec so the inner process does not re-wrap.
 const ACTIVE_ENV: &str = "EM_PRIVILEGE_ACTIVE";
@@ -82,15 +92,124 @@ fn will_build(cli: &Cli) -> bool {
 /// `None` when no wrapping is needed (root, already wrapped, `EM_PRIVILEGE=none`,
 /// or a non-building command), so the caller proceeds normally.
 pub fn maybe_supervise(cli: &Cli) -> Option<i32> {
+    let _ = PRIVILEGE_REQUEST.set(cli.privilege);
     if !will_build(cli) {
         return None;
     }
     match Backend::detect(cli.privilege) {
         Backend::RealRoot => None,
-        Backend::Fakeroost => Some(reexec_fakeroost()),
+        // Fakeroost/sudo are scoped, not umbrellas (Q6): the ptrace tax / real
+        // root must stay off the compile. build_and_merge delegates only
+        // install+qmerge to a wrapped __worker child. The exception is
+        // `em ebuild … install/qmerge` — the debug applet runs phases
+        // in-process with no worker seam, so wrap that whole invocation.
+        backend @ (Backend::Fakeroost | Backend::Sudo) => {
+            if !ebuild_applet_installs(cli) {
+                return None;
+            }
+            Some(match backend {
+                Backend::Fakeroost => reexec_fakeroost(),
+                _ => reexec_sudo(),
+            })
+        }
         Backend::Hakoniwa => Some(reexec_hakoniwa(cli)),
-        Backend::Sudo => Some(reexec_sudo()),
     }
+}
+
+/// `em ebuild … <phase>` with a merge-side phase: the only build path that does
+/// not go through `build_and_merge` (and thus the worker seam).
+fn ebuild_applet_installs(cli: &Cli) -> bool {
+    matches!(&cli.applet, Some(Applet::Ebuild { phase, .. })
+        if phase.iter().any(|p| matches!(p.as_str(), "install" | "qmerge" | "merge")))
+}
+
+/// The backend the install group should be wrapped with in a `__worker` child,
+/// or `None` to run it in-process (root, already inside a session, hakoniwa
+/// umbrella, `--privilege none`). The worker child runs with
+/// `EM_PRIVILEGE_ACTIVE` set, so its own install group is in-process.
+pub fn install_wrap_backend() -> Option<Backend> {
+    let requested = PRIVILEGE_REQUEST.get().copied().unwrap_or(Privilege::Auto);
+    match Backend::detect(requested) {
+        backend @ (Backend::Fakeroost | Backend::Sudo) => Some(backend),
+        Backend::RealRoot | Backend::Hakoniwa => None,
+    }
+}
+
+/// Serializable inputs for the install worker — the subset of
+/// `build_and_merge`'s args that cross the process boundary.
+pub struct WorkerArgs<'a> {
+    pub ebuild_path: &'a str,
+    pub use_flags: &'a str,
+    pub work_base: &'a str,
+    pub root: &'a str,
+    pub distdir: Option<&'a str>,
+    pub config_root: Option<&'a str>,
+    pub sysroot: Option<&'a str>,
+    pub eprefix: Option<&'a str>,
+    pub binpkg: Option<&'a str>,
+    pub buildpkg: bool,
+    pub quiet: bool,
+}
+
+/// Spawn a wrapped `em __worker` child for the install group and await it.
+/// The compile ran un-wrapped in the parent; this wraps only the
+/// install/qmerge/binpkg tail where ownership/device-node metadata is produced.
+pub async fn spawn_install_worker(backend: Backend, args: &WorkerArgs<'_>) -> std::io::Result<i32> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = match backend {
+        Backend::Sudo => {
+            eprintln!(">>> install/qmerge under sudo (real root)");
+            let mut c = std::process::Command::new("sudo");
+            c.arg("-E").arg(&exe);
+            c
+        }
+        _ => std::process::Command::new(&exe),
+    };
+    cmd.arg("__worker")
+        .arg("--ebuild")
+        .arg(args.ebuild_path)
+        .arg("--use-flags")
+        .arg(args.use_flags)
+        .arg("--work-base")
+        .arg(args.work_base)
+        .arg("--root")
+        .arg(args.root);
+    if args.buildpkg {
+        cmd.arg("--buildpkg");
+    }
+    if args.quiet {
+        cmd.arg("--quiet");
+    }
+    if let Some(d) = args.distdir {
+        cmd.arg("--distdir").arg(d);
+    }
+    if let Some(c) = args.config_root {
+        cmd.arg("--config-root").arg(c);
+    }
+    if let Some(s) = args.sysroot {
+        cmd.arg("--sysroot").arg(s);
+    }
+    if let Some(e) = args.eprefix {
+        cmd.arg("--eprefix").arg(e);
+    }
+    if let Some(b) = args.binpkg {
+        cmd.arg("--binpkg").arg(b);
+    }
+    match backend {
+        Backend::Fakeroost => {
+            use fakeroost::FakerootCommandExt;
+            cmd.env(ACTIVE_ENV, "fakeroost");
+            cmd.fakeroot();
+        }
+        _ => {
+            cmd.env(ACTIVE_ENV, "sudo");
+        }
+    }
+    // The worker runs a full install+qmerge — off the executor thread, so
+    // parallel builds in other tasks keep making progress while we wait.
+    tokio::task::spawn_blocking(move || cmd.status().map(|s| s.code().unwrap_or(1)))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 /// `(own binary, forwarded args)` for a self re-exec, or `None` if the binary
@@ -105,6 +224,8 @@ fn self_invocation() -> Option<(std::path::PathBuf, Vec<std::ffi::OsString>)> {
     }
 }
 
+/// Umbrella re-exec under fakeroost — only for `em ebuild … install/qmerge`
+/// (see [`maybe_supervise`]); merge runs use the per-package install worker.
 fn reexec_fakeroost() -> i32 {
     use fakeroost::FakerootCommandExt;
     let Some((exe, args)) = self_invocation() else {

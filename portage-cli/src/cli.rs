@@ -427,6 +427,35 @@ pub enum Applet {
         args: Vec<String>,
     },
 
+    /// Internal: the privilege-wrapped install worker (install+qmerge+binpkg
+    /// for one package; spawned per package by `build_and_merge`).
+    #[command(name = "__worker", hide = true)]
+    Worker {
+        #[arg(long)]
+        ebuild: String,
+        #[arg(long)]
+        use_flags: String,
+        #[arg(long)]
+        work_base: String,
+        #[arg(long)]
+        root: String,
+        #[arg(long)]
+        distdir: Option<String>,
+        #[arg(long)]
+        config_root: Option<String>,
+        #[arg(long)]
+        sysroot: Option<String>,
+        #[arg(long)]
+        eprefix: Option<String>,
+        /// A pre-built GPKG to merge (`-k`/`-g`).
+        #[arg(long)]
+        binpkg: Option<String>,
+        #[arg(long)]
+        buildpkg: bool,
+        #[arg(long)]
+        quiet: bool,
+    },
+
     #[command(about = "Execute ebuild phases")]
     Ebuild {
         #[arg(required = true)]

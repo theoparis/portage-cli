@@ -16,6 +16,117 @@ use portage_vdb::{ContentsEntry, ContentsKind, InstalledPackage, MergeSpec, Vdb}
 
 use crate::postprocess;
 
+/// Which phases a [`run_inner`] call owns — the single source of truth for the
+/// build-tree epilogues (clean, env-dump/restore, buildpkg, tree-drop).
+///
+/// The fakeroost/sudo scoping (Q6: the ptrace tax / real root must stay off
+/// the compile) splits a source build into [`PhaseGroup::Compile`] (parent,
+/// un-wrapped) + [`PhaseGroup::Install`] (wrapped `__worker` child). The other
+/// backends (real root, hakoniwa umbrella) use [`PhaseGroup::Full`] — one
+/// process. [`PhaseGroup::Debug`] backs `em ebuild`.
+#[derive(Clone, Debug)]
+enum PhaseGroup {
+    /// Full source build + merge: clean → `pretend..qmerge` → buildpkg → tree-drop.
+    Full,
+    /// Pre-install phases only (the un-wrapped parent): clean →
+    /// `pretend..compile` → dump env to `worker-env`. No buildpkg, no tree-drop
+    /// — the compile artifacts must survive for the Install worker.
+    Compile,
+    /// Install + qmerge (the wrapped worker): restore env from `worker-env` →
+    /// `install,qmerge` → buildpkg → tree-drop. Does NOT wipe `work/` (the
+    /// compile artifacts live there); only `image/temp/homedir`.
+    Install,
+    /// Merge a pre-built GPKG (`-k`/`-g`): clean → extract image → `qmerge` →
+    /// tree-drop. No src_install — the extracted image is the payload.
+    BinpkgMerge,
+    /// Debug (`em ebuild`): run the given phases only; no clean/drop/buildpkg.
+    Debug(Vec<String>),
+}
+
+impl PhaseGroup {
+    /// The phases this group runs, in order.
+    fn phases(&self) -> Vec<String> {
+        match self {
+            Self::Full => [
+                "pretend",
+                "setup",
+                "fetch",
+                "unpack",
+                "prepare",
+                "configure",
+                "compile",
+                "test",
+                "install",
+                "qmerge",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            Self::Compile => [
+                "pretend",
+                "setup",
+                "fetch",
+                "unpack",
+                "prepare",
+                "configure",
+                "compile",
+                "test",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            Self::Install => ["install", "qmerge"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            Self::BinpkgMerge => vec!["qmerge".to_string()],
+            Self::Debug(p) => p.clone(),
+        }
+    }
+
+    /// A real build/merge (not `em ebuild`): gates `src_test` skip and the
+    /// merge critical-section lock.
+    fn is_merge(&self) -> bool {
+        !matches!(self, Self::Debug(_))
+    }
+
+    /// Subdirs to wipe before the phase loop (stale-tree clean).
+    /// Full/Compile/BinpkgMerge: everything (starting fresh). Install:
+    /// `image/temp/homedir` only — `work/` holds the compile artifacts.
+    /// Debug: none.
+    fn clean_subs(&self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Full | Self::Compile | Self::BinpkgMerge => {
+                Some(&["work", "image", "temp", "homedir"])
+            }
+            Self::Install => Some(&["image", "temp", "homedir"]),
+            Self::Debug(_) => None,
+        }
+    }
+
+    /// Dump the live env to `worker-env` after the phase loop (Compile only —
+    /// the Install worker sources it to recover BUILD_DIR etc. across the
+    /// process boundary).
+    fn should_dump_env(&self) -> bool {
+        matches!(self, Self::Compile)
+    }
+
+    /// Source `worker-env` before the phase loop (Install only).
+    fn should_restore_env(&self) -> bool {
+        matches!(self, Self::Install)
+    }
+
+    /// Build a binpkg after qmerge (Full + Install, when `-b` is set).
+    fn should_buildpkg(&self) -> bool {
+        matches!(self, Self::Full | Self::Install)
+    }
+
+    /// Drop the build tree after qmerge.
+    fn should_tree_drop(&self) -> bool {
+        matches!(self, Self::Full | Self::Install | Self::BinpkgMerge)
+    }
+}
+
 /// The base directory for build work trees: `<prefix>/var/tmp/portage` under
 /// a prefix; otherwise the system `/var/tmp/portage` when writable, falling
 /// back to the user cache.
@@ -112,7 +223,7 @@ pub async fn run(
 ) -> Result<()> {
     run_inner(
         ebuild_path,
-        phases,
+        &PhaseGroup::Debug(phases.to_vec()),
         work_dir,
         repo_override,
         root,
@@ -148,44 +259,82 @@ pub async fn build_and_merge(
     merge_gate: Option<&tokio::sync::Mutex<()>>,
     buildpkg: bool,
 ) -> Result<()> {
-    let phases: Vec<String> = [
-        "pretend",
-        "setup",
-        "fetch",
-        "unpack",
-        "prepare",
-        "configure",
-        "compile",
-        "test",
-        "install",
-        "qmerge",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
     let ebuild =
         Ebuild::from_path(ebuild_path).with_context(|| format!("loading {ebuild_path}"))?;
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
     let work_dir = work_base.join(ebuild.category()).join(pf);
     let log = work_dir.join("build.log");
-    run_inner(
-        ebuild_path.as_str(),
-        &phases,
-        Some(&work_dir),
-        None,
-        root,
-        Some(use_flags),
-        distdir,
-        Some((log.clone(), quiet)),
-        config_root,
-        sysroot,
-        eprefix,
-        merge_gate,
-        buildpkg,
-        None,
-    )
-    .await
-    .with_context(|| format!("build log: {log}"))
+
+    if let Some(backend) = crate::privilege::install_wrap_backend() {
+        // Scoped privilege (Q6): compile runs un-wrapped in this process;
+        // install+qmerge(+binpkg) delegates to a wrapped __worker child so the
+        // ptrace tax / real root stays off the compile's make/gcc tree.
+        run_inner(
+            ebuild_path.as_str(),
+            &PhaseGroup::Compile,
+            Some(&work_dir),
+            None,
+            root,
+            Some(use_flags),
+            distdir,
+            Some((log.clone(), quiet)),
+            config_root,
+            sysroot,
+            eprefix,
+            None,
+            false,
+            None,
+        )
+        .await
+        .with_context(|| format!("build log: {log}"))?;
+
+        let use_str = use_flags
+            .iter()
+            .map(|f| f.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let code = crate::privilege::spawn_install_worker(
+            backend,
+            &crate::privilege::WorkerArgs {
+                ebuild_path: ebuild_path.as_str(),
+                use_flags: &use_str,
+                work_base: work_base.as_str(),
+                root: root.as_str(),
+                distdir: distdir.map(|d| d.as_str()),
+                config_root: config_root.map(|c| c.as_str()),
+                sysroot: sysroot.map(|s| s.as_str()),
+                eprefix: eprefix.map(|e| e.as_str()),
+                buildpkg,
+                quiet,
+                binpkg: None,
+            },
+        )
+        .await
+        .context("starting the install worker")?;
+        if code != 0 {
+            anyhow::bail!("install worker exited with status {code} (build log: {log})");
+        }
+        Ok(())
+    } else {
+        run_inner(
+            ebuild_path.as_str(),
+            &PhaseGroup::Full,
+            Some(&work_dir),
+            None,
+            root,
+            Some(use_flags),
+            distdir,
+            Some((log.clone(), quiet)),
+            config_root,
+            sysroot,
+            eprefix,
+            merge_gate,
+            buildpkg,
+            None,
+        )
+        .await
+        .with_context(|| format!("build log: {log}"))
+    }
 }
 
 /// Merge a pre-built binary package (`-k`/`--usepkg`): extract the GPKG's image
@@ -212,24 +361,112 @@ pub async fn merge_binpkg(
     let work_dir = work_base.join(ebuild.category()).join(pf);
     let log = work_dir.join("build.log");
 
-    // The image is extracted inside run_inner (after its clean step) from the
-    // binpkg, then the qmerge phase merges from work_root/image.
-    let phases: Vec<String> = ["qmerge"].iter().map(|s| s.to_string()).collect();
+    if let Some(backend) = crate::privilege::install_wrap_backend() {
+        // The qmerge chowns must run under (fake) root. Delegate to the
+        // wrapped __worker (BinpkgMerge group, binpkg set).
+        let use_str = use_flags
+            .iter()
+            .map(|f| f.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let code = crate::privilege::spawn_install_worker(
+            backend,
+            &crate::privilege::WorkerArgs {
+                ebuild_path: ebuild_path.as_str(),
+                use_flags: &use_str,
+                work_base: work_base.as_str(),
+                root: root.as_str(),
+                distdir: None,
+                config_root: config_root.map(|c| c.as_str()),
+                sysroot: sysroot.map(|s| s.as_str()),
+                eprefix: eprefix.map(|e| e.as_str()),
+                buildpkg: false,
+                quiet,
+                binpkg: Some(binpkg_path.as_str()),
+            },
+        )
+        .await
+        .context("starting the install worker")?;
+        if code != 0 {
+            anyhow::bail!("install worker exited with status {code} (merge log: {log})");
+        }
+        Ok(())
+    } else {
+        // The image is extracted inside run_inner (after its clean step) from
+        // the binpkg, then the qmerge phase merges from work_root/image.
+        run_inner(
+            ebuild_path.as_str(),
+            &PhaseGroup::BinpkgMerge,
+            Some(&work_dir),
+            None,
+            root,
+            Some(use_flags),
+            None,
+            Some((log.clone(), quiet)),
+            config_root,
+            sysroot,
+            eprefix,
+            merge_gate,
+            false,
+            Some(binpkg_path),
+        )
+        .await
+        .with_context(|| format!("merge log: {log}"))
+    }
+}
+
+/// The `em __worker` body: run the install group (install+qmerge+binpkg) for one
+/// package inside the privilege session the parent spawned us into. The ebuild
+/// is re-sourced (portage spawns each phase in its own process); the parent's
+/// captured env is restored so cross-phase state (BUILD_DIR, …) survives.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_install_worker(
+    ebuild_path: &str,
+    use_flags_str: &str,
+    work_base: &str,
+    root: &str,
+    distdir: Option<&str>,
+    config_root: Option<&str>,
+    sysroot: Option<&str>,
+    eprefix: Option<&str>,
+    binpkg: Option<&str>,
+    buildpkg: bool,
+    quiet: bool,
+) -> Result<()> {
+    use portage_atom::interner::{DefaultInterner, Interned};
+    let use_flags: Vec<Interned<DefaultInterner>> = use_flags_str
+        .split_whitespace()
+        .map(Interned::<DefaultInterner>::intern)
+        .collect();
+
+    let ebuild_obj = Ebuild::from_path(Utf8Path::new(ebuild_path))
+        .with_context(|| format!("loading {ebuild_path}"))?;
+    let pf = format!("{}-{}", ebuild_obj.name(), ebuild_obj.version());
+    let work_dir = Utf8Path::new(work_base)
+        .join(ebuild_obj.category())
+        .join(pf);
+    let log = work_dir.join("build.log");
+
+    let group = if binpkg.is_some() {
+        PhaseGroup::BinpkgMerge
+    } else {
+        PhaseGroup::Install
+    };
     run_inner(
-        ebuild_path.as_str(),
-        &phases,
+        ebuild_path,
+        &group,
         Some(&work_dir),
         None,
-        root,
-        Some(use_flags),
-        None,
+        Utf8Path::new(root),
+        Some(&use_flags),
+        distdir.map(Utf8Path::new),
         Some((log.clone(), quiet)),
-        config_root,
-        sysroot,
-        eprefix,
-        merge_gate,
-        false,
-        Some(binpkg_path),
+        config_root.map(Utf8Path::new),
+        sysroot.map(Utf8Path::new),
+        eprefix.map(Utf8Path::new),
+        None,
+        buildpkg,
+        binpkg.map(Utf8Path::new),
     )
     .await
     .with_context(|| format!("merge log: {log}"))
@@ -281,7 +518,7 @@ fn resolve_masters(
 #[allow(clippy::too_many_arguments)]
 async fn run_inner(
     ebuild_path: &str,
-    phases: &[String],
+    group: &PhaseGroup,
     work_dir: Option<&Utf8Path>,
     repo_override: Option<&str>,
     root: &Utf8Path,
@@ -293,10 +530,9 @@ async fn run_inner(
     eprefix: Option<&Utf8Path>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
     buildpkg: bool,
-    // A pre-built GPKG to merge (`-k`): when set, its image is extracted into
-    // work_dir/image *after* the clean step below (so the clean doesn't wipe
-    // it) and the phase list should be just ["qmerge"]. None for a normal
-    // source build.
+    // A pre-built GPKG to merge (`-k`/`-g`): its image is extracted into
+    // work_dir/image *after* the clean step. Only meaningful with
+    // [`PhaseGroup::Install`]. None for a normal source build.
     binpkg: Option<&Utf8Path>,
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
@@ -429,7 +665,10 @@ async fn run_inner(
     // PMS 11.1: REPLACING_VERSIONS — the installed versions this merge
     // replaces (same slot), visible to pkg_pretend/setup/preinst/postinst.
     // Computed up front from the target root's VDB and the ebuild's SLOT.
-    if use_flags.is_some() || phases.iter().any(|p| p == "merge" || p == "qmerge") {
+    // Also for a debug `em ebuild … qmerge`, which merges without a plan.
+    if group.is_merge()
+        || matches!(group, PhaseGroup::Debug(p) if p.iter().any(|p| p == "merge" || p == "qmerge"))
+    {
         let slot = repo
             .cache_entry(ebuild.cpv())
             .ok()
@@ -453,7 +692,7 @@ async fn run_inner(
         .split_whitespace()
         .map(str::to_string)
         .collect();
-    let merge_mode = use_flags.is_some();
+    let merge_mode = group.is_merge();
 
     // Clean the build tree before starting a merge, mirroring portage's `clean`
     // phase that precedes `setup`. `run_phase` creates work/image/temp/homedir
@@ -466,11 +705,11 @@ async fn run_inner(
     // (FEATURES=keepwork keeps the tree for inspection), matching the post-merge
     // cleanup below. `build.log` and the `.em-helpers` shim dir are left: the
     // log is truncated by the phase-log tee, and the shims are idempotent.
-    if merge_mode
-        && !features.contains("keepwork")
+    if !features.contains("keepwork")
         && let Some(wd) = work_dir
+        && let Some(subs) = group.clean_subs()
     {
-        for sub in ["work", "image", "temp", "homedir"] {
+        for sub in subs {
             let _ = std::fs::remove_dir_all(wd.join(sub));
         }
     }
@@ -487,7 +726,32 @@ async fn run_inner(
             .with_context(|| format!("extracting image from {bp}"))?;
     }
 
-    for phase in phases {
+    // Install worker: restore the compile parent's captured env so cross-phase
+    // shell state (BUILD_DIR, a custom S, configure-time vars) survives the
+    // process boundary. Source the ebuild first (defines the phase functions
+    // and eclass state), overlay the captured env, then mark the shell
+    // phase-sourced so the phase loop treats install as a later phase of the
+    // same package — re-sourcing would re-assert the default S over the
+    // restored one.
+    if group.should_restore_env()
+        && let Some(wd) = work_dir
+    {
+        let env_path = wd.join("worker-env");
+        if env_path.exists() {
+            shell
+                .source_ebuild(&ebuild)
+                .await
+                .context("sourcing ebuild for env restore")?;
+            shell
+                .source_env_file(env_path.as_std_path())
+                .await
+                .with_context(|| format!("restoring environment {env_path}"))?;
+            shell.mark_phase_sourced(&ebuild);
+        }
+    }
+
+    let phases = group.phases();
+    for phase in &phases {
         // In the merge chain, src_test only runs under FEATURES=test
         // (an explicit `em ebuild … test` always runs it).
         if merge_mode && phase == "test" && !features.contains("test") {
@@ -498,14 +762,22 @@ async fn run_inner(
         // phases) run concurrently, but the qmerge — collision check, VDB
         // counter, world/profile updates — must not interleave across packages.
         // The guard is held only for this phase; non-merge phases stay parallel.
+        // The in-process gate only covers tasks in this process; parallel
+        // `__worker` children serialise on the flock (design Q2 — released by
+        // the kernel if a worker dies).
         let _merge_guard = match (merge_gate, phase.as_str()) {
             (Some(gate), "merge" | "qmerge") => Some(gate.lock().await),
+            _ => None,
+        };
+        let _merge_flock = match (merge_mode, work_dir, phase.as_str()) {
+            (true, Some(wd), "merge" | "qmerge") => lock_merge_flock(wd).await,
             _ => None,
         };
         run_one_phase(
             &mut shell, &ebuild, &repo, &repo_root, phase, &work_root, root,
         )
         .await?;
+        drop(_merge_flock);
         drop(_merge_guard);
 
         // Portage runs ecompress/estrip at the tail of __dyn_install: the
@@ -517,11 +789,19 @@ async fn run_inner(
         }
     }
 
+    // Compile parent: dump the live variables for the Install worker to
+    // source. Lives at work_dir top-level — the Install clean doesn't touch it.
+    if group.should_dump_env()
+        && let Ok(env_data) = capture_variables(&mut shell, &work_root).await
+    {
+        let _ = std::fs::write(work_root.join("worker-env").as_std_path(), &env_data);
+    }
+
     // Build a binary package from the freshly-merged image + VDB entry, if asked.
     // Runs after qmerge (VDB + CONTENTS written) and before the build tree is
     // dropped, inside the same privilege session so ${D} ownership/xattrs are
     // read correctly.
-    if buildpkg && merge_mode {
+    if buildpkg && group.should_buildpkg() {
         match build_binpkg(&shell, &ebuild, &work_root, root) {
             Ok(path) => println!(">>> Created binary package: {path}"),
             Err(e) => eprintln!("warning: --buildpkg failed for {}: {e:#}", ebuild.cpv()),
@@ -530,16 +810,40 @@ async fn run_inner(
 
     // Successful merge chain: drop the build tree, keeping build.log
     // (FEATURES=keepwork keeps everything).
-    if merge_mode
+    if group.should_tree_drop()
         && !features.contains("keepwork")
         && let Some(wd) = work_dir
     {
         for sub in ["work", "image", "temp", "homedir"] {
             let _ = std::fs::remove_dir_all(wd.join(sub));
         }
+        let _ = std::fs::remove_file(wd.join("worker-env").as_std_path());
     }
 
     Ok(())
+}
+
+/// Exclusive flock on `<work_base>/.merge.lock` (the grandparent of the
+/// per-package work dir), held around the merge critical section so parallel
+/// `__worker` processes — and concurrent em instances sharing the tree —
+/// cannot interleave qmerge. Blocking acquire runs off the async executor;
+/// released on drop (or by the kernel on process exit).
+async fn lock_merge_flock(work_dir: &Utf8Path) -> Option<std::fs::File> {
+    let base = work_dir.parent()?.parent()?;
+    let path = base.join(".merge.lock").into_std_path_buf();
+    tokio::task::spawn_blocking(move || {
+        // append: never truncate — other processes may hold the lock fd.
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()?;
+        rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive).ok()?;
+        Some(f)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Build the ecompress/estrip configuration from the post-`src_install`
@@ -1512,11 +1816,47 @@ async fn capture_environment(
     shell: &mut portage_repo::EbuildShell,
     work_root: &Utf8Path,
 ) -> std::result::Result<Vec<u8>, String> {
+    capture_shell_dump(shell, work_root, "{ declare -p; declare -f; }").await
+}
+
+/// Variables-only dump for the Compile→Install worker handoff. Deliberately no
+/// `declare -f`: the worker re-sources the ebuild (which defines every
+/// ebuild/eclass function), and brush's function printer does not round-trip
+/// heredoc bodies (the indented `<<-EOF` delimiter never terminates), which
+/// would make the whole dump unparseable. Readonly declares are dropped —
+/// re-declaring them in the worker only produces "cannot mutate readonly
+/// variable" noise (portage's env restore filters them the same way).
+async fn capture_variables(
+    shell: &mut portage_repo::EbuildShell,
+    work_root: &Utf8Path,
+) -> std::result::Result<Vec<u8>, String> {
+    let dump = capture_shell_dump(shell, work_root, "declare -p").await?;
+    let text = String::from_utf8_lossy(&dump);
+    let filtered: String = text
+        .lines()
+        .filter(|l| {
+            !l.strip_prefix("declare -")
+                .and_then(|rest| rest.split_whitespace().next())
+                .is_some_and(|flags| flags.contains('r'))
+        })
+        .fold(String::with_capacity(text.len()), |mut acc, l| {
+            acc.push_str(l);
+            acc.push('\n');
+            acc
+        });
+    Ok(filtered.into_bytes())
+}
+
+async fn capture_shell_dump(
+    shell: &mut portage_repo::EbuildShell,
+    work_root: &Utf8Path,
+    dump_cmd: &str,
+) -> std::result::Result<Vec<u8>, String> {
     let dump_path = work_root.join("temp/environment");
     let path_escaped = dump_path.as_str().replace('\'', "'\\''");
     shell
         .run_string(&format!(
-            "{{ declare -p; declare -f; }} > '{path_escaped}' 2>/dev/null || true"
+            "{dump_cmd} > '{path_escaped}' 2>/dev/null || true"
         ))
         .await
         .map_err(|e| format!("environment capture failed: {e}"))?;

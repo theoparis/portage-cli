@@ -944,6 +944,34 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
         Applet::Helper { name, args } => {
             std::process::exit(portage_repo::run_helper(name, args).await);
         }
+        Applet::Worker {
+            ebuild,
+            use_flags,
+            work_base,
+            root,
+            distdir,
+            config_root,
+            sysroot,
+            eprefix,
+            binpkg,
+            buildpkg,
+            quiet,
+        } => {
+            ebuild::run_install_worker(
+                ebuild,
+                use_flags,
+                work_base,
+                root,
+                distdir.as_deref(),
+                config_root.as_deref(),
+                sysroot.as_deref(),
+                eprefix.as_deref(),
+                binpkg.as_deref(),
+                *buildpkg,
+                *quiet,
+            )
+            .await
+        }
         Applet::Ebuild {
             ebuild_path,
             phase,

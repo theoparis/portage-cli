@@ -790,6 +790,15 @@ impl EbuildShell {
         self.phase_sourced_ebuild.as_deref() == Some(ebuild.path())
     }
 
+    /// Declare `ebuild` already sourced into the live shell for the current
+    /// phase run. For an install worker that rebuilt the package state by
+    /// sourcing the ebuild and overlaying the parent's captured environment:
+    /// the next `run_phase` must treat it as a later phase of the same package
+    /// (no re-source, no re-asserting the default `S` over the restored one).
+    pub fn mark_phase_sourced(&mut self, ebuild: &Ebuild) {
+        self.phase_sourced_ebuild = Some(ebuild.path().to_path_buf());
+    }
+
     /// Append an eclass directory (searched after existing dirs).
     pub fn add_eclass_dir(&mut self, dir: Utf8PathBuf) {
         self.invalidate_baseline();
