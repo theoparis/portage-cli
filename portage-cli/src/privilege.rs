@@ -195,16 +195,19 @@ pub async fn spawn_install_worker(backend: Backend, args: &WorkerArgs<'_>) -> st
     if let Some(b) = args.binpkg {
         cmd.arg("--binpkg").arg(b);
     }
-    match backend {
+    let mut cmd = match backend {
         Backend::Fakeroost => {
             use fakeroost::FakerootCommandExt;
             cmd.env(ACTIVE_ENV, "fakeroost");
-            cmd.fakeroot();
+            // fakeroot() returns the supervisor re-exec command; the original
+            // would run unwrapped.
+            cmd.fakeroot()
         }
         _ => {
             cmd.env(ACTIVE_ENV, "sudo");
+            cmd
         }
-    }
+    };
     // The worker runs a full install+qmerge — off the executor thread, so
     // parallel builds in other tasks keep making progress while we wait.
     tokio::task::spawn_blocking(move || cmd.status().map(|s| s.code().unwrap_or(1)))
