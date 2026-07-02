@@ -1127,6 +1127,8 @@ pub enum Privilege {
     Auto,
     /// Pure-Rust ptrace+seccomp fake root; ownership faked in-session.
     Fakeroost,
+    /// LD_PRELOAD fake root (`pseudoroot`); ownership faked in-session, no ptrace tax.
+    Pseudoroot,
     /// User-namespace sandbox with build-user→0 map; real chowns in-box.
     Hakoniwa,
     /// Re-exec under `sudo` for real root (root-owned tree, real setuid).

@@ -102,10 +102,12 @@ fn expand_sets(raw: &[String], config_root: Option<&Utf8Path>, eroot: &Utf8Path)
 }
 
 fn main() {
-    // Must be the first thing in main: on a fakeroost supervisor re-exec this
-    // runs the trace loop and exits; on a normal launch it is a no-op. Kept ahead
-    // of the tokio runtime so the supervisor never spins one up.
+    // Must be the first thing in main: on a fakeroost/pseudoroot supervisor
+    // re-exec these run the session and exit; on a normal launch they are
+    // no-ops. Kept ahead of the tokio runtime so the supervisor never spins
+    // one up.
     fakeroost::init();
+    pseudoroot::init();
 
     // Portage's ebuild.sh sets `umask 022` before running any phase; mirror it
     // so file and directory modes under ${D} and the build tree match a real

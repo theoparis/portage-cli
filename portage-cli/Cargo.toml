@@ -59,6 +59,7 @@ object = { workspace = true }
 bzip2 = { workspace = true }
 rustix = { workspace = true }
 fakeroost = { workspace = true }
+pseudoroot = { workspace = true }
 hakoniwa = { workspace = true }
 humansize = { workspace = true }
 humantime = { workspace = true }

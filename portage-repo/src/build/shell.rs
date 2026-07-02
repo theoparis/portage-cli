@@ -1117,6 +1117,20 @@ impl EbuildShell {
             }
         }
 
+        // An LD_PRELOAD fake-root session (pseudoroot) only holds if every
+        // phase child loads the interposer; pass its variables through the
+        // otherwise clean build env, exported, as portage does for its
+        // sandbox preload.
+        if std::env::vars().any(|(k, _)| k.starts_with("PSEUDOROOT_")) {
+            for (key, val) in std::env::vars() {
+                if key == "LD_PRELOAD" || key.starts_with("PSEUDOROOT_") {
+                    let mut var = ShellVariable::new(ShellValue::String(val));
+                    var.export();
+                    let _ = self.shell.set_env_global(&key, var);
+                }
+            }
+        }
+
         // Default CBUILD to CHOST when unset, as portage does (`portageq envvar
         // CBUILD` yields CHOST on a native system even with no CBUILD in
         // make.conf). Without it `econf` omits `--build`, so configure sees

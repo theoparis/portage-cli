@@ -2,7 +2,7 @@
 //! `chown`/setuid succeed and ownership is recorded, instead of swallowing the
 //! EPERM and losing it.
 //!
-//! Fakeroost and sudo are *scoped*, not umbrellas (`todo/
+//! Fakeroost, pseudoroot and sudo are *scoped*, not umbrellas (`todo/
 //! fakeroot-privilege-backends.md` Q6: the ptrace tax / real root must stay off
 //! the compile): the un-wrapped parent runs `pretend..compile`, then
 //! `build_and_merge` delegates install+qmerge(+binpkg) to a wrapped
@@ -16,6 +16,9 @@
 //! Backend selection (`--privilege`, or `EM_PRIVILEGE`; default `auto`):
 //! - `auto`/`fakeroost` — pure-Rust ptrace+seccomp fake root (no privilege). The
 //!   default: ownership is faked in-session, on-disk stays the build user.
+//! - `pseudoroot` — LD_PRELOAD fake root: the same faked-ownership model without
+//!   the per-syscall ptrace tax, but interposition only covers dynamically
+//!   linked libc callers (static binaries / raw syscalls escape it).
 //! - `hakoniwa` — user-namespace sandbox with build-user→0 map ("real-in-a-box"):
 //!   real `chown`/`setuid` syscalls inside the box; on-disk owners are the
 //!   mapped host ids (same family as `sudo`, without host root).
@@ -44,6 +47,10 @@ pub enum Backend {
     RealRoot,
     /// Pure-Rust ptrace+seccomp fake root (`fakeroost`) — the default unprivileged.
     Fakeroost,
+    /// LD_PRELOAD fake root (`pseudoroot`) — same faked-ownership model as
+    /// fakeroost without the ptrace tax (glibc-interposed, so static binaries
+    /// and raw syscalls escape it).
+    Pseudoroot,
     /// User-namespace sandbox (`hakoniwa`) with build-user→0 map.
     Hakoniwa,
     /// Re-exec under `sudo` for real root. Opt-in via `EM_PRIVILEGE=sudo`.
@@ -60,6 +67,7 @@ impl Backend {
         }
         match requested {
             Privilege::Auto | Privilege::Fakeroost => Backend::Fakeroost,
+            Privilege::Pseudoroot => Backend::Pseudoroot,
             Privilege::Hakoniwa => Backend::Hakoniwa,
             Privilege::Sudo => Backend::Sudo,
             Privilege::None => Backend::RealRoot,
@@ -103,12 +111,13 @@ pub fn maybe_supervise(cli: &Cli) -> Option<i32> {
         // install+qmerge to a wrapped __worker child. The exception is
         // `em ebuild … install/qmerge` — the debug applet runs phases
         // in-process with no worker seam, so wrap that whole invocation.
-        backend @ (Backend::Fakeroost | Backend::Sudo) => {
+        backend @ (Backend::Fakeroost | Backend::Pseudoroot | Backend::Sudo) => {
             if !ebuild_applet_installs(cli) {
                 return None;
             }
             Some(match backend {
                 Backend::Fakeroost => reexec_fakeroost(),
+                Backend::Pseudoroot => reexec_pseudoroot(),
                 _ => reexec_sudo(),
             })
         }
@@ -130,7 +139,7 @@ fn ebuild_applet_installs(cli: &Cli) -> bool {
 pub fn install_wrap_backend() -> Option<Backend> {
     let requested = PRIVILEGE_REQUEST.get().copied().unwrap_or(Privilege::Auto);
     match Backend::detect(requested) {
-        backend @ (Backend::Fakeroost | Backend::Sudo) => Some(backend),
+        backend @ (Backend::Fakeroost | Backend::Pseudoroot | Backend::Sudo) => Some(backend),
         Backend::RealRoot | Backend::Hakoniwa => None,
     }
 }
@@ -203,6 +212,11 @@ pub async fn spawn_install_worker(backend: Backend, args: &WorkerArgs<'_>) -> st
             // would run unwrapped.
             cmd.fakeroot()
         }
+        Backend::Pseudoroot => {
+            use pseudoroot::FakerootCommandExt;
+            cmd.env(ACTIVE_ENV, "pseudoroot");
+            cmd.fakeroot()
+        }
         _ => {
             cmd.env(ACTIVE_ENV, "sudo");
             cmd
@@ -244,6 +258,28 @@ fn reexec_fakeroost() -> i32 {
         Ok(s) => s.code().unwrap_or(1),
         Err(e) => {
             eprintln!("em: failed to start the fakeroost supervisor: {e}");
+            1
+        }
+    }
+}
+
+/// Umbrella re-exec under pseudoroot — only for `em ebuild … install/qmerge`
+/// (see [`maybe_supervise`]); merge runs use the per-package install worker.
+fn reexec_pseudoroot() -> i32 {
+    use pseudoroot::FakerootCommandExt;
+    let Some((exe, args)) = self_invocation() else {
+        return 1;
+    };
+    eprintln!(">>> unprivileged build — running under pseudoroot (LD_PRELOAD fake root)");
+    match std::process::Command::new(exe)
+        .args(args)
+        .env(ACTIVE_ENV, "pseudoroot")
+        .fakeroot()
+        .status()
+    {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("em: failed to start the pseudoroot session: {e}");
             1
         }
     }
