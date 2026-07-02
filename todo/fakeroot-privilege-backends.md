@@ -40,14 +40,18 @@ process under `none`. **pseudoroot backend added (2026-07-02, `37e8d49`)**:
 `--privilege pseudoroot` = LD_PRELOAD fake root (lu-zero/pseudoroot, same
 `FakerootCommandExt` API), scoped exactly like fakeroost, no ptrace tax;
 static binaries / raw syscalls escape it. Integration surfaced two
-pseudoroot bugs (fixed there, `08cba85`): the supervise env marker leaked
-into the child (fatal for self-referential targets like `em __worker`) and
-the uid/gid defaults clobbered inherited `PSEUDOROOT_UID/GID`. The ebuild
+pseudoroot bugs — `run_session` leaks `__PSEUDOROOT_SUPERVISE` into the
+child (env overrides don't remove inherited vars; fatal for
+self-referential targets like `em __worker`, which re-enters supervision on
+its own argv → ENOENT) and `ensure_default_env` clobbers inherited
+`PSEUDOROOT_UID/GID` with the 0 defaults. A local fix was validated
+end-to-end but **dropped at Luca's request (other pseudoroot work is
+ongoing)** — the backend does not function until equivalent fixes land
+upstream; then bump the workspace rev (Cargo.toml pins the pre-embed
+`a762be5`; local builds use the path patch). The ebuild
 shell's clean env also stripped `LD_PRELOAD`/`PSEUDOROOT_*` from phase
 children — now passed through exported when a session is active (portage
-does the same for its sandbox preload). Pending: push pseudoroot master and
-bump the workspace rev to ≥`6eb7c4f` (Cargo.toml pins the pre-embed rev;
-local builds use the path patch). Goal: a correct
+does the same for its sandbox preload). Goal: a correct
 root-owned `@system` stage3 (setuid `mount`, `root:root`, file caps) without
 running em as root. Supersedes the "decision point" in
 [[stage-build-shakeout]] and the privilege half of [[build-clean-env]].

@@ -29,11 +29,12 @@ here briefly for context). Updated 2026-06-27.
   (2026-07-02, `f3201cb`)**: a uid/chown probe ebuild caught the worker wrap
   discarding `fakeroot()`'s returned command (silent degrade to `none`);
   full backend matrix now verified (uid/chown/gpkg ownership per phase).
-  ✅ **pseudoroot backend (2026-07-02, `37e8d49`)**: `--privilege pseudoroot`
-  = LD_PRELOAD fake root, worker-scoped like fakeroost, no ptrace tax; two
-  pseudoroot bugs fixed there (`08cba85`, supervise-marker leak + uid/gid
-  default clobber; push + workspace rev bump ≥`6eb7c4f` pending); phase env
-  now passes `LD_PRELOAD`/`PSEUDOROOT_*` through exported. Remaining: the
+  🟡 **pseudoroot backend (2026-07-02, `37e8d49`)**: `--privilege pseudoroot`
+  = LD_PRELOAD fake root, worker-scoped like fakeroost, no ptrace tax; phase
+  env passes `LD_PRELOAD`/`PSEUDOROOT_*` through exported. em-side wiring is
+  validated, but two pseudoroot bugs (supervise-marker env leak into the
+  child + uid/gid default clobber) must land upstream first — the local fix
+  was dropped (other pseudoroot work ongoing); rev bump then. Remaining: the
   binpkg/stage tar
   in-session (real `root:root` artifacts — next), fakeroot (system) backend,
   auto-detect chain (pseudoroot is the natural auto default once wall-tested
