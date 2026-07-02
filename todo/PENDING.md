@@ -25,9 +25,19 @@ here briefly for context). Updated 2026-06-27.
   serialised across workers by an flock on `work_base/.merge.lock`; hakoniwa
   stays an umbrella; `em ebuild … install` keeps the umbrella (no worker seam).
   Validated: baselayout source build, `-b` producer and `-k` binpkg merge all
-  through the worker. Remaining: the binpkg/stage tar
+  through the worker. ✅ **Scoping confirmed live + fakeroost wrap fixed
+  (2026-07-02, `f3201cb`)**: a uid/chown probe ebuild caught the worker wrap
+  discarding `fakeroot()`'s returned command (silent degrade to `none`);
+  full backend matrix now verified (uid/chown/gpkg ownership per phase).
+  ✅ **pseudoroot backend (2026-07-02, `37e8d49`)**: `--privilege pseudoroot`
+  = LD_PRELOAD fake root, worker-scoped like fakeroost, no ptrace tax; two
+  pseudoroot bugs fixed there (`08cba85`, supervise-marker leak + uid/gid
+  default clobber; push + workspace rev bump ≥`6eb7c4f` pending); phase env
+  now passes `LD_PRELOAD`/`PSEUDOROOT_*` through exported. Remaining: the
+  binpkg/stage tar
   in-session (real `root:root` artifacts — next), fakeroot (system) backend,
-  auto-detect chain. **Benchmark fakeroost vs hakoniwa
+  auto-detect chain (pseudoroot is the natural auto default once wall-tested
+  on a big closure). **Benchmark fakeroost vs hakoniwa
   vs sudo** — the 2026-06-27 stage3 smoke showed fakeroost (ptrace+seccomp, 2 ctx
   switches per `stat`/chown/…) much slower on the gcc bootstrap; if hakoniwa
   (userns, ~no per-syscall cost) lands near sudo it should become the default

@@ -27,7 +27,27 @@ addressed: (a) `pkg_setup` now runs *unprivileged* in the compile parent —
 portage runs it privileged; an ebuild that needs root-ish checks there will
 diverge; (b) the VDB `environment.bz2` still embeds brush's `declare -f`
 output, whose heredoc bodies don't re-source (fine for em, a compat gap for
-consumers that re-source it — see [[parser-audit]]). Goal: a correct
+consumers that re-source it — see [[parser-audit]]). **Scoping confirmed live
+(2026-07-02)** with a uid/chown probe ebuild across every backend — and the
+probe caught the worker wrap being a silent no-op: `fakeroot()` returns the
+supervisor command and the return was discarded, so fakeroost degraded to
+`none` for the whole install group (fixed `f3201cb`; `fakeroot()` is now
+`#[must_use]` in both forks). Verified matrix: compile parent uid=1000
+un-wrapped everywhere; install worker fake-uid 0 with `chown 123:456`
+recorded through to the gpkg image tar (fakeroost + pseudoroot), real root +
+real ownership under sudo, mapped-root umbrella under hakoniwa, single
+process under `none`. **pseudoroot backend added (2026-07-02, `37e8d49`)**:
+`--privilege pseudoroot` = LD_PRELOAD fake root (lu-zero/pseudoroot, same
+`FakerootCommandExt` API), scoped exactly like fakeroost, no ptrace tax;
+static binaries / raw syscalls escape it. Integration surfaced two
+pseudoroot bugs (fixed there, `08cba85`): the supervise env marker leaked
+into the child (fatal for self-referential targets like `em __worker`) and
+the uid/gid defaults clobbered inherited `PSEUDOROOT_UID/GID`. The ebuild
+shell's clean env also stripped `LD_PRELOAD`/`PSEUDOROOT_*` from phase
+children — now passed through exported when a session is active (portage
+does the same for its sandbox preload). Pending: push pseudoroot master and
+bump the workspace rev to ≥`6eb7c4f` (Cargo.toml pins the pre-embed rev;
+local builds use the path patch). Goal: a correct
 root-owned `@system` stage3 (setuid `mount`, `root:root`, file caps) without
 running em as root. Supersedes the "decision point" in
 [[stage-build-shakeout]] and the privilege half of [[build-clean-env]].
