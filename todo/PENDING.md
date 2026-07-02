@@ -34,8 +34,15 @@ here briefly for context). Updated 2026-06-27.
   fakeroost, no ptrace tax; phase env passes `LD_PRELOAD`/`PSEUDOROOT_*`
   through exported. The two blocking pseudoroot bugs (supervise-marker env
   leak into the child + uid/gid default clobber) shipped fixed in the
-  v0.2.0 release; workspace pins the tag and runs from the plain git dep
-  (embedded interposer, no path patch). uid probe + baselayout verified. Remaining: the
+  v0.2.0 release. **2026-07-03**: the util-linux gpkg sweep caught a third
+  pseudoroot gap — the interposer missed the LFS `stat64` family, so
+  bzip2 (ownership-preserving, binds `lstat64`) recorded the real build
+  user on every compressed doc/man page (189/588 files); fixed in
+  pseudoroot `f3997ea` (fakeroost verified immune — ptrace is
+  symbol-agnostic). After that: 0/588 leaks, setuid mount/umount/su 0/0.
+  🟡 housekeeping: once `f3997ea` is pushed/tagged, bump the workspace pin
+  (now `tag = "v0.2.0"`) and drop the temporary pseudoroot path patch in
+  `.cargo/config.toml`. Remaining: the
   binpkg/stage tar
   in-session (real `root:root` artifacts — next), fakeroot (system) backend,
   auto-detect chain (pseudoroot is the natural auto default once wall-tested

@@ -46,8 +46,16 @@ self-referential targets like `em __worker`, which re-enters supervision on
 its own argv → ENOENT) and `ensure_default_env` clobbered inherited
 `PSEUDOROOT_UID/GID` with the 0 defaults. Both shipped fixed in
 **pseudoroot v0.2.0**; the workspace pins the tag (`c6b0ae9`) and the
-backend runs from the plain git dependency (embedded interposer, no local
-path patch), matrix re-verified. The ebuild
+backend runs from the plain git dependency (embedded interposer), matrix
+re-verified. A third gap surfaced on the util-linux sweep (2026-07-03):
+the interposer missed the LFS `stat64` family, so any
+`_FILE_OFFSET_BITS=64` binary read *real* ownership while the chown hooks
+stayed live — bzip2 preserves ownership across compression, so all 189
+compressed doc/man files in the binpkg recorded the build user. Fixed in
+pseudoroot `f3997ea` (LFS aliases; 0/588 leaks after, setuid mount 0/0;
+fakeroost verified immune — ptrace intercepts syscalls, not symbols).
+Until `f3997ea` is pushed/tagged, a temporary pseudoroot path patch sits
+in `.cargo/config.toml`; bump the pin and drop it after. The ebuild
 shell's clean env also stripped `LD_PRELOAD`/`PSEUDOROOT_*` from phase
 children — now passed through exported when a session is active (portage
 does the same for its sandbox preload). Goal: a correct
