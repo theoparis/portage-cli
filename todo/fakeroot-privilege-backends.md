@@ -53,9 +53,9 @@ the interposer missed the LFS `stat64` family, so any
 stayed live — bzip2 preserves ownership across compression, so all 189
 compressed doc/man files in the binpkg recorded the build user. Fixed in
 pseudoroot `f3997ea` (LFS aliases; 0/588 leaks after, setuid mount 0/0;
-fakeroost verified immune — ptrace intercepts syscalls, not symbols).
-Until `f3997ea` is pushed/tagged, a temporary pseudoroot path patch sits
-in `.cargo/config.toml`; bump the pin and drop it after. The ebuild
+fakeroost verified immune — ptrace intercepts syscalls, not symbols),
+released as **v0.2.1**: the workspace pins the tag (`5acb4ce`) and the
+backend runs from the plain git dependency again, no path patch. The ebuild
 shell's clean env also stripped `LD_PRELOAD`/`PSEUDOROOT_*` from phase
 children — now passed through exported when a session is active (portage
 does the same for its sandbox preload). Goal: a correct

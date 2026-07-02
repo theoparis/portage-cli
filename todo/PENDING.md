@@ -40,9 +40,8 @@ here briefly for context). Updated 2026-06-27.
   user on every compressed doc/man page (189/588 files); fixed in
   pseudoroot `f3997ea` (fakeroost verified immune — ptrace is
   symbol-agnostic). After that: 0/588 leaks, setuid mount/umount/su 0/0.
-  🟡 housekeeping: once `f3997ea` is pushed/tagged, bump the workspace pin
-  (now `tag = "v0.2.0"`) and drop the temporary pseudoroot path patch in
-  `.cargo/config.toml`. Remaining: the
+  Shipped as **pseudoroot v0.2.1**; workspace pins the tag (`5acb4ce`),
+  path patch dropped, doc/man repro green from the plain git dep. Remaining: the
   binpkg/stage tar
   in-session (real `root:root` artifacts — next), fakeroot (system) backend,
   auto-detect chain (pseudoroot is the natural auto default once wall-tested
