@@ -161,9 +161,43 @@ impl Profile {
             let entry = if line == "-*" {
                 PackageEntry::Clear
             } else if let Some(rest) = line.strip_prefix('-') {
+                // A removal line echoes the *original* text of the addition
+                // it cancels, `*` marker and all (e.g. `arch/riscv/packages`
+                // has `-*sys-apps/busybox`, removing `default/linux`'s
+                // `*sys-apps/busybox` system add) — the marker doesn't change
+                // what gets removed (`Remove` matches by dep identity
+                // regardless of whether the retained entry was System or
+                // Plain), so strip it too before parsing. Found 2026-07-03
+                // building the riscv profile's stage1 packages.build list for
+                // the first time ever — no prior profile stack this codebase
+                // exercised happened to use this removal form. See
+                // [[stage-build-shakeout]].
+                let rest = rest.strip_prefix('*').unwrap_or(rest);
                 PackageEntry::Remove(Dep::parse(rest.trim())?)
             } else if let Some(rest) = line.strip_prefix('*') {
                 PackageEntry::System(Dep::parse(rest.trim())?)
+            } else {
+                PackageEntry::Plain(Dep::parse(line.trim())?)
+            };
+            result.push(entry);
+        }
+        Ok(result)
+    }
+
+    /// Parse the `packages.build` file into raw entries (PMS doesn't cover this
+    /// file; it's a catalyst/crossdev-stages convention: the stage1 bootstrap
+    /// package list, in build order). Unlike `packages`, entries are never
+    /// `*`-prefixed (there is no advisory-vs-system distinction here) but the
+    /// file still uses the same incremental `-atom`/`-*` removal as other
+    /// profile files (`portage.util.stack_lists(..., incremental=1)`).
+    fn packages_build_raw(&self) -> Result<Vec<PackageEntry>> {
+        let lines = util::read_lines(self.path.join("packages.build"))?;
+        let mut result = Vec::new();
+        for line in lines {
+            let entry = if line == "-*" {
+                PackageEntry::Clear
+            } else if let Some(rest) = line.strip_prefix('-') {
+                PackageEntry::Remove(Dep::parse(rest.trim())?)
             } else {
                 PackageEntry::Plain(Dep::parse(line.trim())?)
             };
@@ -419,6 +453,53 @@ impl ProfileStack {
             .into_iter()
             .filter_map(|(is_sys, d)| is_sys.then_some(d))
             .collect())
+    }
+
+    /// Accumulated `packages.build` entries across the full stack, in build
+    /// order, with incremental `-atom`/`-*` removal applied. This is the
+    /// **stage1 bootstrap list** (catalyst/crossdev-stages convention) — the
+    /// minimal package set a stage1 emerges into an empty root, distinct from
+    /// (and much smaller than) [`system_set`](Self::system_set)'s `@system`.
+    /// Entries here are bare `cat/pkg` atoms (no version); see
+    /// [`stage1_packages`](Self::stage1_packages) for the version-qualified
+    /// merge with `packages`.
+    pub fn packages_build(&self) -> Result<Vec<Dep>> {
+        let mut acc: Vec<Dep> = Vec::new();
+        for p in &self.profiles {
+            for entry in p.packages_build_raw()? {
+                match entry {
+                    PackageEntry::Plain(d) => acc.push(d),
+                    PackageEntry::Remove(d) => acc.retain(|existing| existing != &d),
+                    PackageEntry::Clear => acc.clear(),
+                    PackageEntry::System(_) => {
+                        unreachable!("packages_build_raw never produces System entries")
+                    }
+                }
+            }
+        }
+        Ok(acc)
+    }
+
+    /// The stage1 package list, version-qualified: mirrors catalyst's
+    /// `targets/stage1/build.py`.
+    ///
+    /// [`packages_build`](Self::packages_build) gives the build *order* and
+    /// *membership* as bare `cat/pkg` atoms; [`packages`](Self::packages) (the
+    /// `@system` set) may carry version/operator constraints (`>=cat/pkg-1.2`)
+    /// for the same key. For each `packages` entry whose `cat/pkg` key matches
+    /// a `packages.build` slot, that slot is replaced with the (possibly
+    /// versioned) `packages` atom — same key, so build order is preserved.
+    /// `packages.build` entries with no `packages` match are kept bare;
+    /// `packages` entries with no `packages.build` match are dropped (the
+    /// build list drives order and membership, not the system list).
+    pub fn stage1_packages(&self) -> Result<Vec<Dep>> {
+        let mut result = self.packages_build()?;
+        for (_, dep) in self.packages()? {
+            if let Some(slot) = result.iter_mut().find(|d| d.cpn == dep.cpn) {
+                *slot = dep;
+            }
+        }
+        Ok(result)
     }
 
     /// Accumulated `package.use` entries from the full stack, ancestors first.
@@ -1033,6 +1114,79 @@ mod tests {
     }
 
     #[test]
+    fn packages_build_accumulated_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = make_profile(&dir, "parent", &[]);
+        std::fs::write(parent.join("packages.build"), "sys-devel/binutils\n").unwrap();
+        let leaf = make_profile(&dir, "leaf", &["../parent"]);
+        std::fs::write(leaf.join("packages.build"), "sys-devel/gcc\n").unwrap();
+
+        let stack = ProfileStack::build(leaf).unwrap();
+        let pkgs = stack.packages_build().unwrap();
+        let names: Vec<_> = pkgs.iter().map(|d| d.to_string()).collect();
+        assert_eq!(names, vec!["sys-devel/binutils", "sys-devel/gcc"]);
+    }
+
+    #[test]
+    fn packages_build_honours_incremental_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = make_profile(&dir, "parent", &[]);
+        std::fs::write(
+            parent.join("packages.build"),
+            "sys-devel/binutils\nsys-devel/gcc\n",
+        )
+        .unwrap();
+        let leaf = make_profile(&dir, "leaf", &["../parent"]);
+        std::fs::write(leaf.join("packages.build"), "-sys-devel/gcc\n").unwrap();
+
+        let stack = ProfileStack::build(leaf).unwrap();
+        let names: Vec<_> = stack
+            .packages_build()
+            .unwrap()
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
+        assert_eq!(names, vec!["sys-devel/binutils"]);
+    }
+
+    #[test]
+    fn stage1_packages_takes_version_from_system_set_keeps_build_order() {
+        // Mirrors catalyst's targets/stage1/build.py: packages.build supplies
+        // order+membership; packages (@system) supplies version constraints
+        // for matching keys, dropping the leading `*`.
+        let dir = tempfile::tempdir().unwrap();
+        let p = make_profile(&dir, "leaf", &[]);
+        std::fs::write(
+            p.join("packages.build"),
+            "sys-devel/binutils\nsys-apps/baselayout\nsys-devel/gcc\n",
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("packages"),
+            "*>=sys-devel/gcc-13\n*sys-libs/glibc\n",
+        )
+        .unwrap();
+
+        let stack = ProfileStack::build(p).unwrap();
+        let names: Vec<_> = stack
+            .stage1_packages()
+            .unwrap()
+            .iter()
+            .map(|d| d.to_string())
+            .collect();
+        // Build order preserved; gcc slot replaced with the versioned atom;
+        // glibc (no packages.build match) is not injected.
+        assert_eq!(
+            names,
+            vec![
+                "sys-devel/binutils",
+                "sys-apps/baselayout",
+                ">=sys-devel/gcc-13"
+            ]
+        );
+    }
+
+    #[test]
     fn is_deprecated_false_by_default() {
         let dir = tempfile::tempdir().unwrap();
         let p = make_profile(&dir, "leaf", &[]);
@@ -1061,6 +1215,35 @@ mod tests {
         let pkgs = stack.packages().unwrap();
         assert_eq!(pkgs.len(), 2);
         assert!(pkgs.iter().all(|(is_sys, _)| *is_sys));
+    }
+
+    #[test]
+    fn packages_removal_echoes_the_star_marker_of_the_add_it_cancels() {
+        // A removal line repeats the *original* text of the addition it
+        // cancels, `*` marker and all — e.g. real
+        // profiles/arch/riscv/packages has `-*sys-apps/busybox`, removing
+        // `default/linux`'s `*sys-apps/busybox` system add. Found 2026-07-03
+        // building the riscv profile's packages.build list for the first
+        // time (see todo/stage-build-shakeout.md) — no prior profile stack
+        // this codebase exercised happened to use this removal form.
+        let dir = tempfile::tempdir().unwrap();
+        let parent = make_profile(&dir, "parent", &[]);
+        std::fs::write(
+            parent.join("packages"),
+            "*sys-apps/busybox\n*sys-libs/glibc\n",
+        )
+        .unwrap();
+        let leaf = make_profile(&dir, "leaf", &["../parent"]);
+        std::fs::write(leaf.join("packages"), "-*sys-apps/busybox\n").unwrap();
+
+        let stack = ProfileStack::build(leaf).unwrap();
+        let names: Vec<_> = stack
+            .packages()
+            .unwrap()
+            .into_iter()
+            .map(|(_, d)| d.to_string())
+            .collect();
+        assert_eq!(names, vec!["sys-libs/glibc"]);
     }
 
     #[test]
