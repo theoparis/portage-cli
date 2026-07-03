@@ -64,9 +64,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub local: bool,
 
-    /// How an unprivileged build gets root for chown/setuid: auto (fakeroost),
-    /// fakeroost, hakoniwa (userns mapped root), sudo (real root), or none.
-    /// Ignored when already root.
+    /// How an unprivileged build gets root for chown/setuid: auto (best
+    /// compiled-in fake root), fakeroost, pseudoroot, hakoniwa (userns mapped
+    /// root), sudo (real root), or none; backends unsupported on this platform
+    /// are compiled out. Ignored when already root.
     #[arg(long, value_enum, default_value_t = Privilege::Auto, global = true, env = "EM_PRIVILEGE")]
     pub privilege: Privilege,
 
@@ -1122,14 +1123,18 @@ pub enum LogCommand {
 /// How an unprivileged build gets root for `chown`/setuid (see `--privilege`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Privilege {
-    /// fakeroost when unprivileged, real chowns when already root (default).
+    /// Best compiled-in fake root (fakeroost, else pseudoroot, else none) when
+    /// unprivileged, real chowns when already root (default).
     #[default]
     Auto,
     /// Pure-Rust ptrace+seccomp fake root; ownership faked in-session.
+    #[cfg(all(feature = "fakeroost", target_os = "linux"))]
     Fakeroost,
     /// LD_PRELOAD fake root (`pseudoroot`); ownership faked in-session, no ptrace tax.
+    #[cfg(all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")))]
     Pseudoroot,
     /// User-namespace sandbox with build-user→0 map; real chowns in-box.
+    #[cfg(all(feature = "hakoniwa", target_os = "linux"))]
     Hakoniwa,
     /// Re-exec under `sudo` for real root (root-owned tree, real setuid).
     Sudo,

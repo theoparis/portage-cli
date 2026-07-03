@@ -13,8 +13,16 @@
 //! (the debug applet runs phases in-process, with no worker seam). qmerge is
 //! serialised across worker processes by an flock in `ebuild.rs`.
 //!
+//! Each fake-root backend is a default-on cargo feature compiled only where
+//! it works — fakeroost and hakoniwa are Linux kernel interfaces, pseudoroot
+//! covers Linux and macOS. The cfg gates pair the feature with the target
+//! because default features stay enabled on targets where the dependency
+//! table drops the crate.
+//!
 //! Backend selection (`--privilege`, or `EM_PRIVILEGE`; default `auto`):
-//! - `auto`/`fakeroost` — pure-Rust ptrace+seccomp fake root (no privilege). The
+//! - `auto` — the best compiled-in fake root: fakeroost, else pseudoroot (the
+//!   macOS default), else `none`.
+//! - `fakeroost` — pure-Rust ptrace+seccomp fake root (no privilege). The
 //!   default: ownership is faked in-session, on-disk stays the build user.
 //! - `pseudoroot` — LD_PRELOAD fake root: the same faked-ownership model without
 //!   the per-syscall ptrace tax, but interposition only covers dynamically
@@ -46,12 +54,15 @@ pub enum Backend {
     /// Already root, or already inside a session: real chowns, no wrapping.
     RealRoot,
     /// Pure-Rust ptrace+seccomp fake root (`fakeroost`) — the default unprivileged.
+    #[cfg(all(feature = "fakeroost", target_os = "linux"))]
     Fakeroost,
     /// LD_PRELOAD fake root (`pseudoroot`) — same faked-ownership model as
-    /// fakeroost without the ptrace tax (glibc-interposed, so static binaries
+    /// fakeroost without the ptrace tax (libc-interposed, so static binaries
     /// and raw syscalls escape it).
+    #[cfg(all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")))]
     Pseudoroot,
     /// User-namespace sandbox (`hakoniwa`) with build-user→0 map.
+    #[cfg(all(feature = "hakoniwa", target_os = "linux"))]
     Hakoniwa,
     /// Re-exec under `sudo` for real root. Opt-in via `EM_PRIVILEGE=sudo`.
     Sudo,
@@ -60,17 +71,38 @@ pub enum Backend {
 impl Backend {
     /// Pick the backend for this process: [`RealRoot`](Self::RealRoot) when
     /// euid==0 or already inside a wrapped session; otherwise map the `--privilege`
-    /// request (`auto` ⇒ fakeroost).
+    /// request.
     pub fn detect(requested: Privilege) -> Self {
         if rustix::process::geteuid().is_root() || already_active() {
             return Backend::RealRoot;
         }
         match requested {
-            Privilege::Auto | Privilege::Fakeroost => Backend::Fakeroost,
+            Privilege::Auto => Self::auto_backend(),
+            #[cfg(all(feature = "fakeroost", target_os = "linux"))]
+            Privilege::Fakeroost => Backend::Fakeroost,
+            #[cfg(all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")))]
             Privilege::Pseudoroot => Backend::Pseudoroot,
+            #[cfg(all(feature = "hakoniwa", target_os = "linux"))]
             Privilege::Hakoniwa => Backend::Hakoniwa,
             Privilege::Sudo => Backend::Sudo,
             Privilege::None => Backend::RealRoot,
+        }
+    }
+
+    /// `auto`: the best compiled-in fake root — fakeroost (ptrace covers every
+    /// caller) over pseudoroot (the only fake root on macOS); neither compiled
+    /// in ⇒ no wrapping, the chown workarounds degrade gracefully.
+    fn auto_backend() -> Self {
+        std::cfg_select! {
+            all(feature = "fakeroost", target_os = "linux") => {
+                Backend::Fakeroost
+            }
+            all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")) => {
+                Backend::Pseudoroot
+            }
+            _ => {
+                Backend::RealRoot
+            }
         }
     }
 }
@@ -106,22 +138,18 @@ pub fn maybe_supervise(cli: &Cli) -> Option<i32> {
     }
     match Backend::detect(cli.privilege) {
         Backend::RealRoot => None,
-        // Fakeroost/sudo are scoped, not umbrellas (Q6): the ptrace tax / real
-        // root must stay off the compile. build_and_merge delegates only
-        // install+qmerge to a wrapped __worker child. The exception is
+        // Fakeroost/pseudoroot/sudo are scoped, not umbrellas (Q6): the ptrace
+        // tax / real root must stay off the compile. build_and_merge delegates
+        // only install+qmerge to a wrapped __worker child. The exception is
         // `em ebuild … install/qmerge` — the debug applet runs phases
         // in-process with no worker seam, so wrap that whole invocation.
-        backend @ (Backend::Fakeroost | Backend::Pseudoroot | Backend::Sudo) => {
-            if !ebuild_applet_installs(cli) {
-                return None;
-            }
-            Some(match backend {
-                Backend::Fakeroost => reexec_fakeroost(),
-                Backend::Pseudoroot => reexec_pseudoroot(),
-                _ => reexec_sudo(),
-            })
-        }
-        Backend::Hakoniwa => Some(reexec_hakoniwa(cli)),
+        #[cfg(all(feature = "fakeroost", target_os = "linux"))]
+        Backend::Fakeroost => ebuild_applet_installs(cli).then(fakeroost::reexec),
+        #[cfg(all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")))]
+        Backend::Pseudoroot => ebuild_applet_installs(cli).then(pseudoroot::reexec),
+        Backend::Sudo => ebuild_applet_installs(cli).then(reexec_sudo),
+        #[cfg(all(feature = "hakoniwa", target_os = "linux"))]
+        Backend::Hakoniwa => Some(hakoniwa::reexec(cli)),
     }
 }
 
@@ -139,8 +167,10 @@ fn ebuild_applet_installs(cli: &Cli) -> bool {
 pub fn install_wrap_backend() -> Option<Backend> {
     let requested = PRIVILEGE_REQUEST.get().copied().unwrap_or(Privilege::Auto);
     match Backend::detect(requested) {
-        backend @ (Backend::Fakeroost | Backend::Pseudoroot | Backend::Sudo) => Some(backend),
-        Backend::RealRoot | Backend::Hakoniwa => None,
+        Backend::RealRoot => None,
+        #[cfg(all(feature = "hakoniwa", target_os = "linux"))]
+        Backend::Hakoniwa => None,
+        backend => Some(backend),
     }
 }
 
@@ -205,17 +235,15 @@ pub async fn spawn_install_worker(backend: Backend, args: &WorkerArgs<'_>) -> st
         cmd.arg("--binpkg").arg(b);
     }
     let mut cmd = match backend {
+        #[cfg(all(feature = "fakeroost", target_os = "linux"))]
         Backend::Fakeroost => {
-            use fakeroost::FakerootCommandExt;
             cmd.env(ACTIVE_ENV, "fakeroost");
-            // fakeroot() returns the supervisor re-exec command; the original
-            // would run unwrapped.
-            cmd.fakeroot()
+            fakeroost::wrap(&cmd)
         }
+        #[cfg(all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")))]
         Backend::Pseudoroot => {
-            use pseudoroot::FakerootCommandExt;
             cmd.env(ACTIVE_ENV, "pseudoroot");
-            cmd.fakeroot()
+            pseudoroot::wrap(&cmd)
         }
         _ => {
             cmd.env(ACTIVE_ENV, "sudo");
@@ -237,240 +265,6 @@ fn self_invocation() -> Option<(std::path::PathBuf, Vec<std::ffi::OsString>)> {
         Err(e) => {
             eprintln!("em: cannot locate own binary to re-exec: {e}");
             None
-        }
-    }
-}
-
-/// Umbrella re-exec under fakeroost — only for `em ebuild … install/qmerge`
-/// (see [`maybe_supervise`]); merge runs use the per-package install worker.
-fn reexec_fakeroost() -> i32 {
-    use fakeroost::FakerootCommandExt;
-    let Some((exe, args)) = self_invocation() else {
-        return 1;
-    };
-    eprintln!(">>> unprivileged build — running under fakeroost (fake root)");
-    match std::process::Command::new(exe)
-        .args(args)
-        .env(ACTIVE_ENV, "fakeroost")
-        .fakeroot()
-        .status()
-    {
-        Ok(s) => s.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("em: failed to start the fakeroost supervisor: {e}");
-            1
-        }
-    }
-}
-
-/// Umbrella re-exec under pseudoroot — only for `em ebuild … install/qmerge`
-/// (see [`maybe_supervise`]); merge runs use the per-package install worker.
-fn reexec_pseudoroot() -> i32 {
-    use pseudoroot::FakerootCommandExt;
-    let Some((exe, args)) = self_invocation() else {
-        return 1;
-    };
-    eprintln!(">>> unprivileged build — running under pseudoroot (LD_PRELOAD fake root)");
-    match std::process::Command::new(exe)
-        .args(args)
-        .env(ACTIVE_ENV, "pseudoroot")
-        .fakeroot()
-        .status()
-    {
-        Ok(s) => s.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("em: failed to start the pseudoroot session: {e}");
-            1
-        }
-    }
-}
-
-/// Whether the host can spawn an unprivileged user namespace with id maps.
-///
-/// Hakoniwa's parent process writes `/proc/<child>/uid_map` via `newuidmap` /
-/// `newgidmap`; both the kernel knob and those helpers must be present.
-pub(crate) fn userns_available() -> bool {
-    if let Ok(v) = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
-        && v.trim() == "0"
-    {
-        return false;
-    }
-    ["newuidmap", "newgidmap"]
-        .iter()
-        .any(|name| which_in_path(name))
-}
-
-fn which_in_path(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
-}
-
-/// Bind `host` read-write at the same path inside hakoniwa's mount namespace.
-fn bind_rw(container: &mut hakoniwa::Container, host: &str) {
-    if std::path::Path::new(host).is_dir() {
-        container.bindmount_rw(host, host);
-    }
-}
-
-fn bind_ro(container: &mut hakoniwa::Container, host: &str) {
-    if std::path::Path::new(host).exists() {
-        container.bindmount_ro(host, host);
-    }
-}
-
-/// Writable trees the build touches but `rootfs("/")` leaves out (it only
-/// bind-mounts the usual FHS prefixes read-only).
-fn bind_build_tree(container: &mut hakoniwa::Container, cli: &Cli) {
-    let roots = cli.roots();
-    bind_rw(container, roots.merge_root().as_str());
-    if let Some(overlay) = roots.config_overlay() {
-        bind_rw(container, overlay.as_str());
-    }
-    if let Some(eprefix) = roots.eprefix() {
-        bind_rw(container, eprefix.as_str());
-    }
-    bind_rw(container, "/tmp");
-    bind_rw(container, "/var/tmp");
-    // `rootfs("/")` binds only the FHS prefixes (/usr, /etc, /bin, /lib*, /sbin) —
-    // not the portage data trees under /var that a build reads/writes. Bind the
-    // ebuild repositories read-only and the distfiles dir read-write (the inner em
-    // fetches into it). The build/merge trees (work_base, merge_root, eprefix) are
-    // bound above; the em binary itself is bound by reexec_hakoniwa.
-    bind_ro(container, "/var/db/repos");
-    bind_rw(container, "/var/cache/distfiles");
-    if roots.relocate() {
-        let merge = roots.merge_root();
-        bind_rw(container, merge.join("var/cache/distfiles").as_ref());
-        bind_rw(container, merge.join("var/tmp").as_ref());
-    }
-}
-
-/// The `(start, count)` subordinate-id range delegated to the user in
-/// `/etc/subuid`/`/etc/subgid` (first line matching the name or numeric id).
-fn read_subid(name: &str, id: u32, subid_file: &str) -> Option<(u32, u32)> {
-    let content = std::fs::read_to_string(subid_file).ok()?;
-    let id_str = id.to_string();
-    for line in content.lines() {
-        let mut f = line.split(':');
-        let who = f.next()?;
-        if who != name && who != id_str.as_str() {
-            continue;
-        }
-        let start = f.next()?.parse().ok()?;
-        let count = f.next()?.parse().ok()?;
-        return Some((start, count));
-    }
-    None
-}
-
-/// hakoniwa id-map triples `(container_id, host_id, count)`.
-type IdMaps = Vec<(u32, u32, u32)>;
-
-/// Container root → the caller, plus the caller's delegated subuid/subgid range
-/// from container id 1, so real chown/setuid to non-root ids inside the box land
-/// on owned ids (a single `uid→0` map can only own root). Mirrors crossdev-stages.
-fn idmaps_for(id: u32, subid_file: &str) -> IdMaps {
-    let name = std::env::var("USER").unwrap_or_else(|_| id.to_string());
-    let mut maps = vec![(0, id, 1)];
-    if let Some((start, count)) = read_subid(&name, id, subid_file) {
-        maps.push((1, start, count));
-    }
-    maps
-}
-
-/// `(uid_maps, gid_maps)` for the current user (root + delegated subuid/subgid).
-fn id_range_maps() -> (IdMaps, IdMaps) {
-    let uid = rustix::process::getuid().as_raw();
-    let gid = rustix::process::getgid().as_raw();
-    (
-        idmaps_for(uid, "/etc/subuid"),
-        idmaps_for(gid, "/etc/subgid"),
-    )
-}
-
-fn reexec_hakoniwa(cli: &Cli) -> i32 {
-    if !userns_available() {
-        eprintln!(
-            "em: hakoniwa requires user namespaces and newuidmap/newgidmap on PATH; \
-             try --privilege fakeroost or sudo"
-        );
-        return 1;
-    }
-    let Some((exe, args)) = self_invocation() else {
-        return 1;
-    };
-    let program = match exe.to_str() {
-        Some(s) => s,
-        None => {
-            eprintln!("em: hakoniwa cannot run a non-UTF-8 executable path");
-            return 1;
-        }
-    };
-
-    use hakoniwa::{Namespace, Runctl};
-    let mut container = hakoniwa::Container::new();
-    // Container::new() unshares Mount, User and Pid (and mounts a private /proc).
-    // rootfs("/") binds the FHS prefixes read-only but leaves out /dev and the
-    // tmpfs mounts a build needs. Mirror the working crossdev-stages setup: full
-    // namespace isolation, a minimal devfs, a /dev/shm tmpfs, and allow-new-privs
-    // (builds exec setuid helpers). The writable build trees (merge root, /tmp,
-    // /var/tmp, …) are bound by bind_build_tree.
-    if let Err(e) = container.rootfs("/") {
-        eprintln!("em: hakoniwa rootfs setup failed: {e}");
-        return 1;
-    }
-    container
-        .unshare(Namespace::Ipc)
-        .unshare(Namespace::Uts)
-        .unshare(Namespace::Cgroup)
-        .devfsmount("/dev")
-        .tmpfsmount("/dev/shm")
-        // Without RootdirRW hakoniwa remounts the whole container root read-only,
-        // which also forces our rw build binds RO (the build can't create its work
-        // dirs). crossdev-stages sets this for the same reason; the FHS prefixes
-        // from rootfs("/") stay individually read-only regardless.
-        .runctl(Runctl::RootdirRW)
-        .runctl(Runctl::AllowNewPrivs);
-    // Map the caller to container root *and* their delegated subuid/subgid range
-    // (not a single uid→0), so the build can really own files as the various
-    // system users (portage, messagebus, …), not only root.
-    let (uid_maps, gid_maps) = id_range_maps();
-    container.uidmaps(&uid_maps);
-    container.gidmaps(&gid_maps);
-    bind_build_tree(&mut container, cli);
-    // The em binary we re-exec: bound by rootfs("/") when installed under /usr,
-    // but a dev build lives outside the FHS prefixes — bind it read-only so the
-    // container can exec it.
-    bind_ro(&mut container, program);
-
-    let mut cmd = container.command(program);
-    for arg in args {
-        let Some(s) = arg.to_str() else {
-            eprintln!("em: hakoniwa cannot forward a non-UTF-8 argument");
-            return 1;
-        };
-        cmd.arg(s);
-    }
-    cmd.env(ACTIVE_ENV, "hakoniwa");
-    for (key, val) in std::env::vars() {
-        cmd.env(&key, &val);
-    }
-
-    eprintln!(">>> unprivileged build — running under hakoniwa (userns mapped root)");
-    match cmd.status() {
-        Ok(status) => {
-            // hakoniwa reports container-setup/exec failures via `reason` with a
-            // non-success code — surface it instead of swallowing it.
-            if status.code != 0 && !status.reason.is_empty() {
-                eprintln!("em: hakoniwa: {}", status.reason);
-            }
-            status.code
-        }
-        Err(e) => {
-            eprintln!("em: failed to start the hakoniwa container: {e}");
-            1
         }
     }
 }
@@ -498,13 +292,279 @@ fn reexec_sudo() -> i32 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(feature = "fakeroost", target_os = "linux"))]
+mod fakeroost {
+    use std::process::Command;
+
+    use ::fakeroost::FakerootCommandExt;
+
+    /// The supervisor re-exec command wrapping `cmd`; running `cmd` itself
+    /// would execute unwrapped.
+    pub fn wrap(cmd: &Command) -> Command {
+        cmd.fakeroot()
+    }
+
+    /// Umbrella re-exec — only for `em ebuild … install/qmerge` (see
+    /// [`maybe_supervise`](super::maybe_supervise)); merge runs use the
+    /// per-package install worker.
+    pub fn reexec() -> i32 {
+        let Some((exe, args)) = super::self_invocation() else {
+            return 1;
+        };
+        eprintln!(">>> unprivileged build — running under fakeroost (fake root)");
+        match Command::new(exe)
+            .args(args)
+            .env(super::ACTIVE_ENV, "fakeroost")
+            .fakeroot()
+            .status()
+        {
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("em: failed to start the fakeroost supervisor: {e}");
+                1
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")))]
+mod pseudoroot {
+    use std::process::Command;
+
+    use ::pseudoroot::FakerootCommandExt;
+
+    /// The session re-exec command wrapping `cmd`; running `cmd` itself
+    /// would execute unwrapped.
+    pub fn wrap(cmd: &Command) -> Command {
+        cmd.fakeroot()
+    }
+
+    /// Umbrella re-exec — only for `em ebuild … install/qmerge` (see
+    /// [`maybe_supervise`](super::maybe_supervise)); merge runs use the
+    /// per-package install worker.
+    pub fn reexec() -> i32 {
+        let Some((exe, args)) = super::self_invocation() else {
+            return 1;
+        };
+        eprintln!(">>> unprivileged build — running under pseudoroot (LD_PRELOAD fake root)");
+        match Command::new(exe)
+            .args(args)
+            .env(super::ACTIVE_ENV, "pseudoroot")
+            .fakeroot()
+            .status()
+        {
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("em: failed to start the pseudoroot session: {e}");
+                1
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "hakoniwa", target_os = "linux"))]
+mod hakoniwa {
+    use ::hakoniwa::{Container, Namespace, Runctl};
+
+    use crate::cli::Cli;
+
+    /// Whether the host can spawn an unprivileged user namespace with id maps.
+    ///
+    /// Hakoniwa's parent process writes `/proc/<child>/uid_map` via `newuidmap` /
+    /// `newgidmap`; both the kernel knob and those helpers must be present.
+    pub fn userns_available() -> bool {
+        if let Ok(v) = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
+            && v.trim() == "0"
+        {
+            return false;
+        }
+        ["newuidmap", "newgidmap"]
+            .iter()
+            .any(|name| which_in_path(name))
+    }
+
+    fn which_in_path(name: &str) -> bool {
+        let Some(path) = std::env::var_os("PATH") else {
+            return false;
+        };
+        std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
+    }
+
+    /// Bind `host` read-write at the same path inside hakoniwa's mount namespace.
+    fn bind_rw(container: &mut Container, host: &str) {
+        if std::path::Path::new(host).is_dir() {
+            container.bindmount_rw(host, host);
+        }
+    }
+
+    fn bind_ro(container: &mut Container, host: &str) {
+        if std::path::Path::new(host).exists() {
+            container.bindmount_ro(host, host);
+        }
+    }
+
+    /// Writable trees the build touches but `rootfs("/")` leaves out (it only
+    /// bind-mounts the usual FHS prefixes read-only).
+    fn bind_build_tree(container: &mut Container, cli: &Cli) {
+        let roots = cli.roots();
+        bind_rw(container, roots.merge_root().as_str());
+        if let Some(overlay) = roots.config_overlay() {
+            bind_rw(container, overlay.as_str());
+        }
+        if let Some(eprefix) = roots.eprefix() {
+            bind_rw(container, eprefix.as_str());
+        }
+        bind_rw(container, "/tmp");
+        bind_rw(container, "/var/tmp");
+        // `rootfs("/")` binds only the FHS prefixes (/usr, /etc, /bin, /lib*, /sbin) —
+        // not the portage data trees under /var that a build reads/writes. Bind the
+        // ebuild repositories read-only and the distfiles dir read-write (the inner em
+        // fetches into it). The build/merge trees (work_base, merge_root, eprefix) are
+        // bound above; the em binary itself is bound by reexec.
+        bind_ro(container, "/var/db/repos");
+        bind_rw(container, "/var/cache/distfiles");
+        if roots.relocate() {
+            let merge = roots.merge_root();
+            bind_rw(container, merge.join("var/cache/distfiles").as_ref());
+            bind_rw(container, merge.join("var/tmp").as_ref());
+        }
+    }
+
+    /// The `(start, count)` subordinate-id range delegated to the user in
+    /// `/etc/subuid`/`/etc/subgid` (first line matching the name or numeric id).
+    fn read_subid(name: &str, id: u32, subid_file: &str) -> Option<(u32, u32)> {
+        let content = std::fs::read_to_string(subid_file).ok()?;
+        let id_str = id.to_string();
+        for line in content.lines() {
+            let mut f = line.split(':');
+            let who = f.next()?;
+            if who != name && who != id_str.as_str() {
+                continue;
+            }
+            let start = f.next()?.parse().ok()?;
+            let count = f.next()?.parse().ok()?;
+            return Some((start, count));
+        }
+        None
+    }
+
+    /// hakoniwa id-map triples `(container_id, host_id, count)`.
+    type IdMaps = Vec<(u32, u32, u32)>;
+
+    /// Container root → the caller, plus the caller's delegated subuid/subgid range
+    /// from container id 1, so real chown/setuid to non-root ids inside the box land
+    /// on owned ids (a single `uid→0` map can only own root). Mirrors crossdev-stages.
+    fn idmaps_for(id: u32, subid_file: &str) -> IdMaps {
+        let name = std::env::var("USER").unwrap_or_else(|_| id.to_string());
+        let mut maps = vec![(0, id, 1)];
+        if let Some((start, count)) = read_subid(&name, id, subid_file) {
+            maps.push((1, start, count));
+        }
+        maps
+    }
+
+    /// `(uid_maps, gid_maps)` for the current user (root + delegated subuid/subgid).
+    fn id_range_maps() -> (IdMaps, IdMaps) {
+        let uid = rustix::process::getuid().as_raw();
+        let gid = rustix::process::getgid().as_raw();
+        (
+            idmaps_for(uid, "/etc/subuid"),
+            idmaps_for(gid, "/etc/subgid"),
+        )
+    }
+
+    pub fn reexec(cli: &Cli) -> i32 {
+        if !userns_available() {
+            eprintln!(
+                "em: hakoniwa requires user namespaces and newuidmap/newgidmap on PATH; \
+                 try --privilege fakeroost or sudo"
+            );
+            return 1;
+        }
+        let Some((exe, args)) = super::self_invocation() else {
+            return 1;
+        };
+        let program = match exe.to_str() {
+            Some(s) => s,
+            None => {
+                eprintln!("em: hakoniwa cannot run a non-UTF-8 executable path");
+                return 1;
+            }
+        };
+
+        let mut container = Container::new();
+        // Container::new() unshares Mount, User and Pid (and mounts a private /proc).
+        // rootfs("/") binds the FHS prefixes read-only but leaves out /dev and the
+        // tmpfs mounts a build needs. Mirror the working crossdev-stages setup: full
+        // namespace isolation, a minimal devfs, a /dev/shm tmpfs, and allow-new-privs
+        // (builds exec setuid helpers). The writable build trees (merge root, /tmp,
+        // /var/tmp, …) are bound by bind_build_tree.
+        if let Err(e) = container.rootfs("/") {
+            eprintln!("em: hakoniwa rootfs setup failed: {e}");
+            return 1;
+        }
+        container
+            .unshare(Namespace::Ipc)
+            .unshare(Namespace::Uts)
+            .unshare(Namespace::Cgroup)
+            .devfsmount("/dev")
+            .tmpfsmount("/dev/shm")
+            // Without RootdirRW hakoniwa remounts the whole container root read-only,
+            // which also forces our rw build binds RO (the build can't create its work
+            // dirs). crossdev-stages sets this for the same reason; the FHS prefixes
+            // from rootfs("/") stay individually read-only regardless.
+            .runctl(Runctl::RootdirRW)
+            .runctl(Runctl::AllowNewPrivs);
+        // Map the caller to container root *and* their delegated subuid/subgid range
+        // (not a single uid→0), so the build can really own files as the various
+        // system users (portage, messagebus, …), not only root.
+        let (uid_maps, gid_maps) = id_range_maps();
+        container.uidmaps(&uid_maps);
+        container.gidmaps(&gid_maps);
+        bind_build_tree(&mut container, cli);
+        // The em binary we re-exec: bound by rootfs("/") when installed under /usr,
+        // but a dev build lives outside the FHS prefixes — bind it read-only so the
+        // container can exec it.
+        bind_ro(&mut container, program);
+
+        let mut cmd = container.command(program);
+        for arg in args {
+            let Some(s) = arg.to_str() else {
+                eprintln!("em: hakoniwa cannot forward a non-UTF-8 argument");
+                return 1;
+            };
+            cmd.arg(s);
+        }
+        cmd.env(super::ACTIVE_ENV, "hakoniwa");
+        for (key, val) in std::env::vars() {
+            cmd.env(&key, &val);
+        }
+
+        eprintln!(">>> unprivileged build — running under hakoniwa (userns mapped root)");
+        match cmd.status() {
+            Ok(status) => {
+                // hakoniwa reports container-setup/exec failures via `reason` with a
+                // non-success code — surface it instead of swallowing it.
+                if status.code != 0 && !status.reason.is_empty() {
+                    eprintln!("em: hakoniwa: {}", status.reason);
+                }
+                status.code
+            }
+            Err(e) => {
+                eprintln!("em: failed to start the hakoniwa container: {e}");
+                1
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "hakoniwa", target_os = "linux"))]
 mod tests {
     use super::*;
 
     #[test]
     fn userns_knob_zero_means_unavailable() {
         // Don't assert true on real hosts — only that we don't panic reading the knob.
-        let _ = userns_available();
+        let _ = hakoniwa::userns_available();
     }
 }

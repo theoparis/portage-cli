@@ -2,7 +2,8 @@
 name = "portage-cli"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.92"
+# cfg_select! (privilege.rs) stabilized in 1.95.
+rust-version = "1.95"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Gentoo Portage command-line tools (em)"
@@ -17,8 +18,11 @@ name = "em"
 path = "src/main.rs"
 
 [features]
-default = ["mimalloc"]
+default = ["mimalloc", "fakeroost", "pseudoroot", "hakoniwa"]
 mimalloc = ["dep:mimalloc"]
+fakeroost = ["dep:fakeroost"]
+pseudoroot = ["dep:pseudoroot"]
+hakoniwa = ["dep:hakoniwa"]
 lasso = [
     "portage-atom/lasso",
     "portage-metadata/lasso",
@@ -58,12 +62,16 @@ hex = { workspace = true }
 object = { workspace = true }
 bzip2 = { workspace = true }
 rustix = { workspace = true }
-fakeroost = { workspace = true }
-pseudoroot = { workspace = true }
-hakoniwa = { workspace = true }
 humansize = { workspace = true }
 humantime = { workspace = true }
 serde_json = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fakeroost = { workspace = true, optional = true }
+hakoniwa = { workspace = true, optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+pseudoroot = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

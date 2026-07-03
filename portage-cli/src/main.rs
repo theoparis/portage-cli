@@ -106,7 +106,9 @@ fn main() {
     // re-exec these run the session and exit; on a normal launch they are
     // no-ops. Kept ahead of the tokio runtime so the supervisor never spins
     // one up.
+    #[cfg(all(feature = "fakeroost", target_os = "linux"))]
     fakeroost::init();
+    #[cfg(all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")))]
     pseudoroot::init();
 
     // Portage's ebuild.sh sets `umask 022` before running any phase; mirror it
