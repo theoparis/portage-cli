@@ -571,7 +571,8 @@ impl Adapter<'_> {
             return;
         };
         let enabled = |flag: &str| matches!(cfg.get(Interned::intern(flag)), UseFlagState::Enabled);
-        if ru.unsatisfied(&enabled).is_empty() {
+        let unsatisfied = ru.unsatisfied(&enabled);
+        if unsatisfied.is_empty() {
             return;
         }
 
@@ -583,8 +584,20 @@ impl Adapter<'_> {
         // Flags pinned by use.force/use.mask (global, package-level and the stable
         // variants): hard profile decisions, never ceded.
         let forced_masked = self.force_mask.pins(cpv, stable);
+        // Only flags mentioned in the *violated* clause(s), not the whole
+        // REQUIRED_USE tree: a package can have several independent top-level
+        // clauses (e.g. util-linux's `python? ( ... ) su? ( pam )`), and one
+        // failing must not cede flags belonging to an unrelated, independently
+        // satisfied clause — that gratuitously turns an already-decided flag
+        // into a solver-owned virtual choice node, which can fabricate a
+        // dependency edge that doesn't reflect the real (settled) USE state.
+        // Found 2026-07-03: util-linux's own `su?(pam)` violation was ceding
+        // `python` too, spuriously wiring it to dev-lang/python and creating a
+        // fake install-order cycle. See todo/stage-build-shakeout.md.
         let mut names = std::collections::BTreeSet::new();
-        collect_required_use_flags(ru, &mut names);
+        for clause in &unsatisfied {
+            collect_required_use_flags(clause, &mut names);
+        }
         for name in names {
             let flag = Interned::intern(&name);
             // Only cede real flags the user has not pinned or the profile has not
@@ -1366,6 +1379,64 @@ mod tests {
                     UseFlagState::SolverDecided { .. }
                 ),
                 "flag {f} must not be ceded when REQUIRED_USE already holds"
+            );
+        }
+    }
+
+    // Regression for the em stages --stage1 --cross riscv64 finding
+    // (todo/stage-build-shakeout.md): util-linux's
+    // REQUIRED_USE="python? ( foo ) su? ( pam )" has two independent
+    // top-level clauses. Only `su? ( pam )` is violated (su on, pam off);
+    // `python? ( foo )` is independently satisfied (python off, vacuous).
+    // Ceding must be scoped to the violated clause only — `python`/`foo`
+    // must stay fixed-Disabled, not become a solver-owned virtual choice
+    // (which previously fabricated a spurious dependency edge and a fake
+    // install-order cycle).
+    #[test]
+    fn independently_satisfied_clause_is_not_ceded_by_an_unrelated_violation() {
+        let (data, cpv) = repo_with(
+            "cat/pkg-1.0",
+            "EAPI=7\nSLOT=0\nIUSE=python foo su pam\n\
+             REQUIRED_USE=python? ( foo ) su? ( pam )\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+        );
+        let arch = Arch::intern("amd64");
+        let mut use_config = UseConfig::new();
+        use_config.enable(Interned::intern("su")); // su on, pam off ⇒ su?(pam) violated
+        // python left unset ⇒ Disabled ⇒ python?(foo) vacuously satisfied
+
+        let fm = ForceMask::default();
+        let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
+        let adapter = Adapter {
+            data: &data,
+            accept_keywords: &ak,
+            package_mask: &[],
+            package_unmask: &[],
+            installed_cpvs: &std::collections::HashSet::new(),
+            accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
+            use_config: &use_config,
+            package_use: &[],
+            force_mask: &fm,
+            autosolve_use: true,
+        };
+
+        let desired = adapter.desired_use(&cpv);
+        for f in ["su", "pam"] {
+            assert!(
+                matches!(
+                    desired.get(Interned::intern(f)),
+                    UseFlagState::SolverDecided { .. }
+                ),
+                "flag {f} (in the violated clause) should be ceded"
+            );
+        }
+        for f in ["python", "foo"] {
+            assert!(
+                !matches!(
+                    desired.get(Interned::intern(f)),
+                    UseFlagState::SolverDecided { .. }
+                ),
+                "flag {f} (in the independently-satisfied clause) must stay fixed, \
+                 not be ceded just because an unrelated clause failed"
             );
         }
     }
