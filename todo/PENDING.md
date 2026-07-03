@@ -45,7 +45,22 @@ here briefly for context). Updated 2026-06-27.
   binpkg/stage tar
   in-session (real `root:root` artifacts — next), fakeroot (system) backend,
   auto-detect chain (pseudoroot is the natural auto default once wall-tested
-  on a big closure). **Benchmark fakeroost vs hakoniwa
+  on a big closure).
+  **2026-07-03**: resumed the `stage-build-shakeout` @system run under pseudoroot
+  — the util-linux wall is confirmed cleared. Found (a) a stale-VDB trap: any
+  acct-group/acct-user package merged before a privilege backend existed lies
+  about group/user creation (silent eclass no-op, not a failure) — needs
+  re-merging, not a code fix; (b) ✅ **hang FIXED**: a `brush` scheduling
+  deadlock — any read-side process substitution inside a command substitution
+  (`old_groups=$(egetgroups …)` → `while read … done < <(…)` in
+  `acct-user.eclass pkg_postinst`) strands the procsub body in a tokio worker's
+  non-stealable LIFO slot while the parent blocks on a synchronous pipe read,
+  so it never gets its first poll. Fixed with a `yield_now().await` after the
+  procsub spawn (`setup_process_substitution`, `brush-core/src/interp.rs`);
+  verified end-to-end (`@system` resumed clean, 50/50, 0 failures, no hangs).
+  Patch sits **uncommitted** in the `~/Sources/brush` working tree
+  (`for-portage-repo` branch) — needs Luca to review/commit/push + bump the
+  `Cargo.toml` rev pin. [[stage-build-shakeout]] **Benchmark fakeroost vs hakoniwa
   vs sudo** — the 2026-06-27 stage3 smoke showed fakeroost (ptrace+seccomp, 2 ctx
   switches per `stat`/chown/…) much slower on the gcc bootstrap; if hakoniwa
   (userns, ~no per-syscall cost) lands near sudo it should become the default
@@ -83,9 +98,38 @@ here briefly for context). Updated 2026-06-27.
   no-op). Blocker: `select/env_d.rs` is config-root-keyed, must be merge-root-aware
   for the activation path (trait-sig change across the four select modules). The
   stages need the ROOT `<chost>-gcc`. [[select-toolchain]]
-- 🔴 **packages.build DEPEND-into-ROOT residuals.** `acct-group/root`,
-  `sys-fs/e2fsprogs`, util-linux ordering — re-test now that the DEPEND-trim
-  sysroot fix landed; the staged toolchain pre-breaks the cycle. [[em-root-characterization]]
+- 🔴 **VERY IMPORTANT — two real bugs block a full `em stages --stage1 --cross`
+  build, confirmed 2026-07-03 by an actual (non-pretend) run against the
+  riscv64 target** (`acct-group/root` itself is now fixed — see
+  [[stage-build-shakeout]] finding #13 — this is what preflight reports
+  *after* that fix):
+  1. **USE-dep conditional-default syntax (`flag(-)?`/`flag(+)?`/`-flag(-)`)
+     not evaluated correctly.** `sys-fs/e2fsprogs[abi_x86_32(-)?,abi_x86_64(-)?,
+     abi_x86_x32(-)?,abi_mips_n32(-)?,abi_mips_n64(-)?,abi_mips_o32(-)?,
+     abi_s390_32(-)?,abi_s390_64(-)?]` (libarchive's dep), `sys-libs/glibc
+     [-crypt(-)]` (libxcrypt's dep), `sys-libs/glibc[cet(-)?]` (gcc's dep) are
+     all EAPI 7+ "optional, default-if-flag-absent" USE-deps — riscv64 doesn't
+     have `abi_x86_*`/`abi_mips_*`/`abi_s390_*`/`crypt`/`cet` in IUSE at all,
+     so per spec these should trivially be satisfied regardless. Instead
+     `preflight::check`/`collect_unsatisfied` (`portage-cli/src/bdepend_avail.rs`
+     or wherever `DepEntry::evaluate_use`'s USE-dep matcher lives) flags them
+     as missing — strongly suggests the `(-)?`/`(+)?`/bare-`(-)` suffix forms
+     aren't parsed/matched at all. Needs an actual parser/matcher audit, not a
+     guess-fix.
+  2. **`sys-apps/util-linux` install-order bug.** Both `sys-fs/e2fsprogs` and
+     `dev-lang/python` DEPEND on `sys-apps/util-linux`, but the solver's
+     install order places `util-linux` *after* both (confirmed: line 170 in
+     the plan vs. e2fsprogs at 166, python at 169) — so preflight's
+     "earlier plan entries satisfy later ones" visibility model (correctly)
+     flags it as unsatisfiable at that point, even though util-linux genuinely
+     is in the plan. This is a real topological-sort/edge-registration bug in
+     the solver's `build_blockers`/install-order computation for this
+     specific dependency shape, not a preflight false positive.
+  Confirmed via `diff` against the very first (pre-session) capture of this
+  same command that both bugs pre-date all of today's work — not a
+  regression from the `--root-deps` fix. This is the actual next blocker for
+  a real `em stages --stage1 --cross` build (not just the plan/pretend path,
+  which is now fully correct). [[em-root-characterization]] [[stage-build-shakeout]]
 - 🔴 **Profile/USE vs the releng stage profile.** em `@system` matches 175/180 of
   the real arm64 stage3; the 5 em-only (nghttp2/3, ngtcp2, libusb) are the default
   profile enabling curl `http2/http3/quic` + libusb vs the lean releng profile.
