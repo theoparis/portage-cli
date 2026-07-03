@@ -98,38 +98,23 @@ here briefly for context). Updated 2026-06-27.
   no-op). Blocker: `select/env_d.rs` is config-root-keyed, must be merge-root-aware
   for the activation path (trait-sig change across the four select modules). The
   stages need the ROOT `<chost>-gcc`. [[select-toolchain]]
-- 🔴 **VERY IMPORTANT — two real bugs block a full `em stages --stage1 --cross`
-  build, confirmed 2026-07-03 by an actual (non-pretend) run against the
-  riscv64 target** (`acct-group/root` itself is now fixed — see
-  [[stage-build-shakeout]] finding #13 — this is what preflight reports
-  *after* that fix):
-  1. **USE-dep conditional-default syntax (`flag(-)?`/`flag(+)?`/`-flag(-)`)
-     not evaluated correctly.** `sys-fs/e2fsprogs[abi_x86_32(-)?,abi_x86_64(-)?,
-     abi_x86_x32(-)?,abi_mips_n32(-)?,abi_mips_n64(-)?,abi_mips_o32(-)?,
-     abi_s390_32(-)?,abi_s390_64(-)?]` (libarchive's dep), `sys-libs/glibc
-     [-crypt(-)]` (libxcrypt's dep), `sys-libs/glibc[cet(-)?]` (gcc's dep) are
-     all EAPI 7+ "optional, default-if-flag-absent" USE-deps — riscv64 doesn't
-     have `abi_x86_*`/`abi_mips_*`/`abi_s390_*`/`crypt`/`cet` in IUSE at all,
-     so per spec these should trivially be satisfied regardless. Instead
-     `preflight::check`/`collect_unsatisfied` (`portage-cli/src/bdepend_avail.rs`
-     or wherever `DepEntry::evaluate_use`'s USE-dep matcher lives) flags them
-     as missing — strongly suggests the `(-)?`/`(+)?`/bare-`(-)` suffix forms
-     aren't parsed/matched at all. Needs an actual parser/matcher audit, not a
-     guess-fix.
-  2. **`sys-apps/util-linux` install-order bug.** Both `sys-fs/e2fsprogs` and
-     `dev-lang/python` DEPEND on `sys-apps/util-linux`, but the solver's
-     install order places `util-linux` *after* both (confirmed: line 170 in
-     the plan vs. e2fsprogs at 166, python at 169) — so preflight's
-     "earlier plan entries satisfy later ones" visibility model (correctly)
-     flags it as unsatisfiable at that point, even though util-linux genuinely
-     is in the plan. This is a real topological-sort/edge-registration bug in
-     the solver's `build_blockers`/install-order computation for this
-     specific dependency shape, not a preflight false positive.
-  Confirmed via `diff` against the very first (pre-session) capture of this
-  same command that both bugs pre-date all of today's work — not a
-  regression from the `--root-deps` fix. This is the actual next blocker for
-  a real `em stages --stage1 --cross` build (not just the plan/pretend path,
-  which is now fully correct). [[em-root-characterization]] [[stage-build-shakeout]]
+- ✅ **`em stages --stage1 --cross` install-order/preflight bugs — FIXED
+  2026-07-03.** Confirmed with real portage (`qdepends`) that the apparent
+  `util-linux` ↔ `python` cycle was never real: util-linux's `python? (
+  ${PYTHON_DEPS} )` doesn't apply with `python` off. Root cause: Level-C
+  `--autosolve-use` ceding (`cede_required_use`,
+  `portage-cli/src/query/depgraph/repo.rs`) scanned the *whole*
+  `REQUIRED_USE` tree for flags to cede whenever *any* clause was violated,
+  instead of just the violated clause(s) — util-linux's independently-satisfied
+  `python? (...)` got ceded as a side effect of its unrelated, genuinely-violated
+  `su? ( pam )` clause, fabricating a phantom `util-linux -> python` DEPEND
+  edge that corrupted install order for the whole cluster (which is also
+  what produced the "USE-dep conditional-default syntax" symptom below —
+  once ordering is fixed, those self-resolve). Fixed by scanning only
+  `ru.unsatisfied(&enabled)`'s clauses. Verified: phantom edge gone, order
+  correct, real (non-pretend) `em stages --stage1 --cross riscv64...` now
+  passes `preflight::check` clean and starts building (gcc underway).
+  [[stage-build-shakeout]] finding #15.
 - 🔴 **Profile/USE vs the releng stage profile.** em `@system` matches 175/180 of
   the real arm64 stage3; the 5 em-only (nghttp2/3, ngtcp2, libusb) are the default
   profile enabling curl `http2/http3/quic` + libusb vs the lean releng profile.

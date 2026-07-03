@@ -829,4 +829,77 @@ Task #8 (`em stages --stage1` against a real `--cross` target) is now
 blocked on these two, not on `--root-deps`/`acct-group/root` (that part is
 done). Full command + log: `todo/PENDING.md`'s stage-building section,
 top entry.
+
+**15th finding, resolved: finding #14's "util-linux install-order bug"
+traced and fixed — it was never a real cycle.** Checked directly with real
+portage (`qdepends`/`equery` on this host): `sys-apps/util-linux`'s real
+ebuild only depends on `dev-lang/python` behind `python? ( ${PYTHON_DEPS} )`
+— with `python` off (as it is in this `USE="-* build"` stage1 set), that
+dependency legitimately does not apply. `dev-lang/python`'s own dependency
+on `sys-apps/util-linux` is unconditional and one-way. So there is no real
+cycle at all in the actual Gentoo dependency graph; em was fabricating one.
+
+Root-caused with a from-scratch `portage-atom-pubgrub` test
+(`scratch_two_cycles_chained_plus_dependents`, since removed — it didn't
+reproduce, which is what narrowed this down) plus reading the actual
+`em --json` edge dump for the real riscv64 plan: em's `--json`/`--tree`
+output showed a phantom `DEPEND sys-apps/util-linux -> dev-lang/python`
+edge that shouldn't exist. Traced to two compounding bugs:
+
+1. **The real bug**: `cede_required_use`
+   (`portage-cli/src/query/depgraph/repo.rs`) — Level-C `--autosolve-use`
+   ceding of REQUIRED_USE flags to the solver. util-linux's own
+   `REQUIRED_USE="python? ( ${PYTHON_REQUIRED_USE} ) su? ( pam )"` has two
+   *independent* top-level clauses; only `su? ( pam )` was violated here
+   (confirmed by the `--autosolve-use` report: `-su … because: su? ( pam )`).
+   But the code checked `ru.unsatisfied(&enabled).is_empty()` (correctly,
+   whole-expression) and then called `collect_required_use_flags(ru, …)` on
+   the **whole** `ru` tree regardless — collecting `python` too, even though
+   `python? ( … )` was independently satisfied (python off, vacuously true).
+   That needlessly ceded `python` to the solver (`SolverDecided`) as if it
+   were genuinely undecided, turning it into a solver-owned virtual
+   choice node purely as a side effect of the *unrelated* `su`/`pam`
+   violation.
+2. A latent, secondary issue in `dependency_graph()`'s virtual-choice-node
+   expansion (`portage-atom-pubgrub/src/graph.rs`): once a flag is ceded, a
+   synthetic two-version "choice" package models on/off, and edge extraction
+   walks *every* version of that choice node (`vdata.versions.values()`)
+   rather than only the one actually selected in `solution` — so even a
+   correctly-ceded flag whose "off" branch was chosen can still leak the
+   "on" branch's dependencies into the graph. Not fixed (bug 1 alone
+   resolves the observed case — no ceding, no virtual node, no phantom
+   edge — but this is worth revisiting if a *genuinely* ceded flag ever
+   shows the same symptom).
+
+Fix: `ru.unsatisfied(&enabled)` (already computed, previously only checked
+for emptiness) now drives which clauses get scanned — `collect_required_use_flags`
+is called per violated clause, not on the whole tree. One new regression
+test, `independently_satisfied_clause_is_not_ceded_by_an_unrelated_violation`
+(`portage-cli/src/query/depgraph/repo.rs`), confirmed to fail on the old
+code and pass on the fix (verified by hand-reverting the fix line, temporarily under a "TEMP" edit, retested, then restored).
+
+Verified against the real riscv64 target: the phantom `util-linux -> python`
+edge is gone from `--json` output (only the real one-way `python -> util-linux`
+edge remains); install order is now correct (`util-linux` before `e2fsprogs`
+before `python` before `glibc`/`gcc`/`libarchive`/`libxcrypt`); the
+`su`/`pam` REQUIRED_USE flip (the genuinely violated clause) still reports
+correctly, confirming the fix doesn't suppress real ceding. `em
+--autosolve-use --keep-going stages --stage1 --root <dir> --cross
+riscv64-unknown-linux-gnu` (no `-p`) now passes `preflight::check`
+entirely and starts building for real (gcc configure/compile underway) —
+first time this has gotten past pre-flight for a real (non-pretend) run.
+
+**Still open, unresolved**: the USE-dep conditional-default syntax question
+(`flag(-)?`/`flag(+)?`/`-flag(-)`) from finding #14 — `libarchive needs:
+e2fsprogs[abi_x86_32(-)?,…]`, `libxcrypt needs: glibc[-crypt(-)]`, `gcc
+needs: glibc[cet(-)?]` — turned out to be a **non-issue**, not a bug:
+`Dep::matches_cpv` deliberately never evaluates USE-dep brackets at all
+(by design — see its doc comment, "answers the has_version-style question");
+`preflight::check`'s `Avail::atom_satisfied` only calls `matches_cpv`, so
+these three lines were always just an artifact of `util-linux` (and
+therefore everything chained off it) being mis-ordered by the phantom-edge
+bug — once ordering is correct, these self-resolve (confirmed: they no
+longer appear in the real run's failures, because there are no failures —
+preflight now passes clean). No further work needed on USE-dep conditional
+parsing for this issue.
 [[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]
