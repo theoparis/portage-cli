@@ -1161,11 +1161,7 @@ mod tests {
             "sys-devel/binutils\nsys-apps/baselayout\nsys-devel/gcc\n",
         )
         .unwrap();
-        std::fs::write(
-            p.join("packages"),
-            "*>=sys-devel/gcc-13\n*sys-libs/glibc\n",
-        )
-        .unwrap();
+        std::fs::write(p.join("packages"), "*>=sys-devel/gcc-13\n*sys-libs/glibc\n").unwrap();
 
         let stack = ProfileStack::build(p).unwrap();
         let names: Vec<_> = stack
