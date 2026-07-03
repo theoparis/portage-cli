@@ -1341,6 +1341,18 @@ impl EbuildShell {
         self.set_var("P", &p);
         self.set_var("PF", &pf);
 
+        // Whether this package is one of the *host-side* cross toolchain tools
+        // (built to run on CBUILD, targeting CTARGET — lives under the `cross-*`
+        // symlink category). Computed once, early, and reused by both the PATH
+        // fix below and the EPREFIX/ESYSROOT fix further down: it's the one
+        // signal that distinguishes "this package's own ROOT is the top-level
+        // EROOT, host-arch-executable" from "this package's own ROOT is the
+        // foreign-arch target sysroot" — an *ordinary* package being built to
+        // install *into* a `--cross` target sysroot is emphatically the latter.
+        let cross_host_tool_tuple = category
+            .strip_prefix("cross-")
+            .filter(|_| matches!(pn, "binutils" | "gcc" | "gdb" | "clang-crossdev-wrappers"));
+
         // FILESDIR is the ebuild's own dir + `files` (PMS), not repo+cat+pn —
         // they differ only for a `cross-*` symlink, whose real files live with
         // the symlinked ebuild, under the real category.
@@ -1466,7 +1478,25 @@ impl EbuildShell {
         // via the untouched host PATH, and prepending the prefix's own
         // `usr/bin` there would be a *new* preference-order change for that
         // mode with no reported gap motivating it.
-        if root_str != "/" && self.build_eprefix.is_none() && self.build_sysroot.is_none() {
+        //
+        // Also gated on NOT being an ordinary package under an active
+        // `--cross` (`build_config_root` is the cross sysroot precisely when
+        // one is): for glibc/the other genuine host-side toolchain steps,
+        // `root_str` here is the top-level EROOT (host-arch-executable, the
+        // original motivating case above). But an *ordinary* package merely
+        // installing *into* the cross target sysroot (`em stages --stage1
+        // --cross <tuple>`, e.g. plain `sys-libs/ncurses`) has `root_str` ==
+        // that foreign-arch sysroot itself — prepending its `usr/bin` put a
+        // riscv64 `sed`/`patch`/`gsed` ahead of the host's own on PATH,
+        // breaking every `eltpatch`/`eapply` call in the package's own
+        // prepare phase with "Exec format error". Found 2026-07-03 doing the
+        // first real (non-pretend) `em stages --stage1 --cross` run — see
+        // [[stage-build-shakeout]].
+        if root_str != "/"
+            && self.build_eprefix.is_none()
+            && self.build_sysroot.is_none()
+            && (self.build_config_root.is_none() || cross_host_tool_tuple.is_some())
+        {
             let bin = format!("{root_str}usr/bin");
             let path = self.get_var("PATH").unwrap_or_default();
             if !path.split(':').any(|p| p == bin) {
@@ -1521,20 +1551,17 @@ impl EbuildShell {
         //
         // NOTE for future refactoring: this function derives `ROOT`, `EPREFIX`,
         // `ED`, `EROOT`, `SYSROOT`, `ESYSROOT` — six PMS location variables —
-        // through a chain of local variables computed in sequence, with two
-        // *different* package-class special-cases (this one, and the ESYSROOT
-        // one further down) each re-deriving `category`/`pn` filters
-        // independently. If a third such case shows up, this whole block
-        // deserves extracting into a small `RootVars { root, eprefix, ed,
-        // eroot, sysroot, esysroot }` value type built by one function that
-        // takes `(category, pn, root_str, build_sysroot, build_eprefix)` and
-        // returns all six together — so the invariants connecting them (ED
-        // must track EPREFIX; ESYSROOT must NOT double-count a flipped
-        // EPREFIX) are enforced in one place instead of by convention across
-        // a 100-line function.
-        let cross_host_tool_tuple = category
-            .strip_prefix("cross-")
-            .filter(|_| matches!(pn, "binutils" | "gcc" | "gdb" | "clang-crossdev-wrappers"));
+        // through a chain of local variables computed in sequence. `PATH`
+        // above and `EPREFIX`/`ESYSROOT` here all key off the same
+        // `cross_host_tool_tuple` signal (computed once, near `category`/`pn`,
+        // above). If a further package-class special-case shows up, this
+        // whole block deserves extracting into a small `RootVars { root,
+        // eprefix, ed, eroot, sysroot, esysroot }` value type built by one
+        // function that takes `(category, pn, root_str, build_sysroot,
+        // build_eprefix)` and returns all six together — so the invariants
+        // connecting them (ED must track EPREFIX; ESYSROOT must NOT
+        // double-count a flipped EPREFIX) are enforced in one place instead
+        // of by convention across a 100-line function.
         let eprefix = if cross_host_tool_tuple.is_some() && eprefix.is_empty() && root_str != "/" {
             root_str.trim_end_matches('/').to_string()
         } else {
