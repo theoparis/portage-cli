@@ -177,6 +177,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
             use_override: &[],
             nodeps: cli.nodeps,
             depgraph_flags: None,
+            merge_flags: None,
         },
     )
     .await
@@ -195,6 +196,14 @@ pub(crate) struct EmergeOpts<'a> {
     /// Override depgraph flags (deep, newuse) for this call. When None, uses
     /// the values from cli.depgraph_flags.
     pub depgraph_flags: Option<crate::cli::DepgraphFlags>,
+    /// Override merge-behavior flags (jobs, keep_going, buildpkg, …) for this
+    /// call. When None, uses the values from `cli.merge_flags` — same
+    /// override/fallback shape as `depgraph_flags` above, needed for the same
+    /// reason: the staged driver (`crossdev::run_staged`) must see whichever
+    /// of the subcommand's own flattened `MergeFlags` or the top-level one
+    /// the user actually set (`em -j 80 stages --stage1` vs `em stages
+    /// --stage1 -j 80`), not just the top-level `Cli`'s copy.
+    pub merge_flags: Option<crate::cli::MergeFlags>,
 }
 
 /// Resolve and (unless `--pretend`) merge `raw_atoms` with the global config in
@@ -217,7 +226,14 @@ pub(crate) async fn emerge_atoms(
         // USE between this set and the restore below.
         unsafe { std::env::set_var("USE", merged.trim()) };
     }
-    let result = emerge_atoms_inner(cli, raw_atoms, opts.nodeps, opts.depgraph_flags).await;
+    let result = emerge_atoms_inner(
+        cli,
+        raw_atoms,
+        opts.nodeps,
+        opts.depgraph_flags,
+        opts.merge_flags,
+    )
+    .await;
     if !opts.use_override.is_empty() {
         // SAFETY: see above.
         unsafe {
@@ -235,7 +251,9 @@ async fn emerge_atoms_inner(
     raw_atoms: &[String],
     nodeps: bool,
     depgraph_flags_override: Option<crate::cli::DepgraphFlags>,
+    merge_flags_override: Option<crate::cli::MergeFlags>,
 ) -> Result<()> {
+    let merge_flags = merge_flags_override.as_ref().unwrap_or(&cli.merge_flags);
     let resolved = cli.repo_path();
     let repo_path = camino::Utf8Path::new(&resolved);
     if !repo_path.is_dir() {
@@ -243,7 +261,7 @@ async fn emerge_atoms_inner(
     }
     let repo = portage_repo::Repository::open(repo_path.as_std_path())?;
     let vdb = open_vdb(cli).ok();
-    let mode = if cli.update {
+    let mode = if merge_flags.update {
         query::ResolveMode::PreferInstalled
     } else {
         query::ResolveMode::Error
@@ -273,9 +291,9 @@ async fn emerge_atoms_inner(
     if atoms.is_empty() {
         bail!("em: no valid atoms");
     }
-    let format = if cli.json {
+    let format = if merge_flags.json {
         cli::DepgraphFormat::Json
-    } else if cli.tree {
+    } else if merge_flags.tree {
         cli::DepgraphFormat::Tree
     } else {
         cli::DepgraphFormat::Pretty
@@ -290,13 +308,14 @@ async fn emerge_atoms_inner(
         arch: &cli.arch,
         format,
         verbose: cli.verbose,
-        empty: cli.emptytree,
-        autounmask_write: cli.autounmask_write,
-        autosolve_use: cli.autosolve_use,
+        empty: merge_flags.emptytree,
+        autounmask_write: merge_flags.autounmask_write,
+        autosolve_use: merge_flags.autosolve_use,
         multi_repo: cli.repo.is_none(),
         roots: &roots,
-        onlydeps: cli.onlydeps,
-        with_bdeps: cli.with_bdeps,
+        onlydeps: merge_flags.onlydeps,
+        with_bdeps: merge_flags.with_bdeps,
+        root_deps_rdeps: merge_flags.root_deps,
         deep: depgraph_flags.0,
         nodeps,
     })
@@ -343,13 +362,13 @@ async fn emerge_atoms_inner(
         &work_base,
         distdir.as_deref(),
         cli.quiet,
-        cli.keep_going,
-        cli.emptytree,
-        cli.jobs.map(|j| j as usize).unwrap_or(1).max(1),
-        cli.buildpkg,
-        cli.usepkg,
-        cli.getbinpkg,
-        cli.getbinpkgonly,
+        merge_flags.keep_going,
+        merge_flags.emptytree,
+        merge_flags.jobs.map(|j| j as usize).unwrap_or(1).max(1),
+        merge_flags.buildpkg,
+        merge_flags.usepkg,
+        merge_flags.getbinpkg,
+        merge_flags.getbinpkgonly,
         cli,
     )
     .await
@@ -1080,6 +1099,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
         Applet::Setup => setup::bootstrap(&globals.roots()),
         Applet::Crossdev(args) => crossdev::run(args, globals).await,
         Applet::Toolchain(args) => crossdev::toolchain(args, globals).await,
+        Applet::Stages(args) => crossdev::stage1(args, globals).await,
         Applet::Dispatch => {
             eprintln!("dispatch-conf");
             bail!("not implemented: dispatch-conf")
@@ -1153,6 +1173,10 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
             format,
             autosolve_use,
             depgraph_flags,
+            emptytree,
+            onlydeps,
+            with_bdeps,
+            root_deps,
         } => {
             let resolved = globals.repo_path();
             let repo_path = camino::Utf8Path::new(&resolved);
@@ -1173,13 +1197,17 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 arch: &globals.arch,
                 format: *format,
                 verbose: globals.verbose,
-                empty: globals.emptytree,
-                autounmask_write: globals.autounmask_write,
-                autosolve_use: *autosolve_use || globals.autosolve_use,
+                empty: *emptytree || globals.merge_flags.emptytree,
+                // equery depgraph is read-only: it reports autounmask candidates
+                // (mask/keyword/USE fixes) but must never write them to
+                // /etc/portage — that's `em`'s job, not a query command's.
+                autounmask_write: false,
+                autosolve_use: *autosolve_use || globals.merge_flags.autosolve_use,
                 multi_repo: globals.repo.is_none(),
                 roots: &roots,
-                onlydeps: globals.onlydeps,
-                with_bdeps: globals.with_bdeps,
+                onlydeps: *onlydeps || globals.merge_flags.onlydeps,
+                with_bdeps: *with_bdeps || globals.merge_flags.with_bdeps,
+                root_deps_rdeps: *root_deps || globals.merge_flags.root_deps,
                 deep: depgraph_flags.deep || globals.depgraph_flags.deep,
                 nodeps: globals.nodeps,
             })

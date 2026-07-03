@@ -5,7 +5,9 @@ use clap::{Parser, Subcommand};
 use gentoo_core::Arch;
 
 mod depgraph_flags;
+mod merge_flags;
 pub use depgraph_flags::DepgraphFlags;
+pub use merge_flags::MergeFlags;
 
 const fn cli_styles() -> Styles {
     Styles::styled()
@@ -79,85 +81,11 @@ pub struct Cli {
     #[arg(short = 'S', long)]
     pub searchdesc: bool,
 
-    #[arg(short = 'u', long)]
-    pub update: bool,
-
-    /// Write required USE changes to /etc/portage/package.use/
-    #[arg(long)]
-    pub autounmask_write: bool,
-
-    #[arg(short = '1', long = "oneshot")]
-    pub oneshot: bool,
-
-    #[arg(short = 'f', long)]
-    pub fetchonly: bool,
-
-    #[arg(short = 'b', long)]
-    pub buildpkg: bool,
-
-    #[arg(short = 'k', long)]
-    pub usepkg: bool,
-
-    #[arg(short = 'K', long)]
-    pub usepkgonly: bool,
-
-    #[arg(short = 'g', long)]
-    pub getbinpkg: bool,
-
-    #[arg(short = 'G', long)]
-    pub getbinpkgonly: bool,
-
-    #[arg(short = 'e', long)]
-    pub emptytree: bool,
-
-    #[arg(short = 't', long)]
-    pub tree: bool,
-
-    /// Emit the depgraph as machine-parsable JSON instead of pretend text.
-    /// Takes precedence over `--tree`. Works with `-p` (including `-e`).
-    #[arg(long)]
-    pub json: bool,
-
     #[arg(short = 'O', long)]
     pub nodeps: bool,
 
-    #[arg(short = 'o', long)]
-    pub onlydeps: bool,
-
-    #[arg(short = 'n', long)]
-    pub noreplace: bool,
-
-    /// Build up to N packages in parallel, respecting build-dependency order
-    /// (merges are still serialised). Default 1 (sequential).
-    #[arg(short = 'j', long, value_name = "N")]
-    pub jobs: Option<u32>,
-
-    #[arg(short = 'l', long, value_name = "LOAD")]
-    pub load_average: Option<f64>,
-
-    #[arg(long)]
-    pub keep_going: bool,
-
-    #[arg(long)]
-    pub autounmask: bool,
-
-    /// Let the solver choose USE flags to satisfy REQUIRED_USE (Level C) rather
-    /// than only reporting violations. Off by default; flips are reported.
-    #[arg(long)]
-    pub autosolve_use: bool,
-
-    #[arg(long)]
-    pub complete_graph: bool,
-
-    /// Include build-time dependencies (BDEPEND) in the resolution.
-    /// Default is false (exclude BDEPEND), matching emerge's default.
-    /// When enabled, BDEPEND are included but filtered by what's already
-    /// installed on the build host (BROOT).
-    #[arg(long)]
-    pub with_bdeps: bool,
-
-    #[arg(short = 'X', long, value_name = "ATOM")]
-    pub exclude: Vec<String>,
+    #[command(flatten)]
+    pub merge_flags: MergeFlags,
 
     /// Installation root (the offset all applets install into / query).
     #[arg(long, env = "ROOT", value_name = "PATH", global = true)]
@@ -631,6 +559,9 @@ pub enum Applet {
     )]
     Toolchain(ToolchainArgs),
 
+    #[command(about = "Assemble stage-build artifacts (stage1 packages.build) into --root")]
+    Stages(StagesArgs),
+
     #[command(about = "Safe configuration file updates (dispatch-conf)")]
     Dispatch,
 
@@ -671,6 +602,9 @@ pub struct CrossdevArgs {
 
     #[command(flatten)]
     pub depgraph_flags: DepgraphFlags,
+
+    #[command(flatten)]
+    pub merge_flags: MergeFlags,
 }
 
 /// `em toolchain` — bootstrap a self-hosting native toolchain into `--root`.
@@ -690,6 +624,28 @@ pub struct ToolchainArgs {
 
     #[command(flatten)]
     pub depgraph_flags: DepgraphFlags,
+
+    #[command(flatten)]
+    pub merge_flags: MergeFlags,
+}
+
+/// `em stages` — assemble stage-build artifacts (stage1/stage3/stage4) *using*
+/// a toolchain already built by `em toolchain --setup`. See
+/// `todo/em-stages-and-binhosts.md`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct StagesArgs {
+    /// Emerge the profile's `packages.build` bootstrap set into `--root`:
+    /// baselayout (USE=build, --nodeps) then the minimal stage1 package list
+    /// (USE="-* build"), mirroring catalyst's `stage1/chroot.sh`. Requires a
+    /// working toolchain already in the root (`em toolchain --setup`).
+    #[arg(long)]
+    pub stage1: bool,
+
+    #[command(flatten)]
+    pub depgraph_flags: DepgraphFlags,
+
+    #[command(flatten)]
+    pub merge_flags: MergeFlags,
 }
 
 #[derive(Subcommand)]
@@ -1025,6 +981,18 @@ pub enum QueryCommand {
         autosolve_use: bool,
         #[command(flatten)]
         depgraph_flags: DepgraphFlags,
+        /// Treat every atom as not-yet-installed (emerge's `-e`/`--emptytree`).
+        #[arg(short = 'e', long)]
+        emptytree: bool,
+        #[arg(short = 'o', long)]
+        onlydeps: bool,
+        /// Include build-time dependencies (BDEPEND) in the resolution.
+        #[arg(long)]
+        with_bdeps: bool,
+        /// emerge's `--root-deps[=rdeps]`: only require RDEPEND (not DEPEND)
+        /// to be satisfiable in the merge target.
+        #[arg(long = "root-deps")]
+        root_deps: bool,
     },
     #[command(about = "List files installed by a package", alias = "f")]
     Files {

@@ -96,6 +96,14 @@ pub struct DepgraphOpts<'a> {
     /// Include BDEPEND in resolution (emerge's `--with-bdeps`). Default false
     /// (exclude BDEPEND) to match emerge's default.
     pub with_bdeps: bool,
+    /// emerge's `--root-deps[=rdeps]`: only RDEPEND (not DEPEND) is required
+    /// to be satisfiable in the merge target. Caller-supplied rather than
+    /// auto-derived from cross-arch detection: it's a property of *which
+    /// operation* is running (`em crossdev --setup` bootstrapping a still-empty
+    /// target always needs it; `em stages --stage1` building ordinary packages
+    /// against an already-working toolchain should not), not of the sysroot's
+    /// CHOST/CBUILD alone. See `todo/stage-build-shakeout.md`.
+    pub root_deps_rdeps: bool,
     /// `--deep`: re-examine transitive deps for updates. Used here to bump a
     /// `:*` any-slot dep to the newest slot (like `emerge -uD`) rather than
     /// keeping a satisfying installed slot.
@@ -119,6 +127,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         roots,
         onlydeps,
         with_bdeps,
+        root_deps_rdeps,
         deep,
         nodeps,
     } = opts;
@@ -300,10 +309,10 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         let mut provider =
             PortageDependencyProvider::new_for_targets_with_bdeps(adapter, seeds, solve_with_bdeps);
         provider.set_cross_active(cross.active);
-        // crossdev `--root-deps=rdeps`: only a genuine cross-*arch* build discards
-        // target `DEPEND` from the sysroot graph (same-arch offset/stage builds
-        // keep `DEPEND` → target ROOT).
-        provider.set_root_deps_rdeps(cross.root_deps_rdeps(arch));
+        // crossdev `--root-deps=rdeps`: caller-supplied (see `DepgraphOpts::
+        // root_deps_rdeps`) — a property of which operation is running, not of
+        // the sysroot's CHOST/CBUILD.
+        provider.set_root_deps_rdeps(root_deps_rdeps);
         provider.set_nodeps(nodeps);
         provider.set_rebuild_tree(emptytree_native);
         // `--deep` and native emptytree bump `:*` deps to the newest slot.

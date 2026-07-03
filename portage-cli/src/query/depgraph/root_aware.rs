@@ -15,8 +15,11 @@ use crate::cli::Roots;
 ///
 /// The single owner of "is this a cross build, and how" for the resolver: the
 /// derived predicates ([`is_cross_arch`](Self::is_cross_arch),
-/// [`target_arch`](Self::target_arch), [`root_deps_rdeps`](Self::root_deps_rdeps))
-/// are computed here so call sites don't each re-derive them from `chost`.
+/// [`target_arch`](Self::target_arch)) are computed here so call sites don't
+/// each re-derive them from `chost`. `--root-deps=rdeps` is deliberately NOT
+/// derived here — it's a property of which *operation* is running (`em
+/// crossdev --setup` vs `em stages --stage1`), not of the sysroot's
+/// CHOST/CBUILD; see `DepgraphOpts::root_deps_rdeps`.
 #[derive(Debug, Clone)]
 pub struct CrossContext {
     /// Whether dual-root cross planning is active for this invocation (any of:
@@ -31,8 +34,8 @@ pub struct CrossContext {
     /// Host `CBUILD` from the profile `make.conf` (if readable).
     pub cbuild: Option<String>,
     /// Gentoo keyword `ARCH` of the target `CHOST` (e.g. `riscv`), when `active`
-    /// and the `CHOST` maps to a known arch. Derived once; drives both keyword
-    /// acceptance and the `--root-deps=rdeps` gate.
+    /// and the `CHOST` maps to a known arch. Derived once; drives keyword
+    /// acceptance for the target.
     target_arch: Option<Arch>,
 }
 
@@ -50,13 +53,6 @@ impl CrossContext {
     /// host `--arch`.
     pub fn target_arch(&self) -> Option<&Arch> {
         self.target_arch.as_ref()
-    }
-
-    /// Whether crossdev `--root-deps=rdeps` applies: a genuine cross-*arch* build
-    /// (target arch differs from the invocation's `host_arch`). Same-arch offset/
-    /// stage builds return `false` and keep `DEPEND` → target ROOT.
-    pub fn root_deps_rdeps(&self, host_arch: &Arch) -> bool {
-        self.target_arch.as_ref().is_some_and(|ta| ta != host_arch)
     }
 }
 

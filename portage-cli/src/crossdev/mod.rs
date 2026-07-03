@@ -27,18 +27,59 @@ use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
-use portage_repo::{MakeConf, ReposConf, Repository};
+use portage_repo::{MakeConf, ProfileStack, ReposConf, Repository};
 
-use crate::cli::{Cli, CrossdevArgs, DepgraphFlags};
+use crate::cli::{Cli, CrossdevArgs, DepgraphFlags, MergeFlags};
 use crate::style::{C_LABEL, C_PKG};
 use crate::util::write_if_absent;
 use target::CrossTarget;
 
-/// Merge depgraph flags from args into globals, with args taking precedence.
-fn merge_depgraph_flags(globals: &Cli, args: &CrossdevArgs) -> DepgraphFlags {
+/// Merge a subcommand's own flattened depgraph flags with the top-level one,
+/// args taking precedence — so `--deep`/`--newuse` work whether given before
+/// or after the subcommand name.
+fn merge_depgraph_flags(globals: &Cli, args: &DepgraphFlags) -> DepgraphFlags {
     DepgraphFlags {
-        deep: args.depgraph_flags.deep || globals.depgraph_flags.deep,
-        newuse: args.depgraph_flags.newuse || globals.depgraph_flags.newuse,
+        deep: args.deep || globals.depgraph_flags.deep,
+        newuse: args.newuse || globals.depgraph_flags.newuse,
+    }
+}
+
+/// Merge merge-behavior flags (`-j`, `--keep-going`, `--buildpkg`, …) from a
+/// subcommand's own flattened [`MergeFlags`] with the top-level one, args
+/// taking precedence — the same "either position works" merge
+/// [`merge_depgraph_flags`] already does for `--deep`/`--newuse`, needed here
+/// for the same reason (`em -j 80 stages --stage1` vs `em stages --stage1 -j
+/// 80`, see `todo/stage-build-shakeout.md`).
+fn merge_merge_flags(globals: &Cli, args: &MergeFlags) -> MergeFlags {
+    let g = &globals.merge_flags;
+    MergeFlags {
+        update: args.update || g.update,
+        autounmask_write: args.autounmask_write || g.autounmask_write,
+        oneshot: args.oneshot || g.oneshot,
+        fetchonly: args.fetchonly || g.fetchonly,
+        buildpkg: args.buildpkg || g.buildpkg,
+        usepkg: args.usepkg || g.usepkg,
+        usepkgonly: args.usepkgonly || g.usepkgonly,
+        getbinpkg: args.getbinpkg || g.getbinpkg,
+        getbinpkgonly: args.getbinpkgonly || g.getbinpkgonly,
+        emptytree: args.emptytree || g.emptytree,
+        tree: args.tree || g.tree,
+        json: args.json || g.json,
+        onlydeps: args.onlydeps || g.onlydeps,
+        noreplace: args.noreplace || g.noreplace,
+        jobs: args.jobs.or(g.jobs),
+        load_average: args.load_average.or(g.load_average),
+        keep_going: args.keep_going || g.keep_going,
+        autounmask: args.autounmask || g.autounmask,
+        autosolve_use: args.autosolve_use || g.autosolve_use,
+        complete_graph: args.complete_graph || g.complete_graph,
+        with_bdeps: args.with_bdeps || g.with_bdeps,
+        exclude: if args.exclude.is_empty() {
+            g.exclude.clone()
+        } else {
+            args.exclude.clone()
+        },
+        root_deps: args.root_deps || g.root_deps,
     }
 }
 
@@ -78,7 +119,14 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
     if !globals.pretend {
         init_target(target, globals)?;
     }
-    let plan = stages::toolchain_plan(&stages::BootstrapKind::Cross(target.clone()));
+    // A self-contained `--root DIR` EPREFIX (`roots.config()` is `Some` — see
+    // [[stage-build-shakeout]]) has no host-shared merged-usr skeleton or
+    // libs, so the plan needs the same from-scratch treatment as native.
+    let self_contained = globals.roots().config().is_some();
+    let plan = stages::toolchain_plan(
+        &stages::BootstrapKind::Cross(target.clone()),
+        self_contained,
+    );
     let mut out = anstream::stdout();
     let verb = if globals.pretend { "Plan" } else { "Bootstrap" };
     writeln!(
@@ -93,10 +141,18 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
         let target = target.clone();
         move |step: &stages::StageStep| post_step_cross(&target, globals, step)
     };
+    // `--root-deps=rdeps` unconditionally: the whole point of this bootstrap is
+    // building a toolchain (+ glibc) into a target that starts empty, where
+    // plain DEPEND (`virtual/os-headers`, `acct-group/root`, …) genuinely can't
+    // be satisfied yet. Matches crossdev's own `<CTARGET>-emerge` wrapper,
+    // which always implies this flag — not user-togglable here.
+    let mut merge_flags = merge_merge_flags(globals, &args.merge_flags);
+    merge_flags.root_deps = true;
     run_staged(
         &plan,
         globals,
-        merge_depgraph_flags(globals, args),
+        merge_depgraph_flags(globals, &args.depgraph_flags),
+        merge_flags,
         post_step,
     )
     .await?;
@@ -135,6 +191,7 @@ async fn run_staged(
     plan: &stages::StagePlan,
     globals: &Cli,
     depgraph_flags: crate::cli::DepgraphFlags,
+    merge_flags: MergeFlags,
     post_step: impl Fn(&stages::StageStep) -> Result<()>,
 ) -> Result<()> {
     let mut out = anstream::stdout();
@@ -160,6 +217,7 @@ async fn run_staged(
                 use_override: &step.use_override,
                 nodeps: step.nodeps,
                 depgraph_flags: Some(depgraph_flags.clone()),
+                merge_flags: Some(merge_flags.clone()),
             },
         )
         .await?;
@@ -236,7 +294,10 @@ pub(crate) async fn toolchain(args: &crate::cli::ToolchainArgs, globals: &Cli) -
              meaningless (use the host toolchain directly, or pass --root <empty>)"
         );
     }
-    let plan = stages::toolchain_plan(&stages::BootstrapKind::Native);
+    if !globals.pretend {
+        ensure_self_contained_prefix(globals)?;
+    }
+    let plan = stages::toolchain_plan(&stages::BootstrapKind::Native, true);
     let mut out = anstream::stdout();
     let verb = if globals.pretend { "Plan" } else { "Bootstrap" };
     writeln!(
@@ -245,11 +306,72 @@ pub(crate) async fn toolchain(args: &crate::cli::ToolchainArgs, globals: &Cli) -
         plan.steps.len()
     )
     .ok();
-    run_staged(&plan, globals, args.depgraph_flags.clone(), |_| Ok(())).await?;
+    run_staged(
+        &plan,
+        globals,
+        merge_depgraph_flags(globals, &args.depgraph_flags),
+        merge_merge_flags(globals, &args.merge_flags),
+        |_| Ok(()),
+    )
+    .await?;
     if !globals.pretend {
         writeln!(out, "\n>>> native toolchain ready in {merge_root}").ok();
     }
     Ok(())
+}
+
+/// `em stages --stage1`: emerge the profile's `packages.build` bootstrap set
+/// into `--root` — baselayout (USE=build, `--nodeps`) then the minimal stage1
+/// package list (USE="-* build"), mirroring catalyst's `stage1/chroot.sh`.
+/// Requires the ROOT's own toolchain already built (`em toolchain --setup`);
+/// stage1 assumes a working `<chost>-gcc` is already in the root, it does not
+/// build one (that's [`toolchain`]). With `-p` it prints the plan instead of
+/// building.
+pub(crate) async fn stage1(args: &crate::cli::StagesArgs, globals: &Cli) -> Result<()> {
+    if !args.stage1 {
+        bail!(
+            "em stages does stage1 only for now — pass --stage1 to emerge the \
+             profile's packages.build bootstrap set into --root"
+        );
+    }
+    let merge_root = globals.roots().merge_root().to_owned();
+    if merge_root.as_str() == "/" {
+        bail!("em stages --stage1 needs --root <dir>: a stage1 into / is meaningless");
+    }
+    let stack = profile_stack(globals)?;
+    let plan = stages::stage1_plan(&stack)?;
+    let mut out = anstream::stdout();
+    let verb = if globals.pretend { "Plan" } else { "Bootstrap" };
+    writeln!(
+        out,
+        "\n{C_LABEL}{verb} native stage1{C_LABEL:#} into {merge_root} — {} steps:",
+        plan.steps.len()
+    )
+    .ok();
+    run_staged(
+        &plan,
+        globals,
+        merge_depgraph_flags(globals, &args.depgraph_flags),
+        merge_merge_flags(globals, &args.merge_flags),
+        |_| Ok(()),
+    )
+    .await?;
+    if !globals.pretend {
+        writeln!(out, "\n>>> stage1 ready in {merge_root}").ok();
+    }
+    Ok(())
+}
+
+/// Build the [`ProfileStack`] for the invocation's config-root (host `/`
+/// unless `--config-root`/`--root` offsets it), resolving
+/// `etc/portage/make.profile` the same way `@system`/`@world` expansion does.
+fn profile_stack(globals: &Cli) -> Result<ProfileStack> {
+    let roots = globals.roots();
+    let config_root = roots.config().unwrap_or(Utf8Path::new("/"));
+    let profile_link = config_root.join("etc/portage/make.profile");
+    let canon = std::fs::canonicalize(profile_link.as_std_path())
+        .with_context(|| format!("cannot resolve make.profile at {profile_link}"))?;
+    ProfileStack::build(canon).context("failed to build profile stack")
 }
 
 /// `EROOT`/prefix the overlay, `repos.conf`, and `package.env` are written under
@@ -265,14 +387,32 @@ fn sysroot(target: &CrossTarget, globals: &Cli) -> Utf8PathBuf {
 }
 
 /// The configured main repo (`gentoo`) — the real ebuilds the overlay links to.
+///
+/// A self-contained `--root DIR` target (no `--local`/`--prefix` host-config
+/// sharing) starts with no `repos.conf` of its own — that's exactly the
+/// "stage1 from scratch" case, and `--init-target` is what's supposed to lay
+/// one down. So this can't rely solely on the target's own config-root: it
+/// falls back to the *host's* `repos.conf`, then to portage's own well-known
+/// default location (mirroring `Cli::repo_path`'s fallback), so the very first
+/// `--init-target` on a fresh root can still find the real ebuild tree to
+/// symlink/reference.
 fn main_repo(globals: &Cli) -> Result<Repository> {
-    let conf = globals.roots().repos_conf().context("reading repos.conf")?;
-    let entry = conf
-        .main_repo()
-        .or_else(|| conf.find("gentoo"))
-        .context("no main repo configured in repos.conf")?;
-    Repository::open(&entry.location)
-        .with_context(|| format!("opening main repo at {}", entry.location.display()))
+    let target_conf = globals.roots().repos_conf().ok();
+    let host_conf = ReposConf::load_rooted(Utf8Path::new("/"), &[]).ok();
+    let entry = target_conf
+        .as_ref()
+        .and_then(|c| c.main_repo().or_else(|| c.find("gentoo")))
+        .or_else(|| {
+            host_conf
+                .as_ref()
+                .and_then(|c| c.main_repo().or_else(|| c.find("gentoo")))
+        });
+    match entry {
+        Some(e) => Repository::open(&e.location)
+            .with_context(|| format!("opening main repo at {}", e.location.display())),
+        None => Repository::open("/var/db/repos/gentoo")
+            .context("no main repo configured in repos.conf (target or host) and the default /var/db/repos/gentoo is not a repo either"),
+    }
 }
 
 fn show_target_cfg(target: &CrossTarget, globals: &Cli) -> Result<()> {
@@ -302,13 +442,7 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
     // to the build PATH (the shell sanitiser strips `$HOME` paths, so a `--local`
     // prefix's own bin is otherwise invisible). That is what makes the cross
     // toolchain wrappers we install reachable by the gcc-stage builds. Idempotent.
-    let roots = globals.roots();
-    if roots.merge_root().as_str() != "/" {
-        crate::setup::bootstrap(&roots)?;
-    }
-
-    let gentoo = main_repo(globals)?;
-    let gentoo_path = gentoo.path().to_owned();
+    let gentoo_path = ensure_self_contained_prefix(globals)?;
     let overlay = setup_root(globals).join("var/db/repos").join(OVERLAY_NAME);
     let sysroot = sysroot(target, globals);
 
@@ -359,21 +493,79 @@ fn write_overlay(target: &CrossTarget, overlay: &Utf8Path, gentoo: &Utf8Path) ->
     Ok(())
 }
 
+/// Bootstrap the EPREFIX config that both `em toolchain --setup` (native) and
+/// `em crossdev --setup` (cross) need before merging anything into it:
+/// - the skeleton (`setup::bootstrap`, idempotent);
+/// - a `gentoo` `repos.conf` entry, for a self-contained `--root DIR` target
+///   only (`roots.config()` is `Some` — unlike `--local`/`--prefix`, which
+///   merge this same directory onto the host's real repos.conf as an extra
+///   source, so already resolve `gentoo` from there);
+/// - a `make.profile` link, same self-contained-only condition — the EPREFIX
+///   builds *host-arch* packages (the crossdev toolchain lands on
+///   `ROOT=/`-equivalent, and a native toolchain always is host-arch), so it
+///   links the *host's* resolved profile, unlike the cross target sysroot,
+///   which links the target's own arch profile.
+///
+/// Without this a self-contained `--root` target has no way to resolve any
+/// ebuild at all — the "stage1 from scratch" gap found 2026-07-03 doing a
+/// real from-scratch native + cross toolchain bootstrap, see
+/// [[stage-build-shakeout]]. Returns the resolved `::gentoo` repo path.
+fn ensure_self_contained_prefix(globals: &Cli) -> Result<Utf8PathBuf> {
+    let roots = globals.roots();
+    if roots.merge_root().as_str() != "/" {
+        crate::setup::bootstrap(&roots)?;
+    }
+    let gentoo_path = main_repo(globals)?.path().to_owned();
+    if roots.config().is_some() {
+        let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
+        std::fs::create_dir_all(&conf_dir).with_context(|| format!("creating {conf_dir}"))?;
+        write_if_absent(
+            &conf_dir.join("gentoo.conf"),
+            &format!("[gentoo]\nlocation = {gentoo_path}\n"),
+        )?;
+        ensure_prefix_profile(globals)?;
+    }
+    Ok(gentoo_path)
+}
+
 /// Register the overlay in `repos.conf` if no entry of that name exists yet
 /// (crossdev/eselect may already provide one — don't duplicate it).
 fn ensure_repos_conf(globals: &Cli, overlay: &Utf8Path) -> Result<()> {
     let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
+    std::fs::create_dir_all(&conf_dir).with_context(|| format!("creating {conf_dir}"))?;
     if let Ok(conf) = ReposConf::load_from(&[&conf_dir])
         && conf.find(OVERLAY_NAME).is_some()
     {
         return Ok(());
     }
-    let dir = conf_dir;
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {dir}"))?;
     write_if_absent(
-        &dir.join(format!("{OVERLAY_NAME}.conf")),
+        &conf_dir.join(format!("{OVERLAY_NAME}.conf")),
         &format!("[{OVERLAY_NAME}]\nlocation = {overlay}\nmasters = gentoo\nauto-sync = false\n"),
     )
+}
+
+/// Link a `make.profile` for a self-contained `--root DIR` EPREFIX (same
+/// "stage1 from scratch" gap as [`ensure_repos_conf`]'s `gentoo.conf`): unlike
+/// `--local`/`--prefix`, which share the host's own `make.profile` via config
+/// sharing, plain `--root` has none of its own. The EPREFIX builds *host-arch*
+/// packages (the crossdev toolchain lands on `ROOT=/`-equivalent, just
+/// offset), so — unlike the target sysroot, which links the target's own
+/// arch profile — this links the *host's* resolved profile. A no-op for
+/// `--local`/`--prefix` (`roots.config()` is `None`, config already comes from
+/// the host).
+fn ensure_prefix_profile(globals: &Cli) -> Result<()> {
+    if globals.roots().config().is_none() {
+        return Ok(());
+    }
+    let link = setup_root(globals).join("etc/portage/make.profile");
+    if link.exists() {
+        return Ok(());
+    }
+    let host_profile = std::fs::canonicalize("/etc/portage/make.profile")
+        .context("resolving the host's make.profile")?;
+    let host_profile = Utf8PathBuf::from_path_buf(host_profile)
+        .map_err(|p| anyhow::anyhow!("host make.profile path {p:?} is not valid UTF-8"))?;
+    symlink_force(&host_profile, &link)
 }
 
 /// Write the cross sysroot `etc/portage/{make.conf,make.profile}`.
