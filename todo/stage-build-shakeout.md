@@ -902,4 +902,58 @@ bug — once ordering is correct, these self-resolve (confirmed: they no
 longer appear in the real run's failures, because there are no failures —
 preflight now passes clean). No further work needed on USE-dep conditional
 parsing for this issue.
+
+**16th finding, resolved: with preflight fixed, the real (`--keep-going`)
+build ran to completion and hit a *third*, distinct bug — 38/127 merged,
+89 failed.** Failures clustered into a handful of systemic categories, not
+89 independent ones: ~23 unrelated packages' own patches all failing
+`eapply`, 12 `econf` exit-77s, 8 `eltpatch` failures, 5 `emake` failures, 3
+`aclocal` failures, 1 `eprefixify` failure. The common thread, found by
+reading one actual failing build log instead of just the summary line:
+
+```
+/usr/bin/eltpatch: line 220: /var/tmp/cross-stage1-riscv64/usr/riscv64-unknown-linux-gnu/usr/bin/sed: cannot execute binary file: Exec format error
+```
+
+`eltpatch` (and `eapply`/`aclocal`/etc., all HOST-side build tools that run
+*during* the build, not part of what's being installed) was finding and
+trying to execute the **target sysroot's own, just-merged riscv64 `sed`**
+— binaries that cannot run on this (host-arch) machine at all. User's
+question ("crossdev emerge doesn't have this problem, shall we look in
+detail why") was the right prompt: checked what `eprefixify`/`eltpatch`
+actually are (`eprefixify` is Prefix-specific, in `prefix.eclass`;
+`eltpatch` is a normal, universal `app-portage/elt-patches` tool, not
+Prefix-specific — an assumption worth correcting) and traced the actual
+PATH contents at failure time.
+
+Root cause: an earlier fix *this same session* (`todo/stage-build-shakeout.md`
+finding on ESYSROOT/EPREFIX/PATH, `portage-repo/src/build/shell.rs`)
+unconditionally prepended `<root_str>usr/bin` to `PATH` for any
+self-contained `--root` build, reasoning only about the case where
+`root_str` is the top-level EROOT (host-arch-executable — the motivating
+case was glibc's `tc-getCPP ${CTARGET}` needing the EROOT's own
+`<CTARGET>-cpp` wrapper during `em crossdev --setup`'s toolchain
+bootstrap). It didn't account for `em stages --stage1 --cross`'s *ordinary*
+packages, whose own `root_str` **is** the foreign-arch target sysroot
+itself (`<EROOT>/usr/<tuple>/`) — for those, `<root_str>usr/bin` contains
+riscv64 binaries, and prepending it ahead of the host's real `/usr/bin`
+broke every host-side tool invocation in that package's own build.
+
+Fixed by hoisting the already-existing `cross_host_tool_tuple` signal
+(category + package name — the same one gating the EPREFIX/ESYSROOT flip a
+few lines below, previously computed twice, now once) earlier in
+`run_phase`, and gating the PATH-prepend on `self.build_config_root.is_none()
+|| cross_host_tool_tuple.is_some()` — i.e. either no `--cross` is active at
+all (the plain self-contained-native-root case, where `root_str` really is
+host-arch), or this specific package really is one of the host-side
+toolchain tools (whose `root_str` really is the EROOT). Ordinary packages
+under an active `--cross` no longer get the prepend at all.
+
+Verified: `net-dns/c-ares` and `sys-apps/attr` (both previously failed with
+this exact `eltpatch`/`sed` Exec-format error) now build and merge cleanly
+against the riscv64 `--cross` target. Full workspace build/tests/fmt/clippy
+clean. Not yet re-run: the full 127-package `--keep-going` stage1 build,
+to see how many of the other 89 failures this alone clears versus what
+remains (the `econf` exit-77s and `aclocal` failures may be a separate,
+fourth issue — not yet investigated).
 [[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]
