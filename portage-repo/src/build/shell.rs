@@ -1440,6 +1440,39 @@ impl EbuildShell {
                 format!("{s}/")
             }
         };
+        // `<root>/usr/bin` on PATH: for `--local`, `BASHRC_LOCAL` already adds
+        // `<EPREFIX>/usr/bin` (it's sourced per phase from the config overlay).
+        // A self-contained `--root DIR` (`self.build_eprefix` AND
+        // `self.build_sysroot` both `None` — no `--local`, and no separate
+        // host base to layer over, matching the same `self_contained`
+        // condition `setup::bootstrap`'s bashrc/make.conf fixes use) has no
+        // such hook — and the "cross-CC auto-export" PATH-prepend a few lines
+        // above only fires when `CHOST != CBUILD`, which never happens in
+        // this em-config (the "cross" in a `cross-<tuple>/*` build lives
+        // entirely in `CTARGET`, parsed by `toolchain.eclass` — `CHOST`/
+        // `CBUILD` stay the *host* arch throughout a staged `em crossdev
+        // --setup`/`em toolchain --setup` bootstrap). So a plain PATH-based
+        // tool lookup for anything this root already installed (e.g. glibc's
+        // `get_kheader_version` doing `$(tc-getCPP ${CTARGET})`, needing the
+        // already-installed, already-`em select`-activated
+        // `<root>/usr/bin/<CTARGET>-cpp` wrapper) silently fails — not found,
+        // not a die, just wrong output (glibc read `0.0.0` and treated it as
+        // a real too-low kernel-headers version) — found 2026-07-03 doing a
+        // from-scratch cross-stage1 test, see [[stage-build-shakeout]].
+        //
+        // Deliberately scoped to self-contained only (not a plain `--prefix`,
+        // which shares the host base): unlike the self-contained case, a
+        // `--prefix` layering already has a working host toolchain reachable
+        // via the untouched host PATH, and prepending the prefix's own
+        // `usr/bin` there would be a *new* preference-order change for that
+        // mode with no reported gap motivating it.
+        if root_str != "/" && self.build_eprefix.is_none() && self.build_sysroot.is_none() {
+            let bin = format!("{root_str}usr/bin");
+            let path = self.get_var("PATH").unwrap_or_default();
+            if !path.split(':').any(|p| p == bin) {
+                self.set_var("PATH", &format!("{bin}:{path}"));
+            }
+        }
         // In-place prefix (`--local`): `root` (the merge root) is EROOT; the
         // package is configured for EPREFIX, so the live ROOT is `/` and files
         // stage under `ED = D + EPREFIX`. Without an eprefix this is a no-op
@@ -1450,6 +1483,64 @@ impl EbuildShell {
             .as_deref()
             .map(|p| p.as_str().trim_end_matches('/').to_string())
             .unwrap_or_default();
+
+        // A `cross-<tuple>/*` host toolchain tool (binutils/gcc/gdb/
+        // clang-crossdev-wrappers — see the ESYSROOT block below for the same
+        // filter) needs an EPREFIX-style offset regardless of `--local`, for a
+        // reason distinct from ESYSROOT: `toolchain.eclass` computes its own
+        // `PREFIX=${EPREFIX}/usr` and passes `--prefix=${PREFIX}` to the
+        // package's own `./configure` — and DESTDIR+prefix is a *physical*
+        // install-path convention (`make install DESTDIR=${D}` literally
+        // writes under `${D}${prefix}/...`), so unlike ESYSROOT (a pure
+        // DEPEND-resolution hint) this one is NOT just cosmetic: whatever
+        // `PREFIX`/`--with-sysroot` bakes in also determines where the built
+        // files actually land inside `${D}`, and our own `ED` must match it
+        // for the merge step to find them.
+        //
+        // `--local` already supplies this correctly (root_str == eprefix
+        // there, by construction of the root model). A self-contained
+        // `--root DIR` (no `--local`) has `eprefix` empty, so
+        // `toolchain.eclass`'s baked-in `--with-sysroot` collapsed to the bare
+        // host path `/usr/<tuple>` (the *host's* own unrelated real crossdev
+        // sysroot, if any, not this root's) — found 2026-07-03 doing a
+        // from-scratch cross-stage1 test, see [[stage-build-shakeout]]. Fix:
+        // for this package class only, when `eprefix` is otherwise empty,
+        // offset it exactly as `--local` would (root_str becomes EPREFIX, ROOT
+        // becomes "/") — this reuses the *already-correct*, already-tested
+        // EPREFIX-subtree merge logic (`ebuild.rs::ed_image_dir`) generically,
+        // rather than inventing a new merge path for this one package class.
+        //
+        // SYSROOT/ESYSROOT are untouched by this flip and must stay so:
+        // SYSROOT already equals `root_str` for a plain `--root` build (unlike
+        // `--local`, where it's host `/`) — which is *already* correct for a
+        // self-contained host toolchain (it must link against the root's own,
+        // not the real host's, native libc — that's the native toolchain this
+        // same root just bootstrapped). ESYSROOT for this package class is
+        // computed straight from `root_str` below, independent of `eprefix` —
+        // so flipping `eprefix` here does not double-count either.
+        //
+        // NOTE for future refactoring: this function derives `ROOT`, `EPREFIX`,
+        // `ED`, `EROOT`, `SYSROOT`, `ESYSROOT` — six PMS location variables —
+        // through a chain of local variables computed in sequence, with two
+        // *different* package-class special-cases (this one, and the ESYSROOT
+        // one further down) each re-deriving `category`/`pn` filters
+        // independently. If a third such case shows up, this whole block
+        // deserves extracting into a small `RootVars { root, eprefix, ed,
+        // eroot, sysroot, esysroot }` value type built by one function that
+        // takes `(category, pn, root_str, build_sysroot, build_eprefix)` and
+        // returns all six together — so the invariants connecting them (ED
+        // must track EPREFIX; ESYSROOT must NOT double-count a flipped
+        // EPREFIX) are enforced in one place instead of by convention across
+        // a 100-line function.
+        let cross_host_tool_tuple = category
+            .strip_prefix("cross-")
+            .filter(|_| matches!(pn, "binutils" | "gcc" | "gdb" | "clang-crossdev-wrappers"));
+        let eprefix = if cross_host_tool_tuple.is_some() && eprefix.is_empty() && root_str != "/" {
+            root_str.trim_end_matches('/').to_string()
+        } else {
+            eprefix
+        };
+
         let root_var = if eprefix.is_empty() {
             root_str.clone()
         } else {
@@ -1506,22 +1597,29 @@ impl EbuildShell {
             //
             // A `cross-<tuple>/*` host toolchain tool (binutils/gcc, which run on
             // CBUILD and emit code for <tuple>) references the *target* deps in
-            // the cross sysroot `<EPREFIX>/usr/<tuple>`. toolchain.eclass passes
+            // the cross sysroot `<EROOT>/usr/<tuple>`. toolchain.eclass passes
             // ESYSROOT through as gcc's `--with-build-sysroot`, so it must be the
             // cross sysroot or the build-tree `xgcc` looks for the target CRT/libc
-            // under host `<EPREFIX>/usr/lib` and the gcc-stage2 self-build dies
-            // with `cannot find Scrt1.o` / `GCC_NO_EXECUTABLES` (only bites in a
-            // prefix, where EPREFIX is a real path that overrides the configured
-            // cross --with-sysroot). The *target* packages (glibc/headers — they
+            // under host `<EROOT>/usr/lib` and the gcc-stage2 self-build dies
+            // with `cannot find Scrt1.o` / `GCC_NO_EXECUTABLES` (only bites when
+            // `EROOT` is a real offset path that overrides the configured cross
+            // `--with-sysroot`). The *target* packages (glibc/headers — they
             // install INTO the sysroot and build their own `${ESYSROOT}$(alt_prefix)`
             // paths) must keep the standard ESYSROOT=SYSROOT+EPREFIX, else the
             // alt_prefix doubles the `/usr/<tuple>` offset. SYSROOT stays host so
             // the host parts build natively.
-            let cross_host_tool = category
-                .strip_prefix("cross-")
-                .filter(|_| matches!(pn, "binutils" | "gcc" | "gdb" | "clang-crossdev-wrappers"));
-            let esysroot = if let Some(tuple) = cross_host_tool {
-                format!("{}/usr/{}/", eprefix.trim_end_matches('/'), tuple)
+            //
+            // Base this on `root_str` (== EROOT) directly, not `eprefix` — even
+            // after the EPREFIX flip above, since `eprefix` may now equal
+            // `root_str` too for this same package class (self-contained
+            // `--root`) and running it through the generic `sysroot_trimmed +
+            // eprefix` formula below would double the offset (`sysroot` is
+            // *also* `root_str` for a plain `--root` build — see the flip's
+            // comment above). Reuses `cross_host_tool_tuple` computed there —
+            // found 2026-07-03 doing a from-scratch cross-stage1 test, see
+            // [[stage-build-shakeout]].
+            let esysroot = if let Some(tuple) = cross_host_tool_tuple {
+                format!("{root_str}usr/{tuple}/")
             } else if eprefix.is_empty() {
                 sysroot.clone()
             } else {

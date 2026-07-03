@@ -128,15 +128,36 @@ pub fn bootstrap(roots: &Roots) -> Result<()> {
     std::fs::create_dir_all(portage.as_std_path())
         .with_context(|| format!("creating {portage}"))?;
 
-    let bashrc_body = if is_local {
-        BASHRC_LOCAL
+    // `BASHRC_PREFIX`'s CPPFLAGS/LDFLAGS injection (`-I<ROOT>/usr/include`, an
+    // extra high-priority search path) is for a genuine `--prefix DIR`
+    // layered *on top of* a shared host base — the host's own real headers
+    // are already found by the compiler's normal default search, so the
+    // prefix needs an explicit assist to also see its own. A self-contained
+    // `--root DIR` (`roots.build_sysroot()` is `None`: base == target, no
+    // separate host base to layer over) has no such gap — its SYSROOT/CHOST
+    // toolchain wiring already resolves the whole root's own `/usr/include`
+    // through the compiler's normal (or cross) search order. Injecting the
+    // same CPPFLAGS there doesn't just do nothing: it *actively breaks*
+    // builds — it lands ahead of a package's own project-local `-I` flags
+    // (e.g. gcc's `libiberty/../include`) and can shadow a version-matched
+    // local header with an incompatible one from the ROOT's own libc (found
+    // 2026-07-03 doing a from-scratch native+cross toolchain bootstrap: gcc's
+    // `libiberty/obstack.c` failed to compile against the ROOT's own,
+    // ABI-mismatched `obstack.h`). See [[stage-build-shakeout]].
+    let self_contained = !is_local && roots.build_sysroot().is_none();
+    if self_contained {
+        write_if_absent(&portage.join("bashrc"), "")?;
     } else {
-        BASHRC_PREFIX
-    };
-    write_if_absent(&portage.join("bashrc"), bashrc_body)?;
+        let bashrc_body = if is_local {
+            BASHRC_LOCAL
+        } else {
+            BASHRC_PREFIX
+        };
+        write_if_absent(&portage.join("bashrc"), bashrc_body)?;
+    }
     write_if_absent(
         &portage.join("make.conf"),
-        &make_conf_template(is_local, eroot),
+        &make_conf_template(is_local, self_contained, eroot),
     )?;
 
     if is_local {
@@ -159,7 +180,16 @@ pub fn bootstrap(roots: &Roots) -> Result<()> {
 }
 
 /// A commented `make.conf` placeholder documenting how the prefix is used.
-fn make_conf_template(is_local: bool, eroot: &Utf8Path) -> String {
+///
+/// For `--local`/`--prefix`, profile and base make.conf (including `MAKEOPTS`)
+/// come from the host, so this file is purely commentary. A self-contained
+/// `--root DIR` shares none of that — this is the *only* make.conf ever read
+/// — so it needs a real `MAKEOPTS`, not just a placeholder: without one, every
+/// build in the root defaults to serial (`-j1`), regardless of how many cores
+/// the host has. Found 2026-07-03 doing a from-scratch toolchain bootstrap: a
+/// full gcc bootstrap ran over an hour single-threaded on a 128-core box
+/// because `MAKEOPTS` was silently unset. See [[stage-build-shakeout]].
+fn make_conf_template(is_local: bool, self_contained: bool, eroot: &Utf8Path) -> String {
     let how = if is_local {
         format!(
             "#   em --local <pkg>        # builds in place into {eroot}\n\
@@ -168,6 +198,20 @@ fn make_conf_template(is_local: bool, eroot: &Utf8Path) -> String {
     } else {
         format!("#   em --prefix {eroot} <pkg>   # builds a ROOT-offset tree here\n")
     };
+    if self_contained {
+        return format!(
+            "# Portage config for this self-contained em --root (created by `em setup`).\n\
+             #\n\
+             # Use this root with:\n\
+             #   em --root {eroot} <pkg>\n\
+             #\n\
+             # Unlike --local/--prefix, this root shares NO config with the host — this\n\
+             # is the only make.conf it ever reads. MAKEOPTS mirrors the host's build\n\
+             # parallelism (or falls back to nproc) since nothing else would set it.\n\
+             MAKEOPTS=\"{}\"\n",
+            host_makeopts()
+        );
+    }
     format!(
         "# Portage config overlay for this em prefix (created by `em setup`).\n\
          #\n\
@@ -180,6 +224,18 @@ fn make_conf_template(is_local: bool, eroot: &Utf8Path) -> String {
          # in `package.use`, e.g.:\n\
          #   media-libs/freetype harfbuzz\n"
     )
+}
+
+/// The host's own `MAKEOPTS` (real build parallelism the user already tuned),
+/// falling back to `-j<nproc>` when the host has none set or is unreadable.
+fn host_makeopts() -> String {
+    portage_repo::MakeConf::load_default()
+        .ok()
+        .and_then(|m| m.get("MAKEOPTS").map(str::to_owned))
+        .unwrap_or_else(|| {
+            let n = std::thread::available_parallelism().map_or(1, |n| n.get());
+            format!("-j{n}")
+        })
 }
 
 /// Expose the host's Python at the prefix paths the eclasses expect.
@@ -251,4 +307,67 @@ fn link_host_entries(dst_dir: &Utf8Path, host_dir: &str, prefix: &str) -> Result
         let _ = std::os::unix::fs::symlink(&target, link.as_std_path());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::cli::Cli;
+
+    fn bashrc_body(flag: &str, dir: &str) -> String {
+        let cli = Cli::parse_from(["em", flag, dir]);
+        super::bootstrap(&cli.roots()).unwrap();
+        std::fs::read_to_string(cli.roots().merge_root().join("etc/portage/bashrc")).unwrap()
+    }
+
+    #[test]
+    fn self_contained_root_gets_no_cppflags_injection() {
+        // A genuinely self-contained `--root DIR` (base == target, no host
+        // base to layer over) must NOT get BASHRC_PREFIX's CPPFLAGS/LDFLAGS
+        // injection — it actively breaks builds by out-ranking a package's
+        // own project-local `-I` flags (found 2026-07-03, see
+        // todo/stage-build-shakeout.md).
+        let dir = tempfile::tempdir().unwrap();
+        let body = bashrc_body("--root", dir.path().to_str().unwrap());
+        assert_eq!(body, "", "self-contained --root must get an empty bashrc");
+    }
+
+    #[test]
+    fn layered_prefix_keeps_cppflags_injection() {
+        // A `--prefix DIR` layered on the shared host base still needs it —
+        // unaffected by the self-contained fix above.
+        let dir = tempfile::tempdir().unwrap();
+        let body = bashrc_body("--prefix", dir.path().to_str().unwrap());
+        assert!(body.contains("CPPFLAGS"));
+    }
+
+    #[test]
+    fn self_contained_root_gets_real_makeopts() {
+        // Without this, every build in a self-contained --root defaults to
+        // serial (no host make.conf to inherit MAKEOPTS from) — found
+        // 2026-07-03 when a full gcc bootstrap ran single-threaded for over
+        // an hour on a 128-core box. See todo/stage-build-shakeout.md.
+        let dir = tempfile::tempdir().unwrap();
+        let cli = Cli::parse_from(["em", "--root", dir.path().to_str().unwrap()]);
+        super::bootstrap(&cli.roots()).unwrap();
+        let make_conf =
+            std::fs::read_to_string(cli.roots().merge_root().join("etc/portage/make.conf"))
+                .unwrap();
+        assert!(make_conf.contains("MAKEOPTS="));
+        assert!(!make_conf.contains("MAKEOPTS=\"\""), "must be non-empty");
+    }
+
+    #[test]
+    fn layered_prefix_make_conf_has_no_makeopts() {
+        // Unaffected by the self-contained fix — --prefix already inherits
+        // the host's real MAKEOPTS via config sharing.
+        let dir = tempfile::tempdir().unwrap();
+        let cli = Cli::parse_from(["em", "--prefix", dir.path().to_str().unwrap()]);
+        super::bootstrap(&cli.roots()).unwrap();
+        let make_conf =
+            std::fs::read_to_string(cli.roots().merge_root().join("etc/portage/make.conf"))
+                .unwrap();
+        assert!(!make_conf.contains("MAKEOPTS="));
+    }
 }

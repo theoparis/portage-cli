@@ -25,6 +25,9 @@
 //! stage1-vs-stage2 gcc *behaviour* (cross) is auto-detected by
 //! `toolchain.eclass` from whether the libc is present in the prefix yet.
 
+use anyhow::Result;
+use portage_repo::ProfileStack;
+
 use super::target::{CrossTarget, Libc};
 
 /// gcc USE forced off for **every** cross gcc build (crossdev `GUSE_DISABLE`).
@@ -152,7 +155,15 @@ impl BootstrapKind {
 /// The driver must run the whole thing — the compiler is not usable until the
 /// libc step lands, so the toolchain and the (stage1) libc are one intertwined
 /// bootstrap.
-pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
+///
+/// `self_contained` distinguishes a from-scratch `--root DIR` EPREFIX (its own
+/// empty VDB, no host-shared libs/merged-usr skeleton) from the default
+/// `--local`/`--prefix` crossdev EPREFIX, which shares the host's already-
+/// merged-usr, already-populated system. `BootstrapKind::Native` is always
+/// self-contained (that's its only use case) and ignores this flag; it only
+/// changes `BootstrapKind::Cross`'s plan — see the two call sites below for
+/// what "self-contained" unlocks (baselayout skeleton, dropping debuginfod).
+pub fn toolchain_plan(kind: &BootstrapKind, self_contained: bool) -> StagePlan {
     let atom = |real_cat: &str, pkg: &str| kind.atom(real_cat, pkg);
     let owned = |toks: &[&str]| toks.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let mut steps = Vec::new();
@@ -194,11 +205,20 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
     // Native: baselayout first for the `/usr/lib` skeleton. gcc's startfile osdir
     // is `../lib64`, so it resolves CRT objects via `<sysroot>/usr/lib/../lib64`,
     // which a fresh ROOT can't traverse without `/usr/lib` (→ `cannot find
-    // crti.o`). Cross bridges the libdir with `link_abi_osdirs` instead.
-    if let BootstrapKind::Native = kind {
+    // crti.o`). Cross bridges the libdir with `link_abi_osdirs` instead. A
+    // self-contained cross EPREFIX needs the same bare-FS skeleton for the same
+    // reason native does (its `--root` has no host-shared `/usr/lib`/merged-usr
+    // layout either) — found 2026-07-03 doing a from-scratch cross-stage1 test,
+    // see [[stage-build-shakeout]].
+    let is_self_contained_bootstrap = matches!(kind, BootstrapKind::Native) || self_contained;
+    if is_self_contained_bootstrap {
+        // Always the real category: baselayout is a host/EPREFIX-arch package
+        // in both cases (never part of the `cross-<tuple>` overlay's package
+        // set — that overlay only symlinks the toolchain components), so it
+        // must bypass `atom()`'s cross rewrite.
         steps.push(StageStep {
             label: "baselayout".into(),
-            atoms: vec![atom("sys-apps", "baselayout")],
+            atoms: vec!["sys-apps/baselayout".to_string()],
             use_override: owned(&["build"]),
             nodeps: false,
         });
@@ -206,10 +226,13 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
 
     // Native binutils drops `debuginfod`: into the empty ROOT it would pull
     // elfutils → curl → … → glibc (47 pkgs vs 7) and trip the os-headers
-    // pre-flight. Cross is host-rooted, so those deps are satisfied — keep it.
-    let binutils_use = match kind {
-        BootstrapKind::Native => owned(&["-debuginfod"]),
-        _ => vec![],
+    // pre-flight. The default cross EPREFIX is host-rooted, so those deps are
+    // satisfied — keep it. A self-contained cross EPREFIX is just as empty as
+    // native's, so it hits the exact same explosion — drop it there too.
+    let binutils_use = if is_self_contained_bootstrap {
+        owned(&["-debuginfod"])
+    } else {
+        vec![]
     };
     steps.push(StageStep {
         label: "binutils".into(),
@@ -251,6 +274,24 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
     // freestanding C compiler, `--disable-shared` via is_crosscompile) → full
     // libc → gcc-stage2.
     if kind.has_kernel() {
+        // The cross-specific `linux-headers` step below installs the target's
+        // arch-tailored UAPI headers *into the target sysroot subdirectory* —
+        // it does NOT satisfy `virtual/os-headers`, a totally different
+        // any-of dependency (`sys-kernel/linux-headers` et al) that
+        // `cross-<tuple>/glibc`'s BDEPEND checks against the EPREFIX's own
+        // installed view. In host-shared mode that's already satisfied by the
+        // host's real installed headers; a self-contained EPREFIX has nothing
+        // installed at all, so it needs the real virtual merged here too —
+        // found 2026-07-03 doing a from-scratch cross-stage1 test (see
+        // [[stage-build-shakeout]]).
+        if self_contained {
+            steps.push(StageStep {
+                label: "os-headers (EPREFIX)".into(),
+                atoms: vec!["virtual/os-headers".to_string()],
+                use_override: owned(&["headers-only"]),
+                nodeps: false,
+            });
+        }
         steps.push(StageStep {
             label: "kernel headers".into(),
             atoms: vec![kind.kernel_headers_atom()],
@@ -291,6 +332,36 @@ pub fn toolchain_plan(kind: &BootstrapKind) -> StagePlan {
     StagePlan { steps }
 }
 
+/// The native **stage1** plan (catalyst `stage1/chroot.sh`): baselayout first
+/// (USE=build, `--nodeps` — the bare FS skeleton), then the profile's
+/// [`packages.build`](ProfileStack::stage1_packages) set in one batch with
+/// `USE="-* build"` (catalyst's `USE="-* build ${BINDIST}"`, minus `BINDIST`,
+/// a catalyst-only var). Distinct from [`toolchain_plan`]'s
+/// `BootstrapKind::Native`, which builds the *compiler* itself
+/// (binutils/glibc/gcc) — stage1 assumes that toolchain already exists in the
+/// root and just emerges the minimal bootable package set with it, mirroring
+/// crossdev-stages' `install_stage1`.
+pub fn stage1_plan(stack: &ProfileStack) -> Result<StagePlan> {
+    let mut steps = vec![StageStep {
+        label: "baselayout".into(),
+        atoms: vec!["sys-apps/baselayout".to_string()],
+        use_override: vec!["build".to_string()],
+        nodeps: true,
+    }];
+    let atoms: Vec<String> = stack
+        .stage1_packages()?
+        .iter()
+        .map(|d| d.to_string())
+        .collect();
+    steps.push(StageStep {
+        label: "packages.build".into(),
+        atoms,
+        use_override: vec!["-*".to_string(), "build".to_string()],
+        nodeps: false,
+    });
+    Ok(StagePlan { steps })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,9 +371,42 @@ mod tests {
     }
 
     #[test]
+    fn stage1_plan_is_baselayout_then_the_versioned_build_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("packages.build"),
+            "sys-devel/binutils\nsys-apps/baselayout\nsys-devel/gcc\n",
+        )
+        .unwrap();
+        std::fs::write(profile.join("packages"), "*>=sys-devel/gcc-13\n").unwrap();
+
+        let stack = ProfileStack::build(profile).unwrap();
+        let plan = stage1_plan(&stack).unwrap();
+
+        assert_eq!(labels(&plan), ["baselayout", "packages.build"]);
+        // Step 1: the isolated USE=build --nodeps baselayout merge.
+        assert!(plan.steps[0].nodeps);
+        assert_eq!(plan.steps[0].atoms, ["sys-apps/baselayout"]);
+        assert_eq!(plan.steps[0].use_override, ["build"]);
+        // Step 2: the full build-order list, version-qualified from `packages`,
+        // with the collapse-all USE.
+        assert_eq!(plan.steps[1].use_override, ["-*", "build"]);
+        assert_eq!(
+            plan.steps[1].atoms,
+            [
+                "sys-devel/binutils",
+                "sys-apps/baselayout",
+                ">=sys-devel/gcc-13"
+            ]
+        );
+    }
+
+    #[test]
     fn gcc_glibc_plan_is_the_two_stage_bootstrap() {
         let t = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
-        let plan = toolchain_plan(&BootstrapKind::Cross(t));
+        let plan = toolchain_plan(&BootstrapKind::Cross(t), false);
         assert_eq!(
             labels(&plan),
             [
@@ -340,9 +444,52 @@ mod tests {
     }
 
     #[test]
+    fn self_contained_cross_gets_baselayout_and_drops_debuginfod() {
+        // A from-scratch `--root DIR` crossdev EPREFIX has no host-shared
+        // merged-usr skeleton or libs — same needs as native, found 2026-07-03
+        // doing a real from-scratch cross-stage1 test (see
+        // todo/stage-build-shakeout.md).
+        let t = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let plan = toolchain_plan(&BootstrapKind::Cross(t), true);
+        assert_eq!(labels(&plan)[0], "baselayout");
+        assert!(plan.steps[0].atoms[0].ends_with("/baselayout"));
+        let binutils = plan.steps.iter().find(|s| s.label == "binutils").unwrap();
+        assert!(binutils.use_override.contains(&"-debuginfod".to_string()));
+        // The EPREFIX's own installed view has nothing satisfying
+        // virtual/os-headers (unlike host-shared mode), so it needs its own
+        // real merge of the virtual, distinct from the cross-specific target
+        // linux-headers step.
+        let os_headers = plan
+            .steps
+            .iter()
+            .find(|s| s.label == "os-headers (EPREFIX)")
+            .expect("self-contained cross plan must merge virtual/os-headers for the EPREFIX");
+        assert_eq!(os_headers.atoms, ["virtual/os-headers"]);
+        let idx_os_headers = plan.steps.iter().position(|s| s == os_headers).unwrap();
+        let idx_kernel_headers = plan
+            .steps
+            .iter()
+            .position(|s| s.label == "kernel headers")
+            .unwrap();
+        assert!(idx_os_headers < idx_kernel_headers);
+    }
+
+    #[test]
+    fn default_cross_has_no_baselayout_and_keeps_debuginfod() {
+        // The default (host-shared) cross EPREFIX is unaffected by the
+        // self-contained fix above.
+        let t = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let plan = toolchain_plan(&BootstrapKind::Cross(t), false);
+        assert!(!labels(&plan).contains(&"baselayout"));
+        let binutils = plan.steps.iter().find(|s| s.label == "binutils").unwrap();
+        assert!(binutils.use_override.is_empty());
+        assert!(!labels(&plan).contains(&"os-headers (EPREFIX)"));
+    }
+
+    #[test]
     fn baremetal_newlib_has_no_kernel_headers() {
         let t = CrossTarget::parse("riscv64-unknown-elf", false).unwrap();
-        let plan = toolchain_plan(&BootstrapKind::Cross(t));
+        let plan = toolchain_plan(&BootstrapKind::Cross(t), false);
         assert!(!labels(&plan).contains(&"kernel headers"));
         assert!(plan.steps.iter().any(|s| s.atoms[0].ends_with("/newlib")));
     }
@@ -350,7 +497,7 @@ mod tests {
     #[test]
     fn llvm_plan_has_runtimes_not_two_stage_gcc() {
         let t = CrossTarget::parse("aarch64-unknown-linux-musl", true).unwrap();
-        let plan = toolchain_plan(&BootstrapKind::Cross(t));
+        let plan = toolchain_plan(&BootstrapKind::Cross(t), false);
         let l = labels(&plan);
         assert!(l.contains(&"clang wrappers"));
         assert!(l.contains(&"compiler-rt"));
@@ -365,7 +512,7 @@ mod tests {
         // builds full glibc, then a single full gcc links against it.
         // toolchain.eclass gates all stage1 affordances on is_crosscompile, so a
         // native gcc is always --enable-shared and needs a full libc present.
-        let plan = toolchain_plan(&BootstrapKind::Native);
+        let plan = toolchain_plan(&BootstrapKind::Native, true);
         assert_eq!(
             labels(&plan),
             ["baselayout", "binutils", "kernel headers", "libc", "gcc"]
@@ -406,7 +553,7 @@ mod tests {
         // Cross binutils is host-rooted, so its debuginfod deps are
         // host-satisfied — no need to force the flag off (behaviour-preserving).
         let t = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
-        let plan = toolchain_plan(&BootstrapKind::Cross(t));
+        let plan = toolchain_plan(&BootstrapKind::Cross(t), false);
         assert_eq!(plan.steps[0].label, "binutils");
         assert!(plan.steps[0].use_override.is_empty());
     }
