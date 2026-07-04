@@ -4,6 +4,21 @@ Open items from the toolchain → stage → binhost work, grouped. Each links to
 file with the detail. Status: 🔴 not started · 🟡 partial/decided · ✅ done (kept
 here briefly for context). Updated 2026-06-27.
 
+## RESUME HERE (2026-07-05)
+
+Mid riscv64 stage3 (`--emptytree @system`) shakeout, [[stage-build-shakeout]]
+findings #22-27. Just fixed and committed (verified live): #24 PKGDIR
+root-relative default + fail-fast preflight (`510e226`), #25 switched
+`auto` privilege default to pseudoroot after a rare fakeroost ptrace
+crash (`42d001e`), #26 three real dep-resolution bugs — USE-dep-blind
+BDEPEND check (`762e645`), PKG_CONFIG not sysroot-scoped for `--cross`
+(`1a7e7c4`), missing BDEPEND scheduling for `--cross` target packages
+(`9c0354e`). `net-misc/dhcpcd`/`sys-apps/iproute2` reverified building
+clean after all that. **Still open**: #27, `dev-python/jinja2` dying in
+`distutils-r1_python_install` (`usr/bin` missing from its own install
+tree) — not yet root-caused, blocks `sys-apps/systemd-utils` and thus
+the full stage3. Task #17 (attempt riscv64 stage3) still in progress.
+
 ## Stage building (the active goal: a real stage3)
 
 - 🟡 **Privilege / fakeroot for stage builds.** `sys-apps/util-linux`'s own
@@ -43,9 +58,14 @@ here briefly for context). Updated 2026-06-27.
   Shipped as **pseudoroot v0.2.1**; workspace pins the tag (`5acb4ce`),
   path patch dropped, doc/man repro green from the plain git dep. Remaining: the
   binpkg/stage tar
-  in-session (real `root:root` artifacts — next), fakeroot (system) backend,
-  auto-detect chain (pseudoroot is the natural auto default once wall-tested
-  on a big closure).
+  in-session (real `root:root` artifacts — next), fakeroot (system) backend.
+  ✅ **`auto` now defaults to pseudoroot over fakeroost (2026-07-05,
+  `42d001e`)** — a real riscv64 stage3 `--buildpkg` run hit a rare,
+  non-reproducible-in-isolation fakeroost ptrace-supervisor crash
+  (`fakeroost: syscall failed: ENOENT`) that silently killed ~1/3 of
+  packages' install workers *after* qmerge had already succeeded; switched
+  the priority order in `Backend::auto_backend()`. See
+  [[stage-build-shakeout]] finding #25.
   **2026-07-03**: resumed the `stage-build-shakeout` @system run under pseudoroot
   — the util-linux wall is confirmed cleared. Found (a) a stale-VDB trap: any
   acct-group/acct-user package merged before a privilege backend existed lies

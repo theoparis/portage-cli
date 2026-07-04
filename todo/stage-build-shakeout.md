@@ -1253,3 +1253,180 @@ cross-compiler. 35/36 stage1 packages merged; the one remaining failure
 (`sys-apps/shadow-4.19.4`, `crypt() not found`) is unrelated, not yet
 investigated.
 [[em-stages-and-binhosts]] [[crossdev-target]]
+
+## 22. `sys-apps/shadow` missing `sys-libs/libxcrypt` (fixed, `b371720`)
+
+The `shadow-4.19.4` failure from finding #21 turned out not to be a shadow
+ebuild bug (verbatim reaction: "sounds like a broken package that a
+retarded systemd fanboy managed to crap up" — it wasn't; the ebuild is
+fine). Root cause: `bdepend_trim`'s `runtime_required_cpns` scanned only
+the *displayed* `order` (post "already installed, nothing to do" filter)
+to decide which CPNs are still runtime-required, so it could reach
+elsewhere. `virtual/libcrypt`'s newer slot needs `sys-libs/libxcrypt`
+(`elibc_glibc`); `virtual/libcrypt` itself was already installed and thus
+invisible in `order`, but it's still the *sole reason* `libxcrypt` is
+required — scanning only `order` made `libxcrypt` look orphaned and it
+was wrongly trimmed. Fixed by computing a separate `full_solution_order`
+(every real package the solver selected, before the display filter) in
+`depgraph()` and scanning *that* for runtime-required CPNs instead.
+Regression test `already_installed_package_excluded_from_order_still_pins_its_rdepend`
+(with a negative-control sanity check reproducing the pre-fix bug).
+[[stage-build-shakeout]]
+
+## 23. `app-crypt/gnupg` `dirmngr.service` staging failure (fixed, `0e95ec1`)
+
+Flagged as "sounds like a broken package" again — again an `em` bug, not
+gnupg's. `PhaseGroup::Install`'s `clean_subs()` wiped `work`/`image`/`temp`/
+`homedir` before its `["install", "qmerge"]` phase list ran. `temp` (`${T}`,
+PMS-defined cross-phase scratch space, same lifetime class as `WORKDIR`)
+is where `src_prepare` staged gnupg's systemd unit templates
+(`GNUPG_SYSTEMD_UNITS`) for `src_install_all`'s later `systemd_douserunit`
+`doins` call — legal PMS use of `T`, but `Install` never re-runs `prepare`,
+so wiping `temp` destroyed the staged files with nothing left to
+repopulate them. Fixed: `Install`'s `clean_subs()` now wipes only
+`image`/`homedir`, matching the persistence `work/` already got. Full
+write-up with PMS references: `docs/worker-build-tree.md`.
+[[stage-build-shakeout]]
+
+## 24. Attempting a riscv64 stage3 (`--emptytree @system`) — PKGDIR fail-fast (fixed, `510e226`)
+
+Next requested step: a full riscv64 stage3 via the existing `--emptytree
+@system` engine (no `em stages --stage3` CLI flag exists yet — deliberately
+"tried raw" instead of building that plumbing first). First `--buildpkg`
+attempt: 50/110 merged, 37 failed, all `install worker exited with status
+1` with **no visible error** — looked like the concurrency ceiling
+(`--jobs 80`) itself was broken, since stage1 never hit anything like it.
+Root cause (found by comparing what differs structurally between stage1
+and stage3, not by staring at logs): `resolve_pkgdir`/`build_binpkg`
+defaulted an unset `PKGDIR` to the real host's `/var/cache/binpkgs`
+*unconditionally* — correct for a host build, wrong (and unwritable) for
+any `--root`/`--cross`/`--local`/`--prefix` merge root. The resulting
+`EACCES` mid-build appears to destabilize the privilege backend for
+several packages at once under high concurrency (not fully proven — see
+#25, which turned out to be a real, separate, low-probability crash in
+the same backend). Fixed two ways: (a) `PKGDIR` now defaults to
+`<merge_root>/var/cache/binpkgs` — reduces to the real host default when
+`merge_root` is `/`, no special-case branch needed (Luca: *"the / or not
+path building looks silly, / + var/cache/binpkgs -> /var/cache/binpkgs"* —
+simplified accordingly); (b) `run_merge_plan` gained a `--buildpkg`
+preflight (`check_pkgdir_writable`: create + write + remove a probe file)
+so a misconfigured PKGDIR fails once, immediately, with a clear message —
+never again 40 packages deep into a `--keep-going` run before anyone
+notices. [[stage-build-shakeout]]
+
+## 25. fakeroost rare ptrace race under real load → switched `auto` default to pseudoroot (`42d001e`)
+
+After #24's fix, PKGDIR-permission errors vanished but 20/60 packages
+still failed identically: qmerge (VDB write) succeeded, `--buildpkg`
+packing then killed the whole install worker with **no printed error** —
+confirmed live by checking the VDB directly (`binutils`, `pam`, `bash`,
+`sed`, `tar`, … were all *actually merged*, just missing their `.gpkg.tar`
+and reported as failed). Traced with a temporary `#[track_caller]` patch
+to fakeroost's `Error::Errno` `From` impl (local-only, reverted, never
+committed to the fork — see [[dont-commit-to-sibling-repos]]): the
+supervisor's own event loop died on `fakeroost: syscall failed: ENOENT`
+from `path::stat_target`'s `nix::sys::stat::lstat` (the `unlink_commit`
+call site, `path.rs:56`), reproducible but **not deterministic** — one
+`--jobs 1` single-package rebuild of `sys-devel/binutils` hit it
+immediately, then 7 more consecutive retries (including a 10-package
+`--jobs 8` batch) all succeeded clean. A real, rare race in the ptrace
+supervisor under load, not something worth chasing to a fix inside
+fakeroost itself right now.
+
+Pragmatic fix (Luca: *"wait, we are using fakeroost? let's switch to
+pseudoroot"*): `--privilege pseudoroot` already existed as a flag; `auto`
+just preferred fakeroost. Flipped the priority in
+`Backend::auto_backend()` — pseudoroot (LD_PRELOAD, no ptrace tax, and
+structurally can't hit this ptrace-supervisor-specific race) is now tried
+first, fakeroost second. Full `--emptytree @system` re-run under
+`--privilege pseudoroot`: **54/57 merged**, and critically the 3 remaining
+failures were genuine build errors with clear messages (see #26) — zero
+recurrence of the silent post-qmerge death. [[stage-build-shakeout]]
+[[pseudoroot-backend]] [[fakeroost-fork]]
+
+## 26. Three real dependency-resolution bugs, found only once the privilege-backend noise was gone
+
+With #25's switch, the stage3 run's remaining 3 failures were finally
+legible root causes instead of privilege-backend noise — each reported by
+the user as "a broken ebuild" and each actually an `em` bug:
+
+- **`net-libs/libtirpc[python]`... no — `sys-apps/iproute2` linked
+  `-ltirpc` despite `USE=-nfs`** (`1a7e7c4`). iproute2's `./configure`
+  auto-detects optional RPC support via plain `${PKG_CONFIG} libtirpc
+  --exists`. The generated cross sysroot `make.conf` never set
+  `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR`, so `pkg-config` searched
+  the **host's** default paths and found the host's own installed
+  `net-libs/libtirpc` — not in `DEPEND` (USE=-nfs) and not in the target
+  sysroot at all. `HAVE_RPC` got set, `-ltirpc` got linked, the link
+  failed since the library genuinely isn't in the sysroot. Fixed: the
+  sysroot's `.pc` files record paths as if the sysroot were `/`
+  (`prefix=/usr`, not the host-absolute path) — exactly what
+  `PKG_CONFIG_SYSROOT_DIR` is for. `PKG_CONFIG_LIBDIR` (replaces, not
+  additive like `_PATH`) points *only* at the sysroot's pkgconfig dirs, so
+  no host `.pc` ever leaks into a foreign-arch cross build again.
+- **`sys-apps/systemd-utils` meson: "python3 is missing modules: jinja2"**
+  — two stacked bugs, both real, only the second one actually explaining
+  why the package never got scheduled at all:
+  - `Avail::atom_satisfied` (BDEPEND-availability check, trim +
+    preflight) went through `Dep::matches_cpv`, whose own doc comment
+    says it explicitly does *not* evaluate USE-dep brackets — so any
+    USE-conditioned atom was "satisfied" the moment *any* build of that
+    CPN existed in VDB, regardless of USE. The host's installed
+    `jinja2-3.1.6` is built for `python_targets_python3_13` only; the
+    BDEPEND needed `[python_targets_python3_14(-)]`. Fixed (`762e645`):
+    `vdb_avail_entries` now carries installed USE+IUSE, so the simple
+    `[flag]`/`[-flag]` forms get checked for real (`Conditional`/`Equal`
+    forms still can't be evaluated here — no parent-flag context — same
+    as before).
+  - That fix alone didn't change the plan at all — because BDEPEND was
+    never even reaching this check. `cross_target_runtime_deps` (the
+    dependency function for a `--cross` Target-root package actually
+    being built) called `append_unsatisfied_broot` for IDEPEND but never
+    for BDEPEND, despite its own neighbouring comment already claiming
+    "unsatisfied BDEPEND schedule via Host-root nodes when `with_bdeps`
+    is on" — documented intent, never implemented. Fixed (`9c0354e`):
+    added the missing call, gated on whether the package is genuinely
+    *being built* (always pulls BDEPEND, matching the native
+    `broot_filtered` equivalent's own `--with-bdeps`-independent
+    behaviour) vs. already-installed-and-kept (never pulls it, also
+    matching native).
+  - Both fixes verified together: `dev-python/jinja2` +
+    `dev-python/markupsafe` now correctly appear in a `--cross
+    --with-bdeps -p` plan as Host-root entries.
+- **`net-misc/dhcpcd` `libudev.h: No such file or directory`** — not a
+  separate bug at all, a downstream cascade of the systemd-utils failure
+  above (`virtual/udev`'s non-systemd branch is
+  `sys-apps/systemd-utils[udev]`, which never built, so the headers it
+  would have installed were never there). Confirmed fixed once
+  systemd-utils's BDEPEND scheduling was fixed and it could actually
+  attempt its build.
+
+Real (non-pretend) re-verification: `net-misc/dhcpcd` and
+`sys-apps/iproute2` both now build and merge cleanly end-to-end.
+[[stage-build-shakeout]]
+
+## 27. OPEN — `distutils-r1_python_install` dies on a scriptless package built as a cross BDEPEND
+
+Surfaced only as a *consequence* of #26's BDEPEND-scheduling fix actually
+letting `dev-python/jinja2` attempt to build (previously it silently never
+did). `markupsafe` (jinja2's own dep, also newly scheduled) hit a
+transient `ln: ... File exists` on a first attempt — resolved by cleaning
+a stale work dir from repeated manual testing, not a real bug; retried
+clean and it now builds fine. `jinja2` itself does *not* self-resolve:
+consistently dies at `distutils-r1.eclass:1387` —
+```
+cd "${reg_scriptdir}" && find . -mindepth 1 | sort > ...
+pipestatus || die "listing ${reg_scriptdir} failed"
+```
+`${reg_scriptdir}` = `${BUILD_DIR}/install/usr/bin`. jinja2 installs zero
+console scripts, and in this build `install/usr/` doesn't exist *at all*
+(confirmed directly with `ls`) — but the eclass unconditionally assumes
+every `distutils-r1` package gets a `usr/bin` populated with
+`python3.14`/`python3`/`python` dispatch-stub symlinks (normally created
+earlier, in `python_compile`, by the python-exec integration) before this
+diff-check step runs. Not yet root-caused *why* those stubs — or the
+directory itself — never got created for this specific host-BDEPEND
+cross build. Next: check whether `_distutils-r1_post_python_compile`
+(or whatever creates `${scriptdir}` normally) is even being reached for a
+`MergeRoot::Host` cross-BDEPEND build, vs. a plain native one where this
+presumably works fine. [[stage-build-shakeout]]
