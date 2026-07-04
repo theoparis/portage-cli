@@ -1091,3 +1091,94 @@ Not yet re-run: the full stage1 `--keep-going` build with this fix, to see
 how much of the remaining failure list (curl/elfutils/binutils were
 downstream of the openssl failure and should clear too) it resolves.
 [[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]
+
+## 19. `use_with`/`use_enable` empty-arg bug (fixed), and the final tally
+
+Re-ran with the CHOST-export fix: `openssl` now merges cleanly, but
+`net-libs/gnutls` failed compiling `dlwrap/brotlienc.h` (`brotli/encode.h:
+No such file or directory`) despite the plan showing `USE="... -brotli
+..."`. Root cause: `gnutls-3.8.13.ebuild` calls `$(use_with brotli '' link)`
+— real portage's `use_with()` resolves the feature name with bash `${2:-$1}`
+(empty-or-unset fallback), so an explicitly empty second argument falls back
+to the flag name (`brotli`). `em`'s `UseWithCommand`/`UseEnableCommand`
+(`portage-repo/src/build/commands/use_flag.rs`) used
+`self.feature.as_deref().unwrap_or(&self.flag)` — `Option::unwrap_or` only
+catches `None`, not `Some("")`, so the literal empty string stayed empty,
+producing `--without-` instead of `--without-brotli`. `./configure` warned
+it was an unrecognized option and ignored it entirely, leaving brotli
+auto-detected regardless of the requested USE flag (confirmed:
+`app-arch/brotli-1.2.0-r1` is installed on the *host*, and gnutls's
+`configure` found it via the host's own pkg-config, unrelated to the
+sysroot).
+
+Fixed by filtering empty strings to `None` before `unwrap_or`, matching bash
+`:-` semantics, for both `use_with` and `use_enable`. New regression test:
+`use_with_and_use_enable_treat_empty_feature_arg_as_omitted` (`shell.rs`) —
+verified it fails without the fix (`--without-` instead of
+`--without-brotli`), confirmed it passes with it.
+
+Rebuilt and re-ran the full stage1 `--keep-going` build a final time.
+**Result: 44 of 46 packages merged** (up from 38 of 127 on the very first
+attempt this session). The two remaining failures are a different class of
+issue, not build-execution bugs:
+
+- `sys-devel/gcc-16.1.1`: fails self-building `libatomic` because
+  `riscv64-unknown-linux-gnu-cc` resolves to the **already-installed older**
+  GCC 15.2.1 (from the earlier toolchain bootstrap stage), which rejects a
+  GCC-16-only configure-test flag (`-fno-link-libatomic`). Confirmed by Luca:
+  a known, expected GCC bootstrap limitation (mixing bootstrap-compiler and
+  final-compiler major versions in one pass), not an em bug — see
+  [[gcc-bootstrap-compiler-version-mismatch]] memory. Don't re-investigate.
+- `sys-apps/shadow`: `configure: error: crypt() not found` — `sys-libs/
+  libxcrypt` is entirely absent from the sysroot's VDB (never planned, not a
+  build failure). A depgraph-completeness gap (missing `virtual/libcrypt`
+  resolution for this profile/USE combination), a different layer from the
+  four build-execution bugs above — not investigated further this session.
+
+Four real, independently-verified bugs found and fixed today, all committed:
+PATH/eltpatch cross-target sysroot leak (#16), `CTARGET` sysroot-wide leak
+(#17), the `CHOST`/allow-list → sourced-env-sweep architecture fix (#18),
+and `use_with`/`use_enable` empty-arg handling (#19).
+[[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]
+
+## 20. `sys-devel/gcc` vs `cross-<CTARGET>/gcc` version drift (root-caused, follow-ups tracked)
+
+Dug into *why* `sys-devel/gcc-16.1.1`'s self-build fails
+(`gcc-bootstrap-compiler-version-mismatch` memory — confirmed by Luca as a
+known GCC limitation, not an em bug, so not chased as a bug). The follow-up
+question — why the active cross-compiler is gcc-15 when gcc-16 was visible
+the whole time — traced to two genuinely **separate, independently-resolved
+atoms** that are easy to conflate:
+
+- `cross-riscv64-unknown-linux-gnu/gcc-15.2.1_p20260214` — the *host-side
+  cross-compiler* `em crossdev --setup`'s toolchain bootstrap built (per
+  `cross-stage1-riscv64-toolchain4.log`, 2026-07-03), currently active via
+  `gcc-config` (`riscv64-unknown-linux-gnu-gcc` on `PATH` resolves to its
+  `gcc-bin/15/` wrapper). That log shows it as `[ebuild R]` (reinstall) —
+  already satisfied the atom from an even earlier attempt, so nothing
+  re-resolved or upgraded it since; a plain `emerge` (or `em`) merge never
+  force-upgrades an atom that's already satisfied without `--update`.
+- `sys-devel/gcc-16.1.1_p20260606` — the *target's own* compiler
+  (`CHOST == CTARGET`), resolved fresh today by `em stages --stage1`'s own
+  independent atom resolution (nothing installed yet under that category in
+  this sysroot), picking the newest visible version.
+
+Both ebuilds have been present in the tree (same commit,
+`367e22eb0c`/2026-06-14) the entire time — this isn't a stale-tree issue, just
+two unrelated resolutions drifting apart over days. GCC then can't
+self-bootstrap `sys-devel/gcc-16` using the older `cross-*/gcc-15` as its own
+`CC_FOR_TARGET`, which is the actual proximate failure.
+
+Documented the `cross-<CTARGET>/gcc` vs `sys-devel/gcc` distinction in
+`portage-cli/src/crossdev/mod.rs`'s module doc and `docs/root-model.md`
+(task #12, done). Two follow-ups tracked, not yet implemented:
+
+- **Task #13**: `em crossdev` doesn't correctly support `--update` for its
+  own toolchain-bootstrap resolution — verify/fix so `cross-<CTARGET>/gcc`
+  can actually be bumped to match a newer `sys-devel/gcc` on request.
+- **Task #14**: add a safety check before building a package literally named
+  `gcc` — compare its version against the currently `gcc-config`-active
+  compiler for that CHOST/CTARGET and warn loudly up front, instead of
+  failing cryptically deep inside `libatomic`'s `configure` after a full
+  compile cycle.
+[[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]
