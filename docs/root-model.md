@@ -138,6 +138,15 @@ shows `to /usr/riscv64-unknown-linux-gnu/`: the **whole closure** is a cross
 build for the target. Host `cmake`/`perl` do not appear because `BDEPEND` edges
 are satisfied from host `/var/db/pkg`.
 
+Note the `gcc` in that plan output is `sys-devel/gcc` — the target's *own*
+compiler, built with `CHOST == CTARGET`, ending up installed *in* the sysroot.
+It is **not** the same package as `cross-<CTARGET>/gcc`, the host-side
+cross-compiler crossdev's toolchain bootstrap already built and that
+`riscv64-unknown-linux-gnu-gcc` on `PATH` resolves to. See
+`portage-cli/src/crossdev/mod.rs`'s module doc for the full distinction —
+conflating the two is exactly what caused a hard-to-read GCC self-bootstrap
+failure (`todo/stage-build-shakeout.md` finding #19).
+
 Portage's depgraph (_emerge_, EAPI 7+) routes each dep string with an explicit
 **`(dep_root, priority)`** pair:
 

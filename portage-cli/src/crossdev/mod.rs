@@ -18,6 +18,34 @@
 //! `<EROOT>/usr/<CTARGET>`, so `em crossdev <t>` targets `/usr/<CTARGET>` (like
 //! crossdev), `em --local crossdev <t>` targets `~/.gentoo/usr/<CTARGET>`, and
 //! `em --prefix DIR`/`--root DIR` retarget under `DIR`.
+//!
+//! ## `cross-<CTARGET>/gcc` vs `sys-devel/gcc` — two different packages
+//!
+//! Easy to conflate, and doing so caused real confusion chasing a stage1
+//! failure (`todo/stage-build-shakeout.md` finding #19): they are **not** the
+//! same compiler at any point.
+//!
+//! - **`cross-<CTARGET>/gcc`** (this module's overlay category, built by
+//!   [`stages::toolchain_plan`]) is the **host-side cross-compiler**: it runs
+//!   on `CBUILD`, emits code for `CTARGET`, and is what every ordinary
+//!   package's `PATH` resolves `<CTARGET>-gcc`/`riscv64-unknown-linux-gnu-gcc`
+//!   to via `gcc-config` (see `env_d.rs`). It's built once during
+//!   `--setup`/`--init-target` and only changes if you explicitly rebuild or
+//!   upgrade it — nothing else in `em` re-solves or upgrades it implicitly.
+//! - **`sys-devel/gcc`** is the ordinary, real-category ebuild for "the
+//!   compiler built with `CHOST == CTARGET`" — i.e. a compiler that will
+//!   *itself run on* whatever `CHOST` currently is, no matter which host that
+//!   happens to be. Installed via `em stages --stage1`/plain `em` merges, its
+//!   version is resolved completely independently of `cross-<CTARGET>/gcc`.
+//!
+//! Because these are separate, independently-resolved atoms, they can drift:
+//! `em stages --stage1 --cross <t>` installing a newer `sys-devel/gcc` into
+//! the target sysroot does **not** upgrade the `cross-<t>/gcc` cross-compiler
+//! actually used to *build* it — and GCC cannot reliably self-bootstrap a
+//! newer major version using an older one as `CC_FOR_TARGET` (a real GCC
+//! limitation, not an em bug). Keeping the two in sync is a `--update`/rebuild
+//! concern — see `todo/stage-build-shakeout.md` finding #19 for the pending
+//! `crossdev --update` support and version-mismatch warning.
 
 mod multilib;
 mod stages;
