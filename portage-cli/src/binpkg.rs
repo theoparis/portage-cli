@@ -25,11 +25,29 @@ use portage_repo::MakeConf;
 
 use crate::cli::Cli;
 
+/// Real portage's own hardcoded system default — for the host-root test
+/// only; `resolve_pkgdir` no longer references this directly since
+/// `merge_root.join("var/cache/binpkgs")` reduces to the same string when
+/// `merge_root` is `/`.
+#[cfg(test)]
 const DEFAULT_PKGDIR: &str = "/var/cache/binpkgs";
 const MAKE_GLOBALS: &str = "/usr/share/portage/config/make.globals";
 
 /// Resolve `PKGDIR`: `$PKGDIR` env → `make.conf` (config root) → `make.globals`
 /// → `/var/cache/binpkgs`. Shared by `em maint binhost` and the `-k` consumer.
+///
+/// The `make.globals`/hardcoded-default steps are **host** defaults — real
+/// portage's own system-wide install convention, unconditionally
+/// `/var/cache/binpkgs` (confirmed: this repo's own `make.globals` hardcodes
+/// exactly that). For a `--root`/`--cross`/`--local`/`--prefix` build (any
+/// merge root other than `/`), consulting that host default is wrong: it's a
+/// real, root-owned system path the build has no business writing to, and
+/// unprivileged builds can't anyway. Caught live: a stage3 `--buildpkg` run
+/// tried to write there, got `EACCES`, and appears to have destabilized the
+/// fakeroost ptrace session for several packages — see
+/// `todo/stage-build-shakeout.md`. Skip straight to a root-relative default
+/// in that case; `$PKGDIR`/config-root `make.conf` (explicit user choices)
+/// still apply regardless of root.
 pub(crate) fn resolve_pkgdir(globals: &Cli) -> Utf8PathBuf {
     if let Ok(v) = std::env::var("PKGDIR")
         && !v.trim().is_empty()
@@ -41,14 +59,21 @@ pub(crate) fn resolve_pkgdir(globals: &Cli) -> Utf8PathBuf {
     {
         return Utf8PathBuf::from(v);
     }
-    let mg = Utf8Path::new(MAKE_GLOBALS);
-    if mg.exists()
-        && let Ok(mc) = MakeConf::load(mg)
-        && let Some(v) = mc.get("PKGDIR").filter(|s| !s.is_empty())
-    {
-        return Utf8PathBuf::from(v);
+    let merge_root = globals.roots().merge_root().to_owned();
+    // make.globals is a host-level default; only consult it for a real host
+    // build. A non-host root falls through to the join below unconditionally
+    // — no separate "is this the host?" branch needed there, since
+    // `"/".join("var/cache/binpkgs")` already *is* the host default.
+    if merge_root.as_str() == "/" {
+        let mg = Utf8Path::new(MAKE_GLOBALS);
+        if mg.exists()
+            && let Ok(mc) = MakeConf::load(mg)
+            && let Some(v) = mc.get("PKGDIR").filter(|s| !s.is_empty())
+        {
+            return Utf8PathBuf::from(v);
+        }
     }
-    Utf8PathBuf::from(DEFAULT_PKGDIR)
+    merge_root.join("var/cache/binpkgs")
 }
 
 /// Read a variable from `make.conf` under the resolved config root.
@@ -311,6 +336,55 @@ fn find_gpkgs(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    /// Regression test for the stage3 --buildpkg failure: a non-host root
+    /// must never default PKGDIR to the real system's `/var/cache/binpkgs`
+    /// (root-owned, not writable, and not even meaningful for a different
+    /// root's package cache) — see `resolve_pkgdir`'s doc comment.
+    #[test]
+    fn non_host_root_gets_root_relative_pkgdir_default() {
+        assert!(
+            std::env::var("PKGDIR").is_err(),
+            "test assumes no ambient PKGDIR override"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let cli = Cli::parse_from(["em", "--root", root]);
+        let pkgdir = resolve_pkgdir(&cli);
+        assert_eq!(
+            pkgdir,
+            camino::Utf8Path::new(root).join("var/cache/binpkgs")
+        );
+    }
+
+    /// A plain host build (root `/`, no --root/--prefix/--local/--cross) is
+    /// unaffected by the root-aware branch — it still falls through to the
+    /// pre-existing make.globals/hardcoded-default lookup, exactly as before
+    /// this change.
+    #[test]
+    fn host_root_skips_the_root_relative_branch() {
+        assert!(
+            std::env::var("PKGDIR").is_err(),
+            "test assumes no ambient PKGDIR override"
+        );
+        // `["em"]` alone (zero args) trips clap's `arg_required_else_help`
+        // (prints help and exits the process) — pass --root explicitly.
+        let cli = Cli::parse_from(["em", "--root", "/"]);
+        assert_eq!(cli.roots().merge_root().as_str(), "/");
+        let expected = {
+            let mg = Utf8Path::new(MAKE_GLOBALS);
+            if mg.exists()
+                && let Ok(mc) = MakeConf::load(mg)
+                && let Some(v) = mc.get("PKGDIR").filter(|s| !s.is_empty())
+            {
+                Utf8PathBuf::from(v)
+            } else {
+                Utf8PathBuf::from(DEFAULT_PKGDIR)
+            }
+        };
+        assert_eq!(resolve_pkgdir(&cli), expected);
+    }
 
     fn set(items: &[&str]) -> HashSet<String> {
         items.iter().map(|s| s.to_string()).collect()

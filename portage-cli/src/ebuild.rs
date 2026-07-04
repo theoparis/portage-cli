@@ -889,7 +889,8 @@ fn ed_image_dir(shell: &portage_repo::EbuildShell, work_root: &Utf8Path) -> Utf8
 }
 
 /// Pack the freshly-merged image (`${D}`) + VDB entry into a GPKG under `PKGDIR`
-/// (default `/var/cache/binpkgs`), returning the written path.
+/// (default `/var/cache/binpkgs` for a host build, `<root>/var/cache/binpkgs`
+/// otherwise), returning the written path.
 fn build_binpkg(
     shell: &portage_repo::EbuildShell,
     ebuild: &Ebuild,
@@ -906,7 +907,11 @@ fn build_binpkg(
     );
     // PKGDIR precedence: $PKGDIR env (portage honours it) → the shell's resolved
     // value (make.conf/make.globals) → the default. Must agree with the
-    // consumer's `binpkg::resolve_pkgdir`.
+    // consumer's `binpkg::resolve_pkgdir` — including its root-awareness:
+    // `root.join("var/cache/binpkgs")` needs no separate host-vs-root branch,
+    // since it already reduces to the real system's `/var/cache/binpkgs` when
+    // `root` is `/`. See `resolve_pkgdir`'s doc comment for why a non-host
+    // root must never fall back to that real, root-owned system path.
     let pkgdir = std::env::var("PKGDIR")
         .ok()
         .map(|s| s.trim().to_string())
@@ -917,11 +922,10 @@ fn build_binpkg(
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         })
-        .unwrap_or_else(|| "/var/cache/binpkgs".to_string());
+        .map(Utf8PathBuf::from)
+        .unwrap_or_else(|| root.join("var/cache/binpkgs"));
     let build_id = next_build_id(&pkgdir, cat, &pf);
-    let out = Utf8PathBuf::from(pkgdir)
-        .join(cat)
-        .join(format!("{pf}-{build_id}.gpkg.tar"));
+    let out = pkgdir.join(cat).join(format!("{pf}-{build_id}.gpkg.tar"));
     portage_binpkg::write_gpkg(
         &portage_binpkg::GpkgInput {
             image_dir: image_dir.as_std_path(),
@@ -936,8 +940,8 @@ fn build_binpkg(
 
 /// The next free GPKG build-id for `<cat>/<pf>` in `pkgdir` (portage numbers
 /// rebuilds `<pf>-1`, `<pf>-2`, …); 1 when none exist.
-fn next_build_id(pkgdir: &str, cat: &str, pf: &str) -> u32 {
-    let dir = Utf8PathBuf::from(pkgdir).join(cat);
+fn next_build_id(pkgdir: &Utf8Path, cat: &str, pf: &str) -> u32 {
+    let dir = pkgdir.join(cat);
     let prefix = format!("{pf}-");
     let mut max = 0u32;
     if let Ok(rd) = std::fs::read_dir(dir.as_std_path()) {

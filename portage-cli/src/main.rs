@@ -400,6 +400,18 @@ struct MergeFailure {
     cause: String,
 }
 
+/// Verify `pkgdir` can actually be written to (creating it if missing) — the
+/// `--buildpkg` preflight in [`run_merge_plan`]. A probe file is written and
+/// removed rather than just checking metadata, since permission bits alone
+/// don't capture every reason a write can fail (e.g. a read-only mount).
+fn check_pkgdir_writable(pkgdir: &camino::Utf8Path) -> Result<()> {
+    std::fs::create_dir_all(pkgdir.as_std_path()).with_context(|| format!("creating {pkgdir}"))?;
+    let probe = pkgdir.join(".em-write-probe");
+    std::fs::write(probe.as_std_path(), b"").with_context(|| format!("writing to {pkgdir}"))?;
+    let _ = std::fs::remove_file(probe.as_std_path());
+    Ok(())
+}
+
 /// Prompt before merging (`--ask`). Defaults to no on empty input or EOF.
 fn confirm_merge(count: usize) -> Result<bool> {
     use std::io::Write;
@@ -437,6 +449,19 @@ async fn run_merge_plan(
 ) -> Result<()> {
     let merge_root = roots.merge_root();
     let total = plan.len();
+
+    // Fail fast: verify PKGDIR is actually writable *before* starting a
+    // potentially multi-hour build, rather than discovering it deep into a
+    // `--keep-going` run once dozens of packages have already silently died.
+    // Found live (todo/stage-build-shakeout.md): a stage3 --buildpkg attempt
+    // hit a permission-denied PKGDIR (fixed separately — resolve_pkgdir is now
+    // root-aware), and each failure surfaced as an unexplained, silent worker
+    // death rather than the single clear error this check now gives instead.
+    if buildpkg {
+        let pkgdir = binpkg::resolve_pkgdir(globals);
+        check_pkgdir_writable(&pkgdir)
+            .with_context(|| format!("--buildpkg: PKGDIR {pkgdir} is not writable"))?;
+    }
 
     // Implication chain (portage actions.py): -g ⇒ --usepkg, -G ⇒ --getbinpkg +
     // binpkg-only (no source). So both enable local reuse; local overrides remote.
