@@ -25,8 +25,18 @@ pub struct TrimCtx<'a> {
 /// Drop entries that are only needed for `BDEPEND` edges already satisfied by
 /// the host/prefix VDB or earlier kept plan entries. No-op when the solver did
 /// not include `BDEPEND` (`with_bdeps=false`).
+///
+/// `full_solution_order` is every real package the solver selected, *before*
+/// the caller's "already installed, nothing to display" filter drops entries
+/// like `virtual/libcrypt` from `order`. Runtime-requirement scanning must use
+/// the full set: an already-installed package invisible in `order` can still
+/// be the sole reason some other, not-yet-installed package is required (its
+/// own DEPEND/RDEPEND edges don't stop existing just because it needs no
+/// action itself). Scanning only `order` made such a dependency look
+/// orphaned and wrongly trimmable — see `todo/stage-build-shakeout.md`.
 pub fn trim_within_run_bdepend(
     order: Vec<(PortagePackage, Version)>,
+    full_solution_order: &[(PortagePackage, Version)],
     with_bdeps: bool,
     ctx: &TrimCtx<'_>,
 ) -> Vec<(PortagePackage, Version)> {
@@ -34,7 +44,7 @@ pub fn trim_within_run_bdepend(
         return order;
     }
 
-    let runtime_required = runtime_required_cpns(&order, ctx);
+    let runtime_required = runtime_required_cpns(full_solution_order, ctx);
     let mut kept: Vec<(PortagePackage, Version)> = Vec::with_capacity(order.len());
     let mut kept_indices: Vec<usize> = Vec::with_capacity(order.len());
 
@@ -153,12 +163,104 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use portage_atom_pubgrub::UseConfig;
+    use portage_metadata::CacheEntry;
 
     use super::*;
     use crate::cli::Roots;
 
     fn empty_roots() -> Roots {
         Roots::default()
+    }
+
+    /// Build a `RepoData` from `(cpv, md5-cache-text)` pairs, one version per CPN.
+    fn repo_from(entries: &[(&str, &str)]) -> RepoData {
+        let mut versions: HashMap<Cpn, Vec<(Cpv, CacheEntry)>> = HashMap::new();
+        let mut cpns = Vec::new();
+        for (cpv_str, text) in entries {
+            let cpv = Cpv::parse(cpv_str).unwrap();
+            let entry = CacheEntry::parse(text).unwrap();
+            cpns.push(cpv.cpn);
+            versions.entry(cpv.cpn).or_default().push((cpv, entry));
+        }
+        RepoData {
+            cpns,
+            versions,
+            repo_name: "test".into(),
+            repo_of: HashMap::new(),
+        }
+    }
+
+    /// Regression test for the bug found chasing `sys-apps/shadow` missing
+    /// `sys-libs/libxcrypt`: an already-installed package (here
+    /// `virtual/lib`, standing in for `virtual/libcrypt`) is correctly
+    /// excluded from the *displayed* `order` — but it's still the sole
+    /// reason `sys-libs/reallib` (standing in for `sys-libs/libxcrypt`) is
+    /// required. `runtime_required_cpns` must see `virtual/lib`'s RDEPEND
+    /// edge via `full_solution_order` even though `virtual/lib` itself never
+    /// appears in `order`, or `reallib` gets wrongly trimmed as orphaned.
+    #[test]
+    fn already_installed_package_excluded_from_order_still_pins_its_rdepend() {
+        let data = repo_from(&[
+            (
+                "sys-apps/consumer-1",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nRDEPEND=virtual/lib\n",
+            ),
+            (
+                "virtual/lib-1",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nRDEPEND=sys-libs/reallib\n",
+            ),
+            (
+                "sys-libs/reallib-1",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+            ),
+        ]);
+
+        let consumer = (
+            PortagePackage::unslotted(Cpn::parse("sys-apps/consumer").unwrap()),
+            Version::parse("1").unwrap(),
+        );
+        let virtual_lib = (
+            PortagePackage::unslotted(Cpn::parse("virtual/lib").unwrap()),
+            Version::parse("1").unwrap(),
+        );
+        let reallib = (
+            PortagePackage::unslotted(Cpn::parse("sys-libs/reallib").unwrap()),
+            Version::parse("1").unwrap(),
+        );
+
+        // `order`: what's actually displayed/merged — `virtual/lib` is
+        // already installed and excluded, matching the real bug scenario.
+        let order = vec![consumer.clone(), reallib.clone()];
+        let full_solution_order = vec![consumer.clone(), virtual_lib, reallib.clone()];
+
+        let use_config = UseConfig::new();
+        let root_cpns: HashSet<Cpn> = [*consumer.0.cpn()].into_iter().collect();
+        let reinstall = HashSet::new();
+        let roots = empty_roots();
+        let ctx = TrimCtx {
+            roots: &roots,
+            data: &data,
+            use_config: &use_config,
+            package_use: &[],
+            root_cpns: &root_cpns,
+            reinstall_cpns: &reinstall,
+        };
+
+        let kept = trim_within_run_bdepend(order.clone(), &full_solution_order, true, &ctx);
+        assert!(
+            kept.iter().any(|(p, _)| p.cpn() == reallib.0.cpn()),
+            "reallib must survive: it's required via virtual/lib's RDEPEND, \
+             even though virtual/lib itself isn't in the displayed order"
+        );
+
+        // Negative control: with the pre-fix behaviour (scanning only `order`,
+        // which excludes `virtual/lib`), `reallib` looks orphaned and is
+        // wrongly dropped — demonstrating the bug this fix closes.
+        let buggy = trim_within_run_bdepend(order.clone(), &order, true, &ctx);
+        assert!(
+            !buggy.iter().any(|(p, _)| p.cpn() == reallib.0.cpn()),
+            "sanity check: scanning only `order` reproduces the original bug"
+        );
     }
 
     #[test]
@@ -184,7 +286,7 @@ mod tests {
             root_cpns: &root_cpns,
             reinstall_cpns: &reinstall,
         };
-        let out = trim_within_run_bdepend(order.clone(), false, &ctx);
+        let out = trim_within_run_bdepend(order.clone(), &order, false, &ctx);
         assert_eq!(out.len(), order.len());
     }
 }

@@ -511,13 +511,24 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         .filter_map(|r| r.upgrade_to.as_ref().map(|v| (*r.package.cpn(), v.clone())))
         .collect();
 
-    let mut order: Vec<_> = provider
+    // Every real (non-virtual) package the solver actually selected, before
+    // the "already installed, nothing to display" filter below drops entries
+    // like `virtual/libcrypt` from the visible plan. Kept around so
+    // `bdepend_trim` can still see *their* dependency edges — an
+    // already-installed package that's invisible in `order` can still be the
+    // sole reason some other, not-yet-installed package (e.g.
+    // `sys-libs/libxcrypt`, pulled in only via `virtual/libcrypt`'s RDEPEND)
+    // is required; scanning only `order` made such a package look orphaned
+    // and wrongly trimmable. See `todo/stage-build-shakeout.md`.
+    let full_order: Vec<(PortagePackage, Version)> = provider
         .install_order(&solution)
         .into_iter()
+        .filter(|(pkg, _)| !pkg.is_virtual())
+        .collect();
+
+    let mut order: Vec<_> = full_order
+        .iter()
         .filter(|(pkg, ver)| {
-            if pkg.is_virtual() {
-                return false;
-            }
             let cpv = Cpv::new(*pkg.cpn(), ver.clone());
             // Drop packages already installed at this version, except:
             //  - same-version USE rebuilds (reinstall_cpns), and
@@ -534,6 +545,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                     .any(|r| r.cpn() == pkg.cpn() && r.slot() == pkg.slot())
                 || emptytree_native
         })
+        .cloned()
         .map(|(pkg, ver)| {
             // Apply the favoured upgrade version if one was recorded.
             let ver = upgrades.get(pkg.cpn()).cloned().unwrap_or(ver);
@@ -595,7 +607,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         // for BDEPEND already satisfied on BROOT or by an earlier kept entry —
         // matching emerge, which trims a built package's redundant build tools
         // regardless of `--with-bdeps`.
-        order = bdepend_trim::trim_within_run_bdepend(order, true, &trim_ctx);
+        order = bdepend_trim::trim_within_run_bdepend(order, &full_order, true, &trim_ctx);
     }
     // Native --emptytree lists the full deep closure straight from the solve
     // (the provider returns un-pruned deps under `rebuild_tree`); no post-solve
