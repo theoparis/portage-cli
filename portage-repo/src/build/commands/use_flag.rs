@@ -136,7 +136,15 @@ impl builtins::Command for UseEnableCommand {
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         let shell = context.shell;
-        let feature = self.feature.as_deref().unwrap_or(&self.flag);
+        // PMS/portage's use_enable() resolves the feature name with bash
+        // `${2:-$1}` — an explicitly empty `feature` arg (e.g. `use_enable foo
+        // ''`) falls back to `flag` exactly like an omitted one, so filter
+        // empty before `unwrap_or` (which only catches `None`).
+        let feature = self
+            .feature
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.flag);
         let out = if use_flag_enabled(shell, &self.flag) {
             match &self.val {
                 Some(v) => format!("--enable-{feature}={v}"),
@@ -173,7 +181,13 @@ impl builtins::Command for UseWithCommand {
         context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
         let shell = context.shell;
-        let feature = self.feature.as_deref().unwrap_or(&self.flag);
+        // See the matching comment in UseEnableCommand: an explicitly empty
+        // `feature` arg must fall back to `flag`, same as an omitted one.
+        let feature = self
+            .feature
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.flag);
         let out = if use_flag_enabled(shell, &self.flag) {
             match &self.val {
                 Some(v) => format!("--with-{feature}={v}"),

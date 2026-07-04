@@ -1017,3 +1017,77 @@ Not yet re-run after this fix: the full 127-package `--keep-going` stage1
 build, to see how much of the remaining failure count (the `econf` exit-77
 cluster, `aclocal` failures, and whatever else) this alone clears.
 [[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]
+
+## 18. `CHOST`/profile vars invisible to real subprocesses — allow-list → sourced-env sweep (fixed)
+
+Re-ran the fixed stage1 build; `dev-libs/openssl` failed differently:
+`Configuring OpenSSL version 3.6.3 for target linux-aarch64` (should be
+`linux64-riscv64`), then real compile errors — `crypto/aes/aes-sha1-armv8.S`
+(ARM64-only assembly) assembled with the *correct* riscv64 cross-`gcc`
+(`-mabi=lp64d -march=rv64gc` etc.), producing "unrecognized opcode" errors.
+Mismatch: right compiler, wrong `Configure` target.
+
+Root cause: `dev-libs/openssl`'s `src_configure` runs `bash
+"${FILESDIR}/gentoo.config"` — a genuine external subprocess, not an em Rust
+builtin — to map `$CHOST` to an OpenSSL `Configure` target string. `em`'s
+`init_build_env` (`portage-repo/src/build/shell.rs`) only ever exported a
+hand-maintained list of names (`CATEGORY PN PV ... MOPREFIX ABI
+CONF_LIBDIR`) to real subprocesses; `CHOST` (and `CBUILD`/`CTARGET`/`ARCH`)
+were never on it. Invisible to `gentoo.config`, `CHOST` read empty there, so
+`sslout` was empty and OpenSSL's own `Configure` fell back to `uname`-based
+autodetection — correctly identifying the **build host's** real aarch64
+kernel, since that's genuinely what `uname -m` reports on this machine.
+Meanwhile `CC`/`CFLAGS` were already correct because the `econf` Rust builtin
+forwards them explicitly, bypassing brush's export mechanism entirely — the
+same asymmetry (Rust builtins read brush's variable table in-process; real
+subprocesses only inherit exported vars) that made this invisible until a
+package's build script needed a raw subprocess.
+
+User's follow-up ("that list is used in other places? feels brittle, what
+does portage do?") reframed this from "add 4 missing names" to "the
+allow-list model itself is wrong": every other profile-derived variable
+(`ELIBC`, `KERNEL`, `USERLAND`, `MULTILIB_ABIS`, `DEFAULT_ABI`,
+`PKG_CONFIG_PATH`, …) has the identical latent bug. Checked real portage's
+`config.environ()`: not an allow-list — it exports its *entire* settings
+dict minus a small internal denylist, because portage builds the whole
+OS-level process environment before the ebuild's bash even starts.
+
+Fixed properly (not just patched): `EbuildShell::export_sourced_env`
+(`portage-repo/src/build/shell.rs`) exports **every** variable currently in
+the shell's environment (brush's `Env::iter()`, all vars regardless of
+export flag) minus a small bash-mechanics denylist (`is_bash_internal_var`),
+flipping each variable's export bit directly via brush's
+`ResolvedVarRefMut::base_var_mut` — no generated `export a b c ...` string
+round-tripped through the interpreter. Called from `apply_profile_env`
+(`portage-cli/src/ebuild.rs`) right after profile/make.conf sourcing and
+again after package.env sourcing. `init_build_env`'s original identity-var
+list is untouched — those are em-synthesized per-package values (CATEGORY,
+PF, S, T, D, …), not sourced from a file, so they can't come from the sweep
+and still need their own explicit export.
+
+New regression test: `export_sourced_env_reaches_a_real_subprocess`
+(`shell.rs`) — sets an arbitrary var (`MULTILIB_ABIS`, standing in for any
+profile var em doesn't specifically know about), calls
+`export_sourced_env`, then spawns a *real* external subprocess via command
+substitution and asserts it inherited the value. Verified it fails without
+the fix (manually reverted the function body, confirmed the assertion
+failed, restored it). Documented the architecture choice in
+`docs/build-environment.md`.
+
+Verified live: `dev-libs/openssl` now configures for `linux64-riscv64` and
+merges cleanly into the riscv64 `--cross` sysroot (the pre-existing,
+unrelated `error: command not found: diropts` during post-install is
+non-fatal — `diropts` is a real portage ebuild-helper em never implemented;
+noted as a separate, minor gap, not chased further here).
+
+Also this round: made the "don't race a running `em` process" mistake a
+second time (launched a manual single-package test against the same ROOT
+while the `--keep-going` run was still live) — generalized the earlier
+rebuild-specific lesson into `check-for-live-em-process` memory covering
+*any* action that touches a live invocation's shared state, not just
+rebuilds.
+
+Not yet re-run: the full stage1 `--keep-going` build with this fix, to see
+how much of the remaining failure list (curl/elfutils/binutils were
+downstream of the openssl failure and should clear too) it resolves.
+[[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]

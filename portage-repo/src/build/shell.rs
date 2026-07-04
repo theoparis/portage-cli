@@ -2692,6 +2692,42 @@ cache-formats = md5-dict
         assert_eq!(shell.get_var("NOMK").as_deref(), Some("died"));
     }
 
+    /// `use_with`/`use_enable`'s explicit-empty second argument
+    /// (`use_with brotli '' link`, as `net-libs/gnutls` calls it) must fall
+    /// back to the flag name, matching bash's `${2:-$1}` in real portage's
+    /// `use_with()` — not just an omitted argument. An empty `Option<String>`
+    /// still satisfies `Option::unwrap_or`'s `Some` case, so a naive
+    /// translation silently drops the feature name entirely, producing
+    /// `--without-` instead of `--without-brotli` (which `./configure` then
+    /// warns is unrecognized and ignores, leaving the feature auto-detected
+    /// regardless of the requested USE flag).
+    #[tokio::test]
+    async fn use_with_and_use_enable_treat_empty_feature_arg_as_omitted() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+        std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+        std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+        std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        shell.set_use_flags(&["-brotli", "cxx"]).unwrap();
+
+        shell
+            .run_string(
+                "WITH_OUT=$(use_with brotli '' link); \
+                 ENABLE_OUT=$(use_enable cxx '')",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            shell.get_var("WITH_OUT").as_deref(),
+            Some("--without-brotli")
+        );
+        assert_eq!(shell.get_var("ENABLE_OUT").as_deref(), Some("--enable-cxx"));
+    }
+
     /// A profile/make.conf-sourced variable must reach a *real* subprocess an
     /// ebuild/eclass spawns directly — not just brush's in-process variable
     /// table (which is all `get_var`/em's Rust builtins need). `MULTILIB_ABIS`
