@@ -92,14 +92,28 @@ impl PhaseGroup {
 
     /// Subdirs to wipe before the phase loop (stale-tree clean).
     /// Full/Compile/BinpkgMerge: everything (starting fresh). Install:
-    /// `image/temp/homedir` only — `work/` holds the compile artifacts.
+    /// `image` only — `work/` *and* `temp` (`${T}`) hold state the Compile
+    /// parent produced that `src_install` may still need.
     /// Debug: none.
+    ///
+    /// `temp` used to be wiped here too, on the reasoning that only `work/`
+    /// (the compile artifacts) needs to survive the Compile→Install process
+    /// boundary. But `${T}` is cross-phase scratch space by PMS convention,
+    /// not throwaway-per-phase: an ebuild's `src_prepare`/`src_configure` can
+    /// stage a file there for `src_install` to pick up later (e.g.
+    /// `app-crypt/gnupg`'s systemd unit templates, copied into `${T}` in
+    /// `src_prepare` and `doins`'d from there in `src_install_all`). Since
+    /// `Install`'s own phase list is just `["install", "qmerge"]` (no
+    /// `prepare` to redo the copy), wiping `temp` here silently destroyed
+    /// that staged file between the two processes and `doins` failed on a
+    /// file that existed moments earlier in the same build. Caught live
+    /// chasing a stage1 gnupg failure — see `todo/stage-build-shakeout.md`.
     fn clean_subs(&self) -> Option<&'static [&'static str]> {
         match self {
             Self::Full | Self::Compile | Self::BinpkgMerge => {
                 Some(&["work", "image", "temp", "homedir"])
             }
-            Self::Install => Some(&["image", "temp", "homedir"]),
+            Self::Install => Some(&["image", "homedir"]),
             Self::Debug(_) => None,
         }
     }
@@ -2009,6 +2023,38 @@ mod tests {
     use portage_vdb::ContentsKind;
     use std::fs;
     use std::os::unix::fs::symlink;
+
+    /// Regression test for the gnupg stage1 failure: the Install worker must
+    /// never wipe `temp` (`${T}`) — it's cross-phase scratch space the
+    /// Compile parent may have staged a file into for `src_install` to
+    /// consume, not throwaway-per-process state like `image` (`${D}`).
+    #[test]
+    fn install_worker_clean_subs_never_includes_temp() {
+        let install_subs = PhaseGroup::Install.clean_subs().unwrap();
+        assert!(
+            !install_subs.contains(&"temp"),
+            "Install must not wipe temp (${{T}}): {install_subs:?}"
+        );
+        // image (${D}) still must be wiped: a stale install destination from
+        // an earlier attempt must never leak into the current merge.
+        assert!(install_subs.contains(&"image"));
+    }
+
+    /// Full/Compile/BinpkgMerge start genuinely fresh, so they wipe
+    /// everything including `work` — unlike Install, which relies on
+    /// `work`'s compile artifacts surviving the process boundary.
+    #[test]
+    fn full_and_compile_clean_subs_wipe_work_too() {
+        for group in [
+            PhaseGroup::Full,
+            PhaseGroup::Compile,
+            PhaseGroup::BinpkgMerge,
+        ] {
+            let subs = group.clean_subs().unwrap();
+            assert!(subs.contains(&"work"), "{group:?}: {subs:?}");
+            assert!(subs.contains(&"temp"), "{group:?}: {subs:?}");
+        }
+    }
 
     #[test]
     fn walk_image_copies_files_and_builds_contents() {
