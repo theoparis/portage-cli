@@ -1704,6 +1704,22 @@ impl EbuildShell {
         // ./configure, …) inherit them as environment variables. Our do*/new*
         // install helpers run in-shell and read these directly.
         // Bash `export` on an unset/empty name is harmless — it just marks it for export.
+        //
+        // CHOST/CBUILD/CTARGET must be here: real portage's config object
+        // exports its whole settings dict as the ebuild process's real OS
+        // environment from the start, so every real subprocess a plain
+        // ebuild/eclass command spawns (e.g. openssl's `bash
+        // "${FILESDIR}/gentoo.config"`) inherits them transparently. em instead
+        // sources make.conf/profile into an already-running brush shell as
+        // plain (non-exported) assignments — fine for our own Rust builtins
+        // (econf/emake read brush's variable table directly, bypassing export
+        // entirely) but invisible to a real child process unless listed here.
+        // Omitting CHOST specifically meant `gentoo.config` saw no CHOST at
+        // all, so openssl's `Configure` fell back to autodetecting the *build
+        // host's* kernel arch via `uname` — silently producing a host-arch
+        // Configure target (and ARM-only assembly files) under `--cross`,
+        // even though CC/CFLAGS (which real Rust builtins forward explicitly)
+        // were already correctly cross-targeted.
         self.run_string(
             "export CATEGORY PN PV PR PVR P PF FILESDIR WORKDIR S T D TMPDIR EAPI EBUILD \
              HOME ROOT DISTDIR PORTAGE_BIN_PATH PATH EBUILD_PHASE EBUILD_PHASE_FUNC \
@@ -1712,7 +1728,7 @@ impl EbuildShell {
              REPLACING_VERSIONS REPLACED_BY_VERSION \
              MAKEOPTS CFLAGS CXXFLAGS CPPFLAGS LDFLAGS CC CXX AR RANLIB NM STRIP \
              INSDESTTREE EXEDESTTREE DOCDESTTREE DESTTREE _into_dir _insopts _exeopts \
-             MOPREFIX ABI CONF_LIBDIR",
+             MOPREFIX ABI CONF_LIBDIR CHOST CBUILD CTARGET ARCH",
         )
         .await
         .ok();
@@ -1904,6 +1920,48 @@ impl EbuildShell {
             .source_script(path, std::iter::empty::<&str>(), &params)
             .await
             .map_err(|e| Error::Shell(format!("sourcing env file {}: {e}", path.display())))?;
+        Ok(())
+    }
+
+    /// Export every variable currently in the shell's environment, so a real
+    /// subprocess an ebuild/eclass spawns directly (`bash
+    /// "${FILESDIR}/gentoo.config"`, any raw `$(external-tool)`) inherits it —
+    /// not just em's own Rust builtins (`econf`/`emake`), which read brush's
+    /// variable table in-process and never needed export at all.
+    ///
+    /// Real portage doesn't hand-list what to export: `config.environ()`
+    /// exports its *entire* settings dict minus a small internal denylist,
+    /// because it builds the whole OS-level process environment before the
+    /// ebuild's bash even starts. `em` instead `source`s make.conf/profile
+    /// into an already-running brush shell as plain (non-exported)
+    /// assignments — matching real bash `source` semantics, but meaning
+    /// nothing reaches a real child process without an explicit `export`.
+    /// Call this right after sourcing make.conf/profile/package.env (see
+    /// `apply_profile_env` in `portage-cli/src/ebuild.rs`) so every
+    /// profile-derived variable (`CHOST`, `ELIBC`, `MULTILIB_ABIS`,
+    /// `DEFAULT_ABI`, …) is covered generically, instead of growing the
+    /// hand-written identity-var list in `init_build_env` one silent
+    /// breakage at a time (as happened with `CHOST` — invisible to
+    /// `openssl`'s `gentoo.config` subshell, which fell back to `uname`
+    /// autodetection and picked the *build host's* arch under `--cross`).
+    ///
+    /// Flips the export bit directly via brush's `ResolvedVarRefMut::
+    /// base_var_mut` rather than round-tripping through a generated `export
+    /// a b c …` string re-parsed by the interpreter — this is pure metadata
+    /// mutation, not shell execution.
+    pub fn export_sourced_env(&mut self) -> Result<()> {
+        let names: Vec<String> = self
+            .shell
+            .env()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| !is_bash_internal_var(name))
+            .collect();
+        for name in &names {
+            if let Some(mut var) = self.shell.env_mut().get_mut(name) {
+                var.base_var_mut().export();
+            }
+        }
         Ok(())
     }
 
@@ -2200,6 +2258,26 @@ fn program_on_path(name: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
         .unwrap_or(false)
+}
+
+/// Bash/brush-internal names [`export_sourced_env`](EbuildShell::export_sourced_env)
+/// must skip: dynamic/magic variables bash manages itself (exporting them is
+/// either a no-op, nonsensical, or — for the readonly ones — a hard error that
+/// would abort the whole `export` statement).
+fn is_bash_internal_var(name: &str) -> bool {
+    matches!(
+        name,
+        "_" | "PIPESTATUS"
+            | "FUNCNAME"
+            | "LINENO"
+            | "RANDOM"
+            | "SECONDS"
+            | "PPID"
+            | "SHELLOPTS"
+            | "BASHOPTS"
+            | "GROUPS"
+            | "HISTCMD"
+    ) || name.starts_with("BASH_")
 }
 
 ///
@@ -2612,6 +2690,42 @@ cache-formats = md5-dict
         // Banned in EAPI 6+, and dies on a missing Makefile in EAPI 5.
         assert_eq!(shell.get_var("BAN").as_deref(), Some("died"));
         assert_eq!(shell.get_var("NOMK").as_deref(), Some("died"));
+    }
+
+    /// A profile/make.conf-sourced variable must reach a *real* subprocess an
+    /// ebuild/eclass spawns directly — not just brush's in-process variable
+    /// table (which is all `get_var`/em's Rust builtins need). `MULTILIB_ABIS`
+    /// stands in for any such variable em doesn't specifically know about
+    /// (this is the exact shape of the CHOST bug: invisible to a real child
+    /// process, even though brush itself sees it fine).
+    #[tokio::test]
+    async fn export_sourced_env_reaches_a_real_subprocess() {
+        let dir = tempdir().unwrap();
+        let repo_path = dir.path().join("repo");
+        std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+        std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+        std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+        std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+        let repo = Repository::open(&repo_path).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+
+        // Plain (non-exported) assignment — exactly what `source`ing a
+        // make.conf-style file produces.
+        shell.run_string("MULTILIB_ABIS=lp64d").await.unwrap();
+        shell.export_sourced_env().unwrap();
+
+        // A real external command, not a brush builtin: only sees inherited
+        // (exported) process environment variables.
+        shell
+            .run_string("OUT=$(/bin/sh -c 'printf %s \"$MULTILIB_ABIS\"')")
+            .await
+            .unwrap();
+        assert_eq!(
+            shell.get_var("OUT").as_deref(),
+            Some("lp64d"),
+            "a real subprocess must inherit a profile/make.conf-sourced var after export_sourced_env"
+        );
     }
 
     #[tokio::test]

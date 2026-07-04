@@ -179,6 +179,13 @@ async fn apply_profile_env(
         .await
         .context("sourcing profile environment")?;
 
+    // Every profile/make.conf-derived variable (CHOST, ELIBC, MULTILIB_ABIS,
+    // DEFAULT_ABI, …) must reach real subprocesses an ebuild/eclass spawns
+    // directly, not just em's own Rust builtins — see export_sourced_env.
+    shell
+        .export_sourced_env()
+        .context("exporting profile environment")?;
+
     // Portage `bashrc` hooks (not PMS): each profile's `profile.bashrc` in stack
     // order, then the user's `${config_root}/etc/portage/bashrc`. run_phase
     // sources these per phase with the full env — the user hook is where overlay
@@ -617,6 +624,11 @@ async fn run_inner(
                 .await
                 .with_context(|| format!("sourcing package.env file {}", env_file.display()))?;
         }
+        // Package-env overrides (FEATURES/*FLAGS/…) need the same subprocess
+        // visibility as the profile/make.conf sweep above.
+        shell
+            .export_sourced_env()
+            .context("exporting package.env environment")?;
     }
 
     // Root model (docs/root-model.md): PORTAGE_CONFIGROOT = config_root, and
