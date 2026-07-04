@@ -20,13 +20,20 @@
 //! table drops the crate.
 //!
 //! Backend selection (`--privilege`, or `EM_PRIVILEGE`; default `auto`):
-//! - `auto` — the best compiled-in fake root: fakeroost, else pseudoroot (the
-//!   macOS default), else `none`.
-//! - `fakeroost` — pure-Rust ptrace+seccomp fake root (no privilege). The
-//!   default: ownership is faked in-session, on-disk stays the build user.
-//! - `pseudoroot` — LD_PRELOAD fake root: the same faked-ownership model without
-//!   the per-syscall ptrace tax, but interposition only covers dynamically
-//!   linked libc callers (static binaries / raw syscalls escape it).
+//! - `auto` — the best compiled-in fake root: pseudoroot, else fakeroost, else
+//!   `none`.
+//! - `pseudoroot` — LD_PRELOAD fake root: faked ownership without the
+//!   per-syscall ptrace tax, but interposition only covers dynamically linked
+//!   libc callers (static binaries / raw syscalls escape it). The `auto`
+//!   default: a real stage3 `--buildpkg` run under fakeroost hit a rare,
+//!   non-reproducible-in-isolation ptrace race (`fakeroost: syscall failed:
+//!   ENOENT`) that silently killed ~1/3 of packages' install workers *after*
+//!   qmerge had already succeeded (see `todo/stage-build-shakeout.md`);
+//!   pseudoroot doesn't share that failure mode.
+//! - `fakeroost` — pure-Rust ptrace+seccomp fake root (no privilege):
+//!   ownership is faked in-session, on-disk stays the build user. Covers every
+//!   caller (no libc-interposition gap), at a higher per-syscall cost and the
+//!   rare crash above.
 //! - `hakoniwa` — user-namespace sandbox with build-user→0 map ("real-in-a-box"):
 //!   real `chown`/`setuid` syscalls inside the box; on-disk owners are the
 //!   mapped host ids (same family as `sudo`, without host root).
@@ -53,12 +60,12 @@ const ACTIVE_ENV: &str = "EM_PRIVILEGE_ACTIVE";
 pub enum Backend {
     /// Already root, or already inside a session: real chowns, no wrapping.
     RealRoot,
-    /// Pure-Rust ptrace+seccomp fake root (`fakeroost`) — the default unprivileged.
+    /// Pure-Rust ptrace+seccomp fake root (`fakeroost`).
     #[cfg(all(feature = "fakeroost", target_os = "linux"))]
     Fakeroost,
     /// LD_PRELOAD fake root (`pseudoroot`) — same faked-ownership model as
     /// fakeroost without the ptrace tax (libc-interposed, so static binaries
-    /// and raw syscalls escape it).
+    /// and raw syscalls escape it) — the default unprivileged backend.
     #[cfg(all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")))]
     Pseudoroot,
     /// User-namespace sandbox (`hakoniwa`) with build-user→0 map.
@@ -89,16 +96,18 @@ impl Backend {
         }
     }
 
-    /// `auto`: the best compiled-in fake root — fakeroost (ptrace covers every
-    /// caller) over pseudoroot (the only fake root on macOS); neither compiled
-    /// in ⇒ no wrapping, the chown workarounds degrade gracefully.
+    /// `auto`: the best compiled-in fake root — pseudoroot (LD_PRELOAD, no
+    /// ptrace tax, and doesn't share fakeroost's rare buildpkg-phase crash;
+    /// see the module doc comment) over fakeroost (ptrace, covers every
+    /// caller but not macOS); neither compiled in ⇒ no wrapping, the chown
+    /// workarounds degrade gracefully.
     fn auto_backend() -> Self {
         std::cfg_select! {
-            all(feature = "fakeroost", target_os = "linux") => {
-                Backend::Fakeroost
-            }
             all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")) => {
                 Backend::Pseudoroot
+            }
+            all(feature = "fakeroost", target_os = "linux") => {
+                Backend::Fakeroost
             }
             _ => {
                 Backend::RealRoot
@@ -477,7 +486,7 @@ mod hakoniwa {
         if !userns_available() {
             eprintln!(
                 "em: hakoniwa requires user namespaces and newuidmap/newgidmap on PATH; \
-                 try --privilege fakeroost or sudo"
+                 try --privilege pseudoroot, fakeroost, or sudo"
             );
             return 1;
         }
