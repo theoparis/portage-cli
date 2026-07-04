@@ -199,6 +199,10 @@ fn make_conf_template(is_local: bool, self_contained: bool, eroot: &Utf8Path) ->
         format!("#   em --prefix {eroot} <pkg>   # builds a ROOT-offset tree here\n")
     };
     if self_contained {
+        let accept_keywords = match host_accept_keywords() {
+            Some(k) => format!("ACCEPT_KEYWORDS=\"{k}\"\n"),
+            None => String::new(),
+        };
         return format!(
             "# Portage config for this self-contained em --root (created by `em setup`).\n\
              #\n\
@@ -208,7 +212,11 @@ fn make_conf_template(is_local: bool, self_contained: bool, eroot: &Utf8Path) ->
              # Unlike --local/--prefix, this root shares NO config with the host — this\n\
              # is the only make.conf it ever reads. MAKEOPTS mirrors the host's build\n\
              # parallelism (or falls back to nproc) since nothing else would set it.\n\
-             MAKEOPTS=\"{}\"\n",
+             # ACCEPT_KEYWORDS mirrors the host's too — without it, portage defaults to\n\
+             # stable-only, silently starving any package whose newest versions dropped\n\
+             # their stable keyword for this arch.\n\
+             MAKEOPTS=\"{}\"\n\
+             {accept_keywords}",
             host_makeopts()
         );
     }
@@ -236,6 +244,21 @@ fn host_makeopts() -> String {
             let n = std::thread::available_parallelism().map_or(1, |n| n.get());
             format!("-j{n}")
         })
+}
+
+/// The host's own `ACCEPT_KEYWORDS`, when set.
+///
+/// Without this, the self-contained root's make.conf leaves `ACCEPT_KEYWORDS`
+/// unset, which portage treats as stable-only. That silently starves any
+/// package whose most recent versions dropped their stable keyword for the
+/// host's arch (e.g. a `cross-<CTARGET>/gcc` host-side cross-compiler build
+/// stuck on a years-old release because every newer one is `~arch`-only) —
+/// found 2026-07-04 chasing a stalled crossdev toolchain bootstrap that
+/// silently never saw newer compiler versions. See [[stage-build-shakeout]].
+fn host_accept_keywords() -> Option<String> {
+    portage_repo::MakeConf::load_default()
+        .ok()
+        .and_then(|m| m.get("ACCEPT_KEYWORDS").map(str::to_owned))
 }
 
 /// Expose the host's Python at the prefix paths the eclasses expect.
@@ -356,6 +379,25 @@ mod tests {
                 .unwrap();
         assert!(make_conf.contains("MAKEOPTS="));
         assert!(!make_conf.contains("MAKEOPTS=\"\""), "must be non-empty");
+    }
+
+    #[test]
+    fn self_contained_root_gets_host_accept_keywords() {
+        // Without this, ACCEPT_KEYWORDS is unset in the self-contained root's
+        // make.conf, which portage treats as stable-only — silently starving
+        // any package whose newest versions dropped their stable keyword for
+        // the host arch (e.g. a cross-toolchain build stuck on a years-old
+        // compiler release). See todo/stage-build-shakeout.md.
+        let Some(host_kw) = super::host_accept_keywords() else {
+            return; // nothing to assert if the test host itself has none set
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cli = Cli::parse_from(["em", "--root", dir.path().to_str().unwrap()]);
+        super::bootstrap(&cli.roots()).unwrap();
+        let make_conf =
+            std::fs::read_to_string(cli.roots().merge_root().join("etc/portage/make.conf"))
+                .unwrap();
+        assert!(make_conf.contains(&format!("ACCEPT_KEYWORDS=\"{host_kw}\"")));
     }
 
     #[test]
