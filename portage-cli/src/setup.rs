@@ -236,7 +236,10 @@ fn make_conf_template(is_local: bool, self_contained: bool, eroot: &Utf8Path) ->
 
 /// The host's own `MAKEOPTS` (real build parallelism the user already tuned),
 /// falling back to `-j<nproc>` when the host has none set or is unreadable.
-fn host_makeopts() -> String {
+/// `pub(crate)`: also used by `crossdev::make_conf_body` for the cross
+/// sysroot's make.conf, which needs the exact same default (see its call site
+/// for why the sysroot's own make.conf needs this at all).
+pub(crate) fn host_makeopts() -> String {
     portage_repo::MakeConf::load_default()
         .ok()
         .and_then(|m| m.get("MAKEOPTS").map(str::to_owned))
