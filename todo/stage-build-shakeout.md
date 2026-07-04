@@ -1208,3 +1208,48 @@ compile cycle) is still open — real value now that the actual gate
 reasons (a stale cross-toolchain simply never rebuilt after `sys-devel/
 gcc` bumps a major version).
 [[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]
+
+## 21. Task #14 closed: auto-detect + weave in a cross-compiler refresh (fixed, verified live)
+
+Built on finding #20: rather than just warning, `stage1()` now compares the
+active `cross-<CTARGET>/gcc` slot against what `sys-devel/gcc` would
+actually resolve to, and — if behind — weaves in a `gcc_refresh_plan`
+(`gcc-stage1` → `gcc-stage2`, pinned to the exact resolved version via an
+`=` atom) before the stage1 packages run. Getting this to actually work
+end-to-end (not just print a correct `-p` plan) needed two more bugs found
+only by real, non-pretend verification:
+
+- **Wrong install root for the refresh.** The woven-in `cross-*/gcc` steps
+  were installing into `--cross`'s sysroot substitution instead of the
+  plain outer EROOT (where that category always lives — confirmed by
+  comparing `em crossdev --setup`, which never sets `--cross`, against
+  `stage1 --cross`, which does, for the identical atom). Fixed with
+  `EmergeOpts::bypass_cross_root`, threaded through `run_staged` and
+  `emerge_atoms_inner` so `stage1()` can run the refresh against
+  `Cli::base_roots()` while its own packages keep using `Cli::roots()`.
+- **The activation never actually happened.** Even with the root fixed,
+  `gcc-config`'s active profile silently stayed on the old slot. Two
+  layered causes: (a) `select::activate_compiler`/`activate_binutils`
+  read `globals.roots()` internally — the whole `select::env_d`
+  profile-selection chain was `&Cli`-coupled — so it looked in the
+  `--cross` sysroot instead of the outer root the toolchain actually
+  lives in; refactored the entire chain to take an explicit `Roots`
+  instead, so crossdev can hand it `Cli::base_roots()` regardless of
+  whether the *caller* has `--cross` set. (b) Once roots were right,
+  `activate_toolchain`'s `atom.ends_with("/gcc")` match missed the
+  refresh's version-pinned atoms (`=cross-.../gcc-16.1.1_...`) entirely —
+  replaced with a proper `atom_is_package` package-name check.
+- **Bonus, unrelated bug found along the way**: the cross sysroot's own
+  auto-generated `make.conf` never set `MAKEOPTS` at all (unlike the
+  self-contained `--root`'s generator) — since it's the *only* config
+  `sys-devel/gcc` and every ordinary stage1 package reads, every such
+  build ran fully serial (one `cc1plus` at a time on a 128-core host).
+  Fixed by sharing `setup::host_makeopts()` between both generators.
+
+Verified live end-to-end on the riscv64 cross sysroot: the previously
+broken `sys-devel/gcc-16.1.1` `libatomic` build (finding #20's proximate
+failure) now succeeds using the auto-refreshed, correctly-activated
+cross-compiler. 35/36 stage1 packages merged; the one remaining failure
+(`sys-apps/shadow-4.19.4`, `crypt() not found`) is unrelated, not yet
+investigated.
+[[em-stages-and-binhosts]] [[crossdev-target]]
