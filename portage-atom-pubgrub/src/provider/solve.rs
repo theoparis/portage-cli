@@ -279,11 +279,16 @@ impl DependencyProvider for PortageDependencyProvider {
             inst == version && !matches!(policy, InstalledPolicy::Rebuild)
         }) {
             if self.cross_active && package.merge_root() == MergeRoot::Target {
+                // Already installed and kept (not rebuilt): mirror the native
+                // equivalent below (`runtime`), which likewise omits BDEPEND
+                // for this case — only RDEPEND/PDEPEND/IDEPEND matter once a
+                // package is already built and staying that way.
                 return Ok(Dependencies::Available(cross_target_runtime_deps(
                     vd,
                     &self.host_installed,
                     &self.sysroot_installed,
                     target_drops_depend(self.root_deps_rdeps, package),
+                    false,
                 )));
             }
             let runtime: DependencyConstraints<PortagePackage, PortageVersionSet> = vd
@@ -307,15 +312,18 @@ impl DependencyProvider for PortageDependencyProvider {
 
         // A package being *built* (not at its installed version):
         if self.cross_active && package.merge_root() == MergeRoot::Target {
-            // Cross `-p` never expands BDEPEND onto ROOT (emerge lists the same
-            // closure with or without `--with-bdeps=y`). Host-satisfied build
-            // tools stay on BROOT; unsatisfied BDEPEND schedule via Host-root
-            // nodes when `with_bdeps` is on (see `host_native_deps` below).
+            // A built package's BDEPEND is strictly required to build it, so
+            // (mirroring `broot_filtered`'s native equivalent) `--with-bdeps`
+            // does not gate it here — only the *installed-and-kept* branch
+            // above does. Cross `-p` never expands BDEPEND *onto* ROOT (the
+            // edge always stamps a Host-root node, never merges into the
+            // target sysroot); unsatisfied BDEPEND schedules there instead.
             return Ok(Dependencies::Available(cross_target_runtime_deps(
                 vd,
                 &self.host_installed,
                 &self.sysroot_installed,
                 target_drops_depend(self.root_deps_rdeps, package),
+                true,
             )));
         }
         if self.cross_active && package.merge_root() == MergeRoot::Host && self.with_bdeps {
@@ -369,6 +377,7 @@ fn cross_target_runtime_deps(
     host_installed: &HashMap<PortagePackage, HostEntry>,
     _sysroot_installed: &HashMap<PortagePackage, Version>,
     root_deps_rdeps: bool,
+    include_bdepend: bool,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
     // `--root-deps=rdeps` (cross-arch): discard `DEPEND` (class 0) from the
     // sysroot graph entirely — the cross toolchain + the `RDEPEND` libraries
@@ -384,6 +393,15 @@ fn cross_target_runtime_deps(
         .chain(vd.pdepend())
         .map(|(p, vs, _)| (stamp_root(p, MergeRoot::Target), vs.clone()))
         .collect();
+    // BDEPEND resolves on BROOT (the host), never the target sysroot — found
+    // live: this call omitted it entirely, so a target package's unsatisfied
+    // BDEPEND (e.g. sys-apps/systemd-utils needing dev-python/jinja2 built for
+    // a python target the host's installed jinja2 lacked) never scheduled a
+    // rebuild; the package's own configure/build then failed instead. See
+    // todo/stage-build-shakeout.md.
+    if include_bdepend {
+        append_unsatisfied_broot(&mut out, vd.bdepend(), host_installed, vd, MergeRoot::Host);
+    }
     append_unsatisfied_broot(&mut out, vd.idepend(), host_installed, vd, MergeRoot::Host);
     out.into_iter().collect()
 }

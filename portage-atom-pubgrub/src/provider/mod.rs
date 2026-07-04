@@ -3484,4 +3484,63 @@ mod tests {
                 .any(|(p, _)| p.cpn().package.as_str() == "a")
         );
     }
+
+    /// Regression test for the `sys-apps/systemd-utils` stage3 failure:
+    /// `cross_target_runtime_deps` (the dependency function for a `--cross`
+    /// Target-root package actually being built) called
+    /// `append_unsatisfied_broot` for IDEPEND but never for BDEPEND at all —
+    /// an unsatisfied BDEPEND (the host lacks `b` entirely here, standing in
+    /// for `dev-python/jinja2` built for the wrong python target) never
+    /// scheduled a Host-root rebuild, so `em` silently omitted it from the
+    /// plan and the target package's own build later failed for a "missing"
+    /// dependency `em` itself dropped. See todo/stage-build-shakeout.md.
+    #[test]
+    fn cross_target_build_pulls_unsatisfied_bdepend() {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                bdepend: DepEntry::parse("dev-build/b").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            let mut p = PortageDependencyProvider::new(repo);
+            p.set_cross_active(true);
+            p.set_with_bdeps(true);
+            p
+        };
+        // No `add_host_installed` call: the host genuinely lacks `b`.
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        let b_entry = solution
+            .iter()
+            .find(|(p, _)| p.cpn().package.as_str() == "b");
+        assert!(
+            b_entry.is_some(),
+            "b is genuinely missing on BROOT; the cross target build must \
+             schedule it rather than silently drop the BDEPEND edge"
+        );
+        assert_eq!(
+            b_entry.unwrap().0.merge_root(),
+            MergeRoot::Host,
+            "an unsatisfied BDEPEND resolves onto BROOT (the host), never the \
+             target sysroot"
+        );
+    }
 }
