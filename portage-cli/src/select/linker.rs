@@ -44,7 +44,7 @@ pub fn run(action: &LinkerAction, globals: &Cli) -> Result<()> {
             .unwrap_or_else(|| env_d::get_default_target(globals)),
     };
 
-    let base_dir = env_d::env_d_dir::<LinkerProfileType>(globals);
+    let base_dir = env_d::env_d_dir::<LinkerProfileType>(&globals.roots());
 
     match action {
         LinkerAction::List { .. } => env_d::run_list::<LinkerProfileType>(globals),

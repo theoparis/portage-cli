@@ -234,8 +234,12 @@ impl Cli {
     }
 
     /// The root model from `--local`/`--prefix`/`--root`/`--config-root`, before
-    /// any `--cross` sysroot override (see [`roots`](Self::roots)).
-    fn base_roots(&self) -> Roots {
+    /// any `--cross` sysroot override (see [`roots`](Self::roots)). Exposed at
+    /// `pub(crate)` so the staged-build driver can install `cross-*` toolchain
+    /// packages (which always live in the outer EROOT, never the sysroot
+    /// subdirectory — see `crossdev/mod.rs`'s module doc) even from a
+    /// `--cross`-active invocation.
+    pub(crate) fn base_roots(&self) -> Roots {
         let path = |s: &Option<String>| s.as_deref().map(camino::Utf8PathBuf::from);
         // `--local`: in-place Gentoo-Prefix at ~/.gentoo. Profile/make.conf come
         // from the host; ~/.gentoo/etc/portage overlays package.use/bashrc.

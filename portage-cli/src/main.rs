@@ -178,6 +178,7 @@ async fn run_emerge(cli: &cli::Cli) -> Result<()> {
             nodeps: cli.nodeps,
             depgraph_flags: None,
             merge_flags: None,
+            bypass_cross_root: false,
         },
     )
     .await
@@ -204,6 +205,13 @@ pub(crate) struct EmergeOpts<'a> {
     /// the user actually set (`em -j 80 stages --stage1` vs `em stages
     /// --stage1 -j 80`), not just the top-level `Cli`'s copy.
     pub merge_flags: Option<crate::cli::MergeFlags>,
+    /// Install into the plain `--local`/`--prefix`/`--root` EROOT, ignoring any
+    /// `--cross` sysroot substitution. Needed for `cross-<CTARGET>/gcc` steps
+    /// woven into a `--cross`-active `stages --stage1` run: that package's
+    /// eclass always installs under the outer EROOT (`crossdev/mod.rs`'s module
+    /// doc), never the target sysroot subdirectory `roots()` would otherwise
+    /// substitute in.
+    pub bypass_cross_root: bool,
 }
 
 /// Resolve and (unless `--pretend`) merge `raw_atoms` with the global config in
@@ -232,6 +240,7 @@ pub(crate) async fn emerge_atoms(
         opts.nodeps,
         opts.depgraph_flags,
         opts.merge_flags,
+        opts.bypass_cross_root,
     )
     .await;
     if !opts.use_override.is_empty() {
@@ -252,6 +261,7 @@ async fn emerge_atoms_inner(
     nodeps: bool,
     depgraph_flags_override: Option<crate::cli::DepgraphFlags>,
     merge_flags_override: Option<crate::cli::MergeFlags>,
+    bypass_cross_root: bool,
 ) -> Result<()> {
     let merge_flags = merge_flags_override.as_ref().unwrap_or(&cli.merge_flags);
     let resolved = cli.repo_path();
@@ -268,12 +278,21 @@ async fn emerge_atoms_inner(
     };
     // Root model (docs/root-model.md): config from roots.config (host for a
     // --prefix overlay), installed view = VDB(base) ∪ VDB(target), and the
-    // plan installs into target.
-    let roots = cli.roots();
+    // plan installs into target. `bypass_cross_root` (woven-in `cross-*`
+    // toolchain steps only) uses the plain outer EROOT instead — that
+    // category always installs there, never into `--cross`'s sysroot
+    // substitution (see `crossdev/mod.rs`'s module doc).
+    let roots = if bypass_cross_root {
+        cli.base_roots()
+    } else {
+        cli.roots()
+    };
     // `--cross <tuple>` targets `<EROOT>/usr/<tuple>`; fail early with a setup
     // hint if that sysroot has not been laid down by `em crossdev --init-target`
-    // (otherwise the profile/make.conf read fails with an opaque ENOENT).
-    if let Some(tuple) = cli.cross.as_deref() {
+    // (otherwise the profile/make.conf read fails with an opaque ENOENT). Skipped
+    // for `bypass_cross_root`: those steps target the outer EROOT on purpose, not
+    // the sysroot this check is guarding.
+    if let Some(tuple) = cli.cross.as_deref().filter(|_| !bypass_cross_root) {
         let cfg = roots.config().unwrap_or_else(|| camino::Utf8Path::new("/"));
         if !cfg.join("etc/portage/make.conf").exists() {
             bail!(

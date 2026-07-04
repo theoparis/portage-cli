@@ -181,6 +181,7 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
         globals,
         merge_depgraph_flags(globals, &args.depgraph_flags),
         merge_flags,
+        false,
         post_step,
     )
     .await?;
@@ -215,11 +216,17 @@ fn post_step_cross(target: &CrossTarget, globals: &Cli, step: &stages::StageStep
 /// after each *built* step (skipped under `-p`) for flavour-specific activation
 /// — cross activates `<CTARGET>-*` wrappers + ABI osdirs; native is a no-op.
 /// This is the shared driver both `--setup` (cross) and `stage1` (native) run.
+///
+/// `bypass_cross_root` forces every step's merge into the plain outer EROOT
+/// even when `globals.cross` is set — for `cross-*` toolchain plans woven
+/// into a `--cross`-active `stage1` run (see `maybe_weave_in_gcc_update`),
+/// which must never install under `--cross`'s sysroot substitution.
 async fn run_staged(
     plan: &stages::StagePlan,
     globals: &Cli,
     depgraph_flags: crate::cli::DepgraphFlags,
     merge_flags: MergeFlags,
+    bypass_cross_root: bool,
     post_step: impl Fn(&stages::StageStep) -> Result<()>,
 ) -> Result<()> {
     let mut out = anstream::stdout();
@@ -246,6 +253,7 @@ async fn run_staged(
                 nodeps: step.nodeps,
                 depgraph_flags: Some(depgraph_flags.clone()),
                 merge_flags: Some(merge_flags.clone()),
+                bypass_cross_root,
             },
         )
         .await?;
@@ -257,18 +265,47 @@ async fn run_staged(
     Ok(())
 }
 
+/// Whether `atom`'s package name is `pkg` — handles both a bare atom
+/// (`cross-<T>/gcc`) and a version-pinned one (`=cross-<T>/gcc-16.1.1...`,
+/// as [`stages::gcc_refresh_plan`] uses to force an exact upgrade rather than
+/// a same-version reinstall). A bare `ends_with("/gcc")` check misses the
+/// pinned form entirely — caught live: it silently skipped activating the
+/// freshly-built compiler, leaving the *old* slot active for the very build
+/// this refresh existed to fix.
+fn atom_is_package(atom: &str, pkg: &str) -> bool {
+    match atom.rsplit_once('/') {
+        Some((_, rest)) => {
+            rest == pkg
+                || rest
+                    .strip_prefix(pkg)
+                    .and_then(|v| v.strip_prefix('-'))
+                    .is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+        }
+        None => false,
+    }
+}
+
 /// Run the prefix-side `binutils-config`/`gcc-config` after the step that built
 /// the tool, creating the `<EROOT>/usr/bin/<CTARGET>-*` wrappers. Keyed off the
 /// step's package so it fires once per toolchain component.
+///
+/// Always activates against `globals.base_roots()`, never `globals.roots()`:
+/// `cross-<CTARGET>/*` toolchain packages always install into the plain outer
+/// EROOT (see this module's doc comment), regardless of whether the *caller*
+/// (`setup()` vs `stage1()`'s woven-in refresh) has `--cross` set on
+/// `globals` for its own, unrelated purposes. For `setup()` the two are the
+/// same root anyway (it never sets `--cross`), so this is a no-op change
+/// there.
 fn activate_toolchain(target: &CrossTarget, globals: &Cli, step: &stages::StageStep) -> Result<()> {
     let Some(atom) = step.atoms.first() else {
         return Ok(());
     };
     let tuple = &target.tuple;
-    let activated = if atom.ends_with("/binutils") {
-        crate::select::activate_binutils(globals, tuple)?
-    } else if atom.ends_with("/gcc") {
-        crate::select::activate_compiler(globals, tuple)?
+    let roots = globals.base_roots();
+    let activated = if atom_is_package(atom, "binutils") {
+        crate::select::activate_binutils(&roots, tuple)?
+    } else if atom_is_package(atom, "gcc") {
+        crate::select::activate_compiler(&roots, tuple)?
     } else {
         return Ok(());
     };
@@ -339,6 +376,7 @@ pub(crate) async fn toolchain(args: &crate::cli::ToolchainArgs, globals: &Cli) -
         globals,
         merge_depgraph_flags(globals, &args.depgraph_flags),
         merge_merge_flags(globals, &args.merge_flags),
+        false,
         |_| Ok(()),
     )
     .await?;
@@ -368,8 +406,36 @@ pub(crate) async fn stage1(args: &crate::cli::StagesArgs, globals: &Cli) -> Resu
     }
     let stack = profile_stack(globals)?;
     let plan = stages::stage1_plan(&stack)?;
+    let refresh = maybe_weave_in_gcc_update(&stack, globals).await;
     let mut out = anstream::stdout();
     let verb = if globals.pretend { "Plan" } else { "Bootstrap" };
+
+    // The `cross-<CTARGET>/gcc` refresh (if needed) is a separate run: it
+    // always installs into the outer EROOT (`bypass_cross_root: true`),
+    // never `--cross`'s sysroot substitution the stage1 packages below use.
+    if let Some((target, refresh_plan)) = &refresh {
+        writeln!(
+            out,
+            "\n{C_LABEL}{verb} cross-compiler refresh{C_LABEL:#} ({}) — {} steps:",
+            target.tuple,
+            refresh_plan.steps.len()
+        )
+        .ok();
+        let post_step = {
+            let target = target.clone();
+            move |step: &stages::StageStep| post_step_cross(&target, globals, step)
+        };
+        run_staged(
+            refresh_plan,
+            globals,
+            merge_depgraph_flags(globals, &args.depgraph_flags),
+            merge_merge_flags(globals, &args.merge_flags),
+            true,
+            post_step,
+        )
+        .await?;
+    }
+
     writeln!(
         out,
         "\n{C_LABEL}{verb} native stage1{C_LABEL:#} into {merge_root} — {} steps:",
@@ -381,6 +447,7 @@ pub(crate) async fn stage1(args: &crate::cli::StagesArgs, globals: &Cli) -> Resu
         globals,
         merge_depgraph_flags(globals, &args.depgraph_flags),
         merge_merge_flags(globals, &args.merge_flags),
+        false,
         |_| Ok(()),
     )
     .await?;
@@ -388,6 +455,101 @@ pub(crate) async fn stage1(args: &crate::cli::StagesArgs, globals: &Cli) -> Resu
         writeln!(out, "\n>>> stage1 ready in {merge_root}").ok();
     }
     Ok(())
+}
+
+/// If this is a cross build and the stage1 set includes `sys-devel/gcc`,
+/// check whether `gcc-config`'s currently *active* `cross-<CTARGET>/gcc` is
+/// new enough to build it, and if not, return a
+/// [`stages::gcc_refresh_plan`] to run (into the outer EROOT, via
+/// `bypass_cross_root` — see [`run_staged`]) before the stage1 plan itself.
+///
+/// `sys-devel/gcc` (`CHOST == CTARGET`) builds single-pass, not as a
+/// self-hosting bootstrap (`toolchain.eclass`'s `is_crosscompile()` is false
+/// for it) — the active cross-compiler is its *only* build tool. GCC's own
+/// target libraries (e.g. `libatomic`) can pass driver flags only a
+/// matching-or-newer major version understands, so an older active
+/// cross-compiler silently breaks deep inside a target library's own
+/// `configure` — see `todo/stage-build-shakeout.md`.
+///
+/// Best-effort: any failure determining compatibility (no active compiler
+/// yet is the *expected* "needs building" case and always weaves in; an
+/// unparseable slot, an LLVM cross target with no `cross-<CTARGET>/gcc`
+/// package at all, or a resolve failure are all treated as "can't tell,
+/// leave the plan alone" rather than blocking the stage1 run).
+async fn maybe_weave_in_gcc_update(
+    stack: &ProfileStack,
+    globals: &Cli,
+) -> Option<(CrossTarget, stages::StagePlan)> {
+    let tuple = globals.cross.clone()?;
+    let stage1_atoms = stack.stage1_packages().ok()?;
+    if !stage1_atoms.iter().any(|d| d.cpn.package.as_str() == "gcc") {
+        return None;
+    }
+    let needed_version = resolve_gcc_version(globals).await?;
+    let needed_slot = needed_version.split(['.', '_']).next()?;
+    let target = CrossTarget::parse(&tuple, false).ok()?;
+    let active_slot = crate::select::current_compiler_slot(&globals.base_roots(), &target.tuple);
+    if gcc_needs_refresh(active_slot.as_deref(), needed_slot) {
+        let refresh_plan = stages::gcc_refresh_plan(&target, &needed_version);
+        Some((target, refresh_plan))
+    } else {
+        None
+    }
+}
+
+/// Whether the active cross-compiler slot is too old to build a
+/// `needed_slot` `sys-devel/gcc`: nothing activated yet (`None`) or a
+/// strictly older slot. A newer-or-equal active slot is assumed fine (GCC is
+/// generally backward compatible as a *build tool*, and this is a numeric
+/// gate, not exact-match, to avoid gratuitous rebuilds). An unparseable
+/// slot (either side) is treated as "can't tell" rather than "needs
+/// refresh" — GCC's own SLOT is always a plain integer, so this should never
+/// actually happen; if it does, silently doing nothing is safer than
+/// forcing an unwanted rebuild.
+fn gcc_needs_refresh(active_slot: Option<&str>, needed_slot: &str) -> bool {
+    let Ok(needed_num) = needed_slot.parse::<u32>() else {
+        return false;
+    };
+    match active_slot {
+        None => true,
+        Some(active) => active.parse::<u32>().is_ok_and(|n| n < needed_num),
+    }
+}
+
+/// The exact version `sys-devel/gcc` would resolve to for this invocation's
+/// config (`ACCEPT_KEYWORDS`/masks), e.g. `"16.1.1_p20260606"`. A lightweight
+/// `--nodeps` resolve of the single atom, reusing the same `depgraph()`
+/// machinery every merge already goes through. GCC's own `SLOT` is always
+/// its major version (`gcc.eclass`: `SLOT="$(ver_cut 1)"`), so callers needing
+/// just the slot take the version's first component.
+async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
+    let repo_path_str = globals.repo_path();
+    let roots = globals.roots();
+    let outcome = crate::query::depgraph::depgraph(crate::query::depgraph::DepgraphOpts {
+        repo_path: Utf8Path::new(&repo_path_str),
+        atoms: &["sys-devel/gcc".to_string()],
+        arch: &globals.arch,
+        format: crate::cli::DepgraphFormat::Pretty,
+        verbose: 0,
+        empty: false,
+        autounmask_write: false,
+        autosolve_use: false,
+        multi_repo: globals.repo.is_none(),
+        roots: &roots,
+        onlydeps: false,
+        with_bdeps: false,
+        root_deps_rdeps: false,
+        deep: false,
+        nodeps: true,
+    })
+    .await
+    .ok()?;
+    let merge = outcome
+        .plan
+        .iter()
+        .find(|m| m.cpv.starts_with("sys-devel/gcc-"))?;
+    let version = merge.cpv.rsplit_once("/gcc-")?.1;
+    Some(version.to_string())
 }
 
 /// Build the [`ProfileStack`] for the invocation's config-root (host `/`
@@ -805,6 +967,43 @@ fn append_line(path: &Utf8Path, line: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gcc_needs_refresh_cases() {
+        // Nothing activated yet: always needs building.
+        assert!(gcc_needs_refresh(None, "16"));
+        // Older active slot: needs a refresh.
+        assert!(gcc_needs_refresh(Some("15"), "16"));
+        // Matching or newer active slot: fine as-is.
+        assert!(!gcc_needs_refresh(Some("16"), "16"));
+        assert!(!gcc_needs_refresh(Some("17"), "16"));
+        // Unparseable slots: can't tell, don't force a rebuild.
+        assert!(!gcc_needs_refresh(Some("not-a-number"), "16"));
+        assert!(!gcc_needs_refresh(Some("15"), "not-a-number"));
+    }
+
+    #[test]
+    fn atom_is_package_matches_bare_and_version_pinned_atoms() {
+        // Bare atom, as toolchain_plan's own gcc-stage1/gcc-stage2 use.
+        assert!(atom_is_package(
+            "cross-riscv64-unknown-linux-gnu/gcc",
+            "gcc"
+        ));
+        // Version-pinned atom, as gcc_refresh_plan uses to force an exact
+        // upgrade — the bug this test guards: a bare `ends_with("/gcc")`
+        // check misses this form entirely, silently skipping activation of
+        // the freshly-built compiler.
+        assert!(atom_is_package(
+            "=cross-riscv64-unknown-linux-gnu/gcc-16.1.1_p20260606",
+            "gcc"
+        ));
+        // Doesn't false-positive on an unrelated package with a shared prefix.
+        assert!(!atom_is_package(
+            "cross-riscv64-unknown-linux-gnu/gcc-doc",
+            "gcc"
+        ));
+        assert!(!atom_is_package("sys-devel/binutils", "gcc"));
+    }
 
     /// The sysroot-wide `make.conf` must never set `CTARGET`: unlike real
     /// crossdev, which scopes it via `package.env` to the host-side

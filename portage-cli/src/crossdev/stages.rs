@@ -332,6 +332,61 @@ pub fn toolchain_plan(kind: &BootstrapKind, self_contained: bool) -> StagePlan {
     StagePlan { steps }
 }
 
+/// Just the gcc refresh for an **already-bootstrapped** cross toolchain:
+/// gcc-stage1 → gcc-stage2, reusing the existing binutils/libc untouched.
+///
+/// Not part of [`toolchain_plan`] (which is for a from-scratch bootstrap and
+/// includes the unconditional-reinstall `libc headers` `--nodeps` step to
+/// break the empty-sysroot cycle) — rerunning that against an
+/// already-bootstrapped sysroot would blindly reinstall the headers-only
+/// variant on top of the real, full glibc already there. A version-only gcc
+/// refresh needs neither that nor the full "libc" rebuild step
+/// `toolchain_plan` does between its own gcc-stage1/gcc-stage2 (that step
+/// exists there because, mid-*bootstrap*, only libc *headers* exist before
+/// it runs; here the full libc is already in place from the original
+/// bootstrap and gcc-stage2 just links against it).
+///
+/// Used when `sys-devel/gcc`'s resolved version needs a newer
+/// `cross-<CTARGET>/gcc` than what `gcc-config` currently has active — see
+/// `stage1()` in `crossdev/mod.rs` and `todo/stage-build-shakeout.md`.
+///
+/// `version` pins the exact `sys-devel/gcc` version just resolved (e.g.
+/// `"16.1.1_p20260606"`), via an `=` atom rather than a bare `cross-<CTARGET>
+/// /gcc`. A bare atom resolves like a plain `emerge <atom>` — reinstalling
+/// whatever's already satisfied/installed rather than upgrading — which
+/// silently rebuilds the *same* old major version and defeats the whole
+/// point of this plan (caught live: the woven-in refresh reinstalled
+/// `gcc-15.2.1` unchanged while `sys-devel/gcc-16.1.1` still failed on the
+/// same driver-flag mismatch). Pinning the exact version also keeps the
+/// build tool and the package it builds on the same major release.
+pub fn gcc_refresh_plan(target: &CrossTarget, version: &str) -> StagePlan {
+    let kind = BootstrapKind::Cross(target.clone());
+    let atom = |real_cat: &str, pkg: &str| format!("={}-{version}", kind.atom(real_cat, pkg));
+    let owned = |toks: &[&str]| toks.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+    let mut stage1 = owned(GCC_DISABLE);
+    stage1.extend(owned(GCC_DISABLE_STAGE1));
+    let mut stage2 = owned(GCC_DISABLE);
+    stage2.extend(owned(GCC_DISABLE_STAGE2));
+
+    StagePlan {
+        steps: vec![
+            StageStep {
+                label: "gcc-stage1 (refresh)".into(),
+                atoms: vec![atom("sys-devel", "gcc")],
+                use_override: stage1,
+                nodeps: false,
+            },
+            StageStep {
+                label: "gcc-stage2 (refresh)".into(),
+                atoms: vec![atom("sys-devel", "gcc")],
+                use_override: stage2,
+                nodeps: false,
+            },
+        ],
+    }
+}
+
 /// The native **stage1** plan (catalyst `stage1/chroot.sh`): baselayout first
 /// (USE=build, `--nodeps` — the bare FS skeleton), then the profile's
 /// [`packages.build`](ProfileStack::stage1_packages) set in one batch with
@@ -441,6 +496,33 @@ mod tests {
         // stage1 gcc drops cxx/libc-dependent USE; stage2 keeps them.
         assert!(plan.steps[3].use_override.contains(&"-cxx".to_string()));
         assert!(!plan.steps[5].use_override.contains(&"-cxx".to_string()));
+    }
+
+    #[test]
+    fn gcc_refresh_plan_is_just_the_two_gcc_stages() {
+        // Refreshing an already-bootstrapped toolchain's gcc must not touch
+        // binutils/headers/libc — those are the fresh-bootstrap-only steps
+        // toolchain_plan needs, and rerunning "libc headers" (an unconditional
+        // --nodeps reinstall) would overwrite an already-full glibc with the
+        // stripped bootstrap headers.
+        let t = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let plan = gcc_refresh_plan(&t, "16.1.1_p20260606");
+        assert_eq!(
+            labels(&plan),
+            ["gcc-stage1 (refresh)", "gcc-stage2 (refresh)"]
+        );
+        for step in &plan.steps {
+            assert!(!step.nodeps);
+            // Pinned to the exact resolved version (`=` atom), not a bare
+            // atom — see the doc comment on why a bare atom is wrong here.
+            assert_eq!(
+                step.atoms[0],
+                "=cross-riscv64-unknown-linux-gnu/gcc-16.1.1_p20260606"
+            );
+        }
+        // Same USE split as toolchain_plan's own gcc-stage1/gcc-stage2.
+        assert!(plan.steps[0].use_override.contains(&"-cxx".to_string()));
+        assert!(!plan.steps[1].use_override.contains(&"-cxx".to_string()));
     }
 
     #[test]

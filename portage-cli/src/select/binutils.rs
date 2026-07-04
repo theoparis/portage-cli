@@ -9,7 +9,7 @@ use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use super::{Cli, env_d};
-use crate::cli::BinutilsAction;
+use crate::cli::{BinutilsAction, Roots};
 
 /// Binutils-specific profile type.
 pub struct BinutilsProfileType;
@@ -32,14 +32,14 @@ impl env_d::EnvDProfile for BinutilsProfileType {
     }
 
     fn install_wrappers(
-        globals: &Cli,
+        roots: &Roots,
         target: &str,
         vars: &BTreeMap<String, String>,
     ) -> Result<()> {
         let Some(ver) = vars.get("VER").filter(|v| !v.is_empty()) else {
             return Ok(());
         };
-        install_binutils_wrappers(&env_d::eprefix(globals), target, ver)
+        install_binutils_wrappers(&env_d::eprefix(roots), target, ver)
     }
 }
 
@@ -97,8 +97,8 @@ fn locate_binutils_bin(
 
 /// Activate the newest binutils profile built into this root for `target`
 /// (`crossdev --setup`). EPREFIX-aware; no-op until the binutils step merges.
-pub fn activate_latest(globals: &Cli, target: &str) -> Result<bool> {
-    env_d::activate_latest::<BinutilsProfileType>(globals, target)
+pub fn activate_latest(roots: &Roots, target: &str) -> Result<bool> {
+    env_d::activate_latest::<BinutilsProfileType>(roots, target)
 }
 
 pub fn run(action: &BinutilsAction, globals: &Cli) -> Result<()> {
@@ -111,7 +111,7 @@ pub fn run(action: &BinutilsAction, globals: &Cli) -> Result<()> {
             .unwrap_or_else(|| env_d::get_default_target(globals)),
     };
 
-    let base_dir = env_d::env_d_dir::<BinutilsProfileType>(globals);
+    let base_dir = env_d::env_d_dir::<BinutilsProfileType>(&globals.roots());
 
     match action {
         BinutilsAction::List { .. } => env_d::run_list::<BinutilsProfileType>(globals),
