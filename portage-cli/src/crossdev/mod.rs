@@ -825,7 +825,7 @@ fn write_sysroot_repos_conf(
 /// *only* one they read, so there is no other source for build parallelism.
 /// Caught live: a real stage1 build ran with a single `cc1plus` at a time on a
 /// 128-core host because this was missing.
-fn make_conf_body(target: &CrossTarget, _sysroot: &Utf8Path) -> String {
+fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path) -> String {
     let arch = target.gentoo_arch();
     let tuple = &target.tuple;
     let cbuild = host_chost();
@@ -839,7 +839,17 @@ fn make_conf_body(target: &CrossTarget, _sysroot: &Utf8Path) -> String {
          ROOT=\"/\"\n\
          MAKEOPTS=\"{makeopts}\"\n\
          CFLAGS=\"{}\"\n\
-         CXXFLAGS=\"${{CFLAGS}}\"\n",
+         CXXFLAGS=\"${{CFLAGS}}\"\n\
+         # The sysroot's own .pc files record paths as if it were \"/\" (e.g.\n\
+         # `prefix=/usr`, not the host-absolute sysroot path) — PKG_CONFIG_SYSROOT_DIR\n\
+         # prepends the real path onto whatever a .pc reports. PKG_CONFIG_LIBDIR\n\
+         # (unlike _PATH) *replaces* pkg-config's default search list, so the host's\n\
+         # own .pc files never leak into a foreign-arch cross build (found live:\n\
+         # iproute2's ./configure auto-detected the host's net-libs/libtirpc via\n\
+         # plain pkg-config, linked -ltirpc, then failed since the target sysroot\n\
+         # never had it — see todo/stage-build-shakeout.md).\n\
+         PKG_CONFIG_SYSROOT_DIR=\"{sysroot}\"\n\
+         PKG_CONFIG_LIBDIR=\"{sysroot}/usr/lib64/pkgconfig:{sysroot}/usr/lib/pkgconfig:{sysroot}/usr/share/pkgconfig\"\n",
         target.cflags(),
     )
 }
@@ -1039,6 +1049,36 @@ mod tests {
         assert!(
             !body.contains("MAKEOPTS=\"\""),
             "must be non-empty:\n{body}"
+        );
+    }
+
+    /// Regression test for the iproute2 stage3 failure: `./configure` ran
+    /// plain `pkg-config`, found the *host's* `net-libs/libtirpc.pc`
+    /// (`net-libs/libtirpc` isn't even in DEPEND — USE=-nfs — let alone
+    /// installed in the target sysroot), and linked `-ltirpc` into a build
+    /// that then failed since the library genuinely isn't in the sysroot.
+    /// `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR` must scope pkg-config to
+    /// the sysroot so a foreign-arch cross build never sees host `.pc` files.
+    #[test]
+    fn make_conf_body_scopes_pkg_config_to_the_sysroot() {
+        let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let sysroot = "/var/tmp/cross-stage1-riscv64/usr/riscv64-unknown-linux-gnu";
+        let body = make_conf_body(&target, Utf8Path::new(sysroot));
+        assert!(
+            body.contains(&format!("PKG_CONFIG_SYSROOT_DIR=\"{sysroot}\"")),
+            "sysroot make.conf:\n{body}"
+        );
+        assert!(
+            body.contains("PKG_CONFIG_LIBDIR=")
+                && body.contains(&format!("{sysroot}/usr/lib64/pkgconfig"))
+                && body.contains(&format!("{sysroot}/usr/share/pkgconfig")),
+            "PKG_CONFIG_LIBDIR must point into the sysroot only:\n{body}"
+        );
+        // PKG_CONFIG_LIBDIR *replaces* the default search list — the whole
+        // point is that no host pkgconfig dir leaks in.
+        assert!(
+            !body.contains("PKG_CONFIG_PATH="),
+            "must not additively leak the host's pkgconfig search path:\n{body}"
         );
     }
 }
