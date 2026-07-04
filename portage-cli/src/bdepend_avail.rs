@@ -4,32 +4,54 @@
 //! `BDEPEND` trim pass.
 
 use camino::Utf8Path;
-use portage_atom::{Cpn, Cpv, Dep, DepEntry};
+use portage_atom::{Cpn, Cpv, Dep, DepEntry, UseDefault, UseDep, UseDepKind};
 use portage_atom_pubgrub::MergeRoot;
 use portage_vdb::Vdb;
 
 use crate::cli::Roots;
 
+/// One entry in an [`Avail`] set: an installed/available `(cpv, main-slot)`,
+/// plus USE info when it's authoritative.
+#[derive(Debug, Clone)]
+struct AvailEntry {
+    cpv: Cpv,
+    slot: Option<String>,
+    /// Installed USE + IUSE, when known. `Some` for VDB-backed entries (real
+    /// installed packages — [`vdb_avail_entries`]), letting `atom_satisfied`
+    /// verify USE-dep brackets (PMS 8.3.4) instead of just CPN/version/slot.
+    /// `None` for within-run solved-plan merges (`record_merge` and friends):
+    /// the solver's own `check_use_deps` already validates USE-dep
+    /// constraints among those packages, so re-checking here would just
+    /// duplicate that logic without the parent-flag context it needs.
+    use_info: Option<UseInfo>,
+}
+
+#[derive(Debug, Clone)]
+struct UseInfo {
+    enabled: Vec<String>,
+    iuse: Vec<String>,
+}
+
 /// Installed `(cpv, main-slot)` pairs visible for dependency presence checks.
 #[derive(Debug, Clone, Default)]
-pub struct Avail(Vec<(Cpv, Option<String>)>);
+pub struct Avail(Vec<AvailEntry>);
 
 impl Avail {
     /// `BDEPEND` availability at the start of a run: host `BROOT`, plus the
     /// prefix target VDB for in-place `--local` (`EPREFIX`) builds.
     pub fn initial_bdepend(roots: &Roots) -> Self {
-        let mut out = vdb_cpvs(None);
+        let mut out = vdb_avail_entries(None);
         if roots.eprefix().is_some() {
-            out.extend(vdb_cpvs(roots.target()));
+            out.extend(vdb_avail_entries(roots.target()));
         }
         Self(out)
     }
 
     /// `DEPEND` availability at the start of a run: `VDB(base) ∪ VDB(target)`.
     pub fn initial_depend(roots: &Roots) -> Self {
-        let mut out = vdb_cpvs(roots.base());
+        let mut out = vdb_avail_entries(roots.base());
         if roots.target() != roots.base() {
-            out.extend(vdb_cpvs(roots.target()));
+            out.extend(vdb_avail_entries(roots.target()));
         }
         Self(out)
     }
@@ -37,34 +59,59 @@ impl Avail {
     /// `DEPEND` availability against a fixed sysroot (`ESYSROOT`). `None` is
     /// the host `/var/db/pkg`.
     pub fn initial_sysroot_depend(sysroot: Option<&camino::Utf8Path>) -> Self {
-        Self(vdb_cpvs(sysroot))
+        Self(vdb_avail_entries(sysroot))
     }
 
     /// Target `ROOT` visibility from an explicit set of installed CPVs.
     pub fn from_cpvs(cpvs: Vec<(Cpv, Option<String>)>) -> Self {
-        Self(cpvs)
+        Self(
+            cpvs.into_iter()
+                .map(|(cpv, slot)| AvailEntry {
+                    cpv,
+                    slot,
+                    use_info: None,
+                })
+                .collect(),
+        )
     }
 
     /// Record a host merge visible to later `BDEPEND` checks.
     pub fn record_merge_bdepend(&mut self, cpv: Cpv) {
-        self.0.push((cpv, None));
+        self.0.push(AvailEntry {
+            cpv,
+            slot: None,
+            use_info: None,
+        });
     }
 
     /// Record a target merge for both DEPEND and BDEPEND views (preflight).
     pub fn record_target_merge(&mut self, depend: &mut Self, cpv: Cpv) {
-        depend.0.push((cpv.clone(), None));
-        self.0.push((cpv, None));
+        depend.0.push(AvailEntry {
+            cpv: cpv.clone(),
+            slot: None,
+            use_info: None,
+        });
+        self.0.push(AvailEntry {
+            cpv,
+            slot: None,
+            use_info: None,
+        });
     }
 
     /// Record a merge for within-run `BDEPEND` trim (host or target).
     pub fn record_merge(&mut self, cpv: Cpv, _merge_root: MergeRoot) {
-        self.0.push((cpv, None));
+        self.0.push(AvailEntry {
+            cpv,
+            slot: None,
+            use_info: None,
+        });
     }
 
     pub fn atom_satisfied(&self, dep: &Dep) -> bool {
-        self.0
-            .iter()
-            .any(|(cpv, slot)| dep.matches_cpv(cpv, slot.as_deref()))
+        self.0.iter().any(|e| {
+            dep.matches_cpv(&e.cpv, e.slot.as_deref())
+                && use_deps_satisfied(dep, e.use_info.as_ref())
+        })
     }
 
     /// `true` when `entries` contain an unsatisfied atom on `cpn`.
@@ -72,6 +119,52 @@ impl Avail {
         entries
             .iter()
             .any(|e| entry_unsatisfied_for_cpn(e, cpn, self))
+    }
+}
+
+/// Whether `dep`'s USE-dep brackets (if any) are satisfied by `use_info`.
+///
+/// `use_info: None` means "no authoritative USE data" (a within-run solved
+/// merge already validated by the solver) — always satisfied here. Only the
+/// simple `[flag]`/`[-flag]` forms are checked; `[flag?]`/`[flag=]` and their
+/// inverses need the *parent* package's own flag state, which `Avail` has no
+/// visibility into, so those are conservatively treated as satisfied (same as
+/// the prior behaviour for every USE-dep form).
+fn use_deps_satisfied(dep: &Dep, use_info: Option<&UseInfo>) -> bool {
+    let Some(use_deps) = &dep.use_deps else {
+        return true;
+    };
+    let Some(info) = use_info else {
+        return true;
+    };
+    use_deps.iter().all(|ud| use_dep_satisfied(ud, info))
+}
+
+fn use_dep_satisfied(ud: &UseDep, info: &UseInfo) -> bool {
+    let flag = ud.flag.as_str();
+    // IUSE tokens keep their `+`/`-` default-state prefix (e.g. `+embedded`);
+    // strip it to compare bare flag names.
+    let enabled = if info
+        .iuse
+        .iter()
+        .any(|f| f.trim_start_matches(['+', '-']) == flag)
+    {
+        info.enabled.iter().any(|f| f == flag)
+    } else {
+        match ud.default {
+            Some(UseDefault::Enabled) => true,
+            Some(UseDefault::Disabled) | None => false,
+        }
+    };
+    match ud.kind {
+        UseDepKind::Enabled => enabled,
+        UseDepKind::Disabled => !enabled,
+        // Conditional/Equal forms depend on the parent's own flag state,
+        // which isn't available here — see the doc comment above.
+        UseDepKind::Conditional
+        | UseDepKind::ConditionalInverse
+        | UseDepKind::Equal
+        | UseDepKind::EqualInverse => true,
     }
 }
 
@@ -88,6 +181,30 @@ pub fn vdb_cpvs(root: Option<&Utf8Path>) -> Vec<(Cpv, Option<String>)> {
     vdb.packages()
         .into_iter()
         .map(|p| (p.cpv().clone(), p.slot_main().ok()))
+        .collect()
+}
+
+/// Like [`vdb_cpvs`], but also carries each installed package's USE + IUSE so
+/// [`Avail::atom_satisfied`] can verify USE-dep brackets against them (see
+/// [`AvailEntry::use_info`]).
+fn vdb_avail_entries(root: Option<&Utf8Path>) -> Vec<AvailEntry> {
+    let vdb = match root {
+        Some(r) => Vdb::open(r.join("var/db/pkg")),
+        None => Vdb::open_default(),
+    };
+    let Ok(vdb) = vdb else {
+        return Vec::new();
+    };
+    vdb.packages()
+        .into_iter()
+        .map(|p| AvailEntry {
+            cpv: p.cpv().clone(),
+            slot: p.slot_main().ok(),
+            use_info: Some(UseInfo {
+                enabled: p.use_flags().unwrap_or_default(),
+                iuse: p.iuse().unwrap_or_default(),
+            }),
+        })
         .collect()
 }
 
@@ -209,7 +326,7 @@ mod tests {
     use super::*;
 
     fn atoms(specs: &[&str]) -> Avail {
-        Avail(
+        Avail::from_cpvs(
             specs
                 .iter()
                 .map(|s| (Cpv::parse(s).unwrap(), None))
@@ -217,8 +334,87 @@ mod tests {
         )
     }
 
+    /// Like [`atoms`], but the entry carries authoritative USE/IUSE info so
+    /// USE-dep brackets get checked (mirrors [`vdb_avail_entries`]'s output).
+    fn atom_with_use(spec: &str, enabled: &[&str], iuse: &[&str]) -> Avail {
+        Avail(vec![AvailEntry {
+            cpv: Cpv::parse(spec).unwrap(),
+            slot: None,
+            use_info: Some(UseInfo {
+                enabled: enabled.iter().map(|s| s.to_string()).collect(),
+                iuse: iuse.iter().map(|s| s.to_string()).collect(),
+            }),
+        }])
+    }
+
     fn parse(dep: &str) -> Vec<DepEntry> {
         DepEntry::parse(dep).unwrap()
+    }
+
+    /// Regression test for the `sys-apps/systemd-utils` stage3 failure: the
+    /// host had `dev-python/jinja2` installed, but only built for
+    /// `python_targets_python3_13`, not the `_14` this run actually needs.
+    /// The old CPN/version/slot-only check treated the atom as satisfied
+    /// regardless of the `[python_targets_python3_14(-)]` USE-dep bracket, so
+    /// `em` never scheduled a jinja2 rebuild and the target package's
+    /// `meson` configure failed with "python3 is missing modules: jinja2".
+    #[test]
+    fn use_dep_not_satisfied_by_installed_flag_mismatch() {
+        let avail = atom_with_use(
+            "dev-python/jinja2-3.1.6",
+            &["python_targets_python3_13"],
+            &[
+                "python_targets_python3_12",
+                "python_targets_python3_13",
+                "python_targets_python3_14",
+            ],
+        );
+        let dep = parse("dev-python/jinja2[python_targets_python3_14(-)]");
+        let DepEntry::Atom(dep) = &dep[0] else {
+            unreachable!()
+        };
+        assert!(
+            !avail.atom_satisfied(dep),
+            "jinja2 built only for py3.13 must not satisfy a py3.14 USE-dep"
+        );
+    }
+
+    #[test]
+    fn use_dep_satisfied_by_matching_installed_flag() {
+        let avail = atom_with_use(
+            "dev-python/jinja2-3.1.6",
+            &["python_targets_python3_14"],
+            &["python_targets_python3_13", "python_targets_python3_14"],
+        );
+        let dep = parse("dev-python/jinja2[python_targets_python3_14(-)]");
+        let DepEntry::Atom(dep) = &dep[0] else {
+            unreachable!()
+        };
+        assert!(avail.atom_satisfied(dep));
+    }
+
+    #[test]
+    fn negated_use_dep_satisfied_when_flag_disabled() {
+        let avail = atom_with_use("dev-libs/foo-1.0", &[], &["static-libs"]);
+        let dep = parse("dev-libs/foo[-static-libs]");
+        let DepEntry::Atom(dep) = &dep[0] else {
+            unreachable!()
+        };
+        assert!(avail.atom_satisfied(dep));
+    }
+
+    /// Within-run solved-plan entries (no `use_info`) keep the old,
+    /// USE-dep-blind behaviour — the solver's own `check_use_deps` already
+    /// validated those, so `atom_satisfied` shouldn't re-check and risk a
+    /// false negative without the parent-flag context that requires.
+    #[test]
+    fn use_dep_ignored_when_use_info_unknown() {
+        let avail = atoms(&["dev-python/jinja2-3.1.6"]);
+        let dep = parse("dev-python/jinja2[python_targets_python3_14(-)]");
+        let DepEntry::Atom(dep) = &dep[0] else {
+            unreachable!()
+        };
+        assert!(avail.atom_satisfied(dep));
     }
 
     #[test]
