@@ -68,7 +68,11 @@ pub struct MergeFlags {
     #[arg(short = 'e', long)]
     pub emptytree: bool,
 
-    #[arg(short = 't', long)]
+    // No short alias: `-t` collides with `em crossdev`'s `--target` once
+    // MergeFlags is flattened into CrossdevArgs (clap's debug_assertions catch
+    // this in dev builds; release builds skip the check, so it was silently
+    // latent). Real emerge has no short form for --tree either.
+    #[arg(long)]
     pub tree: bool,
 
     /// Emit the depgraph as machine-parsable JSON instead of pretend text.
