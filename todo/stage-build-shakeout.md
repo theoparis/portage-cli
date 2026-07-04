@@ -957,3 +957,63 @@ to see how many of the other 89 failures this alone clears versus what
 remains (the `econf` exit-77s and `aclocal` failures may be a separate,
 fourth issue — not yet investigated).
 [[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]
+
+## 17. `CTARGET` leaking sysroot-wide into every package's `econf` (fixed)
+
+Re-ran the full riscv64 `--cross` stage1 build with the PATH fix in place.
+New failure: `dev-db/sqlite-3.53.2-r1`'s `src_configure` died with
+`econf failed (configure exited 1)` — sqlite's own custom (non-autoconf)
+`configure` script rejected `--target=riscv64-unknown-linux-gnu` outright
+(`Error: Unknown option --target`).
+
+`em`'s `econf` builtin (`portage-repo/src/build/commands/econf.rs`)
+unconditionally appends `--target=$CTARGET` whenever `CTARGET` is non-empty —
+which matches real portage's own `econf` exactly
+(`${CTARGET:+--target=${CTARGET}}` in
+`/usr/lib/portage/python3.13/phase-helpers.sh`), so this was never an
+econf-logic bug. The real question was *why* `CTARGET` was set at all for an
+ordinary package build.
+
+Root cause: `em crossdev`'s generated target `make.conf`
+(`portage-cli/src/crossdev/mod.rs` `make_conf_body`) wrote
+`CTARGET=<tuple>` unconditionally into the **sysroot-wide** make.conf, so
+every ordinary package built into that sysroot inherited it — not just the
+host-side cross-toolchain packages. Checked real crossdev's own template
+(`/usr/share/crossdev/etc/portage/make.conf`) directly: it sets `CHOST`/
+`CBUILD` only, never `CTARGET`. `CTARGET` there only ever applies to the
+`cross-<CTARGET>/{binutils,gcc,gdb,linux-headers,glibc}` builds, scoped via
+`package.env` (`write_cross_env`, same file, already correct) and read by
+`toolchain.eclass` off `CATEGORY`.
+
+Fixed by deleting the stray `CTARGET={tuple}` line from `make_conf_body`.
+Added a regression test (`crossdev::tests::make_conf_body_never_sets_ctarget`)
+asserting the generated body never contains a `CTARGET=` line. Patched the
+already-generated make.conf in the live test sysroot by hand (new sysroots
+created after this fix won't need it).
+
+Along the way, made two of the same mistake this session: raced a manual
+`em ... dev-db/sqlite` test invocation against the still-running
+`--keep-going` stage1 build (same ROOT — caught and killed before real
+damage), then rebuilt `target/release/em` via `cargo build --release`
+*while that same long-lived run was still executing*. `spawn_install_worker`
+(`portage-cli/src/privilege.rs`) re-execs `current_exe()` fresh per package,
+not once at startup, so overwriting the binary mid-run tore the in-flight
+packages' install-worker spawns and produced misleading
+`install worker exited with status 127` failures on `sys-devel/gettext`,
+`dev-libs/gmp`, `dev-libs/nettle` — which briefly looked like a real
+regression before mtime correlation (binary replaced at T, next package's
+`build.log` written at T+15s) proved it was self-inflicted, not a code bug.
+Lesson: always `pgrep -af "target/release/em"` before rebuilding the binary
+or launching a second `em` invocation against the same ROOT.
+
+Noted but deferred (task #11): `em` only has a merge-phase flock
+(`lock_merge_flock` in `portage-cli/src/ebuild.rs`, serializing the
+qmerge/VDB-write critical section across concurrent `em` processes sharing a
+build tree) — unlike real portage, which takes a lock for the *whole run*
+scoped to the config root, so a second `emerge` just waits/refuses up front.
+Worth adding a whole-invocation flock later.
+
+Not yet re-run after this fix: the full 127-package `--keep-going` stage1
+build, to see how much of the remaining failure count (the `econf` exit-77
+cluster, `aclocal` failures, and whatever else) this alone clears.
+[[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]
