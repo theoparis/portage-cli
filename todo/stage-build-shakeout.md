@@ -1171,14 +1171,40 @@ self-bootstrap `sys-devel/gcc-16` using the older `cross-*/gcc-15` as its own
 
 Documented the `cross-<CTARGET>/gcc` vs `sys-devel/gcc` distinction in
 `portage-cli/src/crossdev/mod.rs`'s module doc and `docs/root-model.md`
-(task #12, done). Two follow-ups tracked, not yet implemented:
+(task #12, done).
 
-- **Task #13**: `em crossdev` doesn't correctly support `--update` for its
-  own toolchain-bootstrap resolution — verify/fix so `cross-<CTARGET>/gcc`
-  can actually be bumped to match a newer `sys-devel/gcc` on request.
-- **Task #14**: add a safety check before building a package literally named
-  `gcc` — compare its version against the currently `gcc-config`-active
-  compiler for that CHOST/CTARGET and warn loudly up front, instead of
-  failing cryptically deep inside `libatomic`'s `configure` after a full
-  compile cycle.
+**Correction after actually chasing task #13**: the "`--update` doesn't
+work" framing above was wrong. Traced it precisely (instrumented
+`target_package`'s filter in `repo.rs` with temporary `eprintln!`s, removed
+before commit): `--update`/`--deep`/`root_targets` all behave correctly —
+`cross-riscv64-unknown-linux-gnu/gcc` genuinely never sees anything newer
+than `gcc-15.2.1_p20260214` because of a **keyword-acceptance gate**, not a
+solver bug. The cross-compiler is a host-side tool, correctly resolved
+against the *outer* self-contained root's own config (not the target
+sysroot's `ACCEPT_KEYWORDS="riscv ~riscv"`) — and that outer root's
+auto-generated `make.conf` (`em setup`) only ever set `MAKEOPTS`, leaving
+`ACCEPT_KEYWORDS` unset (portage's stable-only default). The real host's
+own `/etc/portage/make.conf` has `ACCEPT_KEYWORDS="~arm64"`; `gcc-15.2.1_
+p20260214` is the last release with a *stable* `arm64` keyword — every
+version since only carries `~arm64` (testing), rejected outright by the
+stable-only fallback, regardless of `--update`/`--deep`. **Fixed** (task
+#13, done): `em setup`'s self-contained root now mirrors the host's real
+`ACCEPT_KEYWORDS` into its own `make.conf`, the same way it already mirrors
+`MAKEOPTS` — `host_accept_keywords()` in `portage-cli/src/setup.rs`, new
+test `self_contained_root_gets_host_accept_keywords`.
+
+Also hit and fixed in passing (task #16): `em crossdev`'s own `-t`/
+`--target` collided with `MergeFlags`' `-t`/`--tree` once flattened
+together — clap's `debug_assertions` catch this and panic on *any*
+`em crossdev` invocation in a dev/debug build (release builds skip the
+check, so it was silently latent all session, only surfacing once a debug
+build was needed for the `eprintln!` instrumentation above). Dropped the
+short alias from `--tree`.
+
+Task #14 (a safety check comparing a `gcc` package's own version against
+the currently `gcc-config`-active compiler, warning before wasting a full
+compile cycle) is still open — real value now that the actual gate
+(`ACCEPT_KEYWORDS`) is fixed and version drift can still happen for other
+reasons (a stale cross-toolchain simply never rebuilt after `sys-devel/
+gcc` bumps a major version).
 [[em-stages-and-binhosts]] [[crossdev-target]] [[em-root-characterization]]
