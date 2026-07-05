@@ -19,27 +19,39 @@ These are the divergences between current code and the target model in
 `docs/root-topology.md` § "Override semantics". Each is a real behaviour change
 to land as part of (or before) the refactor.
 
-- 🔴 **`--root` no longer moves config.** Current `cli.rs:274` does
+- 🔴 **`--root` no longer moves config.** Current `cli.rs` does
   `config: config_root.or(root)` — config follows `--root`. Portage `ROOT=`
   parity requires config to stay at `/`. This is a user-visible change for
   anyone relying on the current offset-config default; decide clean-break vs
-  compat shim.
-- 🔴 **`--local` becomes standalone, not overlay.** Current `cli.rs:261-270`
-  sets base=`/` (overlay). The target model sets base=target=`~/.gentoo` (full
-  closure, self-contained) so `em --local` and `em --local --cross <T>` work
-  on a foreign host. The overlay use case moves entirely to `--prefix`.
-- 🔴 **Host-python/host-tool symlinks move from `--local` to `--prefix`.**
-  Current `setup.rs:163-166` gates `link_host_pythons`/`link_host_base_tools`
-  on `is_local` — exactly backwards. The symlinks are an overlay mechanism
-  (borrow host tools because base=host); under standalone `--local`/`--root`
-  the prefix must own its python. `--prefix` sets EPREFIX=P (relocatable
-  installed tree; ebuilds bake `${EPREFIX}/usr/bin/pythonX.Y` into shebangs),
-  so the symlink is the principled way to satisfy those shebangs without
-  building a prefix python.
-- 🔴 **`--prefix` sets EPREFIX=P.** Currently `--prefix` leaves EPREFIX unset.
-  Under the target model `--prefix P` is the relocatable overlay: installed
+  compat shim. **Deferred** — tangled with `ensure_self_contained_prefix`'s use
+  of `config().is_some()` as a self-contained signal; lands cleanly once the
+  `RootTopology` enum exists (Cluster C).
+- ✅ **`--local` becomes standalone, not overlay.** Landed in `b3f20c1`.
+  `base` goes from None (host) to Some(prefix), so base == target ==
+  ~/.gentoo — full closure, self-contained VDB. Live-verified in
+  crossdev-stages: `em --local -p bzip2` shows `[N] bzip2` +
+  `[N] app-alternatives/bzip2` (full closure; reads the empty prefix VDB,
+  not the host's). Previously base=`/` would have hidden both.
+- ✅ **Host-python/host-tool symlinks moved from `--local` to `--prefix`.**
+  Landed in `b3f20c1`. setup.rs's three-mode split (self-contained /
+  standalone / overlay) gates `link_host_pythons`/`link_host_base_tools` on
+  `is_overlay` (--prefix), not `is_local`. Live-verified:
+  `--local`'s `usr/bin/` is empty; `--prefix`'s has python3.13/3.14/find/xargs
+  symlinked to /usr/bin.
+- ✅ **`--prefix` sets EPREFIX=P.** Landed in `b3f20c1`. Live-verified:
+  `em --prefix /opt/test-prefix dev-python/jinja2` builds and merges clean —
+  host python3.14/gpep517/flit-core drive the build (BROOT=host), result lands
+  in the prefix VDB (counter=1), host VDB untouched (jinja2 counter stays
+  395).
   scripts shebang to `${EPREFIX}/usr/bin/...`, so EPREFIX=P is required for
   the host-python symlinks (above) to actually fire.
+- ✅ **Split BROOT from install target under `--prefix`.** Landed in
+  `21638aa`. `base_roots()` now returns a BROOT view (merge_root=`/` under
+  --prefix), and `roots()` reconstructs the prefix-target view on top. Without
+  this, `preflight::check` read BDEPEND from the *prefix's* empty VDB instead
+  of the host's, failing the jinja2 build with "not satisfied" even though the
+  host had all of gpep517/flit-core/python:3.14. Regression test:
+  `prefix_overlay_broot_is_host_not_prefix`.
 
 ## The variant refactor (structural)
 
@@ -78,7 +90,53 @@ to land as part of (or before) the refactor.
   `broot_filtered` in `solve.rs`) so they don't drift from `preflight`'s
   routing on the next IDEPEND shift.
 
-## Verification
+## Live test results (2026-07-05, crossdev-stages aarch64 sandbox)
+
+Cluster A + the BROOT/target split were live-verified end-to-end in the
+`crossdev-stages` aarch64-20260618T101350Z sandbox (full isolation, real
+stage3, no host contamination):
+
+- ✅ `em setup --local` — "standalone Gentoo-Prefix", empty `usr/bin/` (no
+  host-python symlinks).
+- ✅ `em setup --prefix /opt/test-prefix` — "ROOT-offset overlay",
+  python3.13/3.14/find/xargs symlinked into `${EPREFIX}/usr/bin`.
+- ✅ `em --local -p bzip2` → `[N] bzip2` + `[N] app-alternatives/bzip2`
+  (standalone full closure; base reads the empty prefix).
+- ✅ `em --prefix -p bzip2` → `[R] bzip2` only (overlay delta; base reads host).
+- ✅ `em --prefix /opt/test-prefix dev-python/jinja2` — built + merged clean,
+  host VDB untouched.
+- ✅ `em --prefix /opt/xp crossdev -t riscv64-unknown-linux-gnu --init-target`
+  — sysroot at `/opt/xp/usr/<tuple>`, overlay + make.conf routing correct
+  (`PKG_CONFIG_SYSROOT_DIR`=sysroot, `BUILD_PKG_CONFIG_LIBDIR`=host).
+- ✅ `em --prefix /opt/xp cross-riscv64.../binutils` — built + merged
+  (counter=1), cross wrapper layout correct, host VDB untouched.
+- ✅ `em --prefix /opt/xp select binutils list/show/set` — fully prefix-aware:
+  sees host (aarch64) + prefix (riscv64) profiles, distinguishes them, writes
+  selection to prefix's env.d, installs the two-hop wrapper symlinks under the
+  prefix. **No code changes needed** — `select/mod.rs:config_portage_dir_for`
+  already honours `config_overlay`.
+
+## Open follow-ups (found during live testing)
+
+- 🔴 **MAKEOPTS not parallelising gcc's build.** MAKEOPTS=`-j128` is correctly
+  set in the sysroot make.conf and emake.rs reads it from the shell env, but
+  the live gcc-stage1 compile ran serial (load avg 1.15 on 128 cores). Need
+  instrumentation in emake.rs to log the actual make argv, and a check on
+  whether toolchain.eclass's gcc `src_compile` uses `emake` or bare `make`.
+  Details: `makeopts-emake-parallelism.md` (memory). Blocks the full cross
+  toolchain run being fast.
+- 🟡 **Top-level `em -j N`** that also sets MAKEOPTS (when unset) — mirrors
+  emerge's `--jobs`. Currently `--jobs` only drives parallel package merges,
+  not per-package make parallelism. Small feature.
+- 🔴 **Full cross toolchain under `--prefix`** — paused mid gcc-stage1
+  (MAKEOPTS bug above). Binutils + kernel-headers + libc-headers merged
+  cleanly (counters 2,3,4); gcc-stage1 was compiling when killed. Repro state
+  preserved in `/opt/xp`; resume by re-running `em --prefix /opt/xp crossdev
+  -t riscv64-unknown-linux-gnu --setup` (cached steps skip).
+- 🔴 **Full cross stage1 under `--prefix`** — blocked on the toolchain
+  completing; then `em --prefix /opt/xp --cross riscv64... stages --stage1`.
+
+## Verification (outstanding)
 
 - 🔴 Re-derive "stage1 complete" from a clean `--jobs 1` run of the 4
   stragglers (bzip2, xz-utils, gettext×2), not the VDB spot check
@@ -87,8 +145,6 @@ to land as part of (or before) the refactor.
   `IUSE=nls ssl +reference freepg sequoia` in the VDB. If so, close #36 as
   "already fixed; stale entry" — verified via `regen_only` that current code
   produces correct IUSE (`iuse-vdb-already-fixed.md`).
-- 🔴 Cross-check each behaviour change above against `emerge` parity in the
-  `crossdev-stages` noiseless sandbox before landing.
 
 ## Out of scope (deferred)
 
