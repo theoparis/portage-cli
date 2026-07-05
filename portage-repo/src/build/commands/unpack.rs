@@ -178,7 +178,16 @@ fn unpack_archive(src: &std::path::Path, cwd: &std::path::Path, eapi: u32) -> Re
         }
         unpack_cmd("lha", &["xfq", &src_s], cwd)
     } else {
-        Err(format!("unknown archive type: {name}"))
+        // PMS 12.3.11 only lists behavior for recognized suffixes; real
+        // Portage's `unpack` helper leaves a file with an unrecognized
+        // suffix untouched rather than failing the phase. Ebuilds routinely
+        // list non-archive files in SRC_URI (patches, man pages, data files)
+        // alongside real archives and rely on `default` src_unpack (which
+        // calls `unpack ${A}` unconditionally on every distfile) not dying
+        // on them — e.g. dev-build/meson's `meson-reference.3` man page,
+        // installed straight from `${DISTDIR}` in src_install, never needs
+        // to be extracted at all.
+        Ok(0)
     }
 }
 
@@ -206,4 +215,39 @@ fn unpack_piped(
         .status()
         .map(|s| s.code().unwrap_or(1) as u8)
         .map_err(|e| format!("failed to run {prog}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the riscv64 stage3 shakeout: `dev-build/meson`'s
+    /// real ebuild lists `meson-reference.3` (a bare man page, fetched via
+    /// SRC_URI's `->` rename) alongside its real `.tar.gz` source, and its
+    /// `src_unpack` is just `default` — which calls `unpack ${A}`
+    /// unconditionally on *every* distfile, including the man page. Real
+    /// Portage's `unpack` leaves a file with an unrecognized suffix
+    /// untouched rather than failing the phase; `em` was `die`-ing instead,
+    /// breaking every ebuild with a non-archive SRC_URI entry.
+    #[test]
+    fn unrecognized_extension_is_a_no_op_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = unpack_archive(
+            std::path::Path::new("meson-reference-1.11.1.3"),
+            tmp.path(),
+            8,
+        );
+        assert_eq!(result, Ok(0));
+    }
+
+    #[test]
+    fn recognized_extension_still_dispatches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("missing.tar.gz");
+        // A genuinely recognized suffix still goes through the real
+        // extractor (and fails here only because the file doesn't exist —
+        // proving the no-op path above is specific to unknown suffixes).
+        let result = unpack_archive(&archive, tmp.path(), 8);
+        assert!(result.is_err() || result != Ok(0));
+    }
 }
