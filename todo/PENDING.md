@@ -6,112 +6,49 @@ here briefly for context). Updated 2026-06-27.
 
 ## RESUME HERE (2026-07-05)
 
-Mid riscv64 stage3 (`--emptytree @system`) shakeout, [[stage-build-shakeout]]
-findings #22-27. Just fixed and committed (verified live): #24 PKGDIR
-root-relative default + fail-fast preflight (`510e226`), #25 switched
-`auto` privilege default to pseudoroot after a rare fakeroost ptrace
-crash (`42d001e`), #26 three real dep-resolution bugs — USE-dep-blind
-BDEPEND check (`762e645`), PKG_CONFIG not sysroot-scoped for `--cross`
-(`1a7e7c4`), missing BDEPEND scheduling for `--cross` target packages
-(`9c0354e`). `net-misc/dhcpcd`/`sys-apps/iproute2` reverified building
-clean after all that. #27 (`dev-python/jinja2` dying in
-`distutils-r1_python_install`) — ✅ **root-caused and fixed**: not a
-missing directory at all — `capture_variables` (Compile→Install
-worker-env dump) was leaking `PIPESTATUS` (and other bash dynamic vars)
-across the process boundary; brush never re-resizes `PIPESTATUS` once
-it's been explicitly `declare`d, so the eclass's `pipestatus || die`
-check saw a stale, truncated array and misfired (`5902b73`). The
-underlying brush bug itself is filed separately, not blocking:
-[[brush-pipestatus-not-reset]]. #28 (new, found retrying the full run):
-the merge-execution loop ignored each plan entry's own `merge_root`,
-so a `MergeRoot::Host` BDEPEND like jinja2 silently built into the
-`--cross` sysroot instead of `base_roots()` even after #26 correctly
-scheduled it there — fixed via a new `entry_roots()` helper in `main.rs`
-(`3ef21c8`). 57/59 packages now merge clean. #30: a "clean up this mess"
-pass found the *same* bare-host hardcoding bug, independently duplicated,
-in `Avail::initial_bdepend()` (used by `preflight::check()`) and
-`bdepend_trim::TrimCtx`'s post-solve trim — both fixed to take
-`host_roots` (`base_roots()`), mirroring #28's `load_host_installed` fix
-(`732aefe`). #31 (asked "why did it fail though?" on the huge ~50-package
-pre-flight list from retesting jinja2-into-`base_roots()`): found a
-*second*, genuinely virtual cause mixed into that list — `check()`
-checked every entry's own DEPEND against `depend_avail` regardless of
-`merge_root`, but `depend_avail` only grows from Target merges, so a
-`Host` entry's DEPEND on an *earlier Host*-merged package (e.g.
-`dev-lang/perl` on `sys-libs/gdbm`, both routed to `base_roots()`)
-spuriously failed. Fixed by branching the DEPEND check on `merge_root`
-the same way the existing recording branch already does. #32 (found
-immediately on the live re-run with #31's fix): a real, non-test-pollution
-bug — `order`'s "already installed" filter checked `target_installed_cpvs`
-(a `HashSet<Cpv>`, no `merge_root`) unconditionally, so a `Host`-routed
-`dev-lang/perl` requirement (unsatisfied at `base_roots()`) matched the
-`--cross` sysroot's own legitimately-installed perl by `(cpn, version)`
-alone and got silently dropped from the plan — never built, BDEPEND
-permanently unsatisfied. Almost misdiagnosed as stale-VDB pollution and
-nearly deleted real completed target-system work before checking; caught
-in time. Fixed by adding a parallel `host_installed_cpvs` set and
-branching on `pkg.merge_root()`, same pattern as #28/#30/#31. This is
-the fourth Host/Target root-conflation bug found this session. #33: live
-re-run confirmed real progress (perl now appears in the plan at all) but
-hit a *different, non-root* bug — an initial hypothesis (a stray
-"reinstall" fallback append placing perl at the end of `order`) turned
-out wrong on closer live tracing (temporary `eprintln!`s in the solver,
-removed after). Actual cause: `portage-atom-pubgrub`'s
-`dependency_graph()` (which `install_order`'s topological sort is built
-from) did a raw `self.packages.get(pkg)` lookup instead of the
-alias-resolving `self.package_data(pkg)` — always missing for any
-`Host`-flavored solved package (`self.packages` is keyed `Target`-only;
-`Host` lookups need the `host_aliases` redirect `get_dependencies`
-already used correctly). So a `Host` package's own BDEPEND on *another*
-`Host` package (here, `dev-perl/YAML-Tiny` needing `dev-lang/perl`, both
-Host-routed) got zero ordering edges, and the topological tie-break put
-perl after its own consumer. One-line fix + a verified regression test
-(`208c818`).
-**Remaining 1 failure** (of 2 — binutils resolved, see #29):
-`sys-devel/binutils`'s `make exited 2` was real, not test-session noise —
-confirmed straight from binutils' own upstream `Makefile.am`: it reuses
-`ZSTD_CFLAGS` (the target sysroot's zstd include) in `AM_CFLAGS_FOR_BUILD`
-(the native build-machine helper rule), tripping `#error unsupported ABI`
-on aarch64-host/riscv64-target header mismatch. Upstream bug, not em's;
-worked around with `sys-devel/binutils -zstd` in the sysroot's
-`package.use` — verified rebuilding clean.
+Riscv64 stage3 (`--emptytree @system`) shakeout, [[stage-build-shakeout]]
+findings #22-34 — full detail there, this is the compressed pointer.
 
-**Live re-run confirmed #32+#33 fixed**: the entire perl/dev-perl
-failure mass is gone; plan resolves through to `sys-apps/systemd-utils`
-itself. Remaining ~34 failures are a small, coherent, *real* gap:
-`app-portage/elt-patches`, `dev-build/{autoconf,automake,meson,cmake}`,
-`dev-perl/Locale-gettext` — not a code bug. Root cause (confirmed by
-reading real ebuilds): `--stage1`'s design assumes a baseline tier
-("obviously available", same as `tar`/`gzip`/`bzip2`/`xz-utils` already
-in this session's 31-package seed) exists before it runs; these tools
-belong in that tier and were never meant to be pulled in via BDEPEND —
-`sys-apps/attr`/`dev-libs/libffi` both `inherit libtool` (which sets
-`BDEPEND=elt-patches`) then their own `BDEPEND="..."` line *overwrites*
-it (plain `=`, not `+=`), so real bash semantics don't even carry it
-through — yet `elibtoolize`'s `eltpatch` call still needs the binary on
-`PATH` regardless. Known, accepted Gentoo-tree quirk; real bootstrapping
-works around it by having these tools already present, not via the
-dependency graph. Each resolves cleanly as a standalone atom.
+**Systemic issue fully resolved and live-verified.** Summary of the arc:
+#22-27 fixed real dep-resolution/privilege/USE bugs (see file for detail).
+#28/#30/#31/#32 were the *same* Host/Target root-conflation bug found
+independently in four places (`load_host_installed`,
+`Avail::initial_bdepend`, `preflight`'s DEPEND check, `order`'s
+installed-filter) — each fixed the same way (check the specific root a
+package's own `merge_root` implies, never a merge_root-blind identity).
+#33 was a fifth, structurally different bug: `dependency_graph()` did a
+raw `self.packages.get(pkg)` instead of the alias-resolving
+`self.package_data(pkg)`, so every `Host`-flavored package got zero
+ordering edges in the topological sort. #29: `sys-devel/binutils`'s
+zstd/`AM_CFLAGS_FOR_BUILD` issue — real upstream bug, not em's, worked
+around via `package.use`.
 
-**Architecture, confirmed correct** (see `stage-build-shakeout.md`'s
-"Architecture recap" section for full detail): unprivileged `--stage1`
-populates a self-contained host root (task #7, already works);
-privileged root=`/` installs on host directly (trivial); cross
-sysroot+toolchain (#7-9, done); cross `--stage1` into the sysroot (#8,
-done — the 150+-package `@system` closure found in #32's investigation);
-stage3/stage4 use *that prepared host root* to satisfy Host BDEPEND at
-BROOT — `base_roots()` already is that host root, just under-populated.
+**#34 — the actual remaining gap, fully closed**: the ~34 remaining
+pre-flight failures (`elt-patches`, `autoconf`/`automake`/`meson`/`cmake`,
+`Locale-gettext`) weren't a bug — real bootstrapping assumes a baseline
+tier of tools (same as `tar`/`gzip`, already in this session's minimal
+seed) exists before stage1 runs; these belong in that tier. Traced and
+broke a genuine, confirmed hard cycle (`gawk → bison → gettext → libxml2
+→ meson → python → gawk`) by hand, seeding each link with `--nodeps`
+after verifying its *actual build* (not just the plan) succeeded.
+Along the way, fixed two more real bugs: (1) `--nodeps` didn't skip
+`preflight::check()`, defeating its whole purpose of seeding a cycle
+member the guard-rail can't validate (`13bb26d`); (2) `em`'s `unpack`
+died on any SRC_URI file with an unrecognized suffix (real Portage
+leaves such files untouched) — broke `dev-build/meson`, which fetches a
+bare man page via SRC_URI's `->` rename (`fa27567`). Both fixed with
+regression tests, full `cargo build/clippy/test/fmt --check` clean.
 
-**Current work**: extend the host root's baseline with `elt-patches`,
-`gettext`, `autoconf`, `automake`, `libtool`, `cmake`, `meson`,
-`pkgconfig` (one at a time, not combined — a combined
-`elt-patches+cmake+meson` request pulled in a much larger closure
-including `gdbm` and re-surfaced a similar-looking failure), then retry
-`em --root <hostroot> stages --stage1 --with-bdeps` for real, then
-retry `sys-apps/systemd-utils --cross ...` to confirm the full pipeline
-closes. Also noted: `stages --stage1` doesn't default `--with-bdeps` on
-(unlike `--emptytree`'s native path) — candidate follow-up, not
-blocking. Task #17 still in progress.
+**Result**: a real `--autosolve-use --with-bdeps` request for
+`cmake libxml2 gettext bison` now resolves through `preflight` cleanly
+(previously always failed) and actually runs — 74 packages merged, 28
+failed. Those 28 are now ordinary, disparate per-package build issues
+(patch failures, an `econf` failure) — normal bootstrap shakeout,
+unrelated to the architecture work. Task #17 still in progress.
+
+**Next**: triage the 28 remaining failures (a new, separate list), then
+retry `em stages --stage1` for real end-to-end, then retry
+`sys-apps/systemd-utils --cross ...` to confirm the full pipeline closes.
 
 ## Stage building (the active goal: a real stage3)
 

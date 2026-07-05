@@ -2058,3 +2058,84 @@ present, or (b) narrow the cycle first (e.g. check whether
 `sys-apps/portage`'s footprint can be trimmed for a build-only stage1,
 shrinking the SCC and maybe eliminating the cross-linking entirely).
 Paused here to discuss direction with the user rather than guess further.
+
+## 34. Cycle actually broken, `--nodeps`+preflight bug fixed, a real `unpack` bug found — systemic issue resolved
+
+User picked (a): seed the cycle directly, package by package, using
+`--nodeps` — but `--nodeps` on a single atom *still* hit
+`preflight::check()`, which turned out to check real ebuild metadata
+unconditionally regardless of `--nodeps`. Real fix (not a workaround):
+`--nodeps` already means "merge only the named atoms, no dependency
+expansion or verification" (matching emerge's own semantics) —
+`preflight::check()` should be skipped entirely when `--nodeps` is set,
+since running it defeats the flag's whole purpose (seeding one member
+of a genuine cycle, which by definition has no valid dependency order
+for the guard-rail to check against). One-line fix in `main.rs`
+(`13bb26d`), full `cargo build/clippy/test/fmt --check` clean.
+
+With that in hand, traced the real cycle by hand and broke it link by
+link, verifying each *actual build* (not just the plan) as I went:
+
+1. `dev-build/samurai` (zero real deps — pure C, no python) selected as
+   the `app-alternatives/ninja` provider instead of `dev-build/ninja`
+   (which needs python) via `package.use`, breaking the
+   `meson → ninja → python` sub-link.
+2. Traced `dev-lang/python`'s own real prerequisites (sqlite, openssl,
+   expat, gdbm, libffi, readline, ncurses, pkgconfig, unzip, perl,
+   autoconf/automake/autoconf-archive/mime-types/mpdecimal/
+   gentoo-common/gnuconfig, m4/gzip-alt/autoconf-wrapper/help2man) and
+   built each with `--nodeps`, confirming empirically at each step
+   that only real, satisfiable deps remained (no further hidden
+   cycles in this branch).
+3. Hit the *actual* remaining cycle: `sys-apps/gawk` (needed by
+   `app-alternatives/awk`, needed by python's own BDEPEND) needs
+   `sys-devel/bison`, which — per its own ebuild comment ("gettext IS
+   required in RDEPEND because >=bison-3.7 links against it") —
+   unconditionally needs `sys-devel/gettext`, which unconditionally
+   needs `dev-libs/libxml2` (real DEPEND, not USE-gated), which needs
+   `dev-build/meson`, which needs `python`, which needs `awk`, which
+   needs `gawk`, which needs `bison` — a genuine, confirmed hard cycle.
+   Broke it the same way real distributions do: built `gawk` with
+   `--nodeps` first, betting that upstream gawk tarballs ship a
+   pre-generated bison output and don't actually invoke bison unless
+   timestamps force regeneration. Confirmed live — gawk's *actual
+   build* succeeded with no bison present at all.
+4. With `gawk` (and thus `app-alternatives/awk`) real, `python` merged
+   for real (all prerequisites finally satisfied).
+5. `dev-build/meson`'s *actual build* then hit a genuinely different,
+   real `em` bug (see below) — fixed — after which meson merged too.
+6. With `python` + `meson` real, `dev-libs/libxml2` → `sys-devel/gettext`
+   → `sys-devel/bison` → `dev-build/cmake` all resolved and merged via
+   **normal** (non-`--nodeps`) solving — confirming the cycle really is
+   fully broken now, not just individually special-cased.
+
+**Real `em` bug found and fixed along the way**: `dev-build/meson`'s
+`unpack` phase died with `unknown archive type` on
+`meson-reference-1.11.1.3` — a bare man page fetched via SRC_URI's `->`
+rename (`meson-reference.3 -> meson-reference-${PV}.3`), not an archive
+at all. `meson`'s `src_unpack` is just `default`, which calls
+`unpack ${A}` unconditionally on *every* distfile including this one;
+the man page is later installed straight from `${DISTDIR}` via `newman`
+in `src_install`, never actually needing extraction. `em`'s `unpack`
+treated any unrecognized suffix as fatal; real Portage's `unpack`
+helper leaves such files untouched instead — this must have been
+silently correct for every previously-tested ebuild only because none
+of them happened to have a non-archive SRC_URI entry. Fixed in
+`portage-repo/src/build/commands/unpack.rs` (`fa27567`), with a
+regression test and a control test confirming recognized suffixes
+still dispatch normally.
+
+**Result, live-verified**: a full `--autosolve-use --with-bdeps` request
+for `cmake libxml2 gettext bison` together resolved cleanly through
+`preflight` (previously always failed here) and *ran* — 74 packages
+merged, 28 failed. The 28 failures are now genuinely disparate
+per-package build issues (patch application failures for `nghttp3`/
+`libuv`/`libb2`/`e2fsprogs`/`ensurepip-pip`, an `econf` failure for
+`nghttp2`, etc.) — ordinary from-scratch-bootstrap shakeout, structurally
+unrelated to today's cycle/architecture work. The originally-blocking
+systemic issue (elt-patches baseline gap #30/#31/#32/#33, the meson/cmake
+cycle, the `--nodeps`/preflight gap, the `unpack` bug) is fully resolved
+and verified live. Next: triage the 28 remaining individual failures as
+their own investigation (a new, separate list), then retry
+`em stages --stage1` for real end-to-end, then retry
+`sys-apps/systemd-utils --cross ...`.
