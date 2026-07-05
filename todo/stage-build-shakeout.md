@@ -1635,3 +1635,124 @@ over generically.
 run with the `package.use` override above in place. `sys-apps/systemd-utils`
 (blocked on the native-stage1-at-`base_roots()` gap, #28) is now the only
 known remaining failure out of 59. [[stage-build-shakeout]]
+
+## 30. Cleanup pass — the same "hardcoded bare host" bug as #28, twice more (fixed, `732aefe`)
+
+Requested directly ("let's do a full pass and clean up this mess, there is
+too much duplication and hardcoding") after #28 fixed the solver's own
+`load_host_installed()` reading the bare host VDB regardless of where a
+Host BDEPEND merge actually lands (`base_roots()`). Auditing every other
+`Vdb::open_default()`/`None ⟹ bare host` call site in `bdepend_avail.rs`
+and `query/depgraph/*.rs` found the *exact same bug*, independently
+duplicated, in two more places that never got touched by the #28 fix:
+
+1. `Avail::initial_bdepend()` — hardcoded `vdb_avail_entries(None)`
+   (bare host) unconditionally, ignoring its own `roots` parameter
+   entirely. This is what `preflight::check()` uses, so the pre-flight
+   guard-rail was still checking BDEPEND satisfaction against the wrong
+   root even after #28 fixed the solver side.
+2. `bdepend_trim::TrimCtx`/`avail_for_consumer()` (the post-solve
+   within-run BDEPEND trim pass) — same call, same bug, via
+   `Avail::initial_bdepend(ctx.roots)` where `ctx.roots` is the
+   (possibly `--cross`-substituted) solver root, not `base_roots()`.
+
+Fixed both by threading `host_roots: &Roots` (= `Cli::base_roots()`,
+already computed at every call site for the #28/`load_host_installed`
+fix, no new plumbing needed) into `Avail::initial_bdepend`,
+`preflight::check`, and `TrimCtx`, mirroring the established convention.
+`TrimCtx.roots` became dead once its only reader switched to
+`host_roots` — removed rather than left unused. Also deduped
+`vdb_cpvs()`/`vdb_avail_entries()`'s identical `Vdb::open` match arms
+(one now delegates to the other).
+
+Audited the remaining `None ⟹ bare host` sites and confirmed they're
+legitimate, not the same bug: `installed.rs::load_one`'s `None` case is
+only reached when both `roots.base()`/`roots.target()` are genuinely
+unset (bare host, correctly); `search.rs`'s `Vdb::open_default()` is in
+a command that takes no `Roots` parameter at all today (`em search` has
+no `--root` support, a separate pre-existing feature gap, not a
+hardcoded bypass of an available parameter — left alone).
+
+Added a regression test (`initial_bdepend_reads_the_given_root_not_the_bare_host`)
+mirroring `load_host_installed`'s existing one. Full
+`cargo build/clippy/test/fmt --check` clean across the workspace.
+
+This is a correctness/consistency fix, not a new capability — it doesn't
+change the `sys-apps/systemd-utils` outcome (#28's note): that failure is
+a real native-stage1-at-`base_roots()` bootstrap gap, and in *this*
+session's setup `base_roots()` is the `--root /var/tmp/cross-stage1-riscv64`
+offset (not bare host).
+
+**Correction, see #31**: the claim just above ("the preflight failure list
+there was always reporting real, not virtual, missing packages") turned
+out to be only half right — #31 found a second, genuinely virtual cause
+mixed into that same failure list.
+
+## 31. `preflight::check` checked a Host entry's own DEPEND against the wrong Avail set (fixed)
+
+Asked directly ("why did it fail though?") after reporting #30's fix and
+the huge (~50-package) pre-flight failure list from re-running the native
+`dev-python/jinja2` build into `base_roots()`. Cross-referencing the
+printed plan against `preflight.rs`'s bookkeeping (not just re-asserting
+"real bootstrap gap") found a second, distinct, and previously
+unconfirmed bug — the "why do even DEPEND-only relationships like
+`dev-lang/perl` needing `sys-libs/gdbm` fail despite gdbm appearing
+earlier in the plan" question flagged as unresolved earlier this session.
+
+The plan lists `sys-libs/gdbm` and `dev-lang/perl` *twice each*: once with
+no `to ...` suffix (`MergeRoot::Target`, going into the `--cross` sysroot)
+and once with `to /var/tmp/cross-stage1-riscv64/` (`MergeRoot::Host`,
+going into `base_roots()`). `gdbm`-Host is earlier in the plan than
+`perl`-Host, so `perl`-Host's `>=sys-libs/gdbm-1.8.3:=` DEPEND should see
+it as already merged. It didn't, because `check()`'s loop did:
+
+```rust
+collect_unsatisfied(&depend, &depend_avail, &mut missing);   // always
+collect_unsatisfied(&bdepend, &bdepend_avail, &mut missing); // always
+...
+match planned.merge_root {
+    MergeRoot::Host => bdepend_avail.record_merge_bdepend(cpv),       // only bdepend_avail
+    MergeRoot::Target => bdepend_avail.record_target_merge(&mut depend_avail, cpv), // both
+}
+```
+
+Every entry's own `DEPEND` was checked against `depend_avail` regardless
+of its `merge_root` — but `depend_avail` only grows from `Target` merges.
+A `Host` entry's `DEPEND` on *another* `Host`-merged package is checked
+against a set that never received that package, because recording a
+`Host` merge only updates `bdepend_avail`. Since a `Host` package is
+*built at* `base_roots()`/BROOT, its own `DEPEND` should be checked
+against the same view as its `BDEPEND` — not `depend_avail`, which
+represents the Target/base sysroot, a different root entirely.
+
+Fixed by branching the DEPEND check on `merge_root`, same as the existing
+BDEPEND-recording branch:
+
+```rust
+match planned.merge_root {
+    MergeRoot::Host => collect_unsatisfied(&depend, &bdepend_avail, &mut missing),
+    MergeRoot::Target => collect_unsatisfied(&depend, &depend_avail, &mut missing),
+}
+collect_unsatisfied(&bdepend, &bdepend_avail, &mut missing);
+```
+
+Two regression tests added (`host_entry_depend_satisfied_by_earlier_host_entry`,
+`target_entry_depend_not_satisfied_by_host_only_entry` — the latter a
+negative control confirming Host merges still don't leak into the
+Target/base-system view). Both needed an **isolated** `Roots` — the first
+attempt used `Roots::default()` and the negative-control test failed for
+the wrong reason: `Roots::default()`'s `merge_root()`/`base()` fall
+through to the *real* bare host `/var/db/pkg`, and this dev machine
+already has `sys-libs/gdbm`/`dev-lang/perl` installed, satisfying the
+atom regardless of the bug. Fixed by extending `Roots::for_test` to also
+set `base` (matching a real `--root DIR` invocation, where base == target)
+so both tests run against an empty tempdir VDB, hermetically.
+
+This means the earlier ~50-package failure list was a mix of two causes:
+some packages genuinely missing at `base_roots()` (the real bootstrap
+gap, #28/#30's note stands for those), and others — anything with a
+`Host`-routed DEPEND on another `Host`-merged package earlier in the plan
+— spuriously reported due to this bug. Full re-run needed to know the
+real remaining gap size; not yet done as of this writing (large, slow
+build). Committed alongside #30's plumbing. Full
+`cargo build/clippy/test/fmt --check` clean.

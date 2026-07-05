@@ -198,12 +198,16 @@ impl Roots {
         portage_repo::ReposConf::load_rooted(cfg, &extra)
     }
 
-    /// Test-only: a `Roots` with just `target` set, for exercising
-    /// root-selection logic without a full CLI parse.
+    /// Test-only: a `Roots` with `base` and `target` both set to the same
+    /// path (matching a plain `--root DIR` invocation), for exercising
+    /// root-selection logic without a full CLI parse and without any VDB
+    /// lookup silently falling through to the real bare host's.
     #[cfg(test)]
     pub(crate) fn for_test(target: &str) -> Self {
+        let path = camino::Utf8PathBuf::from(target);
         Roots {
-            target: Some(camino::Utf8PathBuf::from(target)),
+            base: Some(path.clone()),
+            target: Some(path),
             ..Default::default()
         }
     }

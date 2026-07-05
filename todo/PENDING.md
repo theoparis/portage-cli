@@ -27,7 +27,22 @@ the merge-execution loop ignored each plan entry's own `merge_root`,
 so a `MergeRoot::Host` BDEPEND like jinja2 silently built into the
 `--cross` sysroot instead of `base_roots()` even after #26 correctly
 scheduled it there — fixed via a new `entry_roots()` helper in `main.rs`
-(commit pending as of this writing). 57/59 packages now merge clean.
+(`3ef21c8`). 57/59 packages now merge clean. #30: a "clean up this mess"
+pass found the *same* bare-host hardcoding bug, independently duplicated,
+in `Avail::initial_bdepend()` (used by `preflight::check()`) and
+`bdepend_trim::TrimCtx`'s post-solve trim — both fixed to take
+`host_roots` (`base_roots()`), mirroring #28's `load_host_installed` fix
+(`732aefe`). #31 (asked "why did it fail though?" on the huge ~50-package
+pre-flight list from retesting jinja2-into-`base_roots()`): found a
+*second*, genuinely virtual cause mixed into that list — `check()`
+checked every entry's own DEPEND against `depend_avail` regardless of
+`merge_root`, but `depend_avail` only grows from Target merges, so a
+`Host` entry's DEPEND on an *earlier Host*-merged package (e.g.
+`dev-lang/perl` on `sys-libs/gdbm`, both routed to `base_roots()`)
+spuriously failed. Fixed by branching the DEPEND check on `merge_root`
+the same way the existing recording branch already does. Full re-run not
+yet done (large, slow build) — the real remaining gap size at
+`base_roots()` is now unknown until that happens.
 **Remaining 1 failure** (of 2 — binutils resolved, see #29):
 `sys-devel/binutils`'s `make exited 2` was real, not test-session noise —
 confirmed straight from binutils' own upstream `Makefile.am`: it reuses
@@ -36,12 +51,13 @@ confirmed straight from binutils' own upstream `Makefile.am`: it reuses
 on aarch64-host/riscv64-target header mismatch. Upstream bug, not em's;
 worked around with `sys-devel/binutils -zstd` in the sysroot's
 `package.use` — verified rebuilding clean. `sys-apps/systemd-utils`
-(blocked on a *real bootstrap gap*, not a code bug — `base_roots()`, this
-session's outer EROOT, has no native Python at all, only the minimal
-cross-toolchain-support set; jinja2 needs a full native stage1 there —
-see [[em-root-characterization]] Tier 1 item 2 and
-`stage-build-shakeout.md` #28) is now the only known remaining failure.
-Task #17 still in progress.
+(blocked on jinja2 needing a full native stage1 at `base_roots()`, this
+session's outer EROOT having only the minimal cross-toolchain-support set
+— see [[em-root-characterization]] Tier 1 item 2) is the last known
+failure, but #31 means the exact remaining gap size is unconfirmed until
+a fresh run with the DEPEND-routing fix — some of what looked like
+missing packages may turn out to already be satisfiable once Host-Host
+DEPEND edges are checked correctly. Task #17 still in progress.
 
 ## Stage building (the active goal: a real stage3)
 

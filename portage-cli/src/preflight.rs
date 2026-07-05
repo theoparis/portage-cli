@@ -4,12 +4,15 @@
 //! entry's build-time dependencies are present in the set that will be visible
 //! when it builds:
 //!
-//! - `DEPEND` is resolved against the **base system** view
-//!   `VDB(base) ∪ VDB(target)` (what `SYSROOT`/`ESYSROOT` point at), and
-//! - `BDEPEND` against the build host's own `BROOT`: `Cli::base_roots()`,
+//! - a **Target**-routed entry's `DEPEND` is resolved against the **base
+//!   system** view `VDB(base) ∪ VDB(target)` (what `SYSROOT`/`ESYSROOT`
+//!   point at);
+//! - a **Host**-routed entry's `DEPEND` — it's built *at* `BROOT`, so its
+//!   own build-time deps live there too — and every entry's `BDEPEND` are
+//!   both resolved against the build host's own `BROOT`: `Cli::base_roots()`,
 //!   *not* unconditionally bare `/` (a `--root`/`--prefix`/`--local`
-//!   invocation's Host BDEPEND merges land in `base_roots()`, so that's what
-//!   must be checked — see `todo/stage-build-shakeout.md` #28/#30).
+//!   invocation's Host merges land in `base_roots()`, so that's what must be
+//!   checked — see `todo/stage-build-shakeout.md` #28/#30/#31).
 //!
 //! Both sets grow with each earlier plan entry: a package merged earlier in the
 //! run is visible to everything after it (root-model.md "within-run
@@ -45,8 +48,19 @@ pub fn check(plan: &[PlannedMerge], roots: &Roots, host_roots: &Roots) -> Result
         let depend = DepEntry::evaluate_use(&planned.depend, &active);
         let bdepend = DepEntry::evaluate_use(&planned.bdepend, &active);
 
+        // A Host entry is built *at* `base_roots()` (BROOT), so its own
+        // DEPEND — not just BDEPEND — must be checked against that same
+        // view, not `depend_avail` (the target/base sysroot's, a different
+        // root entirely). Checking it against `depend_avail` regardless of
+        // `merge_root` made a Host package's DEPEND on another Host-merged
+        // package (e.g. `dev-lang/perl` on `sys-libs/gdbm`, both routed to
+        // `base_roots()`) spuriously fail: `depend_avail` only grows from
+        // Target merges, so it never saw the earlier Host merge at all.
         let mut missing: Vec<String> = Vec::new();
-        collect_unsatisfied(&depend, &depend_avail, &mut missing);
+        match planned.merge_root {
+            MergeRoot::Host => collect_unsatisfied(&depend, &bdepend_avail, &mut missing),
+            MergeRoot::Target => collect_unsatisfied(&depend, &depend_avail, &mut missing),
+        }
         collect_unsatisfied(&bdepend, &bdepend_avail, &mut missing);
         if !missing.is_empty() {
             missing.sort();
@@ -73,4 +87,65 @@ pub fn check(plan: &[PlannedMerge], roots: &Roots, host_roots: &Roots) -> Result
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn planned(merge_root: MergeRoot, cpv: &str, depend: &str) -> PlannedMerge {
+        PlannedMerge {
+            merge_root,
+            cpv: cpv.to_string(),
+            ebuild_path: camino::Utf8PathBuf::new(),
+            use_flags: Vec::new(),
+            depend: DepEntry::parse(depend).unwrap(),
+            bdepend: Vec::new(),
+            reinstall: false,
+        }
+    }
+
+    /// Regression test for the riscv64 stage3 shakeout (#31): a `Host`
+    /// entry's own DEPEND on an *earlier* `Host` entry in the same plan
+    /// (both routed to `base_roots()`, e.g. `dev-lang/perl` on
+    /// `sys-libs/gdbm` in a self-contained native bootstrap) must be seen
+    /// as satisfied — checking it against `depend_avail` (which only grows
+    /// from Target merges) made it spuriously fail.
+    ///
+    /// Uses an isolated tempdir root (via `Roots::for_test`), not
+    /// `Roots::default()`: the default falls through to the *real* bare
+    /// host `/var/db/pkg`, which may already have `gdbm`/`perl` installed on
+    /// the machine running the test, silently passing regardless of the fix.
+    #[test]
+    fn host_entry_depend_satisfied_by_earlier_host_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = Roots::for_test(tmp.path().to_str().unwrap());
+        let plan = vec![
+            planned(MergeRoot::Host, "sys-libs/gdbm-1.26", ""),
+            planned(
+                MergeRoot::Host,
+                "dev-lang/perl-5.42.2",
+                ">=sys-libs/gdbm-1.8.3:=",
+            ),
+        ];
+        assert!(check(&plan, &roots, &roots).is_ok());
+    }
+
+    /// Negative control: a `Target` entry's DEPEND on a `Host`-only merge is
+    /// *not* satisfied — the two roots are genuinely different, and Host
+    /// merges must not leak into the Target/base-system view.
+    #[test]
+    fn target_entry_depend_not_satisfied_by_host_only_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = Roots::for_test(tmp.path().to_str().unwrap());
+        let plan = vec![
+            planned(MergeRoot::Host, "sys-libs/gdbm-1.26", ""),
+            planned(
+                MergeRoot::Target,
+                "dev-lang/perl-5.42.2",
+                ">=sys-libs/gdbm-1.8.3:=",
+            ),
+        ];
+        assert!(check(&plan, &roots, &roots).is_err());
+    }
 }
