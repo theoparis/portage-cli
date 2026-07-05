@@ -2128,14 +2128,58 @@ still dispatch normally.
 **Result, live-verified**: a full `--autosolve-use --with-bdeps` request
 for `cmake libxml2 gettext bison` together resolved cleanly through
 `preflight` (previously always failed here) and *ran* — 74 packages
-merged, 28 failed. The 28 failures are now genuinely disparate
-per-package build issues (patch application failures for `nghttp3`/
-`libuv`/`libb2`/`e2fsprogs`/`ensurepip-pip`, an `econf` failure for
-`nghttp2`, etc.) — ordinary from-scratch-bootstrap shakeout, structurally
-unrelated to today's cycle/architecture work. The originally-blocking
-systemic issue (elt-patches baseline gap #30/#31/#32/#33, the meson/cmake
-cycle, the `--nodeps`/preflight gap, the `unpack` bug) is fully resolved
-and verified live. Next: triage the 28 remaining individual failures as
-their own investigation (a new, separate list), then retry
-`em stages --stage1` for real end-to-end, then retry
-`sys-apps/systemd-utils --cross ...`.
+merged, 28 failed. The originally-blocking systemic issue (elt-patches
+baseline gap #30/#31/#32/#33, the meson/cmake cycle, the
+`--nodeps`/preflight gap, the `unpack` bug) is fully resolved and
+verified live.
+
+## 35. Triage of the 28 remaining failures — 24 were `--jobs 16` races, 1 was a real `em` bug, 3 were unrelated flakes
+
+Checked each of the 28 against the VDB directly rather than trusting the
+combined (heavily interleaved, `--jobs 16`) log: only **4** were actually
+still missing. The other 24 (`attr`, `libuv`, `libb2`, `e2fsprogs`, and
+~20 more) had failed on one of two duplicate Host/Target build attempts
+(a not-yet-ready shared prerequisite at that exact moment) while the
+*other* attempt succeeded — individual `build.log` files for all of them
+end cleanly at `pkg_postinst`, and the packages are genuinely installed.
+Not a bug, just `--jobs 16` contention during a from-scratch bootstrap
+where many packages' true readiness windows are narrow.
+
+Of the 4 genuinely missing:
+- `net-dns/c-ares`, `dev-libs/libgpg-error`, `sys-apps/findutils` — all
+  three merged cleanly on retry at `--jobs 1`. `c-ares`'s config.log
+  showed the compiler test program *actually compiling and linking*
+  (`$? = 0`) followed immediately by `configure: result: no` — a `--jobs
+  16`-induced race/flake in the build environment, not a real toolchain
+  problem. `findutils`'s "could not determine how to read list of
+  mounted file systems" likewise didn't recur at `--jobs 1`.
+- `dev-python/installer` — a **real, distinct `em` bug**: `unpack`'s
+  existence check for a `./`-relative archive used a bare
+  `PathBuf::from(archive)`, resolving against the Rust process's own
+  OS-level CWD instead of the shell's *tracked* working directory
+  (`cwd`, already captured and used for the actual extraction) — those
+  can diverge, since brush tracks `$PWD` independently of calling
+  `std::env::set_current_dir`. `installer`'s `src_unpack` does
+  `cp foo.whl foo.whl.zip && unpack "./foo.whl.zip"` (a real,
+  PMS-legitimate pattern — PMS 12.3.11 says only bare filenames get
+  looked up in `$DISTDIR`; anything with a path separator is used as
+  given — independently confirmed live in `eclass/rpm.eclass`'s own
+  `unpack "./${a}"`). The check always reported "not found" for a file
+  that demonstrably existed in `cwd`. Fixed by resolving `./`-relative
+  archives against `cwd.join(archive)`; extracted the whole
+  path-resolution branch into a pure `resolve_src_path()` function so
+  it's directly unit-testable without a full shell harness (`bc236f7`).
+  Verified: reverting the fix made the new regression test fail
+  cleanly; restoring it passes. `dev-python/installer` itself then
+  merged cleanly on retry.
+
+All 4 confirmed fixed/resolved and live-verified; the workspace's own
+test suite hit one unrelated, pre-existing flaky test
+(`reused_shell_does_not_leak_metadata_between_ebuilds` — passes in
+isolation and on a clean re-run of the full suite) during this pass,
+unconnected to any of today's changes.
+
+**Next**: retry `em stages --stage1` for real, end-to-end, on
+`/var/tmp/cross-stage1-riscv64` (now that all 4 real gaps are closed),
+then retry `sys-apps/systemd-utils --cross riscv64-unknown-linux-gnu ...`
+to confirm the full pipeline closes.
