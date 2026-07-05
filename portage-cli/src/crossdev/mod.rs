@@ -639,7 +639,12 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
     write_overlay(target, &overlay, &gentoo_path)?;
     write_cross_env(target, globals, &gentoo_path)?;
     ensure_repos_conf(globals, &overlay)?;
-    write_sysroot_config(target, &sysroot, &gentoo_path)?;
+    write_sysroot_config(
+        target,
+        &sysroot,
+        globals.base_roots().merge_root(),
+        &gentoo_path,
+    )?;
     write_sysroot_repos_conf(&sysroot, &gentoo_path, &overlay)?;
 
     println!(">>> cross target {} ready", target.tuple);
@@ -759,7 +764,12 @@ fn ensure_prefix_profile(globals: &Cli) -> Result<()> {
 }
 
 /// Write the cross sysroot `etc/portage/{make.conf,make.profile}`.
-fn write_sysroot_config(target: &CrossTarget, sysroot: &Utf8Path, gentoo: &Utf8Path) -> Result<()> {
+fn write_sysroot_config(
+    target: &CrossTarget,
+    sysroot: &Utf8Path,
+    outer_root: &Utf8Path,
+    gentoo: &Utf8Path,
+) -> Result<()> {
     let portage = sysroot.join("etc/portage");
     std::fs::create_dir_all(&portage).with_context(|| format!("creating {portage}"))?;
 
@@ -771,7 +781,10 @@ fn write_sysroot_config(target: &CrossTarget, sysroot: &Utf8Path, gentoo: &Utf8P
     let vdb = sysroot.join("var/db/pkg");
     std::fs::create_dir_all(&vdb).with_context(|| format!("creating {vdb}"))?;
 
-    write_if_absent(&portage.join("make.conf"), &make_conf_body(target, sysroot))?;
+    write_if_absent(
+        &portage.join("make.conf"),
+        &make_conf_body(target, sysroot, outer_root),
+    )?;
 
     // Link make.profile DIRECTLY (absolute) to the target-arch profile — eselect
     // profile validates against the host arch and refuses a foreign one.
@@ -825,7 +838,7 @@ fn write_sysroot_repos_conf(
 /// *only* one they read, so there is no other source for build parallelism.
 /// Caught live: a real stage1 build ran with a single `cc1plus` at a time on a
 /// 128-core host because this was missing.
-fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path) -> String {
+fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path, outer_root: &Utf8Path) -> String {
     let arch = target.gentoo_arch();
     let tuple = &target.tuple;
     let cbuild = host_chost();
@@ -849,7 +862,16 @@ fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path) -> String {
          # plain pkg-config, linked -ltirpc, then failed since the target sysroot\n\
          # never had it — see todo/stage-build-shakeout.md).\n\
          PKG_CONFIG_SYSROOT_DIR=\"{sysroot}\"\n\
-         PKG_CONFIG_LIBDIR=\"{sysroot}/usr/lib64/pkgconfig:{sysroot}/usr/lib/pkgconfig:{sysroot}/usr/share/pkgconfig\"\n",
+         PKG_CONFIG_LIBDIR=\"{sysroot}/usr/lib64/pkgconfig:{sysroot}/usr/lib/pkgconfig:{sysroot}/usr/share/pkgconfig\"\n\
+         # meson.eclass (and any buildsystem following the same convention) reads\n\
+         # BUILD_PKG_CONFIG_LIBDIR for its *native* build-machine pkg-config search\n\
+         # path, falling back to the target PKG_CONFIG_LIBDIR above when unset — the\n\
+         # same host/target conflation bug as the bare zstd.m4 case in\n\
+         # sys-devel/binutils (see todo/stage-build-shakeout.md #29), just for\n\
+         # buildsystems that otherwise do the right thing. Point it at the outer\n\
+         # EROOT's own native pkgconfig dirs (host BDEPEND packages build there —\n\
+         # see [[em-root-characterization]] Tier 1 item 2), not the bare host `/`.\n\
+         BUILD_PKG_CONFIG_LIBDIR=\"{outer_root}/usr/lib64/pkgconfig:{outer_root}/usr/lib/pkgconfig:{outer_root}/usr/share/pkgconfig\"\n",
         target.cflags(),
     )
 }
@@ -1024,7 +1046,11 @@ mod tests {
     #[test]
     fn make_conf_body_never_sets_ctarget() {
         let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
-        let body = make_conf_body(&target, Utf8Path::new("/usr/riscv64-unknown-linux-gnu"));
+        let body = make_conf_body(
+            &target,
+            Utf8Path::new("/usr/riscv64-unknown-linux-gnu"),
+            Utf8Path::new("/"),
+        );
         assert!(
             !body.lines().any(|l| l.starts_with("CTARGET=")),
             "sysroot make.conf must not set CTARGET:\n{body}"
@@ -1044,7 +1070,11 @@ mod tests {
     #[test]
     fn make_conf_body_sets_makeopts() {
         let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
-        let body = make_conf_body(&target, Utf8Path::new("/usr/riscv64-unknown-linux-gnu"));
+        let body = make_conf_body(
+            &target,
+            Utf8Path::new("/usr/riscv64-unknown-linux-gnu"),
+            Utf8Path::new("/"),
+        );
         assert!(body.contains("MAKEOPTS="), "sysroot make.conf:\n{body}");
         assert!(
             !body.contains("MAKEOPTS=\"\""),
@@ -1063,7 +1093,11 @@ mod tests {
     fn make_conf_body_scopes_pkg_config_to_the_sysroot() {
         let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
         let sysroot = "/var/tmp/cross-stage1-riscv64/usr/riscv64-unknown-linux-gnu";
-        let body = make_conf_body(&target, Utf8Path::new(sysroot));
+        let body = make_conf_body(
+            &target,
+            Utf8Path::new(sysroot),
+            Utf8Path::new("/var/tmp/cross-stage1-riscv64"),
+        );
         assert!(
             body.contains(&format!("PKG_CONFIG_SYSROOT_DIR=\"{sysroot}\"")),
             "sysroot make.conf:\n{body}"
@@ -1079,6 +1113,33 @@ mod tests {
         assert!(
             !body.contains("PKG_CONFIG_PATH="),
             "must not additively leak the host's pkgconfig search path:\n{body}"
+        );
+    }
+
+    /// meson.eclass (and any buildsystem following the same convention) reads
+    /// `BUILD_PKG_CONFIG_LIBDIR` for its native build-machine pkg-config
+    /// search path, falling back to the *target* `PKG_CONFIG_LIBDIR` when
+    /// unset — the same host/target conflation that broke
+    /// `sys-devel/binutils`'s bare `zstd.m4` check (#29), just for
+    /// buildsystems that otherwise get this right. It must point at the
+    /// outer EROOT (where Host BDEPEND packages actually build — see
+    /// `entry_roots()` in `main.rs`), not the target sysroot and not the
+    /// bare host `/`.
+    #[test]
+    fn make_conf_body_sets_build_pkg_config_libdir_to_the_outer_root() {
+        let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let sysroot = "/var/tmp/cross-stage1-riscv64/usr/riscv64-unknown-linux-gnu";
+        let outer_root = "/var/tmp/cross-stage1-riscv64";
+        let body = make_conf_body(&target, Utf8Path::new(sysroot), Utf8Path::new(outer_root));
+        assert!(
+            body.contains(&format!(
+                "BUILD_PKG_CONFIG_LIBDIR=\"{outer_root}/usr/lib64/pkgconfig"
+            )),
+            "BUILD_PKG_CONFIG_LIBDIR must point into the outer EROOT:\n{body}"
+        );
+        assert!(
+            !body.contains(&format!("BUILD_PKG_CONFIG_LIBDIR=\"{sysroot}")),
+            "BUILD_PKG_CONFIG_LIBDIR must not point into the target sysroot:\n{body}"
         );
     }
 }
