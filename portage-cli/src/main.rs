@@ -369,7 +369,16 @@ async fn emerge_atoms_inner(
 
     // Pre-flight: fail fast with a clear message if any plan entry's build
     // dependencies won't be present when it builds, rather than mid-build.
-    preflight::check(&outcome.plan, &roots, &host_roots)?;
+    // Skipped under `--nodeps`: that flag already means "merge only the named
+    // atoms, no dependency expansion or verification" (matching emerge's own
+    // `--nodeps`) — the guard-rail would otherwise still block on real,
+    // unconditional BDEPEND that --nodeps deliberately opted out of checking
+    // (e.g. a genuine bootstrap cycle like gawk -> bison -> gettext ->
+    // libxml2 -> meson -> python -> gawk, which has no valid dependency
+    // order and must be seeded out of order somewhere).
+    if !nodeps {
+        preflight::check(&outcome.plan, &roots, &host_roots)?;
+    }
 
     if cli.ask && !confirm_merge(outcome.plan.len())? {
         println!(">>> Quitting.");
