@@ -4,51 +4,51 @@ Open items from the toolchain → stage → binhost work, grouped. Each links to
 file with the detail. Status: 🔴 not started · 🟡 partial/decided · ✅ done (kept
 here briefly for context). Updated 2026-06-27.
 
-## RESUME HERE (2026-07-05)
+## RESUME HERE (2026-07-05) — flagged for independent review
+
+**⚠️ Before trusting anything below: read
+[[session-status-2026-07-05-needs-review]] first.** That file lists
+today's claims that rest on indirect evidence (VDB spot-checks, log
+greps) rather than clean re-runs, plus one confirmed methodology mistake
+(a task-notification "exit code 0" that didn't actually reflect `em`'s
+own exit status, caused by an `echo` masking it — worked around later by
+writing the exit code into the log file directly, but any earlier
+exit-code reasoning in this arc should be treated as suspect until
+re-checked).
 
 Riscv64 stage3 (`--emptytree @system`) shakeout, [[stage-build-shakeout]]
-findings #22-34 — full detail there, this is the compressed pointer.
+findings #22-37 — full detail there, this is the compressed pointer.
 
-**Systemic issue fully resolved and live-verified.** Summary of the arc:
-#22-27 fixed real dep-resolution/privilege/USE bugs (see file for detail).
-#28/#30/#31/#32 were the *same* Host/Target root-conflation bug found
-independently in four places (`load_host_installed`,
-`Avail::initial_bdepend`, `preflight`'s DEPEND check, `order`'s
-installed-filter) — each fixed the same way (check the specific root a
-package's own `merge_root` implies, never a merge_root-blind identity).
-#33 was a fifth, structurally different bug: `dependency_graph()` did a
-raw `self.packages.get(pkg)` instead of the alias-resolving
-`self.package_data(pkg)`, so every `Host`-flavored package got zero
-ordering edges in the topological sort. #29: `sys-devel/binutils`'s
-zstd/`AM_CFLAGS_FOR_BUILD` issue — real upstream bug, not em's, worked
-around via `package.use`.
+Five Host/Target root-conflation bugs (#28/#30/#31/#32/#33), a genuine
+gawk↔bison↔gettext↔libxml2↔meson↔python bootstrap cycle (#34, broken by
+hand with `--nodeps`), a `--nodeps`/`preflight` bug, and an `unpack`
+fatal-die-on-unrecognized-suffix bug are all committed with regression
+tests (`13bb26d`, `fa27567`, `bc236f7`). Task #20 (`em stages --stage1`
+complete on `base_roots()`) was marked done based on a VDB-presence spot
+check of the 4 packages a run reported as "failed" — **not yet
+independently re-verified**, see the review file.
 
-**#34 — the actual remaining gap, fully closed**: the ~34 remaining
-pre-flight failures (`elt-patches`, `autoconf`/`automake`/`meson`/`cmake`,
-`Locale-gettext`) weren't a bug — real bootstrapping assumes a baseline
-tier of tools (same as `tar`/`gzip`, already in this session's minimal
-seed) exists before stage1 runs; these belong in that tier. Traced and
-broke a genuine, confirmed hard cycle (`gawk → bison → gettext → libxml2
-→ meson → python → gawk`) by hand, seeding each link with `--nodeps`
-after verifying its *actual build* (not just the plan) succeeded.
-Along the way, fixed two more real bugs: (1) `--nodeps` didn't skip
-`preflight::check()`, defeating its whole purpose of seeding a cycle
-member the guard-rail can't validate (`13bb26d`); (2) `em`'s `unpack`
-died on any SRC_URI file with an unrecognized suffix (real Portage
-leaves such files untouched) — broke `dev-build/meson`, which fetches a
-bare man page via SRC_URI's `->` rename (`fa27567`). Both fixed with
-regression tests, full `cargo build/clippy/test/fmt --check` clean.
+One more real, deferred bug (#36): `app-alternatives/gpg`'s VDB-written
+`IUSE` drops eclass-injected flags (`ebuild.rs`'s `iuse: env.iuse`
+sources from live post-execution shell state, not the metadata cache).
+Unblocked via a **manual, hand-edited VDB file patch** (not a code fix)
+— flagged in the review file for scrutiny.
 
-**Result**: a real `--autosolve-use --with-bdeps` request for
-`cmake libxml2 gettext bison` now resolves through `preflight` cleanly
-(previously always failed) and actually runs — 74 packages merged, 28
-failed. Those 28 are now ordinary, disparate per-package build issues
-(patch failures, an `econf` failure) — normal bootstrap shakeout,
-unrelated to the architecture work. Task #17 still in progress.
+**Currently open, interrupted mid-investigation**: retrying task #17's
+target (`sys-apps/systemd-utils --cross riscv64-unknown-linux-gnu
+--emptytree --with-bdeps --keep-going --jobs 16 --buildpkg`) got to 99 of
+101 merged, 2 failing:
+- `sys-apps/systemd-utils` itself: meson can't find `jinja2` for
+  python3 — `dev-python/jinja2` is installed in the Host-flavor VDB
+  location but not the Target-flavor one, which *smells* like another
+  instance of the Host/Target root-conflation bug class, but this was
+  **not yet root-caused** when the session was interrupted.
+- `app-text/opensp`: `make: -c: No such file or directory` (Error 127)
+  — **not investigated at all** beyond the raw error line.
 
-**Next**: triage the 28 remaining failures (a new, separate list), then
-retry `em stages --stage1` for real end-to-end, then retry
-`sys-apps/systemd-utils --cross ...` to confirm the full pipeline closes.
+**Next**: do the independent-review checklist in
+[[session-status-2026-07-05-needs-review]] first, then pick up the
+jinja2/opensp failures.
 
 ## Stage building (the active goal: a real stage3)
 
@@ -297,6 +297,16 @@ retry `em stages --stage1` for real end-to-end, then retry
 
 ## Other open (pre-existing, related)
 
+- 🟡 **Root topology refactor** — replace the flat `Roots` bag with a
+  `RootTopology` enum (`Single`/`Dual`/`Overlayed` + `CrossArch`) whose
+  variant answers `satisfaction_root(dep_class)`. Retires the `host_roots`
+  positional threading across 9 files and the `host_aliases` invariant
+  violation (`208c818`). Four behaviour changes come with it: `--root` stops
+  moving config (portage `ROOT=` parity), `--local` becomes standalone (not
+  overlay) so it works on a foreign host, host-python symlinks move from
+  `--local` to `--prefix` (overlay borrows host tools; standalone must own
+  its python), `--prefix` sets EPREFIX=P. Design: [[root-topology]] (doc)
+  + [[root-topology-refactor]] (tasks).
 - 🔴 **Parser audit pass** — review the recent burst of parser work (incremental
   `-*`, package.use/license/accept_keywords, @set expansion, USE-dep eval, IUSE
   defaults, make.conf sourcing, md5-cache) for PMS/portage faithfulness.
