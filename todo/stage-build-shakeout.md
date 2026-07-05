@@ -1567,6 +1567,30 @@ independent of any prior test-session state — not "noise from an unclean
 setup."** This would hit real `emerge` too, under the same
 CBUILD/CTARGET/USE=zstd combination; not em-specific at all.
 
+User pushed back further: "why isn't zstd being picked up [for the build
+machine]?" — traced one level deeper into `config/zstd.m4` (unpacked a
+fresh source copy to check, since the merged build's own work tree is
+gone by the time a package succeeds):
+```m4
+AC_DEFUN([AC_ZSTD], [
+  ...
+  PKG_CHECK_MODULES(ZSTD, [libzstd >= 1.4.0], [...])
+])
+```
+There is exactly **one** `PKG_CHECK_MODULES` call for zstd in the entire
+binutils build, called once at top-level configure using whatever
+`$PKG_CONFIG`/`PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR` is active —
+correctly scoped to the target sysroot by this session's earlier
+`PKG_CONFIG_SYSROOT_DIR`/`LIBDIR` fix (`1a7e7c4`; that fix is right and
+necessary for the *actual* target-linked zstd to resolve at all).
+Binutils has **no build-machine-specific zstd detection anywhere in its
+own build system** — not a missed detection, a code path that was never
+written. `Makefile.am` then applies that single, correctly-target-scoped
+result to both the real target build and the native `sysinfo.c` helper.
+So "zstd isn't being picked up for the build machine" because binutils
+never attempts to look it up there at all; there's nothing for em to fix
+or configure differently on its side.
+
 **Workaround (verified live)**: disable `zstd` for this cross binutils
 build — it only gates optional debug-info decompression support, unrelated
 to binutils' actual function:
