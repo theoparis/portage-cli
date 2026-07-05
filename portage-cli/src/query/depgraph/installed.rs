@@ -66,13 +66,22 @@ pub(super) struct HostInstalledEntry {
     pub iuse: Vec<Interned<DefaultInterner>>,
 }
 
-/// Packages present on the **build host** (BROOT, always `/var/db/pkg`) for
-/// `host_installed` — a BDEPEND already present there is satisfied without
-/// building it, unless a USE-dep on that edge demands a flag the host lacks (in
-/// which case the package is rebuilt). Duplicates across slots of the same
-/// package are kept (each slot is a distinct `PortagePackage`).
-pub(super) fn load_host_installed() -> Vec<HostInstalledEntry> {
-    let Ok(vdb) = Vdb::open_default() else {
+/// Packages present on the **build host** (BROOT) for `host_installed` — a
+/// BDEPEND already present there is satisfied without building it, unless a
+/// USE-dep on that edge demands a flag the host lacks (in which case the
+/// package is rebuilt). Duplicates across slots of the same package are kept
+/// (each slot is a distinct `PortagePackage`).
+///
+/// `host_roots` is the outer EROOT (`Cli::base_roots`), *not* unconditionally
+/// the bare system `/`: an unsatisfied Host BDEPEND builds into
+/// `base_roots()` (`entry_roots()` in `main.rs`), so satisfaction must be
+/// checked against that same root's VDB, or a package built there on one run
+/// is never recognized as already-satisfied on the next. Found live: jinja2
+/// rebuilt into `base_roots()` for a `--cross` stage3 was still reported
+/// unsatisfied because this read the bare host `/var/db/pkg` regardless — see
+/// todo/stage-build-shakeout.md #28/#30.
+pub(super) fn load_host_installed(host_roots: &crate::cli::Roots) -> Vec<HostInstalledEntry> {
+    let Ok(vdb) = Vdb::open(host_roots.merge_root().join("var/db/pkg")) else {
         return Vec::new();
     };
     vdb.packages()
@@ -183,5 +192,45 @@ pub(super) fn action_tag<'a>(
             };
             (tag, Some(inst))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the riscv64 stage3 shakeout (#28/#30): a Host
+    /// BDEPEND rebuilt into `base_roots()` must be recognized as satisfied
+    /// by reading *that* root's VDB, not the bare host `/var/db/pkg`.
+    #[test]
+    fn load_host_installed_reads_the_given_root_not_the_bare_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("var/db/pkg/dev-python/jinja2-3.1.6");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("EAPI"), "8").unwrap();
+        std::fs::write(pkg_dir.join("SLOT"), "0").unwrap();
+        std::fs::write(pkg_dir.join("CONTENTS"), "").unwrap();
+        std::fs::write(
+            pkg_dir.join("USE"),
+            "python_targets_python3_14 python_targets_python3_13",
+        )
+        .unwrap();
+
+        let root_str = tmp.path().to_str().unwrap();
+        let host_roots = crate::cli::Roots::for_test(root_str);
+        let entries = load_host_installed(&host_roots);
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "should find the package in the given root's VDB, not the bare host's"
+        );
+        assert!(
+            entries[0]
+                .active_use
+                .iter()
+                .any(|f| f.as_str() == "python_targets_python3_14"),
+            "USE flags must come from the given root's VDB entry"
+        );
     }
 }

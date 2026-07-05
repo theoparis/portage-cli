@@ -525,6 +525,7 @@ fn gcc_needs_refresh(active_slot: Option<&str>, needed_slot: &str) -> bool {
 async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
     let repo_path_str = globals.repo_path();
     let roots = globals.roots();
+    let host_roots = globals.base_roots();
     let outcome = crate::query::depgraph::depgraph(crate::query::depgraph::DepgraphOpts {
         repo_path: Utf8Path::new(&repo_path_str),
         atoms: &["sys-devel/gcc".to_string()],
@@ -536,6 +537,7 @@ async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
         autosolve_use: false,
         multi_repo: globals.repo.is_none(),
         roots: &roots,
+        host_roots: &host_roots,
         onlydeps: false,
         with_bdeps: false,
         root_deps_rdeps: false,
