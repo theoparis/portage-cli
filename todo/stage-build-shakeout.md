@@ -1929,3 +1929,80 @@ soundness-review question still open — see the note above and
 belongs to. Next: rebuild release and re-run the actual failing
 `sys-apps/systemd-utils --cross ...` command to see the *real*
 remaining gap at `base_roots()`, now that both #32 and #33 are fixed.
+
+**Live re-run confirmed #32 and #33 both actually fixed**: re-ran the
+same `sys-apps/systemd-utils --cross ...` command with the rebuilt
+release binary. The entire perl/dev-perl mass of failures (~30+ lines)
+is completely gone — no `dev-lang/perl` or `dev-perl/*` unsatisfied
+entries anywhere, and the plan now resolves all the way through to
+`sys-apps/systemd-utils` itself. The remaining ~34 pre-flight failures
+are a different, much smaller, coherent set: `app-portage/elt-patches`,
+`dev-build/{autoconf,automake,meson,cmake}` `||`-groups,
+`dev-perl/Locale-gettext`. Two `weak(!)` blocker warnings also appeared
+(`sys-libs/timezone-data` vs `glibc[vanilla(+)]`,
+`app-alternatives/gpg` vs `gnupg[-alternatives(-)]`) — non-fatal per
+PMS, not yet investigated.
+
+## Architecture recap and the real remaining gap (not a code bug)
+
+User pushback after I started manually building `elt-patches`/`cmake`/
+`meson` as ad-hoc standalone atoms to chase the remaining ~34 failures,
+and hit what looked like a fresh circular dependency (`sys-libs/gdbm`
+needing `elt-patches` even in that combined request): **going in circles
+reinventing bootstrapping instead of trusting the mechanism that already
+works** (`em stages --stage1`). Restated architecture, confirmed correct:
+
+- **Unprivileged**: `--stage1` populates a self-contained host root (not
+  `/`) — this is what already works (task #7's from-scratch native
+  bootstrap: binutils, gcc, baselayout, gentoo-functions + basic
+  archive tools).
+- **Privileged**: root is `/`, install directly on the real host —
+  trivial, a real system already has everything.
+- Build sysroot + cross-toolchain (crossdev) — done (task #7-#9).
+- Build a cross `--stage1` into the sysroot — done (task #8): this
+  produced the real, legitimate 150+-package `@system` closure found in
+  the sysroot's own VDB during the #32 investigation.
+- Build stage3/stage4 by using the **host root prepared in step 1** to
+  satisfy Host BDEPEND at BROOT — this is exactly what the
+  `sys-apps/systemd-utils --cross ...` command has been doing all
+  along; `base_roots()` *is* that host root, just under-populated so far.
+
+**Key insight on the remaining gap**: `--stage1`'s own design assumes a
+baseline tier ("obviously available", the same tier as `tar`/`gzip`/
+`bzip2`/`xz-utils` — all already present in this session's minimal
+31-package seed) is present *before* it runs. `elt-patches`/`cmake`/
+`meson`/`autoconf`/`automake`/`libtool`/`gettext`/`pkgconfig` belong in
+that same baseline tier — they were never meant to be pulled in via
+BDEPEND resolution during stage1 itself. Confirmed by reading real
+ebuilds: `sys-apps/attr` and `dev-libs/libffi` both `inherit libtool`
+(which sets `BDEPEND=">=app-portage/elt-patches-20250306"` via
+`LIBTOOL_DEPEND`), then their own `BDEPEND="..."` line **overwrites** it
+(plain `=`, not `+=`) — so in real bash-sourcing semantics, elt-patches
+genuinely isn't part of their final computed BDEPEND either. Yet
+`elibtoolize`'s `eltpatch` call in `src_prepare` still needs the binary
+on `PATH` regardless of what's in the metadata — a known, informally
+accepted Gentoo-tree quirk that real bootstrapping works around simply
+by having these tools already present in any reasonable build
+environment, not by relying on the dependency graph to conjure them.
+Each of these tools resolves cleanly as a standalone atom (confirmed
+live for `elt-patches`, `cmake`, `meson` individually) — the fix is
+building them directly into the baseline, not chasing the solver for a
+gap that isn't a bug.
+
+**Plan**: extend the self-contained host root's baseline (currently just
+binutils/gcc/baselayout/gentoo-functions/basic archive tools) with
+`elt-patches`, `gettext`, `autoconf`, `automake`, `libtool`, `cmake`,
+`meson`, `pkgconfig` — built one at a time (not combined, to avoid
+whatever made the combined `elt-patches cmake meson` request pull in a
+much larger, differently-ordered closure including gdbm) — then retry
+`em --root <hostroot> stages --stage1 --with-bdeps` for real. Once that
+succeeds, retry the `sys-apps/systemd-utils --cross ...` build to
+confirm the whole pipeline closes.
+
+Also noted, not yet investigated: `em stages --stage1` doesn't pass
+`--with-bdeps` by default — without it, the plan is visibly smaller
+(missing `meson` entirely). Given a from-scratch stage1 build is
+*exactly* the scenario needing full BDEPEND resolution, this might be
+worth defaulting on for `stages --stage1` specifically (mirroring how
+`--emptytree` already forces `solve_with_bdeps` on for native builds) —
+a candidate follow-up, not blocking the immediate baseline-extension work.

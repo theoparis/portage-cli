@@ -53,15 +53,20 @@ in time. Fixed by adding a parallel `host_installed_cpvs` set and
 branching on `pkg.merge_root()`, same pattern as #28/#30/#31. This is
 the fourth Host/Target root-conflation bug found this session. #33: live
 re-run confirmed real progress (perl now appears in the plan at all) but
-hit a *different, non-root* bug — perl's `[ebuild R]` reinstall entry is
-appended by a separate fallback (`provider.reinstall_deps()` output
-`install_order()` didn't naturally place) at the *end* of `order`,
-landing after `dev-perl/YAML-Tiny` (its own dependent) in plan order, so
-within-run visibility still doesn't see it in time. Not yet fixed —
-paused here per explicit instruction to update the todo and step back:
-review whether the Host/Target model (four point-fixes today, all at
-the specific call site where each bug was found) is still sound, or has
-become a pile of hacks needing real consolidation, before chasing #33.
+hit a *different, non-root* bug — an initial hypothesis (a stray
+"reinstall" fallback append placing perl at the end of `order`) turned
+out wrong on closer live tracing (temporary `eprintln!`s in the solver,
+removed after). Actual cause: `portage-atom-pubgrub`'s
+`dependency_graph()` (which `install_order`'s topological sort is built
+from) did a raw `self.packages.get(pkg)` lookup instead of the
+alias-resolving `self.package_data(pkg)` — always missing for any
+`Host`-flavored solved package (`self.packages` is keyed `Target`-only;
+`Host` lookups need the `host_aliases` redirect `get_dependencies`
+already used correctly). So a `Host` package's own BDEPEND on *another*
+`Host` package (here, `dev-perl/YAML-Tiny` needing `dev-lang/perl`, both
+Host-routed) got zero ordering edges, and the topological tie-break put
+perl after its own consumer. One-line fix + a verified regression test
+(`208c818`).
 **Remaining 1 failure** (of 2 — binutils resolved, see #29):
 `sys-devel/binutils`'s `make exited 2` was real, not test-session noise —
 confirmed straight from binutils' own upstream `Makefile.am`: it reuses
@@ -69,15 +74,44 @@ confirmed straight from binutils' own upstream `Makefile.am`: it reuses
 (the native build-machine helper rule), tripping `#error unsupported ABI`
 on aarch64-host/riscv64-target header mismatch. Upstream bug, not em's;
 worked around with `sys-devel/binutils -zstd` in the sysroot's
-`package.use` — verified rebuilding clean. `sys-apps/systemd-utils`
-(blocked on jinja2/perl/python needing a full native stage1 at
-`base_roots()`, this session's outer EROOT having only the minimal
-cross-toolchain-support set — see [[em-root-characterization]] Tier 1
-item 2) is the last known failure, but the exact remaining gap size is
-still unconfirmed — #31 and #32 each fixed a real bug and moved the
-plan closer to correct, but #33 (reinstall-fallback ordering) is a new,
-separate, not-yet-fixed issue blocking the next live signal. Task #17
-still in progress.
+`package.use` — verified rebuilding clean.
+
+**Live re-run confirmed #32+#33 fixed**: the entire perl/dev-perl
+failure mass is gone; plan resolves through to `sys-apps/systemd-utils`
+itself. Remaining ~34 failures are a small, coherent, *real* gap:
+`app-portage/elt-patches`, `dev-build/{autoconf,automake,meson,cmake}`,
+`dev-perl/Locale-gettext` — not a code bug. Root cause (confirmed by
+reading real ebuilds): `--stage1`'s design assumes a baseline tier
+("obviously available", same as `tar`/`gzip`/`bzip2`/`xz-utils` already
+in this session's 31-package seed) exists before it runs; these tools
+belong in that tier and were never meant to be pulled in via BDEPEND —
+`sys-apps/attr`/`dev-libs/libffi` both `inherit libtool` (which sets
+`BDEPEND=elt-patches`) then their own `BDEPEND="..."` line *overwrites*
+it (plain `=`, not `+=`), so real bash semantics don't even carry it
+through — yet `elibtoolize`'s `eltpatch` call still needs the binary on
+`PATH` regardless. Known, accepted Gentoo-tree quirk; real bootstrapping
+works around it by having these tools already present, not via the
+dependency graph. Each resolves cleanly as a standalone atom.
+
+**Architecture, confirmed correct** (see `stage-build-shakeout.md`'s
+"Architecture recap" section for full detail): unprivileged `--stage1`
+populates a self-contained host root (task #7, already works);
+privileged root=`/` installs on host directly (trivial); cross
+sysroot+toolchain (#7-9, done); cross `--stage1` into the sysroot (#8,
+done — the 150+-package `@system` closure found in #32's investigation);
+stage3/stage4 use *that prepared host root* to satisfy Host BDEPEND at
+BROOT — `base_roots()` already is that host root, just under-populated.
+
+**Current work**: extend the host root's baseline with `elt-patches`,
+`gettext`, `autoconf`, `automake`, `libtool`, `cmake`, `meson`,
+`pkgconfig` (one at a time, not combined — a combined
+`elt-patches+cmake+meson` request pulled in a much larger closure
+including `gdbm` and re-surfaced a similar-looking failure), then retry
+`em --root <hostroot> stages --stage1 --with-bdeps` for real, then
+retry `sys-apps/systemd-utils --cross ...` to confirm the full pipeline
+closes. Also noted: `stages --stage1` doesn't default `--with-bdeps` on
+(unlike `--emptytree`'s native path) — candidate follow-up, not
+blocking. Task #17 still in progress.
 
 ## Stage building (the active goal: a real stage3)
 
