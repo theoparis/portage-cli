@@ -1856,25 +1856,73 @@ async fn capture_environment(
 /// would make the whole dump unparseable. Readonly declares are dropped —
 /// re-declaring them in the worker only produces "cannot mutate readonly
 /// variable" noise (portage's env restore filters them the same way).
+///
+/// Also drops bash's own dynamic/special variables (`PIPESTATUS`,
+/// `FUNCNAME`, …): `declare -p` prints them like any other variable, but
+/// re-`declare`ing them in the worker pins a stale snapshot in place of the
+/// shell's live tracking. Confirmed concretely for `PIPESTATUS`: real bash
+/// unconditionally replaces the whole array on every new pipeline regardless
+/// of a prior explicit `declare`, but brush does not — once user code (here,
+/// our own restore) has declared it, brush never resizes it again, so a
+/// later 2-stage pipe in the Install worker still reports the compile
+/// parent's stale 1-element snapshot. That silently broke `distutils-r1`'s
+/// `pipestatus || die` check (`dev-python/jinja2`, the `install//usr/bin`
+/// listing failure — see `todo/brush-pipestatus-not-reset.md` for the
+/// brush-side bug and repro). Filtering the dump is the correct fix
+/// independent of that brush bug: these variables are bash-maintained state,
+/// not build environment, and were never meant to cross a process boundary.
+/// Bash's own dynamic/special variables: never worth restoring across the
+/// Compile→Install process boundary (see `capture_variables`'s doc comment).
+const DYNAMIC_VAR_DENYLIST: &[&str] = &[
+    "PIPESTATUS",
+    "FUNCNAME",
+    "BASH_LINENO",
+    "BASH_SOURCE",
+    "BASH_ARGV",
+    "BASH_ARGV0",
+    "BASH_ARGC",
+    "BASH_CMDS",
+    "BASH_COMMAND",
+    "BASH_SUBSHELL",
+    "BASH_ALIASES",
+];
+
+/// The variable name declared by one `declare -p` output line, e.g. `"PATH"`
+/// from `declare -x PATH="/usr/bin"`.
+fn declared_name(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("declare -")?;
+    let (_flags, name_and_value) = rest.split_once(char::is_whitespace)?;
+    Some(name_and_value.trim_start().split('=').next().unwrap_or(""))
+}
+
+/// Drop readonly declares and bash's dynamic/special variables from a
+/// `declare -p` dump, keeping everything else verbatim (including blank/
+/// non-`declare` lines, so callers can filter arbitrary text defensively).
+fn filter_declare_dump(text: &str) -> String {
+    text.lines()
+        .filter(|l| {
+            let is_readonly = l
+                .strip_prefix("declare -")
+                .and_then(|rest| rest.split_whitespace().next())
+                .is_some_and(|flags| flags.contains('r'));
+            let is_dynamic =
+                declared_name(l).is_some_and(|name| DYNAMIC_VAR_DENYLIST.contains(&name));
+            !is_readonly && !is_dynamic
+        })
+        .fold(String::with_capacity(text.len()), |mut acc, l| {
+            acc.push_str(l);
+            acc.push('\n');
+            acc
+        })
+}
+
 async fn capture_variables(
     shell: &mut portage_repo::EbuildShell,
     work_root: &Utf8Path,
 ) -> std::result::Result<Vec<u8>, String> {
     let dump = capture_shell_dump(shell, work_root, "declare -p").await?;
     let text = String::from_utf8_lossy(&dump);
-    let filtered: String = text
-        .lines()
-        .filter(|l| {
-            !l.strip_prefix("declare -")
-                .and_then(|rest| rest.split_whitespace().next())
-                .is_some_and(|flags| flags.contains('r'))
-        })
-        .fold(String::with_capacity(text.len()), |mut acc, l| {
-            acc.push_str(l);
-            acc.push('\n');
-            acc
-        });
-    Ok(filtered.into_bytes())
+    Ok(filter_declare_dump(&text).into_bytes())
 }
 
 async fn capture_shell_dump(
@@ -2058,6 +2106,30 @@ mod tests {
             assert!(subs.contains(&"work"), "{group:?}: {subs:?}");
             assert!(subs.contains(&"temp"), "{group:?}: {subs:?}");
         }
+    }
+
+    /// Regression test for the jinja2 stage3 failure: restoring `PIPESTATUS`
+    /// (or the other bash dynamic vars) into the Install worker pins a stale
+    /// snapshot that brush never resizes on later pipelines — see
+    /// `todo/brush-pipestatus-not-reset.md`. The fix is simply never
+    /// dumping them in the first place.
+    #[test]
+    fn filter_declare_dump_drops_readonly_and_dynamic_vars() {
+        let dump = concat!(
+            "declare -x PATH=\"/usr/bin\"\n",
+            "declare -ar SOME_READONLY=([0]=\"x\")\n",
+            "declare -a PIPESTATUS=([0]=\"1\")\n",
+            "declare -a FUNCNAME=\n",
+            "declare -- BASH_ARGV0=\"\"\n",
+            "declare -x BUILD_DIR=\"/work/foo\"\n",
+        );
+        let filtered = filter_declare_dump(dump);
+        assert!(filtered.contains("PATH="));
+        assert!(filtered.contains("BUILD_DIR="));
+        assert!(!filtered.contains("SOME_READONLY"));
+        assert!(!filtered.contains("PIPESTATUS"));
+        assert!(!filtered.contains("FUNCNAME"));
+        assert!(!filtered.contains("BASH_ARGV0"));
     }
 
     #[test]
