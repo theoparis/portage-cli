@@ -40,9 +40,19 @@ checked every entry's own DEPEND against `depend_avail` regardless of
 `Host` entry's DEPEND on an *earlier Host*-merged package (e.g.
 `dev-lang/perl` on `sys-libs/gdbm`, both routed to `base_roots()`)
 spuriously failed. Fixed by branching the DEPEND check on `merge_root`
-the same way the existing recording branch already does. Full re-run not
-yet done (large, slow build) — the real remaining gap size at
-`base_roots()` is now unknown until that happens.
+the same way the existing recording branch already does. #32 (found
+immediately on the live re-run with #31's fix): a real, non-test-pollution
+bug — `order`'s "already installed" filter checked `target_installed_cpvs`
+(a `HashSet<Cpv>`, no `merge_root`) unconditionally, so a `Host`-routed
+`dev-lang/perl` requirement (unsatisfied at `base_roots()`) matched the
+`--cross` sysroot's own legitimately-installed perl by `(cpn, version)`
+alone and got silently dropped from the plan — never built, BDEPEND
+permanently unsatisfied. Almost misdiagnosed as stale-VDB pollution and
+nearly deleted real completed target-system work before checking; caught
+in time. Fixed by adding a parallel `host_installed_cpvs` set and
+branching on `pkg.merge_root()`, same pattern as #28/#30/#31. This is
+the fourth Host/Target root-conflation bug found this session — worth a
+deliberate consolidation pass once the current live run's result is in.
 **Remaining 1 failure** (of 2 — binutils resolved, see #29):
 `sys-devel/binutils`'s `make exited 2` was real, not test-session noise —
 confirmed straight from binutils' own upstream `Makefile.am`: it reuses

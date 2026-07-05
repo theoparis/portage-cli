@@ -1756,3 +1756,67 @@ gap, #28/#30's note stands for those), and others — anything with a
 real remaining gap size; not yet done as of this writing (large, slow
 build). Committed alongside #30's plumbing. Full
 `cargo build/clippy/test/fmt --check` clean.
+
+## 32. `order`'s "already installed" filter ignored `merge_root` — a real target system permanently masked its own Host BDEPEND (fixed)
+
+Found immediately on retesting #31 live: `em --autosolve-use --privilege
+pseudoroot --root /var/tmp/cross-stage1-riscv64 --cross
+riscv64-unknown-linux-gnu --emptytree sys-apps/systemd-utils --with-bdeps
+--keep-going --jobs 1 --buildpkg` still failed pre-flight with ~59
+missing deps, but `dev-lang/perl` itself never appeared *anywhere* in the
+plan — not as a Target entry (correctly; it's already built in the
+`--cross` sysroot from the earlier successful stage3 run) and not as a
+`Host` entry either, even though `base_roots()` genuinely has no perl
+and multiple `Host`-routed `dev-perl/*` modules need one (their BDEPEND
+on `dev-lang/perl[perl_features_...]` comes from `perl-module.eclass`,
+which injects the *same* perl atom into both `DEPEND` and `BDEPEND` —
+confirmed by reading the eclass and a real ebuild).
+
+**Initial wrong hypothesis, caught before acting on it**: first assumed
+this was the already-documented "self-inflicted confound" (stale VDB
+leftovers from before the #28 `entry_roots()` fix) and nearly proposed
+deleting `dev-lang/perl`/`python`/`python-exec*` from the `--cross`
+sysroot's VDB. Checked first — that sysroot has a full, legitimate
+150+-package `@system` closure (portage, openrc, udev, openssh, gcc,
+glibc...), the real result of the earlier successful stage3 run. Would
+have destroyed real completed work over a misdiagnosis.
+
+**Actual root cause**: `depgraph/mod.rs`'s `order` filter (~line 548,
+"drop packages already installed at this version") checks a package
+against `target_installed_cpvs: HashSet<Cpv>` — but `Cpv` carries only
+`(cpn, version)`, no `merge_root`. A `Host`-routed `dev-lang/perl`
+requirement (needed unsatisfied at `base_roots()`) has the *same*
+`(cpn, version)` as the `--cross` sysroot's own legitimately-installed
+perl, so it matches `target_installed_cpvs` and gets silently dropped
+from `order` — never built, never displayed, and its BDEPEND stays
+permanently unsatisfied. This isn't test pollution; it will happen for
+*any* real target build that happens to already have a same-named tool
+(perl, python, gettext, m4, autoconf...) installed at the target, which
+is common. The same bug was duplicated at the `PlannedMerge.reinstall`
+assignment further down (~line 957).
+
+Fixed by building a parallel `host_installed_cpvs: HashSet<Cpv>` (from
+the already-loaded `host_installed`) and branching both sites on
+`pkg.merge_root()` — mirroring the pattern already used everywhere else
+this session (`entry_roots()`, `Avail::initial_bdepend`, `preflight`'s
+DEPEND check). `output::print_tree`'s action-tag display (~line 842)
+still uses `target_installed_cpvs` unconditionally — left alone since it
+only covers explicitly-requested root atoms (always real Target atoms in
+practice), lower risk, and out of scope for this fix; worth revisiting
+in the "make it more rational" pass.
+
+No unit test added — `depgraph()` is a heavy integration surface (real
+repo/VDB/use_env loading via `tokio::join!`), unlike the narrower pure
+functions fixed in #26/#30/#31. Verified via `cargo build/clippy/test
+--workspace` (clean) plus a live re-run of the actual failing command.
+
+**This is the fourth Host/Target root-conflation bug found this session**
+(`load_host_installed`, `Avail::initial_bdepend`, `preflight`'s DEPEND
+check, now `order`'s installed-filter) — same root cause pattern each
+time: code written assuming `--cross` is the only reason two roots ever
+matter, so a bare `Cpv`/`None`-sentinel/single `Avail` set silently
+conflates Host and Target once a self-contained `--root` offset with its
+*own* Host-side bootstrap needs entered the picture. Once this run's
+live result is in, worth a deliberate pass to make the model harder to
+get wrong again (e.g. a `Cpv`-keyed set that's illegal to query without
+naming which root) rather than fixing each call site as found.

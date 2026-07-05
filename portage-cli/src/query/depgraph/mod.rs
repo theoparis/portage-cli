@@ -230,6 +230,16 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         .iter()
         .map(|e| Cpv::new(e.cpn, e.version.clone()))
         .collect();
+    // `Cpv` carries no `merge_root`, so a `Host`-routed requirement (e.g.
+    // `dev-lang/perl` needed at `base_roots()` as a BDEPEND tool) must never be
+    // checked against `target_installed_cpvs`: a real target system commonly
+    // has its own same-named, same-version package (a *different* build, for
+    // a different root) which would otherwise wrongly look "already
+    // installed" here — see `todo/stage-build-shakeout.md` #32.
+    let host_installed_cpvs: std::collections::HashSet<Cpv> = host_installed
+        .iter()
+        .map(|e| Cpv::new(*e.package.cpn(), e.version.clone()))
+        .collect();
     // Under `--emptytree` the solver treats target packages as rebuilds (not
     // "already installed" for cede/ingest), while action tags still use the
     // real VDB via `target_installed_cpvs`.
@@ -543,7 +553,15 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             //  - same-version USE rebuilds (reinstall_cpns), and
             //  - explicitly-requested targets, which emerge reinstalls by
             //    default ([ebuild R]) even when already at the best version.
-            !target_installed_cpvs.contains(&cpv)
+            // "Already installed" is root-specific: a `Host` requirement
+            // (built into `base_roots()`) must only be dropped if it's
+            // installed *there*, never because the unrelated Target sysroot
+            // happens to have a same-named, same-version package.
+            let already_installed = match pkg.merge_root() {
+                MergeRoot::Host => host_installed_cpvs.contains(&cpv),
+                MergeRoot::Target => target_installed_cpvs.contains(&cpv),
+            };
+            !already_installed
                 || reinstall_cpns.contains(pkg.cpn())
                 // Explicit target: reinstalled even at best version ([R]). Match
                 // the resolved target *slot*, not the bare CPN — a sibling slot
@@ -936,7 +954,14 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 bdepend,
                 // Kept in the plan despite being installed ⇒ an intentional
                 // reinstall (explicit target / USE rebuild), not a resume-skip.
-                reinstall: target_installed_cpvs.contains(&cpv),
+                // Root-specific for the same reason as the `order` filter
+                // above: a `Host` entry must only count as "already
+                // installed" against `base_roots()`, never the Target
+                // sysroot's unrelated same-named package.
+                reinstall: match entry.merge_root {
+                    MergeRoot::Host => host_installed_cpvs.contains(&cpv),
+                    MergeRoot::Target => target_installed_cpvs.contains(&cpv),
+                },
             }
         })
         .collect();
