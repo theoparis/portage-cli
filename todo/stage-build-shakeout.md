@@ -1591,6 +1591,32 @@ So "zstd isn't being picked up for the build machine" because binutils
 never attempts to look it up there at all; there's nothing for em to fix
 or configure differently on its side.
 
+**User pushback, re-verified with a live controlled A/B (not archaeology)**:
+challenged twice — first whether this was test-session noise, then whether
+the whole finding was simply fabricated, reasonably given "we built
+binutils for crossdev and host enough times" without ever hitting this.
+Re-ran the actual merge path (`em --emptytree sys-devel/binutils --cross
+...`, not the `em ebuild` debug harness — which turned out to not even set
+`PKG_CONFIG_SYSROOT_DIR`/`LIBDIR`, a separate, real gap worth noting
+later) twice back to back on the same live sysroot: `package.use -zstd`
+removed → same exact `bits/wordsize.h:22:3: error: #error unsupported
+ABI` reproduces, byte-for-byte, at a fresh build.log line; restored → the
+exact same build merges clean. Direct, live, repeatable cause and effect.
+
+**Reconciles with "built binutils enough times" — this really is a rare
+combination**: `cross-riscv64-unknown-linux-gnu/binutils` (the crossdev
+toolchain package) and the host's own native `sys-devel/binutils` both
+have `CBUILD == CHOST` — binutils itself is never actually cross-compiled
+in either case, so `CFLAGS`/`CFLAGS_FOR_BUILD` never diverge and the
+`ZSTD_CFLAGS` reuse is inert. This build is different: it's `sys-devel/
+binutils` cross-compiled *to run natively on riscv64* inside the
+sysroot's own `@system` closure — a genuine `CBUILD(aarch64) ≠
+CHOST(riscv64)` compile of binutils itself, which almost nobody needs
+(ordinary crossdev usage never builds a target-native copy of binutils).
+That's exactly why this specific upstream bug basically never surfaces in
+normal use, and why it took a full from-scratch self-hosting stage3 to
+hit it.
+
 **Workaround (verified live)**: disable `zstd` for this cross binutils
 build — it only gates optional debug-info decompression support, unrelated
 to binutils' actual function:
