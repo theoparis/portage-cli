@@ -28,13 +28,20 @@ so a `MergeRoot::Host` BDEPEND like jinja2 silently built into the
 `--cross` sysroot instead of `base_roots()` even after #26 correctly
 scheduled it there — fixed via a new `entry_roots()` helper in `main.rs`
 (commit pending as of this writing). 57/59 packages now merge clean.
-**Remaining 2 failures**: `sys-devel/binutils` (a `make exited 2` not yet
-isolated from `-j80` parallel output) and `sys-apps/systemd-utils`
+**Remaining 1 failure** (of 2 — binutils resolved, see #29):
+`sys-devel/binutils`'s `make exited 2` was real, not test-session noise —
+confirmed straight from binutils' own upstream `Makefile.am`: it reuses
+`ZSTD_CFLAGS` (the target sysroot's zstd include) in `AM_CFLAGS_FOR_BUILD`
+(the native build-machine helper rule), tripping `#error unsupported ABI`
+on aarch64-host/riscv64-target header mismatch. Upstream bug, not em's;
+worked around with `sys-devel/binutils -zstd` in the sysroot's
+`package.use` — verified rebuilding clean. `sys-apps/systemd-utils`
 (blocked on a *real bootstrap gap*, not a code bug — `base_roots()`, this
 session's outer EROOT, has no native Python at all, only the minimal
 cross-toolchain-support set; jinja2 needs a full native stage1 there —
 see [[em-root-characterization]] Tier 1 item 2 and
-`stage-build-shakeout.md` #28). Task #17 still in progress.
+`stage-build-shakeout.md` #28) is now the only known remaining failure.
+Task #17 still in progress.
 
 ## Stage building (the active goal: a real stage3)
 

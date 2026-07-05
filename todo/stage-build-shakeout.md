@@ -1528,10 +1528,60 @@ from-scratch into `--root`" section already tracks, just now with a
 concrete, motivating BDEPEND case (jinja2/gpep517/flit-core, and by
 extension any python-build-time tool: sphinx, cython, setuptools_scm).
 
+## 29. `sys-devel/binutils` cross build fails with `#error unsupported ABI` — upstream binutils bug, not em
+
+The #28 write-up left this as an unexamined `make exited 2` amid parallel
+`-j80` output. User pushed back on whether it was even real vs. leftover
+noise from repeated testing in this session — worth checking directly
+rather than assuming. It is real, and root-caused precisely.
+
+**The failing command**, found by grepping the (huge, `-j80`-interleaved)
+build.log for `error:` past the expected `Werror`/`LOCALEDIR` noise:
+```
+gcc -c -I. -W -Wall ... -I/var/tmp/cross-stage1-riscv64/usr/riscv64-unknown-linux-gnu/usr/include sysinfo.c
+...
+/var/tmp/cross-stage1-riscv64/usr/riscv64-unknown-linux-gnu/usr/include/bits/wordsize.h:22:3: error: #error unsupported ABI
+```
+Plain `gcc` (no cross prefix — correctly, since `sysinfo` is a
+build-machine codegen helper that generates `sysroff.c`/`.h` for
+`dlltool`'s PE support at build time, per `binutils/Makefile.am`'s
+`sysinfo$(EXEEXT_FOR_BUILD)` rule) is compiling `sysinfo.c` with the
+**target** riscv64 sysroot's own `/usr/include` — an aarch64 host gcc
+choking on riscv64-specific glibc header content it was never meant to see.
+
+**Root cause, confirmed straight from binutils' own upstream source**
+(`binutils/Makefile.am`, not anything em-generated):
+```
+AM_CFLAGS          = $(WARN_CFLAGS) $(ZLIBINC) $(ZSTD_CFLAGS)
+AM_CFLAGS_FOR_BUILD = $(WARN_CFLAGS_FOR_BUILD) $(ZLIBINC) $(ZSTD_CFLAGS)
+```
+`ZSTD_CFLAGS` (correctly `-I<sysroot>/usr/include`, for the actual
+cross-compiled binutils binaries linking `libzstd`) is **reused verbatim**
+in `AM_CFLAGS_FOR_BUILD` — the native/build-machine helper flags. There is
+no `ZSTD_CFLAGS_FOR_BUILD` upstream. `sysinfo.c` doesn't even use zstd;
+this is dead/vestigial inclusion that's harmless when CBUILD and CTARGET
+share compatible glibc header layouts, and only breaks when they
+structurally differ enough to trip the ABI `#error` guards (aarch64 host
+vs. riscv64 target, here). **Deterministic, 100% reproducible, confirmed
+independent of any prior test-session state — not "noise from an unclean
+setup."** This would hit real `emerge` too, under the same
+CBUILD/CTARGET/USE=zstd combination; not em-specific at all.
+
+**Workaround (verified live)**: disable `zstd` for this cross binutils
+build — it only gates optional debug-info decompression support, unrelated
+to binutils' actual function:
+```
+# <sysroot>/etc/portage/package.use/sys-devel-binutils
+sys-devel/binutils -zstd
+```
+Rebuilt clean afterward: `em --emptytree sys-devel/binutils --cross
+riscv64-unknown-linux-gnu ...` → merged, binpkg created. No em code change
+needed or appropriate here — this is upstream binutils' bug to fix (drop
+`$(ZSTD_CFLAGS)` from `AM_CFLAGS_FOR_BUILD`, or add a real
+`ZSTD_CFLAGS_FOR_BUILD` autoconf check), not something `em` should paper
+over generically.
+
 **How to resume**: rebuild release, retry the full `--emptytree @system`
-run — `sys-devel/binutils` (a separate, still-unexamined `make exited 2`
-failure amid heavy `-j80` MAKEOPTS parallel output — the real error is
-likely buried earlier in `binutils`'s build.log among interleaved parallel
-compiles, not yet isolated) and `sys-apps/systemd-utils` (blocked on the
-native-stage1-at-`base_roots()` gap above) are the two remaining failures
-out of 59. [[stage-build-shakeout]]
+run with the `package.use` override above in place. `sys-apps/systemd-utils`
+(blocked on the native-stage1-at-`base_roots()` gap, #28) is now the only
+known remaining failure out of 59. [[stage-build-shakeout]]
