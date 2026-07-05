@@ -74,6 +74,56 @@ previous. This doc is **Tier 1** (the active focus).
      offset build with the host interpreter's site-packages visible to the chosen
      python impl. Many python-build-time ebuilds (`jinja2`, `sphinx`, `cython`,
      `setuptools_scm`) will hit this.
+   - **2026-07-05: both remaining sub-gaps closed at the solver/execution
+     level; the jinja2 scenario itself now needs a real bootstrap, not more
+     code.** Riscv64 `--cross` stage3 shakeout (see
+     [[stage-build-shakeout]] #26-#28) hit this exact scenario fresh and
+     fixed it in two layers:
+     1. **Solver**: `cross_target_runtime_deps` wasn't calling
+        `append_unsatisfied_broot` for BDEPEND at all for `--cross` target
+        packages, so an unsatisfied host BDEPEND (jinja2 needing
+        `python_targets_python3_14`, host only had `_python3_13`) never
+        entered the plan as a package to build — the target's own
+        `src_configure` just failed instead. Fixed `9c0354e`.
+     2. **Merge execution** (new, found today): even after the solver
+        correctly scheduled jinja2 as a `MergeRoot::Host` plan entry, the
+        actual merge loop (`main.rs`'s `merge_sequential`/`merge_parallel`)
+        computed a single, plan-wide root from `roots.merge_root()` and used
+        it for *every* entry — completely ignoring
+        `PlannedMerge.merge_root`. So jinja2 silently built into the
+        `--cross` sysroot instead of `BROOT`, "succeeded", and the later
+        `python3 (jinja2) found: NO` failure was unchanged. Fixed by routing
+        each entry through a `base_roots()`-vs-`roots()` choice
+        (`entry_roots()` helper) based on its own `merge_root` field —
+        commit pending, see `stage-build-shakeout.md` #28 for the full
+        trace and the `--local`/`--prefix`/bare-`--root` reasoning behind
+        picking `base_roots()` over the bare system `/`.
+     3. **Still open, and now precisely characterized**: with both of the
+        above fixed, jinja2 gets routed to `base_roots()` (the `--root`
+        offset, *outside* the `--cross` sysroot substitution) — correctly,
+        per the isolation goal below — but *this test sysroot's own outer
+        EROOT* was only ever bootstrapped with the minimal cross-toolchain
+        support set (`binutils`/`gcc`/`baselayout`/`gentoo-functions` — see
+        the "Stage1 from-scratch into `--root`" section below), not a full
+        native stage1 with Python etc. So jinja2's own build fails there for
+        a *new* reason: `gpep517` can't find a `_sysconfigdata` file at all
+        under `base_roots()`'s `usr/lib/python3.14`, because no native
+        Python was ever installed at that root. **This is not a code bug —
+        it's the missing "finish the `--root` offset's own stage1" work
+        this same file already tracks below.** Once that lands, `base_roots()`
+        already gets returned correctly for a Host BDEPEND and this closes.
+   - **Explicit decision (2026-07-05, user)**: `base_roots()` — not the bare
+     system `/` — is the intended long-term target for `MergeRoot::Host`,
+     specifically *because* it keeps an unprivileged `--root`/`--cross`
+     build isolated from the real host (no write access to `/usr` needed,
+     no dependency on whatever happens to be on the real machine). The
+     `--root` offset should eventually carry its own complete stage1 for
+     the host role too — freestanding, or at most sharing host libc the way
+     `--local`/`--prefix` Gentoo Prefix already does — rather than reaching
+     out to the bare system for anything. This directly extends the
+     "Stage1 from-scratch into `--root`" work below: that stage1 needs to
+     cover a general native BDEPEND-capable environment (Python + its own
+     build tools), not just enough to bootstrap the cross-compiler.
 3. **Tier 2 — crossdev on top of Tier 1** (`{target}-emerge`, `CBUILD ≠ CHOST`).
    Same `(cpn, slot, root)` routing as item 2 with a foreign `CHOST`; cross
    already matches `riscv64-emerge -p gcc` (18 pkgs). Reuses Tier 1's

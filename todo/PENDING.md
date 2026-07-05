@@ -22,8 +22,19 @@ across the process boundary; brush never re-resizes `PIPESTATUS` once
 it's been explicitly `declare`d, so the eclass's `pipestatus || die`
 check saw a stale, truncated array and misfired (`5902b73`). The
 underlying brush bug itself is filed separately, not blocking:
-[[brush-pipestatus-not-reset]]. Task #17 (attempt riscv64 stage3) still
-in progress — next step is retrying the full `--emptytree @system` run.
+[[brush-pipestatus-not-reset]]. #28 (new, found retrying the full run):
+the merge-execution loop ignored each plan entry's own `merge_root`,
+so a `MergeRoot::Host` BDEPEND like jinja2 silently built into the
+`--cross` sysroot instead of `base_roots()` even after #26 correctly
+scheduled it there — fixed via a new `entry_roots()` helper in `main.rs`
+(commit pending as of this writing). 57/59 packages now merge clean.
+**Remaining 2 failures**: `sys-devel/binutils` (a `make exited 2` not yet
+isolated from `-j80` parallel output) and `sys-apps/systemd-utils`
+(blocked on a *real bootstrap gap*, not a code bug — `base_roots()`, this
+session's outer EROOT, has no native Python at all, only the minimal
+cross-toolchain-support set; jinja2 needs a full native stage1 there —
+see [[em-root-characterization]] Tier 1 item 2 and
+`stage-build-shakeout.md` #28). Task #17 still in progress.
 
 ## Stage building (the active goal: a real stage3)
 

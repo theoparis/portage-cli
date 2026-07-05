@@ -1451,3 +1451,87 @@ boundary. `dev-python/jinja2` now builds and merges cleanly under both
 `--privilege pseudoroot` and `--privilege sudo`. The brush bug itself is
 still open upstream, tracked separately since it's no longer blocking
 anything here. [[stage-build-shakeout]]
+
+## 28. Merge-execution ignored per-entry `merge_root` — Host BDEPEND silently built into the wrong root
+
+Surfaced immediately after #27's fix: with the PIPESTATUS bug gone,
+`dev-python/jinja2` built and merged cleanly in the standalone
+`--emptytree dev-python/jinja2 --cross ...` repro, and the full
+`--emptytree @system` run got much further (57/59 merged, only
+`sys-devel/binutils` and `sys-apps/systemd-utils` failing — down from the
+#22-27 baseline). But `sys-apps/systemd-utils` still died identically to
+the *original* bug report: `meson.build:1695: ERROR: python3 is missing
+modules: jinja2`, even though jinja2 "succeeded" earlier in the same run.
+
+**Root cause**: `main.rs`'s merge loop (`merge_sequential`/`merge_parallel`,
+both called from `run_merge_plan`) computed a single, plan-wide
+`merge_root = roots.merge_root()` *once*, outside the per-package loop, and
+used it for every `ebuild::build_and_merge`/`merge_binpkg` call regardless
+of that entry's own `PlannedMerge.merge_root` field. So even though the
+solver correctly classified jinja2 as `MergeRoot::Host` (an unsatisfied
+BDEPEND scheduled onto BROOT — see #26/`9c0354e`) and the printed plan
+correctly showed it with no `to /path` suffix, the actual build still ran
+with `--sysroot /var/tmp/cross-stage1-riscv64/usr/riscv64-unknown-linux-gnu`
+and merged into *that* sysroot's own VDB — confirmed directly:
+`/var/tmp/cross-stage1-riscv64/usr/riscv64-unknown-linux-gnu/var/db/pkg/dev-python/jinja2-3.1.6`
+existed, while the real host's own jinja2 (`/var/db/pkg/dev-python/jinja2-3.1.6`,
+`python_targets_python3_13` only) was untouched. jinja2 "succeeded" from
+`em`'s point of view but never became available where `systemd-utils`'s
+build actually looks for it — the exact same die as before #26/#27, just
+one layer deeper.
+
+(Self-inflicted confound found and cleaned along the way: the *very first*
+retest of this showed jinja2 apparently already "satisfied" and dropped
+from the plan entirely — turned out to be `target_installed_cpvs`, a bare
+`HashSet<Cpv>` with no `MergeRoot` in the key, matching my own earlier
+manual `--emptytree dev-python/jinja2 --cross ...` test runs that had
+installed jinja2 into the *sysroot's* VDB as a Target package. Removing
+that leftover VDB/binpkg entry restored the correct signal. Real bug
+confirmed independently of that confound — see the merge-root trace above.)
+
+**Fix**: `main.rs` gained `entry_roots(planned, roots, host_roots) -> &Roots`
+— a pure, unit-tested helper picking `host_roots` for
+`planned.merge_root == MergeRoot::Host`, else `roots`. `run_merge_plan` now
+computes `host_roots = globals.base_roots()` once and threads it into both
+`merge_sequential`/`merge_parallel`, which call `entry_roots(...)` per
+package instead of using one shared `roots`/`merge_root` for the whole
+plan. `cli::Roots` gained a `#[cfg(test)]` `for_test(target: &str)`
+constructor so `entry_roots` is testable without a full CLI parse. Two new
+tests: `host_entry_installs_into_outer_eroot_not_the_cross_sysroot`,
+`target_entry_uses_the_plans_own_root`. 141 tests pass, clippy/fmt clean.
+
+**Why `base_roots()` (the `--root` offset) and not the bare system `/`**:
+discussed live with the user. The bare host `/` would work today (it
+already has jinja2, just for the wrong python target) but defeats the
+point of an unprivileged `--root`/`--cross` build: it would need real
+write access to `/usr` and would silently depend on whatever happens to
+already be on the real machine. `base_roots()` keeps the whole build
+self-contained under the `--root` offset, matching how `--local`/`--prefix`
+Gentoo Prefix already isolates itself (sharing at most the host kernel/libc).
+See [[em-root-characterization]] (Tier 1 item 2) — this is the *same*,
+already-tracked "unsatisfied-BROOT Host scheduling" gap from 2026-06-27,
+not a new discovery; today closed its solver and merge-execution halves.
+
+**Still open — this is now an environment/bootstrap gap, not a code bug**:
+routing jinja2 to `base_roots()` is correct, but *this session's* outer
+EROOT (`/var/tmp/cross-stage1-riscv64`) was only ever bootstrapped with
+the minimal cross-toolchain-support set (`sys-devel/{binutils,gcc}`,
+`sys-apps/{baselayout,gentoo-functions}` — 38 VDB entries total, all
+`cross-riscv64-unknown-linux-gnu/*` plus that handful). No native Python at
+all. So jinja2's own build now fails differently there: `gpep517`'s
+`patch_sysconfig` can't find `_sysconfigdata` under
+`base_roots()`'s `usr/lib/python3.14` because nothing ever installed a
+native Python at that root. Fixing this needs the outer `--root` offset to
+carry a **full native stage1** (not just enough to bootstrap the
+cross-compiler) — exactly the work `em-root-characterization.md`'s "Stage1
+from-scratch into `--root`" section already tracks, just now with a
+concrete, motivating BDEPEND case (jinja2/gpep517/flit-core, and by
+extension any python-build-time tool: sphinx, cython, setuptools_scm).
+
+**How to resume**: rebuild release, retry the full `--emptytree @system`
+run — `sys-devel/binutils` (a separate, still-unexamined `make exited 2`
+failure amid heavy `-j80` MAKEOPTS parallel output — the real error is
+likely buried earlier in `binutils`'s build.log among interleaved parallel
+compiles, not yet isolated) and `sys-apps/systemd-utils` (blocked on the
+native-stage1-at-`base_roots()` gap above) are the two remaining failures
+out of 59. [[stage-build-shakeout]]
