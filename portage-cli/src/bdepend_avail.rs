@@ -37,14 +37,22 @@ struct UseInfo {
 pub struct Avail(Vec<AvailEntry>);
 
 impl Avail {
-    /// `BDEPEND` availability at the start of a run: host `BROOT`, plus the
-    /// prefix target VDB for in-place `--local` (`EPREFIX`) builds.
-    pub fn initial_bdepend(roots: &Roots) -> Self {
-        let mut out = vdb_avail_entries(None);
-        if roots.eprefix().is_some() {
-            out.extend(vdb_avail_entries(roots.target()));
-        }
-        Self(out)
+    /// `BDEPEND` availability at the start of a run: the build host's own
+    /// `BROOT`.
+    ///
+    /// `host_roots` must be `Cli::base_roots()` (the outer EROOT, *before*
+    /// any `--cross` sysroot substitution), never the possibly
+    /// cross-substituted `Roots` the solver targets: an unsatisfied Host
+    /// BDEPEND builds into `base_roots()` (`entry_roots()` in `main.rs`), so
+    /// satisfaction must be checked against that same root's VDB, or a
+    /// package built there on one run is never recognized as already
+    /// satisfied on the next. This mirrors the `load_host_installed` fix —
+    /// see `todo/stage-build-shakeout.md` #28/#30 — for the same bug in the
+    /// solver's own host-installed view. For `--local`, `base_roots()`'s
+    /// `merge_root()` already *is* the prefix (`EPREFIX == target`), so no
+    /// separate bare-host union is needed.
+    pub fn initial_bdepend(host_roots: &Roots) -> Self {
+        Self(vdb_avail_entries(Some(host_roots.merge_root())))
     }
 
     /// `DEPEND` availability at the start of a run: `VDB(base) ∪ VDB(target)`.
@@ -171,22 +179,15 @@ fn use_dep_satisfied(ud: &UseDep, info: &UseInfo) -> bool {
 /// Installed `(cpv, main-slot)` pairs from a root's VDB. `None` = host
 /// `/var/db/pkg`. A missing/unreadable VDB yields an empty set.
 pub fn vdb_cpvs(root: Option<&Utf8Path>) -> Vec<(Cpv, Option<String>)> {
-    let vdb = match root {
-        Some(r) => Vdb::open(r.join("var/db/pkg")),
-        None => Vdb::open_default(),
-    };
-    let Ok(vdb) = vdb else {
-        return Vec::new();
-    };
-    vdb.packages()
+    vdb_avail_entries(root)
         .into_iter()
-        .map(|p| (p.cpv().clone(), p.slot_main().ok()))
+        .map(|e| (e.cpv, e.slot))
         .collect()
 }
 
 /// Like [`vdb_cpvs`], but also carries each installed package's USE + IUSE so
 /// [`Avail::atom_satisfied`] can verify USE-dep brackets against them (see
-/// [`AvailEntry::use_info`]).
+/// [`AvailEntry::use_info`]). `None` = host `/var/db/pkg`.
 fn vdb_avail_entries(root: Option<&Utf8Path>) -> Vec<AvailEntry> {
     let vdb = match root {
         Some(r) => Vdb::open(r.join("var/db/pkg")),
@@ -490,5 +491,32 @@ mod tests {
         let avail = atoms(&["dev-libs/b-1"]);
         let cpns = unsatisfied_cpns(&parse("|| ( dev-libs/a dev-libs/b )"), &avail);
         assert!(cpns.is_empty());
+    }
+
+    /// Regression test for the riscv64 stage3 shakeout (#28/#30): the same
+    /// bug class as `load_host_installed` (installed.rs) — `initial_bdepend`
+    /// must read `host_roots`'s VDB, not unconditionally the bare host's.
+    #[test]
+    fn initial_bdepend_reads_the_given_root_not_the_bare_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("var/db/pkg/dev-python/jinja2-3.1.6");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("EAPI"), "8").unwrap();
+        std::fs::write(pkg_dir.join("SLOT"), "0").unwrap();
+        std::fs::write(pkg_dir.join("CONTENTS"), "").unwrap();
+        std::fs::write(pkg_dir.join("USE"), "").unwrap();
+
+        let root_str = tmp.path().to_str().unwrap();
+        let host_roots = Roots::for_test(root_str);
+        let avail = Avail::initial_bdepend(&host_roots);
+
+        let dep = parse("dev-python/jinja2");
+        let DepEntry::Atom(dep) = &dep[0] else {
+            unreachable!()
+        };
+        assert!(
+            avail.atom_satisfied(dep),
+            "must find the package via host_roots' VDB, not the bare host's"
+        );
     }
 }

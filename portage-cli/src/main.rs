@@ -369,7 +369,7 @@ async fn emerge_atoms_inner(
 
     // Pre-flight: fail fast with a clear message if any plan entry's build
     // dependencies won't be present when it builds, rather than mid-build.
-    preflight::check(&outcome.plan, &roots)?;
+    preflight::check(&outcome.plan, &roots, &host_roots)?;
 
     if cli.ask && !confirm_merge(outcome.plan.len())? {
         println!(">>> Quitting.");

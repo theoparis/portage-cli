@@ -587,7 +587,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     }
 
     let trim_ctx = bdepend_trim::TrimCtx {
-        roots,
+        host_roots,
         data: &data,
         use_config: &use_config,
         package_use: &package_use,

@@ -6,7 +6,10 @@
 //!
 //! - `DEPEND` is resolved against the **base system** view
 //!   `VDB(base) ∪ VDB(target)` (what `SYSROOT`/`ESYSROOT` point at), and
-//! - `BDEPEND` against the **host** `BROOT` (always `/`).
+//! - `BDEPEND` against the build host's own `BROOT`: `Cli::base_roots()`,
+//!   *not* unconditionally bare `/` (a `--root`/`--prefix`/`--local`
+//!   invocation's Host BDEPEND merges land in `base_roots()`, so that's what
+//!   must be checked — see `todo/stage-build-shakeout.md` #28/#30).
 //!
 //! Both sets grow with each earlier plan entry: a package merged earlier in the
 //! run is visible to everything after it (root-model.md "within-run
@@ -28,11 +31,13 @@ use crate::query::depgraph::PlannedMerge;
 
 /// Verify the plan's build dependencies are satisfiable in install order.
 ///
+/// `host_roots` must be `Cli::base_roots()` — see [`Avail::initial_bdepend`].
+///
 /// Returns an error listing every unsatisfied requirement (package → missing
 /// atoms) when the check fails; `Ok(())` otherwise.
-pub fn check(plan: &[PlannedMerge], roots: &Roots) -> Result<()> {
+pub fn check(plan: &[PlannedMerge], roots: &Roots, host_roots: &Roots) -> Result<()> {
     let mut depend_avail = Avail::initial_depend(roots);
-    let mut bdepend_avail = Avail::initial_bdepend(roots);
+    let mut bdepend_avail = Avail::initial_bdepend(host_roots);
 
     let mut problems: Vec<String> = Vec::new();
     for planned in plan {

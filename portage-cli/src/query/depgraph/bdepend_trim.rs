@@ -14,7 +14,8 @@ use super::repo::{self, RepoData};
 
 /// Context for [`trim_within_run_bdepend`].
 pub struct TrimCtx<'a> {
-    pub roots: &'a Roots,
+    /// `Cli::base_roots()` — see [`crate::bdepend_avail::Avail::initial_bdepend`].
+    pub host_roots: &'a Roots,
     pub data: &'a RepoData,
     pub use_config: &'a UseConfig,
     pub package_use: &'a [(portage_atom::Dep, Vec<UseOverride>)],
@@ -122,7 +123,7 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
     }
 
     for (j, (consumer, consumer_ver)) in cand.order.iter().enumerate().skip(cand.index + 1) {
-        let avail = avail_for_consumer(j, cand.kept, cand.kept_indices, cand.ctx.roots);
+        let avail = avail_for_consumer(j, cand.kept, cand.kept_indices, cand.ctx.host_roots);
         let Some(cache) = repo::find_cache(cand.ctx.data, consumer, consumer_ver) else {
             continue;
         };
@@ -146,9 +147,9 @@ fn avail_for_consumer(
     consumer_index: usize,
     kept: &[(PortagePackage, Version)],
     kept_indices: &[usize],
-    roots: &Roots,
+    host_roots: &Roots,
 ) -> Avail {
-    let mut avail = Avail::initial_bdepend(roots);
+    let mut avail = Avail::initial_bdepend(host_roots);
     for (k, (pkg, ver)) in kept.iter().enumerate() {
         if kept_indices[k] < consumer_index {
             let cpv = Cpv::new(*pkg.cpn(), ver.clone());
@@ -238,7 +239,7 @@ mod tests {
         let reinstall = HashSet::new();
         let roots = empty_roots();
         let ctx = TrimCtx {
-            roots: &roots,
+            host_roots: &roots,
             data: &data,
             use_config: &use_config,
             package_use: &[],
@@ -279,7 +280,7 @@ mod tests {
         let reinstall = HashSet::new();
         let roots = empty_roots();
         let ctx = TrimCtx {
-            roots: &roots,
+            host_roots: &roots,
             data: &data,
             use_config: &use_config,
             package_use: &[],
