@@ -1,13 +1,19 @@
 //! `em setup`: bootstrap an unprivileged prefix layout so a subsequent build
-//! (or the next `em --local` / `em --prefix DIR` run) has the directories,
-//! the overlay search-path `bashrc`, and a `make.conf` placeholder it needs.
+//! (or the next `em --local` / `em --prefix DIR` / `em --root DIR` run) has the
+//! directories, the overlay search-path `bashrc`, and a `make.conf` placeholder
+//! it needs.
 //!
-//! Two modes, distinguished by [`Roots::eprefix`]:
-//! - `--local` (`EPREFIX` set): in-place Gentoo-Prefix. The `.pc` files record
-//!   correct `${EPREFIX}/usr` paths, so the recipe is just an additive
-//!   `PKG_CONFIG_PATH` (+ `CMAKE_PREFIX_PATH`).
-//! - `--prefix DIR` (ROOT-offset): staged tree whose `.pc` record `/usr`, so the
-//!   recipe also exports `CPPFLAGS`/`LDFLAGS` pointing into the prefix.
+//! Three modes (docs/root-topology.md § "Lifecycle"):
+//! - `--local` (standalone prefix): EPREFIX set, base == target. Full closure
+//!   into `~/.gentoo`; builds its own python via `toolchain --setup`, so no
+//!   host-python symlinks. The `BASHRC_LOCAL` recipe (EPREFIX-based) covers the
+//!   in-place search-path needs.
+//! - `--prefix DIR` (overlay): EPREFIX set, base == host. Borrows host tools,
+//!   so symlinks host python into `${EPREFIX}/usr/bin` for the relocatable
+//!   shebangs EPREFIX produces. The `BASHRC_PREFIX` recipe (ROOT-based) covers
+//!   the overlay search-path needs.
+//! - `--root DIR` (self-contained offset): no EPREFIX. Own everything; no
+//!   CPPFLAGS injection (it actively breaks self-contained roots).
 //!
 //! Idempotent: directories are created if missing; files are written only when
 //! absent, so re-running never clobbers a user's edits.
@@ -109,7 +115,19 @@ pub fn bootstrap(roots: &Roots) -> Result<()> {
              (the host / is never bootstrapped)"
         );
     }
-    let is_local = roots.eprefix().is_some();
+    // Three layout modes (docs/root-topology.md § "Lifecycle"):
+    // - standalone prefix (--local): eprefix set, base == target. Full closure
+    //   into ~/.gentoo; builds its own python, so NO host-python symlinks.
+    // - overlay (--prefix): eprefix set, base != target (host is base). Borrows
+    //   host tools, so symlinks host python into ${EPREFIX}/usr/bin to satisfy
+    //   the relocatable shebangs EPREFIX produces.
+    // - self-contained offset (--root): no eprefix, base == target. Own
+    //   everything; no CPPFLAGS injection (actively breaks self-contained roots).
+    let has_eprefix = roots.eprefix().is_some();
+    let base_eq_target = roots.base() == roots.target();
+    let is_standalone_prefix = has_eprefix && base_eq_target; // --local
+    let is_overlay = has_eprefix && !base_eq_target; // --prefix
+    let self_contained = !has_eprefix && base_eq_target; // --root
 
     for dir in SKELETON {
         let p = eroot.join(dir);
@@ -144,36 +162,44 @@ pub fn bootstrap(roots: &Roots) -> Result<()> {
     // 2026-07-03 doing a from-scratch native+cross toolchain bootstrap: gcc's
     // `libiberty/obstack.c` failed to compile against the ROOT's own,
     // ABI-mismatched `obstack.h`). See [[stage-build-shakeout]].
-    let self_contained = !is_local && roots.build_sysroot().is_none();
     if self_contained {
         write_if_absent(&portage.join("bashrc"), "")?;
+    } else if is_overlay {
+        // --prefix: ROOT-offset overlay. Host (/) is the build sysroot; the
+        // prefix is layered on top.
+        write_if_absent(&portage.join("bashrc"), BASHRC_PREFIX)?;
     } else {
-        let bashrc_body = if is_local {
-            BASHRC_LOCAL
-        } else {
-            BASHRC_PREFIX
-        };
-        write_if_absent(&portage.join("bashrc"), bashrc_body)?;
+        // --local standalone: EPREFIX-based in-place prefix recipe.
+        write_if_absent(&portage.join("bashrc"), BASHRC_LOCAL)?;
     }
     write_if_absent(
         &portage.join("make.conf"),
-        &make_conf_template(is_local, self_contained, eroot),
+        &make_conf_template(is_standalone_prefix, self_contained, eroot),
     )?;
 
-    if is_local {
+    // Host-python/host-tool symlinks: overlay only (--prefix). The overlay
+    // borrows host tools (base is the host), and EPREFIX makes installed
+    // scripts shebang to ${EPREFIX}/usr/bin/pythonX.Y — the symlink satisfies
+    // those without building a prefix python. A standalone --local builds its
+    // own python via `toolchain --setup`; a symlink there would masquerade as
+    // a prefix-owned file and violate the self-contained invariant.
+    // (Previously gated on `is_local` — exactly backwards.)
+    if is_overlay {
         link_host_pythons(eroot)?;
         link_host_base_tools(eroot)?;
     }
 
-    let mode = if is_local {
-        format!("em --local            (in-place Gentoo-Prefix at {eroot})")
+    let mode = if is_standalone_prefix {
+        format!("em --local            (standalone Gentoo-Prefix at {eroot})")
+    } else if is_overlay {
+        format!("em --prefix {eroot}   (ROOT-offset overlay)")
     } else {
-        format!("em --prefix {eroot}   (ROOT-offset staging)")
+        format!("em --root {eroot}     (self-contained offset)")
     };
     println!(">>> Prefix ready at {eroot}");
     println!("    config overlay: {portage}");
     println!("    use it with:    {mode}");
-    if is_local {
+    if is_standalone_prefix {
         println!("    add to PATH:    {eroot}/usr/bin");
     }
     Ok(())
@@ -414,5 +440,41 @@ mod tests {
             std::fs::read_to_string(cli.roots().merge_root().join("etc/portage/make.conf"))
                 .unwrap();
         assert!(!make_conf.contains("MAKEOPTS="));
+    }
+
+    /// `--prefix` (overlay) symlinks host base tools into ${EPREFIX}/usr/bin —
+    // the relocatable installed tree's shebangs reference ${EPREFIX}/usr/bin/...
+    // and the overlay borrows host tools rather than building its own.
+    // Previously the symlinks were gated on `--local` (exactly backwards).
+    #[test]
+    fn overlay_prefix_symlinks_host_base_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = Cli::parse_from(["em", "--prefix", dir.path().to_str().unwrap()]);
+        super::bootstrap(&cli.roots()).unwrap();
+        let bin = cli.roots().merge_root().join("usr/bin");
+        // HOST_BASE_TOOLS = [xargs, find]; the test host should have at least one.
+        let has_symlink = ["find", "xargs"]
+            .iter()
+            .any(|t| bin.join(t).as_std_path().symlink_metadata().is_ok());
+        assert!(
+            has_symlink,
+            "--prefix overlay must symlink host base tools into ${{EPREFIX}}/usr/bin"
+        );
+    }
+
+    /// `--root` (self-contained) does NOT symlink host tools — it owns everything.
+    #[test]
+    fn self_contained_root_does_not_symlink_host_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = Cli::parse_from(["em", "--root", dir.path().to_str().unwrap()]);
+        super::bootstrap(&cli.roots()).unwrap();
+        let bin = cli.roots().merge_root().join("usr/bin");
+        let has_symlink = ["find", "xargs"]
+            .iter()
+            .any(|t| bin.join(t).as_std_path().symlink_metadata().is_ok());
+        assert!(
+            !has_symlink,
+            "--root self-contained must NOT symlink host tools"
+        );
     }
 }

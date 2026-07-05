@@ -255,14 +255,18 @@ impl Cli {
     /// `--cross`-active invocation.
     pub(crate) fn base_roots(&self) -> Roots {
         let path = |s: &Option<String>| s.as_deref().map(camino::Utf8PathBuf::from);
-        // `--local`: in-place Gentoo-Prefix at ~/.gentoo. Profile/make.conf come
-        // from the host; ~/.gentoo/etc/portage overlays package.use/bashrc.
-        // EPREFIX == target == ~/.gentoo, so EROOT == target and ROOT == /.
+        // `--local`: standalone Gentoo-Prefix at ~/.gentoo. Full closure (base
+        // == target == ~/.gentoo), self-contained VDB. EPREFIX makes installed
+        // scripts relocatable (shebangs reference ${EPREFIX}/usr/bin/...). The
+        // prefix builds its own python via `toolchain --setup`; during bootstrap
+        // the host compiler is reached via PATH, never via a symlink masquerading
+        // as a prefix-owned file (that's the overlay's job — see --prefix below).
+        // See docs/root-topology.md § "Override semantics".
         if self.local {
             let prefix = home_dir().join(".gentoo");
             return Roots {
                 config: None,
-                base: None,
+                base: Some(prefix.clone()),
                 target: Some(prefix.clone()),
                 eprefix: Some(prefix.clone()),
                 config_overlay: Some(prefix.join("etc/portage")),
@@ -271,12 +275,22 @@ impl Cli {
         }
         Roots {
             // config: --config-root, else --root; host otherwise.
+            // (TODO: portage `ROOT=` parity — --root should NOT move config.
+            //  Deferred to Cluster B: ensure_self_contained_prefix uses
+            //  config().is_some() as a self-contained signal that breaks if
+            //  --root stops setting config. See docs/root-topology.md.)
             config: path(&self.config_root).or_else(|| path(&self.root)),
-            // base: --root; host otherwise. --prefix never changes it.
+            // base: --root; host otherwise. --prefix never changes it (overlay:
+            // the host seeds the plan, only the delta lands in the prefix).
             base: path(&self.root),
             // target: --prefix (install destination), else --root.
             target: path(&self.prefix).or_else(|| path(&self.root)),
-            eprefix: None,
+            // --prefix sets EPREFIX: the installed tree is relocatable, so
+            // ebuilds bake ${EPREFIX}/usr/bin/pythonX.Y into shebangs. Since the
+            // overlay borrows the host's python rather than building one,
+            // setup.rs symlinks host python into ${EPREFIX}/usr/bin to satisfy
+            // those shebangs (the standalone --local above builds its own).
+            eprefix: path(&self.prefix),
             // A --prefix overlay reads prefix-local package.use/bashrc from
             // DIR/etc/portage (created by `em setup`); host config provides the
             // profile. None for host / --root (config is already offset).
@@ -356,6 +370,58 @@ mod tests {
         let r = cli.roots();
         assert_eq!(r.config(), None);
         assert_eq!(r.merge_root().as_str(), "/");
+    }
+
+    /// `--local` is a standalone prefix: base == target == ~/.gentoo (full
+    /// closure, own VDB), not an overlay (base would be the host). Previously
+    /// base was None (host) — wrong for cross on a foreign host, where there's
+    /// no host VDB to seed the plan. See docs/root-topology.md § "Override
+    /// semantics".
+    #[test]
+    fn local_is_standalone_not_overlay() {
+        // HOME is process-global; save/restore to avoid interfering with
+        // parallel tests. (Edition 2024 makes set_var unsafe.)
+        let saved = std::env::var("HOME").ok();
+        // SAFETY: no other thread in this test process touches HOME.
+        unsafe {
+            std::env::set_var("HOME", "/tmp/fake-home");
+        }
+        let cli = Cli::parse_from(["em", "--local", "-p", "sys-libs/zlib"]);
+        let r = cli.base_roots();
+        assert_eq!(
+            r.base().unwrap().as_str(),
+            "/tmp/fake-home/.gentoo",
+            "--local base must be the prefix (standalone), not the host"
+        );
+        assert_eq!(
+            r.base(),
+            r.target(),
+            "--local base == target (full closure)"
+        );
+        // Restore.
+        unsafe {
+            match &saved {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// `--prefix` sets EPREFIX: the installed tree is relocatable, so ebuilds
+    /// bake ${EPREFIX}/usr/bin/pythonX.Y into shebangs. The overlay then
+    /// symlinks host python there (setup.rs) to satisfy them without building
+    /// a prefix python. See docs/root-topology.md § "Override semantics".
+    #[test]
+    fn prefix_sets_eprefix_for_relocatable_overlay() {
+        let cli = Cli::parse_from(["em", "--prefix", "/opt/p", "-p", "sys-libs/zlib"]);
+        let r = cli.base_roots();
+        assert_eq!(
+            r.eprefix().unwrap().as_str(),
+            "/opt/p",
+            "--prefix must set EPREFIX (relocatable installed tree)"
+        );
+        // Overlay: base is the host (None), not the prefix.
+        assert_eq!(r.base(), None, "--prefix base is the host (overlay)");
     }
 }
 
