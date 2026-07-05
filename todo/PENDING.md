@@ -14,10 +14,16 @@ crash (`42d001e`), #26 three real dep-resolution bugs — USE-dep-blind
 BDEPEND check (`762e645`), PKG_CONFIG not sysroot-scoped for `--cross`
 (`1a7e7c4`), missing BDEPEND scheduling for `--cross` target packages
 (`9c0354e`). `net-misc/dhcpcd`/`sys-apps/iproute2` reverified building
-clean after all that. **Still open**: #27, `dev-python/jinja2` dying in
-`distutils-r1_python_install` (`usr/bin` missing from its own install
-tree) — not yet root-caused, blocks `sys-apps/systemd-utils` and thus
-the full stage3. Task #17 (attempt riscv64 stage3) still in progress.
+clean after all that. #27 (`dev-python/jinja2` dying in
+`distutils-r1_python_install`) — ✅ **root-caused and fixed**: not a
+missing directory at all — `capture_variables` (Compile→Install
+worker-env dump) was leaking `PIPESTATUS` (and other bash dynamic vars)
+across the process boundary; brush never re-resizes `PIPESTATUS` once
+it's been explicitly `declare`d, so the eclass's `pipestatus || die`
+check saw a stale, truncated array and misfired (`5902b73`). The
+underlying brush bug itself is filed separately, not blocking:
+[[brush-pipestatus-not-reset]]. Task #17 (attempt riscv64 stage3) still
+in progress — next step is retrying the full `--emptytree @system` run.
 
 ## Stage building (the active goal: a real stage3)
 

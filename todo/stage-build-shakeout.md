@@ -1405,28 +1405,49 @@ Real (non-pretend) re-verification: `net-misc/dhcpcd` and
 `sys-apps/iproute2` both now build and merge cleanly end-to-end.
 [[stage-build-shakeout]]
 
-## 27. OPEN — `distutils-r1_python_install` dies on a scriptless package built as a cross BDEPEND
+## 27. FIXED — `distutils-r1_python_install` false-died on a scriptless package built as a cross BDEPEND
 
 Surfaced only as a *consequence* of #26's BDEPEND-scheduling fix actually
 letting `dev-python/jinja2` attempt to build (previously it silently never
 did). `markupsafe` (jinja2's own dep, also newly scheduled) hit a
 transient `ln: ... File exists` on a first attempt — resolved by cleaning
 a stale work dir from repeated manual testing, not a real bug; retried
-clean and it now builds fine. `jinja2` itself does *not* self-resolve:
-consistently dies at `distutils-r1.eclass:1387` —
+clean and it now builds fine. `jinja2` itself did *not* self-resolve:
+consistently died at `distutils-r1.eclass:1387` —
 ```
 cd "${reg_scriptdir}" && find . -mindepth 1 | sort > ...
 pipestatus || die "listing ${reg_scriptdir} failed"
 ```
-`${reg_scriptdir}` = `${BUILD_DIR}/install/usr/bin`. jinja2 installs zero
-console scripts, and in this build `install/usr/` doesn't exist *at all*
-(confirmed directly with `ls`) — but the eclass unconditionally assumes
-every `distutils-r1` package gets a `usr/bin` populated with
-`python3.14`/`python3`/`python` dispatch-stub symlinks (normally created
-earlier, in `python_compile`, by the python-exec integration) before this
-diff-check step runs. Not yet root-caused *why* those stubs — or the
-directory itself — never got created for this specific host-BDEPEND
-cross build. Next: check whether `_distutils-r1_post_python_compile`
-(or whatever creates `${scriptdir}` normally) is even being reached for a
-`MergeRoot::Host` cross-BDEPEND build, vs. a plain native one where this
-presumably works fine. [[stage-build-shakeout]]
+`${reg_scriptdir}` = `${BUILD_DIR}/install/usr/bin`.
+
+**Root cause, found by exhaustive elimination**: NOT a missing directory
+at all. `_distutils-r1_post_python_compile` runs fine and correctly
+populates `usr/bin` with the `python3.14`/`python3`/`python` dispatch
+stubs + `pyvenv.cfg` — confirmed directly on disk, both from a raw
+filesystem check right after the Compile phase and again right before the
+Install phase's own phase loop starts. The directory is there and
+readable the whole time. The `pipestatus || die` misfires because
+`PIPESTATUS` itself is corrupted: `capture_variables` (the
+Compile→Install `__worker` handoff, `ebuild.rs`) dumps `declare -p` and
+restores it verbatim in the worker — and that dump includes bash's own
+`PIPESTATUS` array (`declare -a PIPESTATUS=([0]="1")`, a leftover from
+whatever single command last set it during compile). Once the worker
+`source`s that line, brush *never resizes PIPESTATUS again* for the rest
+of that process — unlike real bash, which unconditionally replaces the
+whole array on every new pipeline regardless of any prior explicit
+`declare`. So the eclass's own two-stage `(cd && find) | sort` pipe
+genuinely succeeds, but `pipestatus()` reads the stale 1-element leftover
+and reports failure. Confirmed with a 3-line repro with no em/eclass
+involved at all — see [[brush-pipestatus-not-reset]] for the brush-side
+root cause (`brush-core/src/variables.rs`'s `convert_to_indexed_array`
+unconditionally destroying a `Dynamic` value's getter/setter binding).
+
+**Fix landed** (`5902b73`): `capture_variables` now excludes `PIPESTATUS`
+and bash's other dynamic/special vars (`FUNCNAME`, `BASH_LINENO`,
+`BASH_SOURCE`, `BASH_ARGV`/`BASH_ARGC`/`BASH_ARGV0`, `BASH_CMDS`,
+`BASH_COMMAND`, `BASH_SUBSHELL`, `BASH_ALIASES`) from the worker-env dump
+— they're bash-maintained runtime state, never meant to cross a process
+boundary. `dev-python/jinja2` now builds and merges cleanly under both
+`--privilege pseudoroot` and `--privilege sudo`. The brush bug itself is
+still open upstream, tracked separately since it's no longer blocking
+anything here. [[stage-build-shakeout]]
