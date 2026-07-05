@@ -160,6 +160,14 @@ impl Roots {
         self.eprefix.as_deref()
     }
 
+    /// Whether this is an overlay view (EPREFIX set, base is the host): the
+    /// `--prefix` case where `base_roots()`'s merge_root is the host but the
+    /// actual install target is the prefix. `roots()` uses this to reconstruct
+    /// the prefix-target view on top of `base_roots()`.
+    pub(crate) fn is_overlay(&self) -> bool {
+        self.eprefix.is_some() && self.base.is_none()
+    }
+
     /// User config overlay dir (`package.use`/`bashrc` layered on host config).
     pub fn config_overlay(&self) -> Option<&camino::Utf8Path> {
         self.config_overlay.as_deref()
@@ -224,16 +232,36 @@ fn home_dir() -> camino::Utf8PathBuf {
 }
 
 impl Cli {
-    /// Resolve the root model (docs/root-model.md) from the global flags.
+    /// Resolve the root model (docs/root-topology.md) from the global flags.
     ///
     /// `--cross <tuple>` layers on top of the base model: it targets the crossdev
     /// sysroot `<EROOT>/usr/<tuple>` as both config-root and root (crossdev's
     /// `PORTAGE_CONFIGROOT == ROOT == SYSROOT`). The `<EROOT>` it sits under still
     /// comes from `--local`/`--prefix`/`--root`, so `em --local --cross <t>`
     /// targets `~/.gentoo/usr/<t>`.
+    ///
+    /// Under `--prefix`, the returned `Roots`'s `merge_root()` is the **prefix**
+    /// (install destination), while [`base_roots`] returns a separate view whose
+    /// `merge_root()` is the **host `/`** (BROOT, for BDEPEND checks). The two
+    /// genuinely differ for an overlay; this split is what lets preflight check
+    /// BDEPEND against the host while the merge lands in the prefix.
     pub fn roots(&self) -> Roots {
+        // --cross: layer the sysroot on top of base_roots (BROOT).
         let base = self.base_roots();
         let Some(tuple) = self.cross.as_deref() else {
+            // No --cross. Under --prefix, base_roots()'s merge_root is the host
+            // (BROOT); the actual install target is the prefix. Reconstruct the
+            // overlay view here so callers see target=prefix.
+            if let Some(prefix) = base.eprefix.as_deref().filter(|_| base.is_overlay()) {
+                return Roots {
+                    config: base.config.clone(),
+                    base: None,
+                    target: Some(prefix.to_path_buf()),
+                    eprefix: Some(prefix.to_path_buf()),
+                    config_overlay: Some(prefix.join("etc/portage")),
+                    relocate: true,
+                };
+            }
             return base;
         };
         let sysroot = base.merge_root().join("usr").join(tuple);
@@ -253,6 +281,13 @@ impl Cli {
     /// packages (which always live in the outer EROOT, never the sysroot
     /// subdirectory — see `crossdev/mod.rs`'s module doc) even from a
     /// `--cross`-active invocation.
+    ///
+    /// `merge_root()` of the returned `Roots` is the **BROOT** — where BDEPEND
+    /// tools run and are checked against (docs/root-topology.md § "Override
+    /// semantics"). Under `--prefix` BROOT is the host `/` (the overlay borrows
+    /// host tools); under `--local`/`--root` BROOT is the offset itself
+    /// (standalone/self-contained). Under `--cross` BROOT is the outer EROOT
+    /// (the sysroot substitution is undone here, applied in [`roots`]).
     pub(crate) fn base_roots(&self) -> Roots {
         let path = |s: &Option<String>| s.as_deref().map(camino::Utf8PathBuf::from);
         // `--local`: standalone Gentoo-Prefix at ~/.gentoo. Full closure (base
@@ -273,6 +308,21 @@ impl Cli {
                 relocate: true,
             };
         }
+        // `--prefix` overlay: BROOT is the host `/`. The prefix is the install
+        // destination (target), but base_roots()'s merge_root() must be the host
+        // because that's what preflight/bdepend_avail check BDEPEND against.
+        // roots() reconstructs the prefix-target view on top of this.
+        if self.prefix.is_some() {
+            let prefix = path(&self.prefix).unwrap();
+            return Roots {
+                config: path(&self.config_root),
+                base: None,
+                target: None, // BROOT = host `/`, NOT the prefix
+                eprefix: Some(prefix.clone()),
+                config_overlay: Some(prefix.join("etc/portage")),
+                relocate: true,
+            };
+        }
         Roots {
             // config: --config-root, else --root; host otherwise.
             // (TODO: portage `ROOT=` parity — --root should NOT move config.
@@ -280,23 +330,13 @@ impl Cli {
             //  config().is_some() as a self-contained signal that breaks if
             //  --root stops setting config. See docs/root-topology.md.)
             config: path(&self.config_root).or_else(|| path(&self.root)),
-            // base: --root; host otherwise. --prefix never changes it (overlay:
-            // the host seeds the plan, only the delta lands in the prefix).
+            // base: --root; host otherwise.
             base: path(&self.root),
-            // target: --prefix (install destination), else --root.
-            target: path(&self.prefix).or_else(|| path(&self.root)),
-            // --prefix sets EPREFIX: the installed tree is relocatable, so
-            // ebuilds bake ${EPREFIX}/usr/bin/pythonX.Y into shebangs. Since the
-            // overlay borrows the host's python rather than building one,
-            // setup.rs symlinks host python into ${EPREFIX}/usr/bin to satisfy
-            // those shebangs (the standalone --local above builds its own).
-            eprefix: path(&self.prefix),
-            // A --prefix overlay reads prefix-local package.use/bashrc from
-            // DIR/etc/portage (created by `em setup`); host config provides the
-            // profile. None for host / --root (config is already offset).
-            config_overlay: path(&self.prefix).map(|p| p.join("etc/portage")),
-            // --prefix also relocates distfiles/build trees under the target.
-            relocate: self.prefix.is_some(),
+            // target: --root (install destination). BROOT == target for --root.
+            target: path(&self.root),
+            eprefix: None,
+            config_overlay: None,
+            relocate: false,
         }
     }
 
@@ -422,6 +462,29 @@ mod tests {
         );
         // Overlay: base is the host (None), not the prefix.
         assert_eq!(r.base(), None, "--prefix base is the host (overlay)");
+    }
+
+    /// `--prefix` BROOT is the host: `base_roots().merge_root()` (BROOT, where
+    /// preflight checks BDEPEND) is `/`, while `roots().merge_root()` (the
+    /// actual install target) is the prefix. These two genuinely differ for an
+    /// overlay; conflating them made preflight check jinja2's BDEPEND against
+    /// the empty prefix VDB instead of the host, failing the build.
+    /// See docs/root-topology.md § "Override semantics".
+    #[test]
+    fn prefix_overlay_broot_is_host_not_prefix() {
+        let cli = Cli::parse_from(["em", "--prefix", "/opt/p", "-p", "sys-libs/zlib"]);
+        // BROOT (base_roots) → host `/`.
+        assert_eq!(
+            cli.base_roots().merge_root().as_str(),
+            "/",
+            "base_roots().merge_root() must be the host (BROOT) under --prefix"
+        );
+        // Install target (roots) → the prefix.
+        assert_eq!(
+            cli.roots().merge_root().as_str(),
+            "/opt/p",
+            "roots().merge_root() must be the prefix (install target) under --prefix"
+        );
     }
 }
 
