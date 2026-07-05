@@ -2183,3 +2183,60 @@ unconnected to any of today's changes.
 `/var/tmp/cross-stage1-riscv64` (now that all 4 real gaps are closed),
 then retry `sys-apps/systemd-utils --cross riscv64-unknown-linux-gnu ...`
 to confirm the full pipeline closes.
+
+## 36. `app-alternatives/gpg`'s VDB-recorded IUSE missing its own alternatives flags — real, deferred `em` bug; unblocked via manual VDB patch
+
+`app-crypt/gpgme` failed to resolve because `app-alternatives/gpg-1-r3`'s
+installed VDB `IUSE` file only contained `nls ssl` — missing `reference`,
+`freepg`, `sequoia`, the three flags `app-alternatives.eclass`'s
+`_app-alternatives_set_globals()` injects at eclass-sourcing time
+(`IUSE="+${ALTERNATIVES[*]%%:*}"`). The metadata cache computes IUSE
+correctly (the solver's own printed plan showed `USE="reference -freepg
+..."` as valid, toggleable flags) — the bug is in the VDB write path:
+`ebuild.rs`'s `iuse: env.iuse` (~line 1982) sources IUSE from
+`shell.collect_env()`, i.e. the *live, post-execution* shell state,
+which only reflects the ebuild's own final `IUSE=` bash assignment. Since
+`gpg-1-r3.ebuild` sets its own plain `IUSE="nls ssl"` *after* inheriting
+`app-alternatives` (the same eclass-var-gets-overwritten-by-the-ebuild's-
+own-plain-assignment pattern already found this session for
+`libtool.eclass`'s `BDEPEND`), the eclass-injected flags never make it
+into what gets written to the VDB, even though they're real, valid,
+solver-visible USE flags.
+
+Not rushed as a code fix — IUSE genuinely needs to be sourced from live
+post-execution state for some dynamic cases (e.g. `PYTHON_TARGETS`), so
+correctly disentangling "eclass computed it, ebuild silently dropped it"
+from "ebuild legitimately mutated it at runtime" needs its own careful
+design pass. Presented 3 options to the user (fix the real bug now /
+manually patch the VDB / stop here); chose the manual patch to unblock
+stage1 completion now, deferring the real fix:
+```
+echo "nls ssl reference freepg sequoia" > \
+  /var/tmp/cross-stage1-riscv64/var/db/pkg/app-alternatives/gpg-1-r3/IUSE
+```
+(plus `package.use/app-alternatives-gpg`: `app-alternatives/gpg
+reference`, `package.use/app-alternatives-ninja`: `app-alternatives/ninja
+-reference samurai`, `package.use/net-misc-curl`: `net-misc/curl ssl` for
+curl's `quic` REQUIRED_USE). This is a **files-only workaround, not a
+code fix** — a fresh `em` build of this same ebuild elsewhere would
+reproduce the bug. **TODO**: fix `ebuild.rs`'s IUSE-for-VDB sourcing
+properly later.
+
+## 37. `em stages --stage1` completes cleanly end-to-end on `base_roots()`
+
+A final full retry (`stage1-final5.log`) reported "4 of 53 failed to
+merge" (`app-arch/bzip2`, `app-arch/xz-utils`, `sys-devel/gettext` ×2) —
+but checking the VDB directly (`find .../var/db/pkg/<cpn>-[0-9]* -maxdepth
+0`) confirmed all 4 are genuinely installed. Root cause, confirmed via
+the `gettext-runtime/config.log` for the failing attempt: its own tail
+showed `configure: exit 0` (success) despite the enclosing `build.log`
+recording a failure moments earlier — a concurrent `--jobs 16` duplicate
+Host/Target attempt clobbered the shared workdir mid-build, exactly the
+already-known race pattern from #35, not a new bug. Task #20 (complete
+the full `stages --stage1` build on `base_roots()`) is done.
+
+**Next**: retry the original task #17 target —
+`em --autosolve-use --privilege pseudoroot --root
+/var/tmp/cross-stage1-riscv64 --cross riscv64-unknown-linux-gnu
+--emptytree sys-apps/systemd-utils --with-bdeps --keep-going --jobs 16
+--buildpkg` — to confirm the full pipeline closes end-to-end.
