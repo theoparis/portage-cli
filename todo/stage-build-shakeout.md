@@ -1820,3 +1820,112 @@ conflates Host and Target once a self-contained `--root` offset with its
 live result is in, worth a deliberate pass to make the model harder to
 get wrong again (e.g. a `Cpv`-keyed set that's illegal to query without
 naming which root) rather than fixing each call site as found.
+
+## 33. Live re-run after #32: real progress, plus a *different*, non-root bug — reinstall fallback breaks install order
+
+Rebuilt release with #32's fix and re-ran the same
+`sys-apps/systemd-utils --cross ... --emptytree ... --with-bdeps` command
+live. Confirmed improvement: `dev-lang/perl-5.42.2` now appears in the
+plan at all (previously invisible, silently dropped by #32's bug) — but
+still only as a single `Target`-routed `[ebuild R]` reinstall entry, not
+also as the `Host` entry the BDEPEND-driven closure needs. `preflight`
+still fails, but for a new, structurally different reason.
+
+Root cause (distinct from #28/#30/#31/#32 — not a Host/Target root
+mix-up): the perl reinstall entry is appended by a *separate* fallback
+block, after the main `order` construction:
+
+```rust
+// Fallback: any reinstall the solver didn't route through install_order
+// (rare) is appended so it is not silently dropped.
+{
+    let in_order: HashSet<Cpn> = order.iter().map(|(pkg, _)| *pkg.cpn()).collect();
+    let to_reinstall = provider.reinstall_deps()
+        .into_iter()
+        .filter(|r| !in_order.contains(r.package.cpn()))
+        ...;
+    order.extend(to_reinstall);
+}
+```
+
+This unconditionally appends at the *end* of `order`, regardless of
+where the package's dependents sit. In this run perl lands at plan
+position 157, but `dev-perl/YAML-Tiny` (which needs it) is at position
+110 — so when `preflight::check`'s within-run-visibility loop reaches
+YAML-Tiny, perl hasn't been recorded yet, and the DEPEND/BDEPEND check
+still fails. `reinstall_deps()` producing a package `install_order()`
+didn't naturally place is exactly the "(rare)" case this fallback's own
+comment anticipates — worth understanding *why* the solver's normal
+`install_order()` didn't route perl through its proper topological slot
+before deciding how to fix the append point.
+
+The failure list also changed shape (now surfacing things like
+`app-portage/elt-patches`, `autoconf`/`automake` `||`-groups,
+`app-alternatives/{ninja,yacc,awk}`) — not yet sorted out how much of
+that is newly-visible *real* gap at `base_roots()` vs. more instances of
+this same ordering issue elsewhere in the plan.
+
+User asked to pause, update the todo, and step back to review whether
+the Host/Target model (four fixes in `preflight.rs`/`bdepend_avail.rs`/
+`depgraph/mod.rs` today) is sound or a pile of hacks, before chasing
+#33 as another one-off patch. After choosing "solver-level fix", root
+was found via live instrumentation (temporary `eprintln!`s in the
+pubgrub crate, removed after — see below), not more guessing:
+
+1. `append_unsatisfied_broot` correctly creates the Host-perl edge
+   (confirmed live: `satisfied=false root=Host` for every one of the 34
+   BDEPEND edges on perl in this run).
+2. `pubgrub::resolve()`'s returned `solution` correctly *includes*
+   `dev-lang/perl:0@host @ 5.42.2` — the solve itself is 100% correct.
+3. `full_order` (from `provider.install_order(&solution)`) also
+   includes it — but at index 183, *after* `dev-perl/YAML-Tiny:0@host`
+   at index 128 — YAML-Tiny is Host-routed too (not Target, contrary to
+   what the printed plan's missing `to .../` suffix suggested at a
+   glance — misleading initial read, corrected by the trace) and needs
+   perl as its own BDEPEND. A dependency landing *after* its consumer is
+   a real ordering bug, not the Host/Target-view bug this session had
+   been fixing all day.
+
+**Root cause, in `portage-atom-pubgrub/src/graph.rs`'s
+`dependency_graph()`** (used only by `install_order`'s topological
+sort): `let Some(data) = self.packages.get(pkg) else { continue };` —
+a **direct** lookup, bypassing the alias-resolving `self.package_data(pkg)`
+that `get_dependencies()` correctly uses elsewhere. `self.packages` is
+keyed by whatever identity the construction-time BFS discovers, always
+`Target`-flavored for a real package (`ensure_host_instances`/
+`host_aliases` exist specifically to redirect a `Host`-flavored lookup
+to its `Target` twin's data). This raw lookup **always misses for every
+`Host`-flavored solved package**, silently producing zero outgoing
+edges for it. So a `Host` package's own BDEPEND on *another* `Host`
+package (perl on perl's own build tools, or here, indirectly, YAML-Tiny
+on perl) never gets an ordering edge at all — `install_order`'s
+Kahn's-algorithm tie-break (`comp_key`, "largest ready first" by
+package-string comparison) then decides their relative order
+arbitrarily, and `"dev-perl/YAML-Tiny..."` happens to sort after
+`"dev-lang/perl..."` — hence perl lands *after* its own consumer.
+
+**Fixed**: `self.packages.get(pkg)` → `self.package_data(pkg)` (one
+line). Added `host_package_bdepend_on_another_host_package_orders_correctly`
+in `graph.rs` — deliberately named so the *broken* tie-break would also
+get the order wrong for the wrong reason (a first attempt using names
+where alphabetical order happened to coincide with correct dependency
+order passed regardless of the fix, i.e. didn't actually discriminate —
+caught by reverting the fix and confirming the test still passed before
+trusting it; the corrected version fails cleanly with the bug reverted
+and passes with the fix). Full `cargo build/clippy/test/fmt --check`
+clean across the workspace (30/30 test binaries).
+
+This is a **fifth**, structurally distinct bug from today's four
+Host/Target root-conflation fixes (#28/#30/#31/#32) — not "is X already
+there in the right root", but "does a Host node's own dependency data
+get found at all when building the ordering graph". Both bug families
+share the same underlying cause, though: `Host` was bolted onto an
+architecture built around a single `PortagePackage` identity space, and
+each fix found a different place that never got updated for the
+dual-identity (`host_aliases`) reality. Whether that's "a pile of
+hacks" or "one real gap found in five places" is exactly the
+soundness-review question still open — see the note above and
+[[em-root-characterization]] for the broader tracking doc this arc
+belongs to. Next: rebuild release and re-run the actual failing
+`sys-apps/systemd-utils --cross ...` command to see the *real*
+remaining gap at `base_roots()`, now that both #32 and #33 are fixed.

@@ -3543,4 +3543,67 @@ mod tests {
              target sysroot"
         );
     }
+
+    /// Regression test for the riscv64 stage3 shakeout (#33): same scenario as
+    /// `cross_target_build_pulls_unsatisfied_bdepend`, but `b` is *also*
+    /// already installed at the **Target** (the `--cross` sysroot) — standing
+    /// in for `dev-lang/perl` being genuinely present in a real, already-built
+    /// target `@system` while `base_roots()` (BROOT) still lacks it. A
+    /// Host-root `b` must still be scheduled: BDEPEND always resolves on
+    /// BROOT, and a same-named Target-side package can never satisfy it.
+    #[test]
+    fn cross_target_build_pulls_unsatisfied_bdepend_even_if_target_already_has_it() {
+        let mut repo = InMemoryRepository::new();
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/b-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty_deps(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                bdepend: DepEntry::parse("dev-build/b").unwrap(),
+                ..empty_deps()
+            },
+        );
+
+        let config = UseConfig::new();
+        let mut provider = {
+            repo.set_use_config(config);
+            let mut p = PortageDependencyProvider::new(repo);
+            p.set_cross_active(true);
+            p.set_with_bdeps(true);
+            p
+        };
+        // `b` is already installed at the Target (sysroot) — NOT at the host.
+        provider.add_installed(InstalledPackage {
+            package: PortagePackage::slotted(
+                Cpn::parse("dev-build/b").unwrap(),
+                Interned::intern("0"),
+            ),
+            version: Version::parse("1.0").unwrap(),
+            policy: InstalledPolicy::Favor,
+            active_use: Vec::new(),
+            iuse: Vec::new(),
+        });
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        let host_b = solution
+            .iter()
+            .find(|(p, _)| p.cpn().package.as_str() == "b" && p.merge_root() == MergeRoot::Host);
+        assert!(
+            host_b.is_some(),
+            "b is missing on BROOT even though a same-named package is \
+             installed at the Target sysroot; the cross target build must \
+             still schedule a Host-root b rather than treating the Target \
+             instance as satisfying the BDEPEND"
+        );
+    }
 }

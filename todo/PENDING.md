@@ -51,8 +51,17 @@ permanently unsatisfied. Almost misdiagnosed as stale-VDB pollution and
 nearly deleted real completed target-system work before checking; caught
 in time. Fixed by adding a parallel `host_installed_cpvs` set and
 branching on `pkg.merge_root()`, same pattern as #28/#30/#31. This is
-the fourth Host/Target root-conflation bug found this session — worth a
-deliberate consolidation pass once the current live run's result is in.
+the fourth Host/Target root-conflation bug found this session. #33: live
+re-run confirmed real progress (perl now appears in the plan at all) but
+hit a *different, non-root* bug — perl's `[ebuild R]` reinstall entry is
+appended by a separate fallback (`provider.reinstall_deps()` output
+`install_order()` didn't naturally place) at the *end* of `order`,
+landing after `dev-perl/YAML-Tiny` (its own dependent) in plan order, so
+within-run visibility still doesn't see it in time. Not yet fixed —
+paused here per explicit instruction to update the todo and step back:
+review whether the Host/Target model (four point-fixes today, all at
+the specific call site where each bug was found) is still sound, or has
+become a pile of hacks needing real consolidation, before chasing #33.
 **Remaining 1 failure** (of 2 — binutils resolved, see #29):
 `sys-devel/binutils`'s `make exited 2` was real, not test-session noise —
 confirmed straight from binutils' own upstream `Makefile.am`: it reuses
@@ -61,13 +70,14 @@ confirmed straight from binutils' own upstream `Makefile.am`: it reuses
 on aarch64-host/riscv64-target header mismatch. Upstream bug, not em's;
 worked around with `sys-devel/binutils -zstd` in the sysroot's
 `package.use` — verified rebuilding clean. `sys-apps/systemd-utils`
-(blocked on jinja2 needing a full native stage1 at `base_roots()`, this
-session's outer EROOT having only the minimal cross-toolchain-support set
-— see [[em-root-characterization]] Tier 1 item 2) is the last known
-failure, but #31 means the exact remaining gap size is unconfirmed until
-a fresh run with the DEPEND-routing fix — some of what looked like
-missing packages may turn out to already be satisfiable once Host-Host
-DEPEND edges are checked correctly. Task #17 still in progress.
+(blocked on jinja2/perl/python needing a full native stage1 at
+`base_roots()`, this session's outer EROOT having only the minimal
+cross-toolchain-support set — see [[em-root-characterization]] Tier 1
+item 2) is the last known failure, but the exact remaining gap size is
+still unconfirmed — #31 and #32 each fixed a real bug and moved the
+plan closer to correct, but #33 (reinstall-fallback ordering) is a new,
+separate, not-yet-fixed issue blocking the next live signal. Task #17
+still in progress.
 
 ## Stage building (the active goal: a real stage3)
 

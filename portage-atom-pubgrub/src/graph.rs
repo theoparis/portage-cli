@@ -58,7 +58,22 @@ impl PortageDependencyProvider {
         }
 
         for (pkg, version) in solution.iter() {
-            let Some(data) = self.packages.get(pkg) else {
+            // A `Host`-flavored package's own dependency data lives under its
+            // `Target`-flavored alias (`self.packages` is keyed by whatever
+            // identity the construction-time BFS discovered, always `Target`
+            // for a real package — see `ensure_host_instances`/`host_aliases`).
+            // A direct `self.packages.get(pkg)` here always misses for a
+            // `Host` node, silently producing zero outgoing edges for it —
+            // so a Host package's own BDEPEND (e.g. one Host-routed perl
+            // module needing another Host-routed perl) never gets an
+            // ordering edge, and `install_order` falls back to an arbitrary
+            // tie-break instead of real dependency order. Found live: a
+            // riscv64 stage3 `--cross` build routed a whole chain of Host
+            // BDEPEND packages (`dev-lang/perl` and its `dev-perl/*`
+            // consumers) with no ordering edges between them, so `perl`
+            // landed *after* consumers that need it — see
+            // `todo/stage-build-shakeout.md` #33.
+            let Some(data) = self.package_data(pkg) else {
                 continue;
             };
             let Some(vd) = data.versions.get(version) else {
@@ -420,6 +435,86 @@ mod tests {
             bottom_pos < top_pos,
             "bottom must come before top in install order, got: {:?}",
             names
+        );
+    }
+
+    /// Regression test for the riscv64 stage3 shakeout (#33): `dependency_graph`
+    /// did a raw `self.packages.get(pkg)` lookup instead of the alias-resolving
+    /// `self.package_data(pkg)` — so a `Host`-flavored solved package (whose
+    /// data lives under its `Target`-flavored alias, see `ensure_host_instances`)
+    /// always missed, silently producing zero outgoing edges for it. A `Host`
+    /// package's own BDEPEND on *another* `Host` package (e.g. one Host-routed
+    /// perl module needing Host-routed perl itself) then got no ordering edge
+    /// at all, so `install_order` could place the dependency *after* its own
+    /// consumer instead of before it.
+    #[test]
+    fn host_package_bdepend_on_another_host_package_orders_correctly() {
+        let mut repo = InMemoryRepository::new();
+        let empty = || PackageDeps {
+            depend: vec![],
+            rdepend: vec![],
+            bdepend: vec![],
+            pdepend: vec![],
+            idepend: vec![],
+        };
+        // Names deliberately chosen so a broken (edge-less) tie-break gets the
+        // order wrong: `dev-build/dep`'s sort key is *smaller* than
+        // `dev-build/user`'s, so without a real ordering edge the "largest
+        // ready first" tie-break would emit `user` before `dep` — the wrong
+        // order. Only a genuine dependency edge (dep must precede user)
+        // forces the correct order regardless of naming.
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/dep-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/user-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                bdepend: vec![DepEntry::Atom(Dep::parse("dev-build/dep").unwrap())],
+                ..empty()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                bdepend: vec![DepEntry::Atom(Dep::parse("dev-build/user").unwrap())],
+                ..empty()
+            },
+        );
+
+        let mut provider = PortageDependencyProvider::new(repo);
+        provider.set_cross_active(true);
+        provider.set_with_bdeps(true);
+        // No `add_host_installed` calls: the host genuinely lacks `user` and
+        // `dep`, so both are scheduled as unsatisfied Host BDEPEND — `user`
+        // (a's BDEPEND) and, transitively, `dep` (user's own BDEPEND once
+        // `user` is Host-routed).
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        let order = provider.install_order(&solution);
+        let names: Vec<&str> = order
+            .iter()
+            .map(|(p, _)| p.cpn().package.as_str())
+            .collect();
+        let user_pos = names.iter().position(|&n| n == "user");
+        let dep_pos = names.iter().position(|&n| n == "dep");
+        assert!(
+            user_pos.is_some() && dep_pos.is_some(),
+            "both user and dep must be scheduled (Host BDEPEND), got: {names:?}"
+        );
+        assert!(
+            dep_pos.unwrap() < user_pos.unwrap(),
+            "dep (user's own BDEPEND) must come before user in install order, got: {names:?}"
         );
     }
 
