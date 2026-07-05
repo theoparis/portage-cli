@@ -57,21 +57,12 @@ impl builtins::Command for UnpackCommand {
 
         let exit = tokio::task::spawn_blocking(move || -> u8 {
             for archive in &archives {
-                let src_path = if archive.starts_with('/') || archive.starts_with("./") {
-                    if archive.starts_with('/') && eapi < 6 {
-                        eprintln!("die: unpack: absolute paths not supported in EAPI {eapi}");
+                let src_path = match resolve_src_path(archive, &cwd, &distdir, &ro_distdirs, eapi) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("die: unpack: {e}");
                         return 1;
                     }
-                    std::path::PathBuf::from(archive)
-                } else {
-                    // The writable DISTDIR first, then the read-only fallbacks
-                    // (PORTAGE_RO_DISTDIRS — e.g. the system distfiles dir when
-                    // running unprivileged).
-                    std::iter::once(&distdir)
-                        .chain(ro_distdirs.iter())
-                        .map(|d| std::path::PathBuf::from(d).join(archive))
-                        .find(|p| p.exists())
-                        .unwrap_or_else(|| std::path::PathBuf::from(&distdir).join(archive))
                 };
 
                 if !src_path.exists() {
@@ -105,6 +96,49 @@ impl builtins::Command for UnpackCommand {
         }
 
         Ok(brush_core::ExecutionResult::new(exit))
+    }
+}
+
+/// Resolve an `unpack` argument to the on-disk distfile it names, per PMS
+/// 12.3.11: a bare filename (no path separator) is looked up in `$DISTDIR`
+/// (or its read-only fallbacks); anything containing a path separator is
+/// used as given — absolute as-is, `./`-relative resolved against `cwd`
+/// (the file the ebuild itself just created there, e.g. a `cp foo.whl
+/// foo.whl.zip` before re-unpacking it as a zip).
+fn resolve_src_path(
+    archive: &str,
+    cwd: &std::path::Path,
+    distdir: &str,
+    ro_distdirs: &[String],
+    eapi: u32,
+) -> Result<std::path::PathBuf, String> {
+    if archive.starts_with('/') {
+        if eapi < 6 {
+            return Err(format!("absolute paths not supported in EAPI {eapi}"));
+        }
+        Ok(std::path::PathBuf::from(archive))
+    } else if archive.starts_with("./") {
+        // A `./`-relative archive refers to a file the ebuild itself just
+        // created in the work directory (e.g. `dev-python/installer`'s
+        // `cp foo.whl foo.whl.zip && unpack "./foo.whl.zip"`, to route a
+        // wheel through the generic zip unpacker — the same pattern
+        // `eclass/rpm.eclass` independently uses via `unpack "./${a}"`).
+        // Must resolve against the shell's *tracked* working directory
+        // (`cwd`), not whatever the Rust process's own OS-level CWD happens
+        // to be — those can diverge, since brush tracks `$PWD` independently
+        // of calling `std::env::set_current_dir`. A bare relative-path
+        // existence check silently looked in the wrong place and always
+        // reported "not found".
+        Ok(cwd.join(archive))
+    } else {
+        // The writable DISTDIR first, then the read-only fallbacks
+        // (PORTAGE_RO_DISTDIRS — e.g. the system distfiles dir when
+        // running unprivileged).
+        Ok(std::iter::once(&distdir.to_string())
+            .chain(ro_distdirs.iter())
+            .map(|d| std::path::PathBuf::from(d).join(archive))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| std::path::PathBuf::from(distdir).join(archive)))
     }
 }
 
@@ -249,5 +283,52 @@ mod tests {
         // proving the no-op path above is specific to unknown suffixes).
         let result = unpack_archive(&archive, tmp.path(), 8);
         assert!(result.is_err() || result != Ok(0));
+    }
+
+    /// Regression test for the riscv64 stage3 shakeout: `dev-python/installer`'s
+    /// `src_unpack` does `cp foo.whl foo.whl.zip && unpack "./foo.whl.zip"`
+    /// (a real, PMS-legitimate pattern — `eclass/rpm.eclass` independently
+    /// does the same `unpack "./${a}"` thing) to route a wheel through the
+    /// generic zip unpacker. A `./`-relative archive must resolve against
+    /// the shell's tracked working directory, not DISTDIR and not whatever
+    /// the Rust process's own OS-level CWD happens to be at the time —
+    /// those can diverge from brush's `$PWD` tracking. The bare
+    /// `PathBuf::from(archive)` this replaces always reported "not found"
+    /// for a file that demonstrably existed in `cwd`.
+    #[test]
+    fn relative_archive_resolves_against_tracked_cwd_not_distdir() {
+        let cwd = tempfile::tempdir().unwrap();
+        let distdir = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join("foo.whl.zip"), b"stub").unwrap();
+
+        let resolved = resolve_src_path(
+            "./foo.whl.zip",
+            cwd.path(),
+            distdir.path().to_str().unwrap(),
+            &[],
+            8,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, cwd.path().join("foo.whl.zip"));
+        assert!(resolved.exists());
+    }
+
+    #[test]
+    fn bare_filename_still_resolves_via_distdir() {
+        let cwd = tempfile::tempdir().unwrap();
+        let distdir = tempfile::tempdir().unwrap();
+        std::fs::write(distdir.path().join("real.tar.gz"), b"stub").unwrap();
+
+        let resolved = resolve_src_path(
+            "real.tar.gz",
+            cwd.path(),
+            distdir.path().to_str().unwrap(),
+            &[],
+            8,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, distdir.path().join("real.tar.gz"));
     }
 }
