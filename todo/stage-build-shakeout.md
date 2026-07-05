@@ -2006,3 +2006,55 @@ Also noted, not yet investigated: `em stages --stage1` doesn't pass
 worth defaulting on for `stages --stage1` specifically (mirroring how
 `--emptytree` already forces `solve_with_bdeps` on for native builds) —
 a candidate follow-up, not blocking the immediate baseline-extension work.
+
+**Baseline-extension progress and the actual remaining wall**: set
+`USE="-* build"` in the host root's `make.conf` (matching `--stage1`'s
+own convention — building baseline tools with default USE pulled in a
+much bigger closure, ~gnupg/portage-sized, not smaller). Built
+`app-portage/elt-patches` alone (trivial, no real deps) — merged clean.
+Re-ran `stages --stage1 --with-bdeps` for real: failure list dropped
+from ~34 to just 4, all `meson`/`cmake` (`libxml2`, `json-c`,
+`pax-utils` needing them). Real progress, elt-patches genuinely was the
+main blocker.
+
+**Then nearly repeated the "reinventing bootstrap" mistake a second
+time**: went to hand-build `meson`+`cmake` next, hit what looked like
+the same "dependency ordered after consumer" symptom (libxml2 before
+meson in the plan) even for a single `dev-build/meson` atom request.
+User pushback again ("why are you trying to install what is the
+stage1") — right call: `--stage1`'s own solve *already* includes
+meson/cmake in its plan (confirmed: they're there, just seemingly
+misordered), so hand-seeding was working around a symptom rather than
+understanding it.
+
+**Root-caused via live instrumentation (temporary, removed after) —
+this time it really is architectural, not a bug**: traced the exact
+edge `dev-libs/libxml2:2@host → dev-build/meson:0@host` (class
+`Bdepend`) — it exists, correctly, confirming `dependency_graph()`'s
+earlier alias fix (#33) is working. But `install_order`'s own Tarjan SCC
+pass places both nodes in the **same 74-member strongly-connected
+component** — a genuine hard-edge cycle, not a bug. The code already
+has a documented, accepted answer for this exact shape of problem (see
+`install_order`'s doc comment: *"only if a genuine hard (build-time)
+cycle remains, as with bootstrap cycles (`xz-utils` ↔ `elt-patches`), do
+we fall back to a deterministic lexicographic tie-break"*) — there is no
+correct linear order for a true cycle; something has to come first
+somewhat arbitrarily. This one is just much bigger (74 nodes vs. 2),
+almost certainly because `sys-apps/portage` (needed by nearly
+everything as a Host BDEPEND target) has its own large RDEPEND/DEPEND
+footprint that loops back through several of the same tools.
+
+**Reframing**: manually seeding a package to break a *genuine* cycle
+isn't "reinventing bootstrapping" — it's what real bootstrapping
+(catalyst stage builds, real Portage's own SRC_URI ordering hacks for
+xz-utils/elt-patches) already does for this exact problem shape. The
+earlier correction stands for the *elt-patches* case (that one wasn't a
+cycle at all, just a baseline-assumption gap) — but meson/cmake landing
+in a real 74-node SCC is a different, legitimate reason to seed
+directly. Not yet decided: whether to (a) just build meson/cmake
+directly (as already attempted) and accept the pre-flight guard-rail
+will still complain about the ~4 remaining entries until they're
+present, or (b) narrow the cycle first (e.g. check whether
+`sys-apps/portage`'s footprint can be trimmed for a build-only stage1,
+shrinking the SCC and maybe eliminating the cross-linking entirely).
+Paused here to discuss direction with the user rather than guess further.
