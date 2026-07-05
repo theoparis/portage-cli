@@ -197,6 +197,16 @@ impl Roots {
         let extra: Vec<&camino::Utf8Path> = self.config_overlay().into_iter().collect();
         portage_repo::ReposConf::load_rooted(cfg, &extra)
     }
+
+    /// Test-only: a `Roots` with just `target` set, for exercising
+    /// root-selection logic without a full CLI parse.
+    #[cfg(test)]
+    pub(crate) fn for_test(target: &str) -> Self {
+        Roots {
+            target: Some(camino::Utf8PathBuf::from(target)),
+            ..Default::default()
+        }
+    }
 }
 
 /// The user's home directory from `$HOME`, falling back to `/root` only if

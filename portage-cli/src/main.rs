@@ -424,6 +424,71 @@ fn confirm_merge(count: usize) -> Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
+/// Which [`cli::Roots`] a plan entry actually installs into: the outer EROOT
+/// (`host_roots`) for a Host-rooted entry — an unsatisfied BDEPEND scheduled
+/// onto the build host by a `--cross` solve (see `cross_target_runtime_deps`
+/// in portage-atom-pubgrub) — or the `--cross`-substituted sysroot (`roots`,
+/// the resolved install target) for everything else. `host_roots` equals
+/// `roots` outside `--cross`, so this is a no-op there.
+///
+/// Found live: the merge loop used a single, plan-wide root for every entry
+/// regardless of `PlannedMerge.merge_root`, so a Host BDEPEND (e.g.
+/// `dev-python/jinja2`, rebuilt for a python target the real host lacked)
+/// silently built into the sysroot instead — the package "succeeded" but
+/// never became available where the later build that needed it actually
+/// looked. See `todo/stage-build-shakeout.md`.
+fn entry_roots<'a>(
+    planned: &query::depgraph::PlannedMerge,
+    roots: &'a cli::Roots,
+    host_roots: &'a cli::Roots,
+) -> &'a cli::Roots {
+    if planned.merge_root == query::depgraph::MergeRoot::Host {
+        host_roots
+    } else {
+        roots
+    }
+}
+
+#[cfg(test)]
+mod entry_roots_tests {
+    use super::*;
+    use query::depgraph::{MergeRoot, PlannedMerge};
+
+    fn planned(merge_root: MergeRoot) -> PlannedMerge {
+        PlannedMerge {
+            merge_root,
+            cpv: "dev-python/jinja2-3.1.6".to_string(),
+            ebuild_path: camino::Utf8PathBuf::new(),
+            use_flags: Vec::new(),
+            depend: Vec::new(),
+            bdepend: Vec::new(),
+            reinstall: false,
+        }
+    }
+
+    #[test]
+    fn host_entry_installs_into_outer_eroot_not_the_cross_sysroot() {
+        let roots = cli::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
+        let host_roots = cli::Roots::for_test("/var/tmp/cross-stage1");
+        let p = planned(MergeRoot::Host);
+        assert_eq!(
+            entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
+            "/var/tmp/cross-stage1"
+        );
+    }
+
+    #[test]
+    fn target_entry_uses_the_plans_own_root() {
+        let roots = cli::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
+        let host_roots = cli::Roots::for_test("/var/tmp/cross-stage1");
+        let p = planned(MergeRoot::Target);
+        assert_eq!(
+            entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
+            "/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu"
+        );
+    }
+}
+
 /// Build and merge a resolved plan in install order.
 ///
 /// Resume comes for free from the target VDB: a package already recorded
@@ -517,10 +582,19 @@ async fn run_merge_plan(
         Vec::new()
     };
 
+    // A `--cross` plan can carry `MergeRoot::Host` entries (an unsatisfied
+    // BDEPEND scheduled onto the build host — see `cross_target_runtime_deps`
+    // in portage-atom-pubgrub). `roots` here is the `--cross`-substituted
+    // sysroot; `base_roots()` is the outer EROOT a Host entry actually belongs
+    // in (matching where crossdev's own `cross-*` toolchain packages live —
+    // see `Cli::base_roots`'s doc comment). Equal to `roots` when `--cross`
+    // isn't active, so this is a no-op outside cross builds.
+    let host_roots = globals.base_roots();
     let (merged, skipped, failures) = if jobs <= 1 {
         merge_sequential(
             plan,
             roots,
+            &host_roots,
             work_base,
             distdir,
             quiet,
@@ -537,6 +611,7 @@ async fn run_merge_plan(
             plan,
             blockers,
             roots,
+            &host_roots,
             work_base,
             distdir,
             quiet,
@@ -592,6 +667,7 @@ async fn run_merge_plan(
 async fn merge_sequential(
     plan: &[query::depgraph::PlannedMerge],
     roots: &cli::Roots,
+    host_roots: &cli::Roots,
     work_base: &camino::Utf8Path,
     distdir: Option<&camino::Utf8Path>,
     quiet: bool,
@@ -602,13 +678,14 @@ async fn merge_sequential(
     remote_indices: &[binpkg::RemoteBinpkgIndex],
     enforce_no_source: bool,
 ) -> (usize, usize, Vec<MergeFailure>) {
-    let merge_root = roots.merge_root();
     let total = plan.len();
     let mut merged = 0usize;
     let mut skipped = 0usize;
     let mut failures: Vec<MergeFailure> = Vec::new();
 
     for (i, planned) in plan.iter().enumerate() {
+        let entry_roots = entry_roots(planned, roots, host_roots);
+        let merge_root = entry_roots.merge_root();
         // The VDB is the resume state: `var/db/pkg/<cat>/<pf>` exists iff this
         // exact version is already installed in the target root. An intentional
         // reinstall (explicit target / USE rebuild) is built anyway — emerge
@@ -655,9 +732,9 @@ async fn merge_sequential(
                 work_base,
                 merge_root,
                 quiet,
-                roots.config(),
-                roots.build_sysroot(),
-                roots.eprefix(),
+                entry_roots.config(),
+                entry_roots.build_sysroot(),
+                entry_roots.eprefix(),
                 None,
             )
             .await
@@ -672,9 +749,9 @@ async fn merge_sequential(
                         work_base,
                         merge_root,
                         quiet,
-                        roots.config(),
-                        roots.build_sysroot(),
-                        roots.eprefix(),
+                        entry_roots.config(),
+                        entry_roots.build_sysroot(),
+                        entry_roots.eprefix(),
                         None,
                     )
                     .await
@@ -700,9 +777,9 @@ async fn merge_sequential(
                         merge_root,
                         distdir,
                         quiet,
-                        roots.config(),
-                        roots.build_sysroot(),
-                        roots.eprefix(),
+                        entry_roots.config(),
+                        entry_roots.build_sysroot(),
+                        entry_roots.eprefix(),
                         None,
                         buildpkg,
                     )
@@ -731,9 +808,9 @@ async fn merge_sequential(
                 merge_root,
                 distdir,
                 quiet,
-                roots.config(),
-                roots.build_sysroot(),
-                roots.eprefix(),
+                entry_roots.config(),
+                entry_roots.build_sysroot(),
+                entry_roots.eprefix(),
                 None,
                 buildpkg,
             )
@@ -843,6 +920,7 @@ async fn merge_parallel(
     plan: &[query::depgraph::PlannedMerge],
     blockers: &[Vec<usize>],
     roots: &cli::Roots,
+    host_roots: &cli::Roots,
     work_base: &camino::Utf8Path,
     distdir: Option<&camino::Utf8Path>,
     quiet: bool,
@@ -854,7 +932,6 @@ async fn merge_parallel(
     remote_indices: &[binpkg::RemoteBinpkgIndex],
     enforce_no_source: bool,
 ) -> (usize, usize, Vec<MergeFailure>) {
-    let merge_root = roots.merge_root();
     let total = plan.len();
     let merge_gate = tokio::sync::Mutex::new(());
 
@@ -870,6 +947,8 @@ async fn merge_parallel(
         while !stop_new && inflight.len() < jobs {
             let Some(i) = sched.next_ready() else { break };
             let planned = &plan[i];
+            let entry_roots = entry_roots(planned, roots, host_roots);
+            let merge_root = entry_roots.merge_root();
             if !emptytree
                 && !planned.reinstall
                 && merge_root.join("var/db/pkg").join(&planned.cpv).exists()
@@ -926,9 +1005,9 @@ async fn merge_parallel(
                         work_base,
                         merge_root,
                         quiet,
-                        roots.config(),
-                        roots.build_sysroot(),
-                        roots.eprefix(),
+                        entry_roots.config(),
+                        entry_roots.build_sysroot(),
+                        entry_roots.eprefix(),
                         Some(gate),
                     )
                     .await
@@ -942,9 +1021,9 @@ async fn merge_parallel(
                                 work_base,
                                 merge_root,
                                 quiet,
-                                roots.config(),
-                                roots.build_sysroot(),
-                                roots.eprefix(),
+                                entry_roots.config(),
+                                entry_roots.build_sysroot(),
+                                entry_roots.eprefix(),
                                 Some(gate),
                             )
                             .await
@@ -963,9 +1042,9 @@ async fn merge_parallel(
                         merge_root,
                         distdir,
                         quiet,
-                        roots.config(),
-                        roots.build_sysroot(),
-                        roots.eprefix(),
+                        entry_roots.config(),
+                        entry_roots.build_sysroot(),
+                        entry_roots.eprefix(),
                         Some(gate),
                         buildpkg,
                     )
