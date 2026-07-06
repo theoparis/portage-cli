@@ -248,6 +248,33 @@ impl DependencyProvider for PortageDependencyProvider {
         package: &Self::P,
         version: &Self::V,
     ) -> std::result::Result<Dependencies<Self::P, Self::VS, Self::M>, Self::Err> {
+        let deps = self.compute_dependencies(package, version)?;
+        // Drop edges the system provides externally (`package.provided`) so the
+        // provided package is neither built nor reported as a dropped dep. No-op
+        // (and no allocation) when nothing is provided.
+        if self.provided.is_empty() {
+            return Ok(deps);
+        }
+        Ok(match deps {
+            Dependencies::Available(cs) => Dependencies::Available(
+                cs.into_iter()
+                    .filter(|(pkg, vs)| !self.edge_is_provided(pkg, vs))
+                    .collect(),
+            ),
+            unavailable => unavailable,
+        })
+    }
+}
+
+impl PortageDependencyProvider {
+    /// The unfiltered dependency computation for a `(package, version)` node.
+    /// [`get_dependencies`](DependencyProvider::get_dependencies) wraps this to
+    /// drop `package.provided` edges.
+    fn compute_dependencies(
+        &self,
+        package: &PortagePackage,
+        version: &Version,
+    ) -> std::result::Result<Dependencies<PortagePackage, PortageVersionSet, String>, Error> {
         let Some(data) = self.package_data(package) else {
             return Ok(Dependencies::Unavailable(format!(
                 "package not found: {}",

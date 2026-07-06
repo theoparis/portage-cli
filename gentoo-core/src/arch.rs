@@ -268,11 +268,17 @@ impl<I: Interner> Arch<I> {
         }
     }
 
-    /// Current system architecture from [`std::env::consts::ARCH`].
+    /// Current system architecture as its Gentoo keyword.
     ///
     /// Returns `Known` for recognized architectures, `Exotic` otherwise.
+    ///
+    /// On macOS this surfaces the Gentoo Prefix Darwin keyword (`arm64-macos`,
+    /// `x64-macos`, …) rather than the bare CPU arch, since that is what ebuild
+    /// `KEYWORDS` on a Prefix Darwin profile are written against — the host CPU
+    /// (`arm64`) and the keyword (`arm64-macos`) differ, and keyword acceptance
+    /// must use the latter.
     pub fn current() -> Self {
-        Self::intern(std::env::consts::ARCH)
+        Self::intern(current_keyword())
     }
 
     /// Extract the CPU arch from a GNU CHOST triple using the interner `I`.
@@ -298,6 +304,30 @@ impl<I: Interner> Arch<I> {
     pub fn as_keyword(&self) -> &str {
         self.as_str()
     }
+}
+
+/// The Gentoo keyword for the platform this binary runs on.
+///
+/// Gentoo Prefix on macOS keys keywords by an OS-suffixed arch (`arm64-macos`,
+/// `x64-macos`, `x86-macos`, `ppc-macos`, `ppc64-macos`) whose CPU spelling also
+/// differs from the Linux keyword (`x86_64` → `x64`, not `amd64`), so it needs an
+/// explicit map. Elsewhere the bare CPU arch (`std::env::consts::ARCH`) interns to
+/// the right keyword directly (`aarch64` → `arm64`).
+#[cfg(target_os = "macos")]
+fn current_keyword() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64-macos",
+        "x86_64" => "x64-macos",
+        "x86" => "x86-macos",
+        "powerpc" => "ppc-macos",
+        "powerpc64" => "ppc64-macos",
+        other => other,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_keyword() -> &'static str {
+    std::env::consts::ARCH
 }
 
 impl<I: Interner> fmt::Display for Arch<I> {
@@ -430,6 +460,21 @@ mod tests {
     }
 
     // ── Arch convenience methods (DefaultInterner) ───────────────────────────
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_current_is_macos_keyword() {
+        // On macOS, current() must surface the Prefix Darwin keyword, not the
+        // bare CPU arch, so keyword acceptance matches the profile.
+        let cur = <Arch>::current();
+        assert!(
+            cur.as_str().ends_with("-macos"),
+            "expected a *-macos keyword, got {}",
+            cur.as_str()
+        );
+        assert!(matches!(cur, Arch::Exotic(_)));
+    }
 
     #[test]
     fn arch_intern_known() {

@@ -1610,6 +1610,15 @@ impl EbuildShell {
                         format!("{s}/")
                     }
                 }
+                // No explicit build-against sysroot: a native build for the same
+                // machine we run on. When a prefix is in play (`--local`), the
+                // toolchain must resolve system headers/libs against the real host
+                // root, so SYSROOT="/" and ESYSROOT=SYSROOT+EPREFIX (the prefix)
+                // supplies the DEPEND location — otherwise SYSROOT=EROOT=prefix and
+                // consumers like distutils-r1's `gpep517 --sysroot ${SYSROOT}` double
+                // the already-prefixed stdlib path. A non-prefix `--root` build keeps
+                // SYSROOT=ROOT (the offset it installs into).
+                None if !eprefix.is_empty() => "/".to_string(),
                 None => root_str.clone(),
             };
             let sysroot_trimmed = sysroot.trim_end_matches('/');
@@ -1653,7 +1662,19 @@ impl EbuildShell {
                 format!("{}/{}/", sysroot_trimmed, eprefix.trim_start_matches('/'))
             };
             self.set_var("ESYSROOT", &esysroot);
-            self.set_var("BROOT", "/");
+            // BROOT is where BDEPEND build tools are installed and run from. A
+            // --local prefix build is self-hosting: its build tools live in the
+            // prefix, not the host root, so eclasses that read `${BROOT}/usr/...`
+            // — e.g. gnuconfig_findnewest's `${BROOT}/usr/share/gnuconfig`, or
+            // `has_version -b` — must resolve there. A --prefix overlay (base is
+            // the host), a plain host build, and a cross build all keep BROOT=/
+            // (build-host tools come from the real root).
+            let broot = if !eprefix.is_empty() && cross_host_tool_tuple.is_none() {
+                eprefix.clone()
+            } else {
+                "/".to_string()
+            };
+            self.set_var("BROOT", &broot);
         }
 
         // PORTAGE_INST_UID/GID: owner dobin/dosbin apply via `install -o/-g`.

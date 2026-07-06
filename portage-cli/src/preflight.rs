@@ -38,9 +38,20 @@ use crate::query::depgraph::PlannedMerge;
 ///
 /// Returns an error listing every unsatisfied requirement (package → missing
 /// atoms) when the check fails; `Ok(())` otherwise.
-pub fn check(plan: &[PlannedMerge], roots: &Roots, host_roots: &Roots) -> Result<()> {
+pub fn check(
+    plan: &[PlannedMerge],
+    roots: &Roots,
+    host_roots: &Roots,
+    provided: &[(Cpv, Option<String>)],
+) -> Result<()> {
     let mut depend_avail = Avail::initial_depend(roots);
     let mut bdepend_avail = Avail::initial_bdepend(host_roots);
+
+    // `package.provided` packages are supplied by the system on both roots.
+    for (cpv, slot) in provided {
+        depend_avail.record_provided(cpv.clone(), slot.clone());
+        bdepend_avail.record_provided(cpv.clone(), slot.clone());
+    }
 
     let mut problems: Vec<String> = Vec::new();
     for planned in plan {
@@ -128,7 +139,7 @@ mod tests {
                 ">=sys-libs/gdbm-1.8.3:=",
             ),
         ];
-        assert!(check(&plan, &roots, &roots).is_ok());
+        assert!(check(&plan, &roots, &roots, &[]).is_ok());
     }
 
     /// Negative control: a `Target` entry's DEPEND on a `Host`-only merge is
@@ -146,6 +157,31 @@ mod tests {
                 ">=sys-libs/gdbm-1.8.3:=",
             ),
         ];
-        assert!(check(&plan, &roots, &roots).is_err());
+        assert!(check(&plan, &roots, &roots, &[]).is_err());
+    }
+
+    /// A `:slot` build dep on a system-supplied `package.provided` package is
+    /// satisfied by the seeded provided entry (the interpreter case: the plan's
+    /// python packages `DEPEND` on `dev-lang/python:3.14`, which is provided by
+    /// the host and never merged). Without the seed the check fails.
+    #[test]
+    fn provided_slotted_dep_is_satisfied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = Roots::for_test(tmp.path().to_str().unwrap());
+        let plan = vec![planned(
+            MergeRoot::Host,
+            "dev-python/wheel-0.47.0",
+            "dev-lang/python:3.14",
+        )];
+        assert!(
+            check(&plan, &roots, &roots, &[]).is_err(),
+            "unseeded control"
+        );
+
+        let provided = vec![(
+            Cpv::parse("dev-lang/python-3.14.0").unwrap(),
+            Some("3.14".into()),
+        )];
+        assert!(check(&plan, &roots, &roots, &provided).is_ok());
     }
 }

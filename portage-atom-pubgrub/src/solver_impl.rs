@@ -248,7 +248,7 @@ fn map_violation(error: PgError) -> Violation {
 
 fn map_error(error: PubGrubError<PortageDependencyProvider>) -> SolveError {
     match error {
-        PubGrubError::NoSolution(tree) => SolveError::NoSolution(format!("{tree:?}")),
+        PubGrubError::NoSolution(tree) => SolveError::NoSolution(crate::format_no_solution(tree)),
         other => SolveError::Provider(format!("{other:?}")),
     }
 }

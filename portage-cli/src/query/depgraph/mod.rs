@@ -74,6 +74,12 @@ pub struct DepgraphOutcome {
     /// always acyclic; the `--jobs` scheduler uses it to parallelise builds
     /// while respecting build order. Empty entry ⇒ no in-plan build deps.
     pub build_blockers: Vec<Vec<usize>>,
+    /// `package.provided` CPVs the system supplies, each with the repo slot it
+    /// maps onto (derived from the version's slot series). The pre-flight build
+    /// check seeds these as present so a build dep on an externally-provided
+    /// package (e.g. the host interpreter, `dev-lang/python:3.14`) is not
+    /// reported missing — the solver already treats it as satisfied.
+    pub provided: Vec<(Cpv, Option<String>)>,
 }
 
 pub struct DepgraphOpts<'a> {
@@ -212,7 +218,34 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         accept_license,
         package_license,
         distdir,
+        provided,
     } = use_env;
+
+    // Map each `package.provided` CPV onto the repo slot(s) a `:slot` dep would
+    // reference (the version sharing its major.minor series), so both the solver
+    // (host-seed, below) and the pre-flight check treat it as present at that
+    // slot. A CPV with no matching repo version is recorded slotless.
+    let provided_avail: Vec<(Cpv, Option<String>)> = provided
+        .iter()
+        .flat_map(|cpv| {
+            let mut slots: Vec<String> = Vec::new();
+            if let Some(entries) = data.versions.get(&cpv.cpn) {
+                for (rcpv, ce) in entries {
+                    if same_slot_series(&rcpv.version, &cpv.version) {
+                        let s = ce.metadata.slot.slot.to_string();
+                        if !slots.contains(&s) {
+                            slots.push(s);
+                        }
+                    }
+                }
+            }
+            if slots.is_empty() {
+                vec![(cpv.clone(), None)]
+            } else {
+                slots.into_iter().map(|s| (cpv.clone(), Some(s))).collect()
+            }
+        })
+        .collect();
 
     // Fold global ACCEPT_KEYWORDS and per-package package.accept_keywords into a
     // single interned acceptance decision. A cross build accepts by the TARGET
@@ -359,6 +392,24 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 iuse: e.iuse.clone(),
             });
         }
+        // `package.provided`: CPVs the system supplies externally. A dep edge
+        // matching one is dropped before it becomes a solver constraint (like a
+        // host-satisfied BDEPEND), so the package is neither built nor reported
+        // as a dropped/autounmask candidate.
+        provider.set_provided(&provided);
+        // A `package.provided` CPV is supplied by the *system*, so it is present
+        // on the build host (BROOT) too: seed it as host-installed so BDEPEND on
+        // it (e.g. a build tool needing the interpreter) is satisfied without
+        // resolving a repo version onto @host — otherwise a slot the repo can't
+        // build (python:3.14 on arm64-macos) would be pulled to the newest
+        // available (python-3.15.9999), conflicting with the provided slot.
+        for (cpv, slot) in &provided_avail {
+            let pkg = match slot {
+                Some(s) => PortagePackage::slotted(cpv.cpn, Interned::intern(s)),
+                None => PortagePackage::unslotted(cpv.cpn),
+            };
+            provider.add_host_installed(pkg, cpv.version.clone(), Vec::new(), Vec::new());
+        }
         // BROOT (the host) provides build tools: a BDEPEND already present there
         // is satisfied without building it into the plan — unless a USE-dep on
         // that edge demands a flag the host lacks, in which case the package is
@@ -410,11 +461,20 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                          falling back to a fixed-USE plan."
                     );
                     let (provider, result) = build_and_solve(false, &package_use);
-                    let sol =
-                        result.map_err(|e2| anyhow::anyhow!("resolution failed: {:?}", e2))?;
+                    let sol = result.map_err(|e2| {
+                        anyhow::anyhow!(
+                            "resolution failed:\n{}",
+                            portage_atom_pubgrub::format_solve_error(e2)
+                        )
+                    })?;
                     (provider, sol)
                 }
-                Err(e) => return Err(anyhow::anyhow!("resolution failed: {:?}", e)),
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "resolution failed:\n{}",
+                        portage_atom_pubgrub::format_solve_error(e)
+                    ));
+                }
             }
         }
     };
@@ -1009,5 +1069,18 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         },
         plan,
         build_blockers,
+        provided: provided_avail,
     })
+}
+
+/// Whether two versions plausibly belong to the same slot, used to map a
+/// `package.provided` CPV onto the repo slot a `:slot` dep would reference.
+///
+/// Compares the leading numeric components up to the shorter version's length
+/// (`3.14.0` vs `3.14.6` → same; `3.14.0` vs `3.15.9999` → different). Slots in
+/// the tree are cut from a version prefix (`python` → `3.14`, `gcc` → `14`), so
+/// a shared prefix is a good proxy without hard-coding any package's slot rule.
+fn same_slot_series(a: &Version, b: &Version) -> bool {
+    let n = a.numbers.len().min(b.numbers.len()).min(2);
+    n > 0 && a.numbers[..n] == b.numbers[..n]
 }

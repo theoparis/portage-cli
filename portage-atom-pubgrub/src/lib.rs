@@ -69,3 +69,36 @@ pub use required_use::RequiredUse;
 pub use use_config::{UseConfig, UseFlagState, UseOverride, apply_package_use};
 pub use validate::SlotOperatorBinding;
 pub use version_set::PortageVersionSet;
+
+/// Render a pubgrub `NoSolution` derivation tree into a human-readable
+/// explanation.
+///
+/// The raw [`pubgrub::DerivationTree`] `Debug` output prints package names as
+/// their internal interned string keys (e.g. `Cpn { category: Interned(3),
+/// package: Interned(4) }`), which is unreadable. This routes the tree through
+/// pubgrub's [`DefaultStringReporter`], which renders packages and version sets
+/// via their [`Display`](std::fmt::Display) impls — producing real atoms like
+/// `dev-lang/python:3.14`. It also collapses "no versions" derivations into
+/// cleaner external messages first.
+pub fn format_no_solution(
+    mut tree: pubgrub::DerivationTree<
+        PortagePackage,
+        PortageVersionSet,
+        <PortageDependencyProvider as pubgrub::DependencyProvider>::M,
+    >,
+) -> String {
+    use pubgrub::Reporter;
+    tree.collapse_no_versions();
+    pubgrub::DefaultStringReporter::report(&tree)
+}
+
+/// Render any [`pubgrub::PubGrubError`] from a resolve into a human-readable
+/// string. `NoSolution` is explained via [`format_no_solution`]; other variants
+/// fall back to `Debug`. Lets callers report resolver failures without pulling
+/// in pubgrub types themselves.
+pub fn format_solve_error(err: pubgrub::PubGrubError<PortageDependencyProvider>) -> String {
+    match err {
+        pubgrub::PubGrubError::NoSolution(tree) => format_no_solution(tree),
+        other => format!("{other:?}"),
+    }
+}

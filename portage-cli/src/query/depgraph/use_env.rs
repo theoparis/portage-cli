@@ -40,6 +40,10 @@ pub(super) struct UseEnv {
     pub package_license: Vec<(Dep, AcceptLicense)>,
     /// Resolved `DISTDIR` (where fetched distfiles live), for download-size accounting.
     pub distdir: String,
+    /// `package.provided` CPVs from the profile stack: packages the system
+    /// supplies externally (e.g. a host interpreter in a Gentoo Prefix). They
+    /// satisfy matching deps and are never built or shown for merge.
+    pub provided: Vec<portage_atom::Cpv>,
 }
 
 pub(super) async fn build_use_env(
@@ -215,6 +219,11 @@ async fn compute_use_env(
     package_mask.extend(load_dep_list(portage_dir.join("package.mask").as_str()));
     let package_unmask = load_dep_list(portage_dir.join("package.unmask").as_str());
 
+    // `package.provided` — CPVs the system supplies externally (profile stack,
+    // incl. the folded-in `/etc/portage/profile`). Fed to the solver as
+    // dependency-satisfying, never-built packages.
+    let provided = stack.package_provided().unwrap_or_default();
+
     // Profile USE force/mask. Global use.force is folded into `config` by
     // resolve_use_flags (enabled set); global use.mask must additionally be
     // applied per package (force_mask.rs) so it overrides a package's `+flag`
@@ -246,6 +255,7 @@ async fn compute_use_env(
         accept_license,
         package_license,
         distdir,
+        provided,
     })
 }
 

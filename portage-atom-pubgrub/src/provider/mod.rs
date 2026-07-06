@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::repository::IUseDefault;
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Dep, Version};
+use portage_atom::{Cpn, Cpv, Dep, Version};
 use pubgrub::{Dependencies, SelectedDependencies};
 
 use crate::convert;
@@ -273,6 +273,11 @@ pub struct PortageDependencyProvider {
     /// The value the solver chose for each `UseDecision` node in the last solve
     /// (`true` = on). Captured before virtual nodes are stripped from the result.
     pub(crate) solved_use_decisions: HashMap<PortagePackage, bool>,
+    /// `package.provided` versions, keyed by CPN. A dependency edge whose target
+    /// CPN is listed and whose version set accepts one of these versions is
+    /// dropped before it becomes a solver constraint — the system supplies that
+    /// package externally, so it is neither built nor reported as a dropped dep.
+    pub(crate) provided: HashMap<Cpn, Vec<Version>>,
 }
 
 /// A USE flag the caller ceded to the solver, with the value the solver chose.
@@ -588,7 +593,47 @@ impl PortageDependencyProvider {
             use_decision_prefer,
             use_decision_meta,
             solved_use_decisions: HashMap::new(),
+            provided: HashMap::new(),
         }
+    }
+
+    /// Register `package.provided` CPVs: packages the system supplies externally
+    /// (e.g. a host interpreter in a Gentoo Prefix). A dependency edge matching
+    /// one (same CPN, version in the edge's set) is dropped in
+    /// [`get_dependencies`](crate::DependencyProvider::get_dependencies), so the
+    /// package is neither pulled into the plan nor flagged as a dropped dep.
+    pub fn set_provided(&mut self, provided: &[Cpv]) {
+        self.provided.clear();
+        for cpv in provided {
+            self.provided
+                .entry(cpv.cpn)
+                .or_default()
+                .push(cpv.version.clone());
+        }
+        // `dropped_deps` is computed at construction (before this call): a dep to
+        // a package absent from the reachable/ingested set is recorded there and
+        // later surfaced as an autounmask candidate. Prune any a provided CPV
+        // satisfies — the system supplies it, so it is neither a real drop nor a
+        // config-change candidate.
+        if !self.provided.is_empty() {
+            let mut dropped = std::mem::take(&mut self.dropped_deps);
+            dropped.retain(|d| !self.edge_is_provided(&d.package, &d.version_set));
+            self.dropped_deps = dropped;
+        }
+    }
+
+    /// Whether a dependency edge `(target, version_set)` is satisfied by a
+    /// `package.provided` entry — the target's CPN is provided at a version the
+    /// edge accepts. Slot is not considered (provided entries name a CPV).
+    pub(crate) fn edge_is_provided(&self, target: &PortagePackage, vs: &PortageVersionSet) -> bool {
+        // Virtual variants (OR-group `Choice`, `SlotChoice`, `UseDecision`, …)
+        // have no CPN and can never be named by a `package.provided` entry.
+        if target.is_virtual() {
+            return false;
+        }
+        self.provided
+            .get(target.cpn())
+            .is_some_and(|versions| versions.iter().any(|v| vs.contains(v)))
     }
 
     /// Record an installed package's pre-evaluated blocker atoms for
