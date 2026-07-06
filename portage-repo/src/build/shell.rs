@@ -1117,6 +1117,30 @@ impl EbuildShell {
             }
         }
 
+        // MAKEOPTS default: portage derives `-j<nproc>` when neither make.conf
+        // nor the process env sets it (make.globals leaves it empty and the PM
+        // computes a default in config.py). Without this, emake runs serially
+        // on every build — a 128-core box builds gcc one file at a time
+        // (found live: full cross gcc-stage1 ran at load 1.15/128). Apply only
+        // if still unset after the env pass-through above so an explicit
+        // make.conf or `MAKEOPTS=... em ...` always wins. Conservative: use
+        // 2/3 of cores + 1 for `-j` (I/O-bound link steps and memory-heavy
+        // compiles like gcc/lto should not fully saturate; mirrors the heuristic
+        // Portage itself recommends), plus `-l<cores>` so make throttles new
+        // jobs once the load average reaches the core count (avoids thrash on
+        // memory-heavy link steps).
+        if self
+            .get_var("MAKEOPTS")
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+        {
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            let j = cores * 2 / 3 + 1;
+            self.set_var("MAKEOPTS", &format!("-j{j} -l{cores}"));
+        }
+
         // An LD_PRELOAD fake-root session (pseudoroot) only holds if every
         // phase child loads the interposer; pass its variables through the
         // otherwise clean build env, exported, as portage does for its
