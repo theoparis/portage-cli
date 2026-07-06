@@ -54,16 +54,24 @@ pub fn query(tuple: &str, eclass_dir: &Utf8Path) -> Result<MultilibEnv> {
     }
     // Mirrors crossdev's load_multilib_env subshell: stub `inherit`, source the
     // eclass, then run `multilib_env`. The `single_abi` dance collapses the
-    // "default" sentinel to the concrete DEFAULT_ABI.
+    // "default" sentinel to the concrete DEFAULT_ABI. CTARGET must be set as a
+    // plain assignment *before* sourcing multilib.eclass (not as a one-shot
+    // prefix to `multilib_env`): the eclass reads CTARGET at source time to
+    // synthesize the `*_default` ABI entries (CHOST_default, CTARGET_default,
+    // LIBDIR_default) that multilib-toolchain.eclass relies on. Without them,
+    // a cross glibc build resolves CC to the host gcc and dies on the
+    // linux-headers version probe (found live: cross-riscv64/glibc under
+    // --prefix). This matches crossdev's `load_multilib_env` exactly.
     let snippet = format!(
         r#"
+CTARGET={tuple}
+unset ${{!CFLAGS_*}} ${{!CHOST_*}} ${{!CTARGET_*}} ${{!LDFLAGS_*}} ${{!LIBDIR_*}}
 inherit() {{ :; }}
 die() {{ echo "die: $*" >&2; exit 1; }}
 EAPI=7 . "{eclass}" || exit 1
-unset ${{!CFLAGS_*}} ${{!CHOST_*}} ${{!CTARGET_*}} ${{!LDFLAGS_*}} ${{!LIBDIR_*}}
 unset DEFAULT_ABI
 if [[ ${{MULTILIB_ABIS}} == default ]]; then unset MULTILIB_ABIS; single_abi=true; else single_abi=false; fi
-CTARGET={tuple} multilib_env "{tuple}"
+multilib_env "{tuple}"
 ${{single_abi}} && MULTILIB_ABIS=${{DEFAULT_ABI}}
 for v in ${{!CFLAGS_*}} ${{!CHOST_*}} ${{!CTARGET_*}} ${{!LDFLAGS_*}} ${{!LIBDIR_*}}; do
     printf '%s=%s\n' "$v" "${{!v}}"
