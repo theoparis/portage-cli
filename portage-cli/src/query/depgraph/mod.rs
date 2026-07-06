@@ -410,11 +410,20 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                          falling back to a fixed-USE plan."
                     );
                     let (provider, result) = build_and_solve(false, &package_use);
-                    let sol =
-                        result.map_err(|e2| anyhow::anyhow!("resolution failed: {:?}", e2))?;
+                    let sol = result.map_err(|e2| {
+                        anyhow::anyhow!(
+                            "resolution failed:\n{}",
+                            portage_atom_pubgrub::format_solve_error(e2)
+                        )
+                    })?;
                     (provider, sol)
                 }
-                Err(e) => return Err(anyhow::anyhow!("resolution failed: {:?}", e)),
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "resolution failed:\n{}",
+                        portage_atom_pubgrub::format_solve_error(e)
+                    ));
+                }
             }
         }
     };
