@@ -1,42 +1,43 @@
-/// Merge-behavior flags: everything `emerge_atoms`/`emerge_atoms_inner`/
-/// `run_merge_plan` read to decide *how* to resolve and build a set of atoms,
-/// as opposed to root-model flags (`--root`, `--local`, `--privilege`, …,
-/// already `global = true` on [`super::Cli`] since they're meaningful to
-/// every applet) or depgraph-shape flags ([`super::DepgraphFlags`]: `--deep`/
-/// `--newuse`).
-///
-/// Flattened both into the top-level [`super::Cli`] (for the bare `em
-/// <atoms>` path) and into [`super::ToolchainArgs`]/[`super::CrossdevArgs`]/
-/// [`super::StagesArgs`] (whose staged driver, `crossdev::run_staged`, calls
-/// the very same `emerge_atoms`/`emerge_atoms_inner` chain per step) —
-/// mirroring exactly how [`super::DepgraphFlags`] is already flattened in
-/// both places. This lets these flags be written either before or after the
-/// subcommand name (`em -j 80 stages --stage1` or `em stages --stage1 -j
-/// 80`), each populating its own instance; the driver merges the two with
-/// the same precedence (subcommand value wins when set, falling back to the
-/// global one — the same precedence
-/// `merge_depgraph_flags` already uses).
-///
-/// `--search`/`--searchdesc` are deliberately NOT here: they select an
-/// entirely different mode in the bare path (`run_emerge` branches to
-/// `search::run_emerge_style` before ever calling `emerge_atoms`), so they
-/// have no meaning for a subcommand's staged build. `--nodeps` is also NOT
-/// here: it is already threaded explicitly per call
-/// ([`crate::EmergeOpts::nodeps`]) because each [`crate::crossdev::stages::StageStep`] needs
-/// its own value (the two-stage cross bootstrap's `--nodeps` libc-headers
-/// step), not a single global/per-invocation one — folding it into this
-/// mixin would lose that per-step distinction.
-///
-/// Found 2026-07-03 running `em stages --stage1 -j 80 --keep-going`: `-j`/
-/// `--keep-going`/`--autosolve-use`/`--autounmask-write` all parsed only
-/// when placed *before* the subcommand (clap rejects non-global args placed
-/// after one), and `run_staged`'s driver read them straight off the
-/// top-level `Cli` regardless of where `stages`/`crossdev`/`toolchain`'s own
-/// flattened copy might set them — so a flag given *after* the subcommand
-/// silently had no effect even where clap did accept it. See
-/// `todo/stage-build-shakeout.md`.
+//! Merge-behavior flags: everything `emerge_atoms`/`emerge_atoms_inner`/
+//! `run_merge_plan` read to decide *how* to resolve and build a set of atoms,
+//! as opposed to root-model flags (`--root`, `--local`, `--privilege`, …,
+//! already `global = true` on [`super::Cli`] since they're meaningful to
+//! every applet) or depgraph-shape flags ([`super::DepgraphFlags`]: `--deep`/
+//! `--newuse`).
+//!
+//! Flattened both into the top-level [`super::Cli`] (for the bare `em
+//! <atoms>` path) and into [`super::ToolchainArgs`]/[`super::CrossdevArgs`]/
+//! [`super::StagesArgs`] (whose staged driver, `crossdev::run_staged`, calls
+//! the very same `emerge_atoms`/`emerge_atoms_inner` chain per step) —
+//! mirroring exactly how [`super::DepgraphFlags`] is already flattened in
+//! both places. This lets these flags be written either before or after the
+//! subcommand name (`em -j 80 stages --stage1` or `em stages --stage1 -j
+//! 80`), each populating its own instance; the driver merges the two with
+//! the same precedence (subcommand value wins when set, falling back to the
+//! global one — the same precedence
+//! `merge_depgraph_flags` already uses).
+//!
+//! `--search`/`--searchdesc` are deliberately NOT here: they select an
+//! entirely different mode in the bare path (`run_emerge` branches to
+//! `search::run_emerge_style` before ever calling `emerge_atoms`), so they
+//! have no meaning for a subcommand's staged build. `--nodeps` is also NOT
+//! here: it is already threaded explicitly per call
+//! ([`crate::EmergeOpts::nodeps`]) because each [`crate::crossdev::stages::StageStep`] needs
+//! its own value (the two-stage cross bootstrap's `--nodeps` libc-headers
+//! step), not a single global/per-invocation one — folding it into this
+//! mixin would lose that per-step distinction.
+//!
+//! Found 2026-07-03 running `em stages --stage1 -j 80 --keep-going`: `-j`/
+//! `--keep-going`/`--autosolve-use`/`--autounmask-write` all parsed only
+//! when placed *before* the subcommand (clap rejects non-global args placed
+//! after one), and `run_staged`'s driver read them straight off the
+//! top-level `Cli` regardless of where `stages`/`crossdev`/`toolchain`'s own
+//! flattened copy might set them — so a flag given *after* the subcommand
+//! silently had no effect even where clap did accept it. See
+//! `todo/stage-build-shakeout.md`.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct MergeFlags {
+    /// Update installed packages to newest available versions.
     #[arg(short = 'u', long)]
     pub update: bool,
 
@@ -44,30 +45,38 @@ pub struct MergeFlags {
     #[arg(long)]
     pub autounmask_write: bool,
 
+    /// Build and install packages but do not add them to the world file.
     #[arg(short = '1', long = "oneshot")]
     pub oneshot: bool,
 
+    /// Only fetch distfiles, do not build or install.
     #[arg(short = 'f', long)]
     pub fetchonly: bool,
 
+    /// Build binary packages for all merged packages.
     #[arg(short = 'b', long)]
     pub buildpkg: bool,
 
+    /// Use binary packages if available, otherwise fall back to source.
     #[arg(short = 'k', long)]
     pub usepkg: bool,
 
+    /// Only use binary packages, fail if none available.
     #[arg(short = 'K', long)]
     pub usepkgonly: bool,
 
+    /// Fetch binary packages for all requested packages.
     #[arg(short = 'g', long)]
     pub getbinpkg: bool,
 
+    /// Only fetch binary packages, do not install.
     #[arg(short = 'G', long)]
     pub getbinpkgonly: bool,
 
     #[arg(short = 'e', long)]
     pub emptytree: bool,
 
+    /// Show dependency tree before merging.
     // No short alias: `-t` collides with `em crossdev`'s `--target` once
     // MergeFlags is flattened into CrossdevArgs (clap's debug_assertions catch
     // this in dev builds; release builds skip the check, so it was silently
@@ -80,9 +89,11 @@ pub struct MergeFlags {
     #[arg(long)]
     pub json: bool,
 
+    /// Only merge dependencies, not the specified packages themselves.
     #[arg(short = 'o', long)]
     pub onlydeps: bool,
 
+    /// Do not replace installed packages that are already the same version.
     #[arg(short = 'n', long)]
     pub noreplace: bool,
 
@@ -91,12 +102,15 @@ pub struct MergeFlags {
     #[arg(short = 'j', long, value_name = "N")]
     pub jobs: Option<u32>,
 
+    /// Maximum load average to allow when starting new builds.
     #[arg(short = 'l', long, value_name = "LOAD")]
     pub load_average: Option<f64>,
 
+    /// Continue merging as much as possible even if some packages fail.
     #[arg(long)]
     pub keep_going: bool,
 
+    /// Automatically add required USE flags and package unmask entries to config files.
     #[arg(long)]
     pub autounmask: bool,
 
@@ -105,6 +119,7 @@ pub struct MergeFlags {
     #[arg(long)]
     pub autosolve_use: bool,
 
+    /// Include all dependencies in the graph, not just those needed for the current operation.
     #[arg(long)]
     pub complete_graph: bool,
 
@@ -115,21 +130,15 @@ pub struct MergeFlags {
     #[arg(long)]
     pub with_bdeps: bool,
 
+    /// Exclude the specified atom from being merged.
     #[arg(short = 'X', long, value_name = "ATOM")]
     pub exclude: Vec<String>,
 
-    /// emerge's `--root-deps[=rdeps]`: only RDEPEND (not DEPEND) is required to
-    /// be satisfied in the merge target — a work-around for the crossdev
-    /// bootstrap cycle (a still-empty target sysroot can't yet satisfy plain
-    /// DEPEND, e.g. `virtual/os-headers`/`acct-group/root`, while its own
-    /// toolchain is being built into it). `em crossdev --setup` always applies
-    /// this unconditionally (matching crossdev's `<CTARGET>-emerge` wrapper),
-    /// regardless of this flag. Elsewhere (bare `em`, `em toolchain --setup`,
-    /// `em stages --stage1`, `equery depgraph`) it defaults off: once a
-    /// target's toolchain already exists, ordinary packages should have their
-    /// full DEPEND resolved against the target like any native build — this
-    /// flag lets that be overridden case by case. See
-    /// `todo/stage-build-shakeout.md`.
+    /// Only require RDEPEND (not DEPEND) to be satisfied in the merge target.
+    /// Work-around for cross-compilation bootstrap: a still-empty target sysroot
+    /// cannot yet satisfy plain DEPEND (e.g. virtual/os-headers, acct-group/root)
+    /// while its own toolchain is being built. `em crossdev --setup` always applies
+    /// this unconditionally; elsewhere it defaults off.
     #[arg(long = "root-deps")]
     pub root_deps: bool,
 }

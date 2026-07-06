@@ -24,7 +24,7 @@ const fn cli_styles() -> Styles {
 #[command(
     name = "em",
     version,
-    about = "Gentoo Portage package manager CLI",
+    about = "Gentoo Portage package manager workalike",
     arg_required_else_help = true,
     styles = cli_styles()
 )]
@@ -35,24 +35,29 @@ pub struct Cli {
     #[command(flatten)]
     pub depgraph_flags: DepgraphFlags,
 
+    /// Show what would be done without actually performing any actions.
     #[arg(short = 'p', long, global = true)]
     pub pretend: bool,
 
+    /// Ask for confirmation before performing actions.
     #[arg(short = 'a', long, global = true)]
     pub ask: bool,
 
+    /// Increase verbosity (can be repeated for more detail).
     #[arg(short = 'v', long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
+    /// Suppress non-error output.
     #[arg(short = 'q', long, global = true)]
     pub quiet: bool,
 
+    /// Target architecture for operations. Defaults to current system architecture.
     #[arg(long, value_name = "ARCH", default_value_t = Arch::current(), value_parser = parse_arch)]
     pub arch: Arch,
 
     /// Pin search/query to a single repository. When unset, repositories are
     /// auto-discovered from `repos.conf` (the main repo wins for single-repo
-    /// applets; `em search` walks all of them).
+    /// applets; search walks all of them).
     #[arg(long, value_name = "PATH")]
     pub repo: Option<String>,
 
@@ -73,14 +78,15 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = Privilege::Auto, global = true, env = "EM_PRIVILEGE")]
     pub privilege: Privilege,
 
-    /// Search package names, like emerge --search (each argument is a pattern)
+    /// Search package names (each argument is a pattern).
     #[arg(short = 's', long)]
     pub search: bool,
 
-    /// Search package names and descriptions, like emerge --searchdesc
+    /// Search package names and descriptions.
     #[arg(short = 'S', long)]
     pub searchdesc: bool,
 
+    /// Skip dependency resolution and only merge specified packages.
     #[arg(short = 'O', long)]
     pub nodeps: bool,
 
@@ -803,7 +809,7 @@ pub enum MaintCommand {
     Binhost,
     #[command(about = "Discard stale config tracker entries")]
     Cleanconfmem,
-    #[command(about = "Discard saved emerge --resume lists")]
+    #[command(about = "Discard saved resume lists")]
     Cleanresume,
     #[command(about = "Clean old Portage build logs")]
     Logs,
