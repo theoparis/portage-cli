@@ -377,7 +377,7 @@ async fn emerge_atoms_inner(
     // libxml2 -> meson -> python -> gawk, which has no valid dependency
     // order and must be seeded out of order somewhere).
     if !nodeps {
-        preflight::check(&outcome.plan, &roots, &host_roots)?;
+        preflight::check(&outcome.plan, &roots, &host_roots, &outcome.provided)?;
     }
 
     if cli.ask && !confirm_merge(outcome.plan.len())? {
