@@ -72,7 +72,7 @@ pub struct Cli {
     pub local: bool,
 
     /// How an unprivileged build gets root for chown/setuid: auto (best
-    /// compiled-in fake root), fakeroost, pseudoroot, hakoniwa (userns mapped
+    /// compiled-in fake root), pseudoroot, fakeroost, hakoniwa (userns mapped
     /// root), sudo (real root), or none; backends unsupported on this platform
     /// are compiled out. Ignored when already root.
     #[arg(long, value_enum, default_value_t = Privilege::Auto, global = true, env = "EM_PRIVILEGE")]
@@ -1244,7 +1244,7 @@ pub enum LogCommand {
 /// How an unprivileged build gets root for `chown`/setuid (see `--privilege`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Privilege {
-    /// Best compiled-in fake root (fakeroost, else pseudoroot, else none) when
+    /// Best compiled-in fake root (pseudoroot, else fakeroost, else none) when
     /// unprivileged, real chowns when already root (default).
     #[default]
     Auto,
