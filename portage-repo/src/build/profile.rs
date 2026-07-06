@@ -59,7 +59,7 @@ impl ProfileStack {
     /// then applies the process-environment layer, `use.force`, and `use.mask`.
     ///
     /// Returns the enabled flags plus the flags explicitly disabled by a `-flag`
-    /// USE token (see [`ResolvedUse`]).  The shell's bash state is updated as a
+    /// USE token (see `ResolvedUse`).  The shell's bash state is updated as a
     /// side-effect (necessary for bash evaluation); the Rust-side `use_flags`
     /// HashSet is **not** set — call `configure_shell` for that.
     pub async fn use_flags(

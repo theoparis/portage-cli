@@ -84,7 +84,7 @@ pub fn env_d_dir<T: EnvDProfile>(roots: &Roots) -> Utf8PathBuf {
 
 /// Path to the current profile config file: `<base>/etc/env.d/<subdir>/config-<target>`,
 /// where `<base>` is the host `/` for a plain run, or the `--config-root`/
-/// `--local`/`--prefix` root. Derived from [`config_portage_dir`] so a prefix
+/// `--local`/`--prefix` root. Derived from the configuration portage directory so a prefix
 /// activation writes into the prefix, not the host `/etc` (a same-named host
 /// config must not capture the write).
 fn current_config_path<T: EnvDProfile>(roots: &Roots, target: &str) -> Utf8PathBuf {

@@ -48,7 +48,7 @@
 //! `crossdev --update` support and version-mismatch warning.
 
 mod multilib;
-mod stages;
+pub mod stages;
 mod target;
 
 use std::io::Write;

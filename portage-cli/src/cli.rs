@@ -241,7 +241,7 @@ impl Cli {
     /// targets `~/.gentoo/usr/<t>`.
     ///
     /// Under `--prefix`, the returned `Roots`'s `merge_root()` is the **prefix**
-    /// (install destination), while [`base_roots`] returns a separate view whose
+    /// (install destination), while `base_roots()` returns a separate view whose
     /// `merge_root()` is the **host `/`** (BROOT, for BDEPEND checks). The two
     /// genuinely differ for an overlay; this split is what lets preflight check
     /// BDEPEND against the host while the merge lands in the prefix.
@@ -287,7 +287,7 @@ impl Cli {
     /// semantics"). Under `--prefix` BROOT is the host `/` (the overlay borrows
     /// host tools); under `--local`/`--root` BROOT is the offset itself
     /// (standalone/self-contained). Under `--cross` BROOT is the outer EROOT
-    /// (the sysroot substitution is undone here, applied in [`roots`]).
+    /// (the sysroot substitution is undone here, applied in `roots()`).
     pub(crate) fn base_roots(&self) -> Roots {
         let path = |s: &Option<String>| s.as_deref().map(camino::Utf8PathBuf::from);
         // `--local`: standalone Gentoo-Prefix at ~/.gentoo. Full closure (base

@@ -13,8 +13,8 @@
 /// both places. This lets these flags be written either before or after the
 /// subcommand name (`em -j 80 stages --stage1` or `em stages --stage1 -j
 /// 80`), each populating its own instance; the driver merges the two with
-/// [`crate::crossdev::merge_merge_flags`] (subcommand value wins when set,
-/// falling back to the global one — the same precedence
+/// the same precedence (subcommand value wins when set, falling back to the
+/// global one — the same precedence
 /// `merge_depgraph_flags` already uses).
 ///
 /// `--search`/`--searchdesc` are deliberately NOT here: they select an
@@ -22,7 +22,7 @@
 /// `search::run_emerge_style` before ever calling `emerge_atoms`), so they
 /// have no meaning for a subcommand's staged build. `--nodeps` is also NOT
 /// here: it is already threaded explicitly per call
-/// ([`crate::EmergeOpts::nodeps`]) because each [`stages::StageStep`] needs
+/// ([`crate::EmergeOpts::nodeps`]) because each [`crate::crossdev::stages::StageStep`] needs
 /// its own value (the two-stage cross bootstrap's `--nodeps` libc-headers
 /// step), not a single global/per-invocation one — folding it into this
 /// mixin would lose that per-step distinction.
