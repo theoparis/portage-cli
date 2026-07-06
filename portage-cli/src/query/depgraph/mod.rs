@@ -212,6 +212,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         accept_license,
         package_license,
         distdir,
+        provided,
     } = use_env;
 
     // Fold global ACCEPT_KEYWORDS and per-package package.accept_keywords into a
@@ -359,6 +360,11 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 iuse: e.iuse.clone(),
             });
         }
+        // `package.provided`: CPVs the system supplies externally. A dep edge
+        // matching one is dropped before it becomes a solver constraint (like a
+        // host-satisfied BDEPEND), so the package is neither built nor reported
+        // as a dropped/autounmask candidate.
+        provider.set_provided(&provided);
         // BROOT (the host) provides build tools: a BDEPEND already present there
         // is satisfied without building it into the plan — unless a USE-dep on
         // that edge demands a flag the host lacks, in which case the package is

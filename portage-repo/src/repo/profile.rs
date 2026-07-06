@@ -3,8 +3,8 @@ use std::hash::Hash;
 use std::path::{Path, PathBuf};
 
 use gentoo_core::Arch;
-use portage_atom::Dep;
 use portage_atom::interner::{DefaultInterner, Interned};
+use portage_atom::{Cpv, Dep};
 use portage_metadata::Eapi;
 
 use super::util;
@@ -411,6 +411,34 @@ impl ProfileStack {
         )
     }
 
+    /// Accumulated `package.provided` across the full stack (incremental
+    /// `-cat/pkg-version` removal).
+    ///
+    /// Each line is an exact `cat/pkg-version` the system provides externally
+    /// (e.g. a host-supplied interpreter in a Gentoo Prefix): it satisfies
+    /// matching dependencies and is never built or listed for merge. A leading
+    /// `=` is tolerated for symmetry with dependency-atom syntax.
+    ///
+    /// See portage(5) `package.provided`.
+    pub fn package_provided(&self) -> Result<Vec<Cpv>> {
+        let mut acc: Vec<Cpv> = Vec::new();
+        for p in &self.profiles {
+            for line in read_profile_file(&p.path().join("package.provided"))? {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix('-') {
+                    let cpv = parse_provided_cpv(rest.trim())?;
+                    acc.retain(|c| c != &cpv);
+                } else {
+                    let cpv = parse_provided_cpv(line)?;
+                    if !acc.contains(&cpv) {
+                        acc.push(cpv);
+                    }
+                }
+            }
+        }
+        Ok(acc)
+    }
+
     /// Accumulated `packages` entries across the full stack, with incremental
     /// `-atom` / `-*` removal applied (portage `stack_lists(..., incremental=1)`).
     ///
@@ -814,6 +842,12 @@ where
     Ok(acc)
 }
 
+/// Parse one `package.provided` entry into a [`Cpv`], tolerating a leading `=`.
+fn parse_provided_cpv(s: &str) -> Result<Cpv> {
+    let s = s.strip_prefix('=').unwrap_or(s);
+    Ok(Cpv::parse(s)?)
+}
+
 /// Merge incremental atom lists (`package.mask` format).
 ///
 /// A line prefixed with `-` causes that atom to be removed from the
@@ -964,6 +998,30 @@ mod tests {
             }
         }
         path
+    }
+
+    #[test]
+    fn package_provided_merges_incrementally_across_stack() {
+        // parent provides two CPVs (one with a leading `=`); leaf removes one
+        // and adds another. Result is order-preserving with the removal applied.
+        let dir = tempfile::tempdir().unwrap();
+        let parent = make_profile(&dir, "parent", &[]);
+        std::fs::write(
+            parent.join("package.provided"),
+            "dev-lang/python-3.14.0\n=sys-devel/gcc-14.2.0\n",
+        )
+        .unwrap();
+        let leaf = make_profile(&dir, "leaf", &["../parent"]);
+        std::fs::write(
+            leaf.join("package.provided"),
+            "-sys-devel/gcc-14.2.0\ndev-lang/perl-5.42.0\n",
+        )
+        .unwrap();
+
+        let stack = ProfileStack::build(leaf).unwrap();
+        let provided = stack.package_provided().unwrap();
+        let got: Vec<String> = provided.iter().map(|c| c.to_string()).collect();
+        assert_eq!(got, vec!["dev-lang/python-3.14.0", "dev-lang/perl-5.42.0"]);
     }
 
     #[test]
