@@ -83,6 +83,19 @@ impl Avail {
         )
     }
 
+    /// Record a `package.provided` entry (a system-supplied package) as present
+    /// with its slot, so a build dep on it is satisfied without a merge. Slot is
+    /// authoritative for the match; USE-deps on such an atom are treated as
+    /// satisfied (`use_info: None`), matching the solver, which counts the
+    /// provided package as present regardless of flags.
+    pub fn record_provided(&mut self, cpv: Cpv, slot: Option<String>) {
+        self.0.push(AvailEntry {
+            cpv,
+            slot,
+            use_info: None,
+        });
+    }
+
     /// Record a host merge visible to later `BDEPEND` checks.
     pub fn record_merge_bdepend(&mut self, cpv: Cpv) {
         self.0.push(AvailEntry {
