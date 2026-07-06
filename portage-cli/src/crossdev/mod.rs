@@ -898,7 +898,18 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
         target.tuple
     );
 
-    let portage = setup_root(globals).join("etc/portage");
+    // Write into the *host's* `etc/portage` (BROOT), where the `cross-<tuple>/*`
+    // builds read config. These are HOST-built packages (binutils/gcc produce
+    // target code, glibc/linux-headers carry target runtime info) managed via
+    // the host's package.env so `emerge -u cross-<tuple>/glibc` works — exactly
+    // what real crossdev does (`/etc/portage/package.env/cross-<tuple>`). The
+    // staged driver routes them through `base_roots()` (bypass_cross_root),
+    // so this must match: `base_roots().merge_root()` is the host under every
+    // topology (/, the offset under --local/--root, / under --prefix).
+    // Found live: cross-riscv64/glibc step 5 failed because package.env was
+    // written to the sysroot (roots().merge_root() under --cross) while the
+    // build read config from the host — the per-target ABI CFLAGS never applied.
+    let portage = globals.base_roots().merge_root().join("etc/portage");
     let category = target.category();
 
     let env_dir = portage.join("env").join(&category);
