@@ -46,6 +46,7 @@ impl builtins::Command for EconfCommand {
             if s.is_empty() { ".".to_string() } else { s }
         };
         let eprefix = get("EPREFIX");
+        let workdir = get("WORKDIR");
         let pf = get("PF");
         let chost = get("CHOST");
         let cbuild = get("CBUILD");
@@ -91,6 +92,24 @@ impl builtins::Command for EconfCommand {
             let configure = base.join("configure");
             if !configure.exists() {
                 return 0u8;
+            }
+
+            // Refresh any bundled config.sub/config.guess from gnuconfig, as
+            // Portage's econf does: packages ship stale copies that reject modern
+            // CHOSTs (e.g. re2c's rejects `arm64-apple-darwin27`), while the
+            // gnuconfig tool in BROOT recognizes them.
+            // gnuconfig installs into the prefix (${EPREFIX}/usr/share/gnuconfig),
+            // which is what Portage's econf reads — not BROOT, which is the bare
+            // host root "/" for a --local build and has no gnuconfig.
+            let gnuconfig_dir =
+                std::path::Path::new(&eprefix).join("usr/share/gnuconfig");
+            if gnuconfig_dir.is_dir() {
+                let search_root = if workdir.is_empty() {
+                    cwd.clone()
+                } else {
+                    std::path::PathBuf::from(&workdir)
+                };
+                refresh_gnuconfig(&search_root, &gnuconfig_dir);
             }
 
             // Probe EAPI-conditional flags from configure --help.
@@ -207,4 +226,35 @@ fn contains_flag(text: &str, flag: &str) -> bool {
         rest = &rest[pos + 1..];
     }
     false
+}
+
+/// Overwrite every `config.sub`/`config.guess` under `root` with the copies from
+/// `gnuconfig_dir`, mirroring Portage's econf gnuconfig update. Best-effort: a
+/// missing source or unreadable subtree is skipped rather than failing econf.
+fn refresh_gnuconfig(root: &std::path::Path, gnuconfig_dir: &std::path::Path) {
+    let sub = gnuconfig_dir.join("config.sub");
+    let guess = gnuconfig_dir.join("config.guess");
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                // fs::copy carries the source's 0755 bits, keeping it executable.
+                match entry.file_name().to_str() {
+                    Some("config.sub") if sub.is_file() => {
+                        let _ = std::fs::copy(&sub, entry.path());
+                    }
+                    Some("config.guess") if guess.is_file() => {
+                        let _ = std::fs::copy(&guess, entry.path());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
