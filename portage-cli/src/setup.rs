@@ -81,14 +81,34 @@ const BASHRC_PREFIX: &str = r#"# Overlay search paths for `em --prefix DIR` (cre
 # Host (/) is the build sysroot; the prefix is layered on top. Do NOT set
 # PKG_CONFIG_SYSROOT_DIR (host .pc must keep their real paths); the prefix .pc
 # emit harmless host-absolute -I/-L while the real files are found via the flags.
+#
+# Two guards: ROOT-keyed (a plain --prefix build where ROOT is the prefix) and
+# EPREFIX-keyed (a --prefix --cross build where ROOT is the sysroot's "/" but
+# the cross toolchain wrappers live under ${EPREFIX}/usr/bin). Without the
+# EPREFIX guard, tc-getCC can't find ${CTARGET}-gcc and falls back to the host
+# ${CHOST}-gcc, breaking cross glibc/gcc builds with target-flag-on-host-gcc
+# errors like "-mabi=lp64d: unrecognized argument".
+
+# ROOT-keyed: a plain --prefix overlay (ROOT = the prefix itself).
 if [[ -n ${ROOT} && ${ROOT%/} != "" && ${ROOT%/} != "/" ]]; then
 	_ov="${ROOT%/}"
 	_libdir="$(get_libdir 2>/dev/null || echo lib)"
+	export PATH="${_ov}/usr/bin${PATH:+:${PATH}}"
 	export PKG_CONFIG_PATH="${_ov}/usr/${_libdir}/pkgconfig:${_ov}/usr/share/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
 	export CPPFLAGS="-I${_ov}/usr/include${CPPFLAGS:+ ${CPPFLAGS}}"
 	export LDFLAGS="-L${_ov}/usr/${_libdir} -Wl,-rpath-link,${_ov}/usr/${_libdir}${LDFLAGS:+ ${LDFLAGS}}"
 	export CMAKE_PREFIX_PATH="${_ov}/usr${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
 	unset _ov _libdir
+fi
+
+# EPREFIX-keyed: a --prefix --cross build (ROOT = sysroot "/", EPREFIX = the
+# overlay prefix). The cross toolchain wrappers (${CTARGET}-gcc etc.) live
+# under ${EPREFIX}/usr/bin; without this on PATH, tc-getCC falls back to the
+# host compiler and the cross build dies on target-specific flags.
+if [[ -n ${EPREFIX} && ${EPREFIX%/} != "" && ${EPREFIX%/} != "/" ]]; then
+	_ov="${EPREFIX%/}"
+	export PATH="${_ov}/usr/bin${PATH:+:${PATH}}"
+	unset _ov
 fi
 "#;
 
