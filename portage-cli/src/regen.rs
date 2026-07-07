@@ -30,10 +30,15 @@ pub async fn run(
         let Some(conf) = &conf else {
             bail!("no repos named and no repos.conf found");
         };
-        let main = conf.main_repo().map(|m| m.location.clone());
+        let main = conf
+            .main_repo()
+            .and_then(|m| m.location.as_path().map(PathBuf::from));
         for entry in conf.repos() {
-            if Some(&entry.location) != main.as_ref() {
-                targets.push(entry.location.clone());
+            let Some(loc) = entry.location.as_path().map(PathBuf::from) else {
+                continue; // virtual/alias repo — no cache to regenerate
+            };
+            if Some(&loc) != main.as_ref() {
+                targets.push(loc);
             }
         }
         if targets.is_empty() {
@@ -46,7 +51,11 @@ pub async fn run(
             if path.is_dir() {
                 targets.push(path.to_path_buf());
             } else if let Some(entry) = conf.as_ref().and_then(|c| c.find(arg)) {
-                targets.push(entry.location.clone());
+                if let Some(p) = entry.location.as_path() {
+                    targets.push(p.to_path_buf());
+                } else {
+                    bail!("'{arg}' is a virtual repo (no on-disk path to regenerate)");
+                }
             } else {
                 bail!("'{arg}' is neither a directory nor a repos.conf repo name");
             }

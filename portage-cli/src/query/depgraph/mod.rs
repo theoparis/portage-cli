@@ -169,15 +169,27 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             Ok(rc) => rc
                 .repos()
                 .iter()
-                .filter(|e| e.location.as_path() != repo.path().as_std_path())
+                .filter(|e| {
+                    e.location
+                        .as_path()
+                        .map(|p| p != repo.path().as_std_path())
+                        .unwrap_or(true)
+                })
                 .filter_map(|e| {
-                    match Repository::open_with_masters(e.location.clone(), &repos_dir) {
+                    let path = match e.location.as_path() {
+                        Some(p) => p.to_path_buf(),
+                        None => return None, // virtual/alias repo — no path to open
+                    };
+                    match Repository::open_with_masters(path, &repos_dir) {
                         Ok(pair) => Some(pair),
                         Err(err) => {
                             eprintln!(
                                 "!!! skipping repo '{}' at {}: {err}",
                                 e.name,
-                                e.location.display()
+                                e.location
+                                    .as_path()
+                                    .unwrap_or(std::path::Path::new(""))
+                                    .display()
                             );
                             None
                         }

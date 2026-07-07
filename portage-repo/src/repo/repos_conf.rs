@@ -1,19 +1,50 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use camino::{Utf8Path, Utf8PathBuf};
+use portage_atom::Cpn;
 
 use super::repository::Repository;
 use super::util;
 use crate::error::Result;
+
+/// Where a configured repository's packages live.
+#[derive(Debug, Clone)]
+pub enum Location {
+    /// A real on-disk repository at this path.
+    Path(PathBuf),
+    /// A virtual repository: no on-disk tree. Packages are derived from a
+    /// source repo, re-categorized under one or more destination categories.
+    /// Used by `crossdev` to present `cross-<tuple>/<pkg>` packages without a
+    /// symlink overlay — see `todo/cross-derive-on-the-fly.md`.
+    Alias {
+        /// The source repo name (e.g. `"gentoo"`) whose packages are aliased.
+        source: String,
+        /// Destination category → source cpns within [`source`](Self::Alias::source).
+        /// Key: the category the packages appear under in this virtual repo
+        /// (e.g. `cross-riscv64-unknown-linux-gnu`). Value: the real cpns
+        /// (e.g. `sys-devel/gcc`) whose versions + metadata are cloned.
+        aliases: HashMap<String, HashSet<Cpn>>,
+    },
+}
+
+impl Location {
+    /// The on-disk path, if this is a real [`Location::Path`].
+    pub fn as_path(&self) -> Option<&Path> {
+        match self {
+            Location::Path(p) => Some(p.as_path()),
+            Location::Alias { .. } => None,
+        }
+    }
+}
 
 /// A single repository entry parsed from `repos.conf`.
 #[derive(Debug, Clone)]
 pub struct RepoEntry {
     /// Section name (e.g. `gentoo`, `crossdev`).
     pub name: String,
-    /// Absolute path to the repository root.
-    pub location: PathBuf,
+    /// Where the repository's packages live: a real path or a virtual alias.
+    pub location: Location,
     /// Names of master repositories (often empty; layout.conf normally wins).
     pub masters: Vec<String>,
 }
@@ -81,14 +112,38 @@ impl ReposConf {
             .iter()
             .filter_map(|name| {
                 let s = sections.get(name)?;
-                let location = s.get("location")?;
                 let masters = s
                     .get("masters")
                     .map(|v| v.split_whitespace().map(String::from).collect())
                     .unwrap_or_default();
+                // A real repo has a `location = /path`. A virtual alias repo
+                // has `alias-source = <repo>` + `alias-target = <dest-cat>`
+                // (+ optional `alias-packages`). See `Location::Alias`.
+                if let (Some(source), Some(target)) = (s.get("alias-source"), s.get("alias-target"))
+                {
+                    let pkgs = s
+                        .get("alias-packages")
+                        .map(|v| {
+                            v.split_whitespace()
+                                .filter_map(|cpn| Cpn::parse(cpn).ok())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let mut aliases = HashMap::new();
+                    aliases.insert(target.clone(), pkgs);
+                    return Some(RepoEntry {
+                        name: name.clone(),
+                        location: Location::Alias {
+                            source: source.clone(),
+                            aliases,
+                        },
+                        masters,
+                    });
+                }
+                let location = s.get("location")?;
                 Some(RepoEntry {
                     name: name.clone(),
-                    location: PathBuf::from(location),
+                    location: Location::Path(PathBuf::from(location)),
                     masters,
                 })
             })
@@ -121,12 +176,14 @@ impl ReposConf {
         self.repos.iter().find(|r| r.name == name)
     }
 
-    /// Open every configured repository. Main repo first; rest in
+    /// Open every configured **on-disk** repository (skipping virtual/alias
+    /// repos, which have no path to open). Main repo first; rest in
     /// configuration order. Fails on the first `Repository::open` error.
     pub fn open_all(&self) -> Result<Vec<Repository>> {
         self.repos
             .iter()
-            .map(|e| Repository::open(&e.location))
+            .filter_map(|e| e.location.as_path())
+            .map(Repository::open)
             .collect()
     }
 }
@@ -247,7 +304,10 @@ masters = gentoo
         write(&a, "[gentoo]\nlocation = /old\n");
         write(&b, "[gentoo]\nlocation = /new\n");
         let rc = ReposConf::load_from(&[&a, &b]).unwrap();
-        assert_eq!(rc.find("gentoo").unwrap().location, PathBuf::from("/new"));
+        assert_eq!(
+            rc.find("gentoo").unwrap().location.as_path().unwrap(),
+            std::path::Path::new("/new")
+        );
     }
 
     #[test]

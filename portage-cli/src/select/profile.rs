@@ -56,8 +56,22 @@ fn main_repo() -> Result<Repository> {
         .main_repo()
         .or_else(|| conf.find("gentoo"))
         .context("no main repo configured in repos.conf")?;
-    Repository::open(&entry.location)
-        .with_context(|| format!("opening main repo at {}", entry.location.display()))
+    Repository::open(
+        entry
+            .location
+            .as_path()
+            .unwrap_or(std::path::Path::new(".")),
+    )
+    .with_context(|| {
+        format!(
+            "opening main repo at {}",
+            entry
+                .location
+                .as_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(virtual)".to_string())
+        )
+    })
 }
 
 /// Where `make.profile` lives for this invocation.

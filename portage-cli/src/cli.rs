@@ -365,7 +365,13 @@ impl Cli {
         if let Ok(rc) = self.roots().repos_conf()
             && let Some(main) = rc.main_repo()
         {
-            return main.location.to_string_lossy().into_owned();
+            return main
+                .location
+                .as_path()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
         }
         "/var/db/repos/gentoo".to_string()
     }
@@ -377,9 +383,11 @@ impl Cli {
             return vec![std::path::PathBuf::from(p)];
         }
         match self.roots().repos_conf() {
-            Ok(rc) if !rc.repos().is_empty() => {
-                rc.repos().iter().map(|e| e.location.clone()).collect()
-            }
+            Ok(rc) if !rc.repos().is_empty() => rc
+                .repos()
+                .iter()
+                .filter_map(|e| e.location.as_path().map(std::path::PathBuf::from))
+                .collect(),
             _ => vec![std::path::PathBuf::from("/var/db/repos/gentoo")],
         }
     }

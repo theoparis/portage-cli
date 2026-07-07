@@ -515,8 +515,8 @@ fn resolve_masters(
             }
             let location = conf
                 .and_then(|c| c.find(name))
-                .map(|e| Utf8PathBuf::from_path_buf(e.location.clone()).unwrap_or_default())
-                .filter(|p| !p.as_str().is_empty())
+                .and_then(|e| e.location.as_path().map(std::path::PathBuf::from))
+                .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
                 .unwrap_or_else(|| repo_root.parent().unwrap_or(repo_root).join(name));
             match Repository::open(location.as_std_path()) {
                 Ok(master) => {

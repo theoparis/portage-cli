@@ -42,7 +42,16 @@ fn list(globals: &Cli) -> Result<()> {
         } else {
             String::new()
         };
-        writeln!(out, "  {:<20} {}{main}", r.name, r.location.display()).ok();
+        writeln!(
+            out,
+            "  {:<20} {}{main}",
+            r.name,
+            r.location
+                .as_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(virtual)".to_string())
+        )
+        .ok();
     }
     Ok(())
 }
