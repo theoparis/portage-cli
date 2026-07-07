@@ -252,7 +252,10 @@ impl Cli {
     /// genuinely differ for an overlay; this split is what lets preflight check
     /// BDEPEND against the host while the merge lands in the prefix.
     pub fn roots(&self) -> Roots {
-        // --cross: layer the sysroot on top of base_roots (BROOT).
+        // --cross: layer the sysroot on top of the overlay target (the prefix),
+        // not base_roots's BROOT (host /). Under --prefix the cross sysroot is
+        // <prefix>/usr/<tuple>, and base_roots's merge_root is the host — so
+        // derive the sysroot from the overlay's prefix (eprefix) when set.
         let base = self.base_roots();
         let Some(tuple) = self.cross.as_deref() else {
             // No --cross. Under --prefix, base_roots()'s merge_root is the host
@@ -270,7 +273,14 @@ impl Cli {
             }
             return base;
         };
-        let sysroot = base.merge_root().join("usr").join(tuple);
+        // The outer EROOT the sysroot sits under: the overlay prefix when set
+        // (--prefix), else base_roots's merge_root (host / for plain --cross).
+        let eroot = base
+            .eprefix
+            .as_deref()
+            .map(camino::Utf8PathBuf::from)
+            .unwrap_or_else(|| base.merge_root().to_owned());
+        let sysroot = eroot.join("usr").join(tuple);
         Roots {
             config: Some(sysroot.clone()),
             base: Some(sysroot.clone()),
