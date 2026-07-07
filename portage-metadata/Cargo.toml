@@ -2,12 +2,12 @@
 name = "portage-metadata"
 version = "0.8.0"
 edition = "2024"
-rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Gentoo ebuild metadata cache types and parser based on PMS"
-repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "portage", "ebuild", "pms", "metadata"]
+rust-version.workspace = true
+repository.workspace = true
 categories = ["parser-implementations", "development-tools"]
 
 [dependencies]

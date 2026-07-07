@@ -2,12 +2,12 @@
 name = "portage-atom-pubgrub"
 version = "0.6.0"
 edition = "2024"
-rust-version = "1.92"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Bridge between portage-atom and the PubGrub dependency solver"
-repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "portage", "pubgrub", "dependency", "solver"]
+rust-version.workspace = true
+repository.workspace = true
 categories = ["algorithms", "development-tools"]
 
 [features]

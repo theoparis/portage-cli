@@ -3,12 +3,12 @@ name = "portage-cli"
 version = "0.1.0"
 edition = "2024"
 # cfg_select! (privilege.rs) stabilized in 1.95.
-rust-version = "1.95"
 authors = ["Luca Barbato <lu_zero@gentoo.org>"]
 license = "MIT"
 description = "Gentoo Portage command-line tools (em)"
-repository = "https://github.com/lu-zero/portage-cli"
 keywords = ["gentoo", "portage", "cli", "package-manager"]
+rust-version.workspace = true
+repository.workspace = true
 categories = ["command-line-utilities", "development-tools"]
 # Unpublishable: depends on portage-repo/portage-distfiles, which pull in the brush fork via git.
 publish = false
