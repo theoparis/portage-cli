@@ -74,13 +74,13 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
         .collect();
     if same_cpn.len() > 1 {
         // Parallel PYTHON_TARGETS installs (3.13 + 3.14) must all stay.
-        if cpn == Cpn::parse("dev-lang/python").expect("cpn") {
+        if cpn == Cpn::parse("dev-lang/python").expect("dev-lang/python is a valid CPN") {
             return true;
         }
         // Bootstrap gcc (11.x) after the real toolchain (16.x) is DEPEND-only noise.
         // Run before the `@system` root_cpn guard: expanded sets list `sys-devel/gcc`
         // once but must not pin every resolved slot/version.
-        if cpn == Cpn::parse("sys-devel/gcc").expect("cpn") {
+        if cpn == Cpn::parse("sys-devel/gcc").expect("sys-devel/gcc is a valid CPN") {
             return same_cpn.iter().max().is_some_and(|max| cand.ver == *max);
         }
     }
