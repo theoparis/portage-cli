@@ -23,7 +23,7 @@ pub use pkgmetadata::{Maintainer, MaintainerKind, PkgMetadata};
 pub use profile::{
     Profile, ProfileDesc, ProfileEnv, ProfileEnvLayer, ProfileStack, ProfileStatus, UseFlags,
 };
-pub use repos_conf::{RepoEntry, ReposConf};
+pub use repos_conf::{Location, RepoEntry, ReposConf};
 pub use repository::{
     CacheEntries, CacheEntriesIter, Ebuilds, EbuildsIter, ProfileUpdate, Repository,
 };

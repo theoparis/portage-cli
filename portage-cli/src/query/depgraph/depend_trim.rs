@@ -174,6 +174,7 @@ mod tests {
             versions: HashMap::new(),
             repo_name: "gentoo".into(),
             repo_of: HashMap::new(),
+            real_cpn_of: HashMap::new(),
         };
         let use_config = UseConfig::new();
         let root_cpns = HashSet::new();

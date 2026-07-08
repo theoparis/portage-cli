@@ -460,6 +460,16 @@ pub(super) struct RepoData {
     pub(super) repo_name: String,
     /// Source repo of overlay-provided versions (absent ⇒ the main repo).
     pub(super) repo_of: HashMap<Cpv, String>,
+    /// Cross-derivation reverse map: `cross-<tuple>/<pkg>` → real `<cat>/<pkg>`.
+    /// Populated by `load_repos` from `Location::Alias` entries; empty for
+    /// non-cross solves. Used by `PlannedMerge.ebuild_path` construction
+    /// (`mod.rs`) to find the real on-disk file for a derived cross cpv — but
+    /// that's only half of the merge-path decoupling. `Ebuild::from_path`
+    /// still re-derives CATEGORY from that real path's text, which loses the
+    /// cross category on an actual merge; see `todo/cross-derive-on-the-fly.md`,
+    /// "The merge-path decoupling", before wiring a real producer of
+    /// `Location::Alias` entries.
+    pub(super) real_cpn_of: HashMap<Cpn, Cpn>,
 }
 
 /// The repo a version comes from (for `::repo` display and constraints).
@@ -817,11 +827,13 @@ fn collect_required_use_flags(
 pub(super) async fn load_repos(
     repo: &Repository,
     overlays: &[(Repository, Vec<Repository>)],
+    aliases: &[portage_repo::RepoEntry],
 ) -> RepoData {
     let mut cpns_set: HashSet<Cpn> = HashSet::new();
     let mut versions: HashMap<Cpn, Vec<(Cpv, CacheEntry)>> = HashMap::new();
     let mut repo_of: HashMap<Cpv, String> = HashMap::new();
     let mut seen: HashSet<Cpv> = HashSet::new();
+    let mut real_cpn_of: HashMap<Cpn, Cpn> = HashMap::new();
 
     let entries = cache_entries_parallel(
         std::slice::from_ref(repo),
@@ -850,6 +862,54 @@ pub(super) async fn load_repos(
         }
     }
 
+    // Inject alias (virtual) repos: for each Location::Alias, clone the source
+    // repo's versions for each aliased package under the destination category.
+    // This is the in-memory equivalent of crossdev's symlink overlay — no
+    // on-disk tree needed. See todo/cross-derive-on-the-fly.md.
+    // Collect first, then inject, to avoid borrowing `versions` while mutating.
+    type CrossInject = (String, Cpn, Vec<(Cpv, CacheEntry)>);
+    let mut cross_inject: Vec<CrossInject> = Vec::new();
+    for entry in aliases {
+        let portage_repo::Location::Alias { source, aliases } = &entry.location else {
+            continue;
+        };
+        // Only the main repo is a supported alias source today — `versions`
+        // doesn't track per-cpn origin for main-repo entries (only overlays
+        // get a `repo_of` entry), so there's no way to disambiguate a
+        // same-named cpn coming from elsewhere.
+        if source != repo.name() {
+            continue;
+        }
+        for (dest_cat, source_cpns) in aliases {
+            let dest_cat_interned = Interned::<DefaultInterner>::intern(dest_cat.as_str());
+            for source_cpn in source_cpns {
+                let Some(real_entries) = versions.get(source_cpn) else {
+                    continue; // source package not in the loaded repos
+                };
+                let cross_cpn = Cpn::new(dest_cat_interned, source_cpn.package);
+                real_cpn_of.insert(cross_cpn, *source_cpn);
+                cpns_set.insert(cross_cpn);
+                let copies: Vec<(Cpv, CacheEntry)> = real_entries
+                    .iter()
+                    .map(|(cpv, cache)| (Cpv::new(cross_cpn, cpv.version.clone()), cache.clone()))
+                    .collect();
+                cross_inject.push((entry.name.clone(), cross_cpn, copies));
+            }
+        }
+    }
+    for (repo_name, cross_cpn, copies) in cross_inject {
+        for (cross_cpv, cache) in copies {
+            if !seen.insert(cross_cpv.clone()) {
+                continue;
+            }
+            repo_of.insert(cross_cpv.clone(), repo_name.clone());
+            versions
+                .entry(cross_cpn)
+                .or_default()
+                .push((cross_cpv, cache));
+        }
+    }
+
     let mut cpns: Vec<Cpn> = cpns_set.into_iter().collect();
     // `Cpn: Ord` already compares category then package over the interned
     // strings — alphabetical, no per-comparison allocation.
@@ -860,6 +920,7 @@ pub(super) async fn load_repos(
         versions,
         repo_name: repo.name().to_string(),
         repo_of,
+        real_cpn_of,
     }
 }
 
@@ -1194,6 +1255,7 @@ mod tests {
                 cpns: vec![cpv.cpn],
                 versions,
                 repo_name: "test".into(),
+                real_cpn_of: Default::default(),
             },
             cpv,
         )
@@ -1214,7 +1276,94 @@ mod tests {
             cpns: vec![cpn.unwrap()],
             versions,
             repo_name: "test".into(),
+            real_cpn_of: Default::default(),
         }
+    }
+
+    /// Build a minimal on-disk repo with one ebuild's md5-cache entry, so
+    /// `load_repos` can be exercised against a real `Repository`.
+    fn disk_repo(cpv: &str, cache_text: &str) -> (tempfile::TempDir, Repository) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("metadata")).unwrap();
+        std::fs::write(dir.path().join("metadata").join("layout.conf"), "").unwrap();
+        std::fs::create_dir_all(dir.path().join("profiles")).unwrap();
+
+        let cpv = Cpv::parse(cpv).unwrap();
+        let cache_dir = dir
+            .path()
+            .join("metadata")
+            .join("md5-cache")
+            .join(cpv.cpn.category.as_ref());
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join(format!("{}-{}", cpv.cpn.package, cpv.version)),
+            cache_text,
+        )
+        .unwrap();
+
+        let repo = Repository::open(dir.path()).unwrap();
+        (dir, repo)
+    }
+
+    /// `load_repos` injects `Location::Alias` entries as in-memory `cross-<tuple>/<pkg>`
+    /// packages cloned from the source repo, with `real_cpn_of` recording the
+    /// derivation — the in-memory equivalent of crossdev's symlink overlay
+    /// (todo/cross-derive-on-the-fly.md).
+    #[tokio::test]
+    async fn load_repos_injects_alias_cross_packages() {
+        let (_dir, repo) = disk_repo("sys-devel/gcc-15.2.1", "EAPI=8\nDESCRIPTION=t\nSLOT=0\n");
+
+        let real_cpn = Cpn::parse("sys-devel/gcc").unwrap();
+        let cross_cat = "cross-riscv64-unknown-linux-gnu";
+        let mut aliases = HashMap::new();
+        aliases.insert(cross_cat.to_string(), [real_cpn].into_iter().collect());
+        let alias_entry = portage_repo::RepoEntry {
+            name: "crossdev".into(),
+            location: portage_repo::Location::Alias {
+                source: repo.name().to_string(),
+                aliases,
+            },
+            masters: Vec::new(),
+        };
+
+        let data = load_repos(&repo, &[], std::slice::from_ref(&alias_entry)).await;
+
+        let cross_cpn = Cpn::new(cross_cat, "gcc");
+        assert!(data.cpns.contains(&cross_cpn), "cross cpn injected");
+        assert!(data.cpns.contains(&real_cpn), "real cpn still present");
+        let cross_versions = data
+            .versions
+            .get(&cross_cpn)
+            .expect("cross versions present");
+        assert_eq!(cross_versions.len(), 1);
+        assert_eq!(cross_versions[0].0.version.to_string(), "15.2.1");
+        assert_eq!(data.real_cpn_of.get(&cross_cpn), Some(&real_cpn));
+    }
+
+    /// An alias entry whose declared `source` doesn't match the repo being
+    /// loaded is skipped rather than silently pulling from the wrong repo.
+    #[tokio::test]
+    async fn load_repos_alias_from_unknown_source_is_ignored() {
+        let (_dir, repo) = disk_repo("sys-devel/gcc-15.2.1", "EAPI=8\nDESCRIPTION=t\nSLOT=0\n");
+
+        let real_cpn = Cpn::parse("sys-devel/gcc").unwrap();
+        let cross_cat = "cross-riscv64-unknown-linux-gnu";
+        let mut aliases = HashMap::new();
+        aliases.insert(cross_cat.to_string(), [real_cpn].into_iter().collect());
+        let alias_entry = portage_repo::RepoEntry {
+            name: "crossdev".into(),
+            location: portage_repo::Location::Alias {
+                source: "some-other-repo".into(),
+                aliases,
+            },
+            masters: Vec::new(),
+        };
+
+        let data = load_repos(&repo, &[], std::slice::from_ref(&alias_entry)).await;
+
+        let cross_cpn = Cpn::new(cross_cat, "gcc");
+        assert!(!data.cpns.contains(&cross_cpn));
+        assert!(data.real_cpn_of.is_empty());
     }
 
     // `target_package` resolves the slot identity from the atom's slot operator

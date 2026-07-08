@@ -47,6 +47,7 @@ fn repo_from(entries: &[(&str, &str)]) -> RepoData {
         cpns,
         versions,
         repo_name: "test".into(),
+        real_cpn_of: Default::default(),
     }
 }
 

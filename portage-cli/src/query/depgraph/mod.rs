@@ -202,8 +202,25 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         Vec::new()
     };
 
+    // Alias repos (virtual, no on-disk tree) from repos.conf — consumed by
+    // load_repos to inject derived cross-<tuple> packages into RepoData.
+    // See Location::Alias / todo/cross-derive-on-the-fly.md.
+    let alias_repos: Vec<portage_repo::RepoEntry> = if multi_repo {
+        match roots.repos_conf() {
+            Ok(rc) => rc
+                .repos()
+                .iter()
+                .filter(|e| matches!(e.location, portage_repo::Location::Alias { .. }))
+                .cloned()
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
     let (data, (target_installed, installed_blockers), host_installed, use_env_result) = tokio::join!(
-        repo::load_repos(&repo, &overlays),
+        repo::load_repos(&repo, &overlays, &alias_repos),
         // Also precompute each installed package's blocker atoms on this task
         // (for `check_blockers`): the walk only needs the VDB, so it overlaps the
         // other concurrent loads instead of running serially before the solve.
@@ -1013,10 +1030,20 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 };
             flags.sort();
             flags.dedup();
-            let ebuild_path = repo_path_of(&cpv)
-                .join(cpn.category.as_str())
-                .join(cpn.package.as_str())
-                .join(format!("{}-{}.ebuild", cpn.package, ver));
+            // A cross-derived cpn (`cross-<tuple>/gcc`) has no on-disk tree of
+            // its own — `real_cpn_of` redirects the *file* lookup to the real
+            // package (`sys-devel/gcc`) it was cloned from, while `cpv`/the
+            // displayed plan above still reports the cross cpv (the ebuild's
+            // own CPV text, parsed back out of the directory name by
+            // `Ebuild::from_path`, must match for VDB/gcc-config routing —
+            // see `todo/cross-derive-on-the-fly.md`, "The merge-path
+            // decoupling").
+            let real_cpn = data.real_cpn_of.get(cpn).copied().unwrap_or(*cpn);
+            let real_cpv = Cpv::new(real_cpn, ver.clone());
+            let ebuild_path = repo_path_of(&real_cpv)
+                .join(real_cpn.category.as_str())
+                .join(real_cpn.package.as_str())
+                .join(format!("{}-{}.ebuild", real_cpn.package, ver));
             PlannedMerge {
                 merge_root: entry.merge_root,
                 cpv: format!("{}/{}-{}", cpn.category, cpn.package, ver),

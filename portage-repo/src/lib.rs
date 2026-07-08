@@ -69,10 +69,10 @@ pub use repo::named_groups::{GROUP_PREFIX, group_ref_name, is_group_ref};
 pub use repo::sets::{SetResolver, is_set_ref, set_name};
 pub use repo::{CacheEntries, CacheEntriesIter, Ebuilds, EbuildsIter, ProfileUpdate, Repository};
 pub use repo::{Categories, CategoriesIter, Category, Packages, PackagesIter};
+pub use repo::{Location, RepoEntry, ReposConf};
 pub use repo::{Maintainer, MaintainerKind, PkgMetadata};
 pub use repo::{Manifest, ManifestEntry};
 pub use repo::{
     Profile, ProfileDesc, ProfileEnv, ProfileEnvLayer, ProfileStack, ProfileStatus, UseFlags,
 };
-pub use repo::{RepoEntry, ReposConf};
 pub use source::{SourceContext, SourceOpts, source_parallel, source_single};
