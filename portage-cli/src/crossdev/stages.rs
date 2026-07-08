@@ -498,6 +498,67 @@ mod tests {
         assert!(!plan.steps[5].use_override.contains(&"-cxx".to_string()));
     }
 
+    /// **Invariant:** every `cross-<tuple>/<pkg>` atom `toolchain_plan` emits
+    /// for a cross target must be derivable — i.e. its underlying real
+    /// `(category, package)` must be in `CrossTarget::packages()`, the single
+    /// source of truth the alias-derivation map (`Location::Alias`) is built
+    /// from. If this fails, the plan references a package the resolver cannot
+    /// alias, so a from-scratch `--setup` would `NoVersions` at runtime.
+    ///
+    /// Real-category bypass atoms (`sys-apps/baselayout`, `virtual/os-headers`)
+    /// are intentionally not cross-aliased — they're host/EPREFIX-arch packages
+    /// merged via their real category — so they're filtered out before the
+    /// check. See `todo/cross-derive-on-the-fly.md`, "Keeping the build plan
+    /// honest".
+    #[test]
+    fn toolchain_plan_atoms_are_all_in_packages_set() {
+        use portage_atom::Dep;
+        for tuple in [
+            "riscv64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "armv7a-unknown-linux-gnueabihf",
+        ] {
+            let t = CrossTarget::parse(tuple, false).unwrap();
+            let category = t.category();
+            let plan = toolchain_plan(&BootstrapKind::Cross(t.clone()), true);
+            let packages_set: std::collections::HashSet<(String, String)> = t
+                .packages()
+                .into_iter()
+                .map(|(c, p)| (c.to_string(), p.to_string()))
+                .collect();
+            for step in &plan.steps {
+                for atom in &step.atoms {
+                    // Only check cross-category atoms; real-category bypass
+                    // atoms (baselayout, virtual/os-headers) are intentionally
+                    // not aliased.
+                    let Ok(dep) = Dep::parse(atom) else {
+                        continue;
+                    };
+                    if dep.category() != category {
+                        continue;
+                    }
+                    let pkg = dep.package();
+                    assert!(
+                        packages_set.iter().any(|(_, p)| p == pkg),
+                        "{tuple}: plan atom {atom:?} (pkg {pkg}) is not in \
+                         CrossTarget::packages() {packages_set:?} — the alias \
+                         derivation cannot resolve it",
+                    );
+                    // The derivation maps cross-<tuple>/<pkg> → <real-cat>/<pkg>,
+                    // so the real category for this package must exist in the set
+                    // (a package with no real category can't be aliased).
+                    assert!(
+                        packages_set
+                            .iter()
+                            .any(|(c, p)| p == pkg && c.as_str() != category),
+                        "{tuple}: plan atom {atom:?}: package {pkg} has no real \
+                         category in CrossTarget::packages() {packages_set:?}",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn gcc_refresh_plan_is_just_the_two_gcc_stages() {
         // Refreshing an already-bootstrapped toolchain's gcc must not touch
