@@ -61,15 +61,18 @@ fn parse_atoms(raw: &[String]) -> Vec<portage_atom::Dep> {
 fn expand_sets(raw: &[String], config_root: Option<&Utf8Path>, eroot: &Utf8Path) -> Vec<String> {
     // Build the resolver lazily, only when a set ref is actually present, so a
     // plain `em foo` (no sets) pays no profile-build cost.
-    #[allow(unused_assignments)] // stack_holder's initial None is overwritten before read.
+    let mut out = Vec::with_capacity(raw.len());
+    #[allow(unused_assignments)]
+    // stack_holder's initial None may not be read if no sets are expanded
     let mut stack_holder: Option<portage_repo::ProfileStack> = None;
     let mut resolver: Option<portage_repo::SetResolver<'_>> = None;
-    let mut out = Vec::with_capacity(raw.len());
+
     for s in raw {
         let Some(name) = portage_repo::set_name(s) else {
             out.push(s.clone());
             continue;
         };
+
         if resolver.is_none() {
             let portage_dir = config_root
                 .unwrap_or(Utf8Path::new("/"))
@@ -82,20 +85,29 @@ fn expand_sets(raw: &[String], config_root: Option<&Utf8Path>, eroot: &Utf8Path)
                         .map_err(|e| anyhow::anyhow!("failed to build profile stack: {e}"))
                 }) {
                 Ok(st) => {
-                    stack_holder = Some(st);
-                    // Safe: stack_holder outlives resolver (both dropped at fn end).
-                    let stack = stack_holder.as_ref().unwrap();
+                    // get_or_insert (not `stack_holder = Some(st); ...unwrap()`) hands
+                    // back the `&ProfileStack` directly, so there's nothing to unwrap.
+                    let stack = stack_holder.get_or_insert(st);
                     resolver = Some(portage_repo::SetResolver::new(stack, eroot));
                 }
                 Err(e) => {
                     eprintln!("warning: cannot expand @{name}: {e}");
+                    // Cannot expand any sets if resolver creation failed; push raw string
+                    out.push(s.clone());
                     continue;
                 }
             }
         }
-        match resolver.as_ref().unwrap().resolve(name) {
-            Ok(atoms) => out.extend(atoms.iter().map(|d| d.to_string())),
-            Err(e) => eprintln!("warning: skipping @{name}: {e}"),
+
+        // If we have a resolver, use it; otherwise skip (resolver creation failed earlier)
+        if let Some(res) = resolver.as_ref() {
+            match res.resolve(name) {
+                Ok(atoms) => out.extend(atoms.iter().map(|d| d.to_string())),
+                Err(e) => eprintln!("warning: skipping @{name}: {e}"),
+            }
+        } else {
+            // Resolver creation failed for earlier set; push raw string
+            out.push(s.clone());
         }
     }
     out
