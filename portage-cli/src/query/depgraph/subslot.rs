@@ -80,7 +80,11 @@ pub(super) fn find_rebuilds(
             let Some(SlotDep::Slot { slot: Some(s), .. }) = &dep.slot_dep else {
                 continue;
             };
-            let bound_subslot = s.subslot.expect("filtered to bound atoms");
+            let Some(bound_subslot) = s.subslot else {
+                // This should not happen as collect_bound_atoms filters for
+                // s.subslot.is_some(), but handle it gracefully
+                continue;
+            };
             let Some(planned) = planned_slots.get(&dep.cpn) else {
                 continue;
             };

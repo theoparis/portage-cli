@@ -908,7 +908,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 &cross,
             )
         }
-        DepgraphFormat::Json => output::print_json(&data, &order, &edges, &installed, &flag_reqs),
+        DepgraphFormat::Json => output::print_json(&data, &order, &edges, &installed, &flag_reqs)?,
         DepgraphFormat::Tree => {
             let roots: Vec<_> = root_pkgs
                 .iter()

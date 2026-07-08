@@ -560,7 +560,8 @@ fn status_field(tag: &str, forced_rebuild: bool) -> String {
         }
         _ => {}
     }
-    String::from_utf8(f.to_vec()).unwrap()
+    // SAFETY: f is an array of ASCII bytes [b' '; 7], so it's valid UTF-8
+    String::from_utf8(f.to_vec()).expect("array of ASCII spaces is valid UTF-8")
 }
 
 /// Colorize the status field characters according to portage conventions:
@@ -758,7 +759,7 @@ pub(super) fn print_json(
     edges: &[portage_atom_pubgrub::DepEdge],
     installed: &HashMap<Cpn, HashMap<String, Version>>,
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
-) {
+) -> anyhow::Result<()> {
     let packages: Vec<serde_json::Value> = order
         .iter()
         .map(|(pkg, ver)| {
@@ -834,7 +835,10 @@ pub(super) fn print_json(
         "edges": dep_edges,
     });
 
-    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    let json = serde_json::to_string_pretty(&out)
+        .map_err(|e| anyhow::anyhow!("failed to serialize JSON output: {e}"))?;
+    println!("{json}");
+    Ok(())
 }
 
 pub(super) const C_DIM: Style = Style::new().effects(Effects::DIMMED);
