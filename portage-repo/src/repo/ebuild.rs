@@ -68,6 +68,25 @@ impl Ebuild {
         util::read_to_string(&self.path)
     }
 
+    /// Construct an [`Ebuild`] from an already-known [`Cpv`] and its on-disk
+    /// `.ebuild` file path.
+    ///
+    /// Unlike [`from_path`](Self::from_path), the CPV is never parsed back out
+    /// of the path text — it's exactly the one given. Use this when the
+    /// caller already has the authoritative identity (a solved merge plan, a
+    /// VDB entry) and the file's on-disk location may not match it: a
+    /// derived/aliased category (e.g. `cross-riscv64-unknown-linux-gnu/gcc`,
+    /// virtually mapped to `sys-devel/gcc`'s real ebuild) has no on-disk
+    /// directory of its own, so parsing the category back out of the real
+    /// path would silently recover the wrong one.
+    ///
+    /// The path is still canonicalized, for [`repo_root`](Self::repo_root)/
+    /// eclass resolution.
+    pub fn with_cpv(cpv: Cpv, path: &Utf8Path) -> Self {
+        let real_path = path.canonicalize_utf8().unwrap_or_else(|_| path.to_owned());
+        Self::new(cpv, real_path)
+    }
+
     /// Construct an [`Ebuild`] directly from a `.ebuild` file path.
     ///
     /// The CPV is derived from the directory structure:
@@ -155,6 +174,44 @@ fn detect_eapi_from_str(content: &str) -> Eapi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn io_err(path: &std::path::Path) -> impl Fn(std::io::Error) -> Error + '_ {
+        move |source| Error::Io {
+            path: path.to_owned(),
+            source,
+        }
+    }
+
+    /// The whole point of [`Ebuild::with_cpv`]: a cross-derived package's
+    /// virtual identity (category `cross-riscv64-unknown-linux-gnu`) must
+    /// win over whatever category the real on-disk ebuild's path implies
+    /// (`sys-devel`, from the real `gcc` ebuild it's aliased to) — this is
+    /// the CPV/CATEGORY-preservation invariant from
+    /// `todo/cross-derive-on-the-fly.md`, "The merge-path decoupling".
+    #[test]
+    fn with_cpv_keeps_the_given_identity_not_the_paths() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(io_err(std::path::Path::new("tempdir")))?;
+        let real_dir = dir.path().join("sys-devel").join("gcc");
+        std::fs::create_dir_all(&real_dir).map_err(io_err(&real_dir))?;
+        let real_path = real_dir.join("gcc-16.1.1.ebuild");
+        std::fs::write(&real_path, "EAPI=8\n").map_err(io_err(&real_path))?;
+        let real_path = Utf8PathBuf::from_path_buf(real_path)
+            .map_err(|p| Error::Shell(format!("non-utf8 test path: {p:?}")))?;
+        let canon_root =
+            Utf8PathBuf::from_path_buf(dir.path().canonicalize().map_err(io_err(dir.path()))?)
+                .map_err(|p| Error::Shell(format!("non-utf8 canonical path: {p:?}")))?;
+
+        let cpv = Cpv::parse("cross-riscv64-unknown-linux-gnu/gcc-16.1.1")?;
+        let ebuild = Ebuild::with_cpv(cpv.clone(), &real_path);
+
+        assert_eq!(ebuild.cpv(), &cpv);
+        assert_eq!(ebuild.category(), "cross-riscv64-unknown-linux-gnu");
+        assert_eq!(ebuild.name(), "gcc");
+        // repo_root still resolves through the *real* path — eclasses and
+        // FILESDIR live there, not under a nonexistent virtual category dir.
+        assert_eq!(ebuild.repo_root(), Some(canon_root.as_path()));
+        Ok(())
+    }
 
     #[test]
     fn detect_eapi_simple() {
