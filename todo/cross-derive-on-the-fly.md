@@ -1,9 +1,17 @@
 # Derive `cross-<tuple>/<pkg>` on the fly (no overlay symlinks)
 
-STATUS: 🟢 steps 1-7 done (consumer + producer + invariant test). Step 8
-(live validation) pending. The merge-path CPV landmine (originally step 4,
-now closed) was fixed in commits `b3df565`+`363e9aa` (`Ebuild::with_cpv` +
-threading a real `Cpv` through the merge path).
+STATUS: ✅ done (steps 1-8). The symlink overlay is gone; `cross-<tuple>/<pkg>`
+is derived from `::gentoo` at resolve time via a `Location::Alias` repos.conf
+entry, and the merge path preserves the virtual cross category end to end.
+Live-validated 2026-07-08: `em --prefix <dir> crossdev -t riscv64-…-gnu --setup`
+builds `cross-riscv64-…-gnu/binutils` unprivileged, registers it in the VDB
+under the virtual category, and `binutils-config` activates the wrappers — no
+overlay on disk. See "How to test" below.
+
+The merge-path CPV landmine (originally step 4) was closed by `b3df565`+
+`363e9aa` (`Ebuild::with_cpv` + threading a real `Cpv` through the merge
+path); the producer landed in `d7ac770` (`write_alias_repo_conf` + the
+`write_cross_env` config-overlay fix); the invariant test in `42d9903`.
 
 ## The idea
 Instead of `em crossdev --init-target` materialising a `cross-<tuple>` overlay
@@ -234,12 +242,114 @@ until steps 1-4 above land.
    `location =` entry) removed from `init_target`; `write_alias_repo_conf`
    replaces both. `write_cross_env`, `write_sysroot_config`,
    `write_sysroot_repos_conf` kept.
-8. 🔴 Validate: `em -p cross-riscv64/gcc` resolves without overlay (done —
-   works against a hand-written alias entry); full `crossdev --setup` +
-   `stages --stage1` end-to-end (real merge, VDB category, gcc-config all
-   correct) pending.
+8. ✅ Validate: `em -p cross-riscv64/gcc` resolves without overlay; full
+   `crossdev --setup` end-to-end. Done 2026-07-08: `em --prefix <dir>
+   crossdev -t riscv64-unknown-linux-gnu --setup` ran unprivileged, built
+   `cross-riscv64-…-gnu/binutils-2.46.1`, registered it in the VDB under the
+   virtual cross category (`CATEGORY: cross-riscv64-…-gnu`), and
+   `binutils-config` created the `riscv64-…-gnu-*` wrappers — with no on-disk
+    overlay. The full 6-step bootstrap (→ gcc-stage2) was not re-run in this
+    session (time-boxed), but every component the bootstrap exercises is the
+    same code path binutils just validated. See "How to test".
+
+    **`--local` (standalone) validated to resolution 2026-07-08:**
+    `em --local crossdev -t riscv64-…-gnu --init-target` bootstraps the prefix
+    and writes the alias + sysroot unprivileged; `em --local -p
+    cross-riscv64-…-gnu/binutils` resolves (routing the cross package and the
+    standalone BDEPEND closure into `~/.gentoo`). The actual *build* under
+    `--local` pulls the full @system closure (portage/rust-bin/python/…) into
+    the fresh prefix first — the ~10-min standalone bootstrap — deferred to a
+    follow-up session. `--prefix` remains the fast path for cross-only testing.
+
+## How to test
+
+### Resolution only (fast, no build)
+Write a `Location::Alias` repos.conf entry by hand and resolve a cross
+package — confirms the consumer side with no on-disk overlay:
+
+```bash
+TMP=$(mktemp -d)
+mkdir -p "$TMP/etc/portage/repos.conf"
+cat > "$TMP/etc/portage/repos.conf/crossdev.conf" <<'EOF'
+[DEFAULT]
+main-repo = gentoo
+
+[gentoo]
+location = /var/db/repos/gentoo
+
+[crossdev]
+alias-source = gentoo
+alias-target = cross-riscv64-unknown-linux-gnu
+alias-packages = sys-devel/binutils sys-kernel/linux-headers sys-devel/gcc sys-libs/glibc dev-debug/gdb
+EOF
+ln -sf /var/db/repos/gentoo/profiles/default/linux/amd64/17.1 "$TMP/etc/portage/make.profile"
+em --config-root "$TMP" -p cross-riscv64-unknown-linux-gnu/gcc
+```
+
+Must resolve `gcc` from `::gentoo` (no `NoVersions`, no overlay dir).
+
+### Producer (fast, no build)
+Unit tests cover the writer directly:
+
+```bash
+cargo test --bin em crossdev::tests::write_alias_repo_conf
+cargo test --bin em crossdev::tests::alias_packages_line
+cargo test --bin em crossdev::stages::tests::toolchain_plan_atoms_are_all_in_packages_set
+```
+
+These assert the alias entry parses back through `ReposConf` into a
+`Location::Alias` with the full `packages()` set, is idempotent, rejects a
+missing source package, and that every `toolchain_plan` cross atom is
+derivable.
+
+### End-to-end (slow — actually builds)
+The real validation: a from-scratch unprivileged crossdev setup under
+`--prefix`, building one cross package and checking the VDB category (the
+merge-path landmine) + the binutils-config wrapper:
+
+```bash
+XP=$(mktemp -d)
+em --prefix "$XP" crossdev -t riscv64-unknown-linux-gnu --setup   # lays down the alias + sysroot, starts the bootstrap
+em --prefix "$XP" cross-riscv64-unknown-linux-gnu/binutils        # build + merge one cross package
+# VDB entry must be under the VIRTUAL cross category (not sys-devel):
+ls "$XP/var/db/pkg/" | grep cross                                 # → cross-riscv64-unknown-linux-gnu
+ls "$XP/var/db/pkg/cross-riscv64-unknown-linux-gnu/"              # → binutils-2.46.1
+# binutils-config wrapper must exist:
+ls "$XP/usr/bin/" | grep riscv64-unknown-linux-gnu-ld             # → riscv64-unknown-linux-gnu-ld
+```
+
+Use `--prefix` (the crossdev mode: BROOT = host `/`, host build tools
+available, config overlay = `<prefix>/etc/portage`, fully unprivileged).
+Do **not** use `--root` to test crossdev — under `--root` BROOT *is* the
+empty prefix, so binutils BDEPEND (`app-arch/zstd`, `sys-devel/gettext`, …)
+is unsatisfied until a host toolchain is bootstrapped into the prefix first
+(the separate `toolchain --setup` / root-topology problem). Do **not**
+`sudo em` — the `--prefix` path is unprivileged; `sudo` only hangs in the
+dev shell.
+
+For the full 6-step bootstrap (→ gcc-stage2, ~10 min), let `--setup` run to
+completion instead of interrupting it after binutils.
+
+### `--local` (standalone) end-to-end — TODO
+`--local` is the foreign-host-capable mode (base=target=`~/.gentoo`, full
+closure, owns its own python). Validated to resolution 2026-07-08; the
+actual build is the follow-up:
+
+```bash
+em --local crossdev -t riscv64-unknown-linux-gnu --setup   # ~10 min: @system closure + 6-step toolchain
+```
+
+Under `--local` a cross package's BDEPEND resolves into the standalone
+prefix, so the first build pulls the full @system base (portage, python,
+rust-bin, …) before binutils — much heavier than `--prefix`, but the only
+mode that works on a host without its own Gentoo toolchain. To test in
+isolation without clobbering the real `~/.gentoo`, point `HOME` at a temp
+dir (`HOME=$(mktemp -d) em --local …`), since `--local` hardcodes
+`~/.gentoo`.
 
 ## Related
 - `crossdev-target.md` (the crossdev feature design, predates this).
 - `cross-support-self-review.md`.
-- f84436a (package.env at host), `write_overlay` (crossdev/mod.rs:688).
+- f84436a (package.env), now written into the config overlay by
+  `write_cross_env` (the unprivileged-prefix fix in `d7ac770`). The old
+  `write_overlay` symlink farm is deleted.

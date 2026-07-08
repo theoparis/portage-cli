@@ -418,29 +418,37 @@ Gentoo-Prefix bootstrap faces).
 
 ### Cross setup (`em crossdev`)
 
-Cross needs three things the native cases don't: the `cross-<tuple>` overlay,
-the sysroot's `make.conf` (pinning `CHOST`/`CBUILD`/`CTARGET`), and the
-two-stage gcc bootstrap. Implemented in
+Cross needs three things the native cases don't: a way to see
+`cross-<tuple>/<pkg>` as buildable packages, the sysroot's `make.conf`
+(pinning `CHOST`/`CBUILD`/`CTARGET`), and the two-stage gcc bootstrap. The
+`cross-<tuple>` packages are now **derived on the fly** from `::gentoo` via a
+`Location::Alias` repos.conf entry (no on-disk symlink overlay — see
+[`todo/cross-derive-on-the-fly.md`](../todo/cross-derive-on-the-fly.md)),
+written by `write_alias_repo_conf` in
 [`crossdev/mod.rs`](../portage-cli/src/crossdev/mod.rs):
 
 ```
-# Privileged: classic crossdev into /usr/<T>
-em crossdev -t <tuple> --init-target     # overlay + sysroot make.conf/profile
-em crossdev -t <tuple> --setup            # binutils→headers→gcc1→libc→gcc2 (implies --init-target)
+# Privileged: classic crossdev into /usr/<T>  (config writes to /etc/portage)
+em crossdev -t <tuple> --init-target     # alias repos.conf + sysroot make.conf/profile
+em crossdev -t <tuple> --setup           # binutils→headers→gcc1→libc→gcc2 (implies --init-target)
 em --cross <tuple> stages --stage1       # target packages.build
 em --cross <tuple> --emptytree @system   # stage3 (target-native @system)
 
-# Unprivileged: same, under --local (or --root <offset>)
-em --local crossdev -t <tuple> --init-target
-em --local crossdev -t <tuple> --setup
-em --local --cross <tuple> stages --stage1
+# Unprivileged: same, under --prefix (config writes to <prefix>/etc/portage)
+em --prefix <P> crossdev -t <tuple> --init-target
+em --prefix <P> crossdev -t <tuple> --setup
+em --prefix <P> --cross <tuple> stages --stage1
 ...
 ```
 
-`--init-target` writes the sysroot `etc/portage/{make.conf,make.profile}` via
-`write_sysroot_config` (the `make.conf` that pins the triples and sets
-`PKG_CONFIG_*`/`BUILD_PKG_CONFIG_LIBDIR` — the latter being the #29 fix).
-`--setup` runs `BootstrapKind::Cross` (two-stage gcc) and implies
+`--init-target` writes the alias `repos.conf` entry (deriving
+`cross-<tuple>/*` from `::gentoo`) and the sysroot
+`etc/portage/{make.conf,make.profile}` via `write_sysroot_config` (the
+`make.conf` that pins the triples and sets `PKG_CONFIG_*`/
+`BUILD_PKG_CONFIG_LIBDIR` — the latter being the #29 fix). The per-target
+CTARGET/ABI-CFLAGS env is written by `write_cross_env` into the config
+overlay (`<prefix>/etc/portage` under `--prefix`/`--local`, host
+`/etc/portage` otherwise) — unprivileged under `--prefix`. `--setup` runs `BootstrapKind::Cross` (two-stage gcc) and implies
 `--init-target`. Note the two roles of the tuple: `crossdev -t <tuple>` drives
 the *setup action*; `--cross <tuple>` (global) targets the sysroot for later
 *use* (`stages`, plain `em <atom>`). Both carry the same tuple in practice.

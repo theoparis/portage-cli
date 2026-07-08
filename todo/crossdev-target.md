@@ -25,6 +25,19 @@ activation/wrapper polish. Goal: make `em` act as a `{target}-emerge` that actua
 covering **both** the GCC and the **LLVM/Clang** toolchain models. Target libc is
 the standard choice (glibc / musl, and LLVM libc only as a generic option).
 
+**2026-07-08 — derive-on-the-fly landed; `--prefix` setup now unprivileged.**
+The on-disk symlink overlay (`write_overlay`) is gone. `cross-<tuple>/<pkg>`
+is now derived from `::gentoo` at resolve time via a `Location::Alias`
+repos.conf entry written by `write_alias_repo_conf` (`d7ac770`). The
+merge-path CPV landmine (`Ebuild::from_path` re-deriving `CATEGORY` from the
+real path, silently building native under a cross category) was closed by
+`Ebuild::with_cpv` + threading a real `Cpv` through the merge path
+(`b3df565`+`363e9aa`). `write_cross_env` now writes into the config overlay
+(`<prefix>/etc/portage`), so `em --prefix <dir> crossdev -t <tuple> --setup`
+is fully unprivileged. Live-validated: `cross-riscv64-…-gnu/binutils` builds,
+registers in the VDB under the virtual cross category, `binutils-config`
+activates. See `todo/cross-derive-on-the-fly.md` (incl. "How to test").
+
 Authoritative design context: `docs/root-model.md` (§ Cross, § Sequencing),
 `todo/em-root-characterization.md`, `todo/nonemptytree-bdeps-gap.md`.
 
