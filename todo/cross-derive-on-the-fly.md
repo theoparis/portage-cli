@@ -1,10 +1,9 @@
 # Derive `cross-<tuple>/<pkg>` on the fly (no overlay symlinks)
 
-STATUS: 🟡 steps 1-2 done, step 3 (uncommitted) half-done — see
-"Implementation order" below. **A real correctness landmine was found
-investigating step 3/4 (merge-path) — see "The merge-path decoupling" below
-before wiring the producer (step 6) or touching `write_overlay` (step 7).**
-Step 4 has a concrete fix plan but is unimplemented; steps 5-8 open.
+STATUS: 🟢 steps 1-7 done (consumer + producer + invariant test). Step 8
+(live validation) pending. The merge-path CPV landmine (originally step 4,
+now closed) was fixed in commits `b3df565`+`363e9aa` (`Ebuild::with_cpv` +
+threading a real `Cpv` through the merge path).
 
 ## The idea
 Instead of `em crossdev --init-target` materialising a `cross-<tuple>` overlay
@@ -209,43 +208,36 @@ until steps 1-4 above land.
 1. ✅ Structural foundation (`017f33a`): `Location` enum (`Path`/`Alias`) on
    `RepoEntry`, repos.conf parser recognises `alias-source`/`alias-target`/
    `alias-packages`.
-2. ✅ Consumer side (uncommitted, this session): `load_repos` reads
-   `Location::Alias` entries and materializes the cross Cpns/Cpvs into
-   `RepoData` — see "Where the hook lives" above. `all_packages`/
-   `versions_for`/`slots_for`/`desired_use` proxying falls out for free
-   since `Adapter` reads `RepoData` directly (no separate proxy code
-   needed — the originally-planned step 2 is subsumed by this).
-3. 🟡 Merge-path part 1 (uncommitted, `mod.rs`): `PlannedMerge.ebuild_path`
-   now redirects through `real_cpn_of` to the real on-disk file.
-   **Necessary but not sufficient** — see "The merge-path decoupling" above.
-   `real_cpn_of` (`RepoData`) is currently `#[allow(dead_code)]` no longer
-   (consumed here), but the CPV-preservation half (below) is still open.
-4. 🔴 **Merge-path part 2 — CPV/CATEGORY preservation through an actual
-   merge.** The landmine found investigating part 3: `Ebuild::from_path`
-   re-derives `CATEGORY` from the (now-real, non-symlinked) path text,
-   losing the cross category and silently building native instead of cross.
-   Fix plan is the 5-item list above (`Ebuild` gains an explicit-`Cpv`
-   constructor; thread `cpv` through `build_and_merge`/`merge_binpkg`/
-   `run_inner`/the `em __worker` boundary; fix `unmerge_slot_occupant`;
-   regression test). **Blocks step 6.**
-5. 🔴 Invariant test: `toolchain_plan` atoms ⊆ `packages()`.
-6. 🔴 **Producer side — not started, blocked on step 4.** Nothing yet
-   builds `cross_map` / writes `Location::Alias` repos.conf entries from
-   `CrossTarget::packages()`. `crossdev::init_target` (`crossdev/mod.rs:631`)
-   still calls `write_overlay` (the symlink farm, `crossdev/mod.rs:666`)
-   unchanged — correctly so, until step 4 lands, since flipping this without
-   it would break real `--setup` merges silently (see landmine above).
-   Resolution-only testing (`-p`/`query` against a hand-written
-   `Location::Alias` repos.conf entry, no `init_target` changes) is safe
-   today and doesn't need to wait.
-7. 🔴 Remove `write_overlay` from `init_target`; keep the rest
-   (`write_cross_env`, `write_sysroot_config`, `write_sysroot_repos_conf`).
-   Do this and step 6 together, once step 4 has landed — flipping the
-   producer and removing the fallback in the same change avoids a window
-   where repos.conf has alias entries but merges still silently misbuild.
-8. 🔴 Validate: `em --cross riscv64 -p cross-riscv64/gcc` resolves without
-   overlay; full `crossdev --setup` + `stages --stage1` end-to-end (real
-   merge, VDB category, gcc-config all correct).
+2. ✅ Consumer side (`8ca65da`): `load_repos` reads `Location::Alias` entries
+   and materializes the cross Cpns/Cpvs into `RepoData` — see "Where the hook
+   lives" above. `all_packages`/`versions_for`/`slots_for`/`desired_use`
+   proxying falls out for free since `Adapter` reads `RepoData` directly.
+3. ✅ Merge-path part 1 (`8ca65da`): `PlannedMerge.ebuild_path` redirects
+   through `real_cpn_of` to the real on-disk file.
+4. ✅ **Merge-path part 2 — CPV/CATEGORY preservation** (`b3df565`+`363e9aa`).
+   The landmine is closed: `Ebuild::with_cpv` takes the caller's `Cpv` without
+   re-parsing the path, and a real `Cpv` (not a formatted `String`) is now
+   threaded through `build_and_merge`/`merge_binpkg`/`run_inner`, across the
+   `em __worker` boundary (`--cpv`), and `unmerge_slot_occupant` uses
+   `old_pkg.cpv()` directly. `PlannedMerge.cpv` is a `Cpv` end to end.
+5. ✅ Invariant test (`stages.rs`):
+   `toolchain_plan_atoms_are_all_in_packages_set` — every `cross-<tuple>/<pkg>`
+   plan atom's package is in `CrossTarget::packages()`, across riscv64,
+   aarch64, and armv7a targets. Real-category bypass atoms (baselayout,
+   virtual/os-headers) are filtered out.
+6. ✅ **Producer side:** `init_target` now calls `write_alias_repo_conf`,
+   which writes a `Location::Alias` repos.conf entry
+   (`alias-source = gentoo`/`alias-target = <cat>`/`alias-packages = …`)
+   built from `CrossTarget::packages()`. `write_sysroot_repos_conf` writes
+   the same alias entry for the sysroot.
+7. ✅ `write_overlay` (the symlink farm) and `ensure_repos_conf` (the overlay
+   `location =` entry) removed from `init_target`; `write_alias_repo_conf`
+   replaces both. `write_cross_env`, `write_sysroot_config`,
+   `write_sysroot_repos_conf` kept.
+8. 🔴 Validate: `em -p cross-riscv64/gcc` resolves without overlay (done —
+   works against a hand-written alias entry); full `crossdev --setup` +
+   `stages --stage1` end-to-end (real merge, VDB category, gcc-config all
+   correct) pending.
 
 ## Related
 - `crossdev-target.md` (the crossdev feature design, predates this).

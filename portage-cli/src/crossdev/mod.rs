@@ -634,22 +634,25 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
     // prefix's own bin is otherwise invisible). That is what makes the cross
     // toolchain wrappers we install reachable by the gcc-stage builds. Idempotent.
     let gentoo_path = ensure_self_contained_prefix(globals)?;
-    let overlay = setup_root(globals).join("var/db/repos").join(OVERLAY_NAME);
     let sysroot = sysroot(target, globals);
+    let category = target.category();
 
-    write_overlay(target, &overlay, &gentoo_path)?;
+    // Derive the cross packages on the fly: a `Location::Alias` repos.conf
+    // entry declares `cross-<tuple>/<pkg>` as a virtual alias for its real
+    // `::gentoo` package, materialised in-memory at load time. No on-disk
+    // symlink overlay. See todo/cross-derive-on-the-fly.md.
+    write_alias_repo_conf(globals, &gentoo_path, target, &category)?;
     write_cross_env(target, globals, &gentoo_path)?;
-    ensure_repos_conf(globals, &overlay)?;
     write_sysroot_config(
         target,
         &sysroot,
         globals.base_roots().merge_root(),
         &gentoo_path,
     )?;
-    write_sysroot_repos_conf(&sysroot, &gentoo_path, &overlay)?;
+    write_sysroot_repos_conf(&sysroot, &gentoo_path, target, &category)?;
 
     println!(">>> cross target {} ready", target.tuple);
-    println!("    overlay:  {overlay}  ({})", target.category());
+    println!("    alias:     {category}  (derived from ::gentoo)");
     println!("    sysroot:  {sysroot}");
     // The toolchain itself is a HOST build (compiler lands on /), so it resolves
     // with host config — NOT the sysroot (that fights the cross make.conf ROOT).
@@ -660,33 +663,49 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Lay down the overlay: `metadata/layout.conf`, `profiles/{repo_name,categories}`,
-/// and the `cross-*` category of per-package symlinks into `::gentoo`.
-fn write_overlay(target: &CrossTarget, overlay: &Utf8Path, gentoo: &Utf8Path) -> Result<()> {
-    let meta = overlay.join("metadata");
-    let profiles = overlay.join("profiles");
-    std::fs::create_dir_all(&meta).with_context(|| format!("creating {meta}"))?;
-    std::fs::create_dir_all(&profiles).with_context(|| format!("creating {profiles}"))?;
-
-    write_if_absent(
-        &meta.join("layout.conf"),
-        "masters = gentoo\nthin-manifests = true\nsign-manifests = false\n",
-    )?;
-    write_if_absent(&profiles.join("repo_name"), &format!("{OVERLAY_NAME}\n"))?;
-
-    let category = target.category();
-    append_line(&profiles.join("categories"), &category)?;
-
-    let cat_dir = overlay.join(&category);
-    std::fs::create_dir_all(&cat_dir).with_context(|| format!("creating {cat_dir}"))?;
+/// Write the virtual `Location::Alias` repos.conf entry that derives
+/// `cross-<tuple>/<pkg>` packages from `::gentoo` at resolve time — the
+/// in-memory replacement for the old on-disk symlink overlay. The entry maps
+/// the destination cross category to the real `(category, package)` set from
+/// [`CrossTarget::packages`], the single source of truth. See
+/// `todo/cross-derive-on-the-fly.md`.
+///
+/// The real packages' existence under `gentoo` is verified up front (a missing
+/// source package would later surface as a resolver `NoVersions` with no hint
+/// at the cause); the alias declaration itself is always written so a partial
+/// tree still resolves the packages that *are* present.
+fn write_alias_repo_conf(
+    globals: &Cli,
+    gentoo: &Utf8Path,
+    target: &CrossTarget,
+    category: &str,
+) -> Result<()> {
+    // Validate every source package exists under ::gentoo, with a clear error
+    // naming the cross package it's needed for, before declaring the alias.
     for (real_cat, pkg) in target.packages() {
         let dst = gentoo.join(real_cat).join(pkg);
         if !dst.is_dir() {
             bail!("{real_cat}/{pkg} not found at {dst} (needed for {category}/{pkg})");
         }
-        symlink_force(&dst, &cat_dir.join(pkg))?;
     }
-    Ok(())
+
+    let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
+    std::fs::create_dir_all(&conf_dir).with_context(|| format!("creating {conf_dir}"))?;
+    // Don't clobber an existing crossdev entry (crossdev/eselect may provide
+    // one); only write if absent or its target/category drifted.
+    let packages_line = alias_packages_line(target);
+    let body = format!(
+        "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
+         alias-packages = {packages_line}\n"
+    );
+    let file = conf_dir.join(format!("{OVERLAY_NAME}.conf"));
+    if let Ok(existing) = std::fs::read_to_string(&file)
+        && existing.contains(&format!("alias-target = {category}"))
+        && existing.contains(&format!("alias-packages = {packages_line}"))
+    {
+        return Ok(());
+    }
+    write_if_absent(&file, &body)
 }
 
 /// Bootstrap the EPREFIX config that both `em toolchain --setup` (native) and
@@ -724,20 +743,17 @@ fn ensure_self_contained_prefix(globals: &Cli) -> Result<Utf8PathBuf> {
     Ok(gentoo_path)
 }
 
-/// Register the overlay in `repos.conf` if no entry of that name exists yet
-/// (crossdev/eselect may already provide one — don't duplicate it).
-fn ensure_repos_conf(globals: &Cli, overlay: &Utf8Path) -> Result<()> {
-    let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
-    std::fs::create_dir_all(&conf_dir).with_context(|| format!("creating {conf_dir}"))?;
-    if let Ok(conf) = ReposConf::load_from(&[&conf_dir])
-        && conf.find(OVERLAY_NAME).is_some()
-    {
-        return Ok(());
-    }
-    write_if_absent(
-        &conf_dir.join(format!("{OVERLAY_NAME}.conf")),
-        &format!("[{OVERLAY_NAME}]\nlocation = {overlay}\nmasters = gentoo\nauto-sync = false\n"),
-    )
+/// The whitespace-separated real-cpn list for `alias-packages`, in stage
+/// order (matching [`CrossTarget::packages`]). The parser re-parses each
+/// token as a `Cpn`, so this is pure config-file serialisation — no identity
+/// is carried as an opaque string downstream.
+fn alias_packages_line(target: &CrossTarget) -> String {
+    target
+        .packages()
+        .into_iter()
+        .map(|(cat, pkg)| format!("{cat}/{pkg}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Link a `make.profile` for a self-contained `--root DIR` EPREFIX (same
@@ -806,7 +822,8 @@ fn write_sysroot_config(
 fn write_sysroot_repos_conf(
     sysroot: &Utf8Path,
     gentoo: &Utf8Path,
-    overlay: &Utf8Path,
+    target: &CrossTarget,
+    category: &str,
 ) -> Result<()> {
     let dir = sysroot.join("etc/portage/repos.conf");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {dir}"))?;
@@ -814,9 +831,13 @@ fn write_sysroot_repos_conf(
         &dir.join("gentoo.conf"),
         &format!("[DEFAULT]\nmain-repo = gentoo\n\n[gentoo]\nlocation = {gentoo}\n"),
     )?;
+    let packages_line = alias_packages_line(target);
     write_if_absent(
         &dir.join(format!("{OVERLAY_NAME}.conf")),
-        &format!("[{OVERLAY_NAME}]\nlocation = {overlay}\nmasters = gentoo\nauto-sync = false\n"),
+        &format!(
+            "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
+             alias-packages = {packages_line}\n"
+        ),
     )
 }
 
@@ -905,10 +926,23 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
     // staged driver routes them through `base_roots()` (bypass_cross_root),
     // so this must match: `base_roots().merge_root()` is the host under every
     // topology (/, the offset under --local/--root, / under --prefix).
-    // Found live: cross-riscv64/glibc step 5 failed because package.env was
-    // written to the sysroot (roots().merge_root() under --cross) while the
-    // build read config from the host — the per-target ABI CFLAGS never applied.
-    let portage = globals.base_roots().merge_root().join("etc/portage");
+    // Write into the build config the `cross-<tuple>/*` packages read — the
+    // per-target CTARGET/ABI-CFLAGS env files plus the `package.env` mapping
+    // that binds them to each cross package. The read path (`env_files_for`,
+    // `ebuild.rs`) consults the config overlay *on top of* the config root, so
+    // we write into the overlay when one exists (`--prefix`/`--local`: the
+    // user-writable `<prefix>/etc/portage`, avoiding a privileged write to host
+    // `/etc/portage`), and fall back to the bare config root otherwise
+    // (`--root`/plain host). This keeps the cross env scoped to the prefix and
+    // unprivileged, and is read back correctly in every mode — including
+    // `bypass_cross_root` toolchain steps, whose `base_roots()` preserves the
+    // same `config_overlay`.
+    let base = globals.base_roots();
+    let portage = if let Some(overlay) = base.config_overlay() {
+        overlay.to_owned()
+    } else {
+        base.merge_root().join("etc/portage")
+    };
     let category = target.category();
 
     let env_dir = portage.join("env").join(&category);
@@ -992,25 +1026,123 @@ fn symlink_force(dst: &Utf8Path, link: &Utf8Path) -> Result<()> {
     std::os::unix::fs::symlink(dst, link).with_context(|| format!("linking {link} -> {dst}"))
 }
 
-/// Append `line` to `path` (one per line), creating it if absent, skipping if the
-/// exact line is already present.
-fn append_line(path: &Utf8Path, line: &str) -> Result<()> {
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
-    if existing.lines().any(|l| l == line) {
-        return Ok(());
-    }
-    let mut body = existing;
-    if !body.is_empty() && !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push_str(line);
-    body.push('\n');
-    std::fs::write(path, body).with_context(|| format!("writing {path}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alias_packages_line_is_the_real_cpns_in_stage_order() {
+        let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let line = alias_packages_line(&target);
+        // Every token is a real ::gentoo cpn, in packages() order, no cross
+        // category, no version — pure derivation source for Location::Alias.
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let expected: Vec<String> = target
+            .packages()
+            .into_iter()
+            .map(|(c, p)| format!("{c}/{p}"))
+            .collect();
+        assert_eq!(
+            tokens,
+            expected.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+        );
+        // Every token round-trips through Cpn::parse (the repos.conf reader
+        // re-parses these, so an unparseable token would silently drop a
+        // package from the derivation map).
+        for tok in &tokens {
+            assert!(
+                portage_atom::Cpn::parse(tok).is_ok(),
+                "alias-packages token {tok:?} is not a valid Cpn"
+            );
+        }
+        assert!(!tokens.contains(&"sys-devel/gcc") || line.contains("sys-devel/gcc"));
+    }
+
+    /// `write_alias_repo_conf` emits a `Location::Alias` repos.conf entry that
+    /// (a) parses back into the expected alias declaration, (b) is idempotent
+    /// across re-runs with the same target, and (c) rejects a missing source
+    /// package up front with a clear error. Covers the producer half of
+    /// derive-on-the-fly in isolation from the prefix-bootstrap topology.
+    #[test]
+    fn write_alias_repo_conf_emits_a_parseable_alias_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let conf = root.join("etc/portage/repos.conf");
+        let gentoo = root.join("gentoo");
+        // Skeleton ::gentoo with just the source packages' dirs present.
+        let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let category = target.category();
+        for (cat, pkg) in target.packages() {
+            std::fs::create_dir_all(gentoo.join(cat).join(pkg)).unwrap();
+        }
+        let globals = test_cli_at_root(root);
+
+        write_alias_repo_conf(&globals, &gentoo, &target, &category).unwrap();
+        let file = conf.join(format!("{OVERLAY_NAME}.conf"));
+        let body = std::fs::read_to_string(&file).unwrap();
+        assert!(body.contains("alias-source = gentoo"));
+        assert!(body.contains(&format!("alias-target = {category}")));
+        assert!(body.contains("alias-packages = "));
+
+        // Parses back into a Location::Alias with the full package set.
+        let rc = portage_repo::ReposConf::load_from(std::slice::from_ref(&conf)).unwrap();
+        let entry = rc.find(OVERLAY_NAME).expect("crossdev entry present");
+        let portage_repo::Location::Alias { source, aliases } = &entry.location else {
+            panic!("expected Location::Alias, got {:?}", entry.location);
+        };
+        assert_eq!(source, "gentoo");
+        let pkgs = aliases
+            .get(&category)
+            .expect("alias target category present");
+        let got: std::collections::HashSet<String> = pkgs.iter().map(|c| c.to_string()).collect();
+        for (cat, pkg) in target.packages() {
+            assert!(
+                got.contains(&format!("{cat}/{pkg}")),
+                "{cat}/{pkg} missing from parsed alias set {got:?}"
+            );
+        }
+
+        // Idempotent: a second run with the same target doesn't rewrite, and
+        // a divergent-target run (different alias-packages) is tolerated.
+        let body_before = std::fs::read_to_string(&file).unwrap();
+        write_alias_repo_conf(&globals, &gentoo, &target, &category).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), body_before);
+    }
+
+    /// A source package missing from ::gentoo is rejected before any alias is
+    /// written — the producer never declares a derivation it can't satisfy.
+    #[test]
+    fn write_alias_repo_conf_rejects_a_missing_source_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let gentoo = root.join("gentoo");
+        // Empty ::gentoo: none of the source packages exist.
+        let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let category = target.category();
+        let globals = test_cli_at_root(root);
+        let err = write_alias_repo_conf(&globals, &gentoo, &target, &category)
+            .err()
+            .expect("missing source package rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not found") && msg.contains(&category),
+            "error should name the cross category and missing source: {msg}"
+        );
+    }
+
+    /// Build a `Cli` whose roots resolve under `root`, so `setup_root`/config
+    /// helpers used by the writer land inside the tempdir.
+    fn test_cli_at_root(root: &camino::Utf8Path) -> Cli {
+        use clap::Parser;
+        // `--config-root` scopes both config reads and `setup_root` writes.
+        Cli::parse_from([
+            "em",
+            "--config-root",
+            root.as_str(),
+            "--root",
+            root.as_str(),
+        ])
+    }
 
     #[test]
     fn gcc_needs_refresh_cases() {
