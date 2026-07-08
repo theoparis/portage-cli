@@ -166,9 +166,16 @@ impl MakeConf {
                 }
                 // Now update the first occurrence.
                 let Entry::Statement { vars, .. } = &self.entries[*first] else {
-                    unreachable!()
+                    unreachable!(
+                        "Entry at index {first} should be a Statement since we found it via filter_map"
+                    )
                 };
-                let var = vars.iter().find(|v| v.name == name && !v.append).unwrap();
+                // SAFETY: We found this entry because vars.iter().any(|v| v.name == name && !v.append) was true,
+                // so the find below must also succeed.
+                let var = vars
+                    .iter()
+                    .find(|v| v.name == name && !v.append)
+                    .expect("inconsistent state: entry matched in filter but variable not found");
                 // The value span excludes any surrounding quotes, so replacing
                 // it preserves the original quoting style untouched.
                 self.src.replace_range(var.value.clone(), value);

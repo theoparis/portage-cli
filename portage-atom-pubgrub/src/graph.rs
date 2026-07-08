@@ -293,8 +293,11 @@ fn tarjan_scc(succ: &[Vec<usize>]) -> Vec<usize> {
                 }
             } else {
                 if lowlink[v] == index[v] {
+                    // v is a root node; pop the SCC off the stack.
+                    // SAFETY: v was pushed onto the stack on line 283 when we first visited it,
+                    // and we haven't popped it yet, so stack is non-empty and contains v.
                     loop {
-                        let x = stack.pop().unwrap();
+                        let x = stack.pop().expect("Tarjan's SCC: stack should contain v");
                         on_stack[x] = false;
                         comp_of[x] = next_comp;
                         if x == v {
@@ -331,12 +334,20 @@ fn order_cycle(
     for &u in members {
         for &v in &succ_all[u] {
             if set.contains(&v) {
-                *indeg_all.get_mut(&v).unwrap() += 1;
+                // SAFETY: v is in set which is the keys of indeg_all (initialized above),
+                // so get_mut must succeed.
+                *indeg_all
+                    .get_mut(&v)
+                    .expect("v in set implies v in indeg_all") += 1;
             }
         }
         for &v in &succ_hard[u] {
             if set.contains(&v) {
-                *indeg_hard.get_mut(&v).unwrap() += 1;
+                // SAFETY: v is in set which is the keys of indeg_hard (initialized above),
+                // so get_mut must succeed.
+                *indeg_hard
+                    .get_mut(&v)
+                    .expect("v in set implies v in indeg_hard") += 1;
             }
         }
     }

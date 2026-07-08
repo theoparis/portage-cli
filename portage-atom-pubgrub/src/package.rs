@@ -155,11 +155,25 @@ impl PortagePackage {
     /// Returns the CPN for real packages.
     ///
     /// # Panics
-    /// Panics if called on a virtual variant.
+    /// Panics if called on a virtual variant. Use [`Self::is_virtual`] to check first,
+    /// or use [`Self::cpn_opt`] for a non-panicking version.
     pub fn cpn(&self) -> &Cpn {
         match self {
             Self::Real { cpn, .. } => cpn,
-            _ => panic!("cpn() called on virtual package {:?}", self),
+            _ => panic!(
+                "cpn() called on virtual package {:?}; use is_virtual() to check or cpn_opt() for Option",
+                self
+            ),
+        }
+    }
+
+    /// Returns the CPN for real packages, or None for virtual packages.
+    ///
+    /// This is the non-panicking version of [`Self::cpn`].
+    pub fn cpn_opt(&self) -> Option<&Cpn> {
+        match self {
+            Self::Real { cpn, .. } => Some(cpn),
+            _ => None,
         }
     }
 
@@ -171,9 +185,17 @@ impl PortagePackage {
         }
     }
 
-    /// Returns the display string without slot suffix.
+    /// Returns the CPN as a string for real packages.
+    ///
+    /// # Panics
+    /// Panics if called on a virtual variant. Use [`Self::is_virtual`] to check first.
     pub fn cpn_str(&self) -> String {
         self.cpn().to_string()
+    }
+
+    /// Returns the CPN as a string for real packages, or None for virtual packages.
+    pub fn cpn_str_opt(&self) -> Option<String> {
+        self.cpn_opt().map(|c| c.to_string())
     }
 }
 

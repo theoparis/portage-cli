@@ -851,7 +851,8 @@ impl PortageDependencyProvider {
         pubgrub::PubGrubError<Self>,
     > {
         let root = PortagePackage::synthetic_root();
-        let root_ver = Version::parse("0").unwrap();
+        let root_ver =
+            Version::parse("0").expect("version string \"0\" should always parse successfully");
 
         self.root_targets = targets.iter().map(|(p, _)| p.clone()).collect();
 

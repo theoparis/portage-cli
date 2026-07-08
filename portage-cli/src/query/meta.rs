@@ -34,7 +34,10 @@ pub fn run(repo_path: &Path, vdb: Option<&Vdb>, mode: ResolveMode, atoms: &[Stri
         }
 
         matches.sort_by(|a, b| a.cpv().version.cmp(&b.cpv().version));
-        let best = matches.last().unwrap();
+        // SAFETY: We just checked is_empty() is false, so matches is non-empty and last() returns Some.
+        let best = matches
+            .last()
+            .expect("non-empty sorted vec has a last element");
         let cpv = best.cpv();
 
         let entry = repo
