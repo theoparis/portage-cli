@@ -536,6 +536,10 @@ pub enum Applet {
     Worker {
         #[arg(long)]
         ebuild: String,
+        /// The resolved plan entry's authoritative cpv — see
+        /// `privilege::WorkerArgs::cpv`.
+        #[arg(long)]
+        cpv: String,
         #[arg(long)]
         use_flags: String,
         #[arg(long)]

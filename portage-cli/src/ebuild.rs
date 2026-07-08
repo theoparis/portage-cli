@@ -242,8 +242,13 @@ pub async fn run(
     sysroot: Option<&Utf8Path>,
     eprefix: Option<&Utf8Path>,
 ) -> Result<()> {
+    // Standalone `em ebuild <path> <phase>`: no resolved plan entry exists, so
+    // there's no authoritative Cpv to pass — `run_inner` falls back to
+    // deriving one from `ebuild_path` (fine here: this debug entry point only
+    // ever targets a real on-disk ebuild, never a cross-derived virtual one).
     run_inner(
         ebuild_path,
+        None,
         &PhaseGroup::Debug(phases.to_vec()),
         work_dir,
         repo_override,
@@ -269,6 +274,7 @@ pub async fn run(
 #[allow(clippy::too_many_arguments)]
 pub async fn build_and_merge(
     ebuild_path: &Utf8Path,
+    cpv: &portage_atom::Cpv,
     use_flags: &[portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>],
     work_base: &Utf8Path,
     root: &Utf8Path,
@@ -280,8 +286,7 @@ pub async fn build_and_merge(
     merge_gate: Option<&tokio::sync::Mutex<()>>,
     buildpkg: bool,
 ) -> Result<()> {
-    let ebuild =
-        Ebuild::from_path(ebuild_path).with_context(|| format!("loading {ebuild_path}"))?;
+    let ebuild = Ebuild::with_cpv(cpv.clone(), ebuild_path);
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
     let work_dir = work_base.join(ebuild.category()).join(pf);
     let log = work_dir.join("build.log");
@@ -292,6 +297,7 @@ pub async fn build_and_merge(
         // ptrace tax / real root stays off the compile's make/gcc tree.
         run_inner(
             ebuild_path.as_str(),
+            Some(cpv),
             &PhaseGroup::Compile,
             Some(&work_dir),
             None,
@@ -314,10 +320,12 @@ pub async fn build_and_merge(
             .map(|f| f.as_str())
             .collect::<Vec<_>>()
             .join(" ");
+        let cpv_str = cpv.to_string();
         let code = crate::privilege::spawn_install_worker(
             backend,
             &crate::privilege::WorkerArgs {
                 ebuild_path: ebuild_path.as_str(),
+                cpv: &cpv_str,
                 use_flags: &use_str,
                 work_base: work_base.as_str(),
                 root: root.as_str(),
@@ -339,6 +347,7 @@ pub async fn build_and_merge(
     } else {
         run_inner(
             ebuild_path.as_str(),
+            Some(cpv),
             &PhaseGroup::Full,
             Some(&work_dir),
             None,
@@ -367,6 +376,7 @@ pub async fn build_and_merge(
 pub async fn merge_binpkg(
     binpkg_path: &Utf8Path,
     ebuild_path: &Utf8Path,
+    cpv: &portage_atom::Cpv,
     use_flags: &[portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>],
     work_base: &Utf8Path,
     root: &Utf8Path,
@@ -376,8 +386,7 @@ pub async fn merge_binpkg(
     eprefix: Option<&Utf8Path>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
 ) -> Result<()> {
-    let ebuild =
-        Ebuild::from_path(ebuild_path).with_context(|| format!("loading {ebuild_path}"))?;
+    let ebuild = Ebuild::with_cpv(cpv.clone(), ebuild_path);
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
     let work_dir = work_base.join(ebuild.category()).join(pf);
     let log = work_dir.join("build.log");
@@ -390,10 +399,12 @@ pub async fn merge_binpkg(
             .map(|f| f.as_str())
             .collect::<Vec<_>>()
             .join(" ");
+        let cpv_str = cpv.to_string();
         let code = crate::privilege::spawn_install_worker(
             backend,
             &crate::privilege::WorkerArgs {
                 ebuild_path: ebuild_path.as_str(),
+                cpv: &cpv_str,
                 use_flags: &use_str,
                 work_base: work_base.as_str(),
                 root: root.as_str(),
@@ -417,6 +428,7 @@ pub async fn merge_binpkg(
         // the binpkg, then the qmerge phase merges from work_root/image.
         run_inner(
             ebuild_path.as_str(),
+            Some(cpv),
             &PhaseGroup::BinpkgMerge,
             Some(&work_dir),
             None,
@@ -443,6 +455,7 @@ pub async fn merge_binpkg(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_install_worker(
     ebuild_path: &str,
+    cpv_str: &str,
     use_flags_str: &str,
     work_base: &str,
     root: &str,
@@ -460,8 +473,12 @@ pub async fn run_install_worker(
         .map(Interned::<DefaultInterner>::intern)
         .collect();
 
-    let ebuild_obj = Ebuild::from_path(Utf8Path::new(ebuild_path))
-        .with_context(|| format!("loading {ebuild_path}"))?;
+    // The parent already resolved this identity (`WorkerArgs::cpv`) — parsed
+    // here, not re-derived from `ebuild_path`'s on-disk directory name, which
+    // is wrong for a cross-derived package (see `Ebuild::with_cpv`).
+    let cpv = portage_atom::Cpv::parse(cpv_str)
+        .with_context(|| format!("invalid --cpv {cpv_str:?} passed to __worker"))?;
+    let ebuild_obj = Ebuild::with_cpv(cpv.clone(), Utf8Path::new(ebuild_path));
     let pf = format!("{}-{}", ebuild_obj.name(), ebuild_obj.version());
     let work_dir = Utf8Path::new(work_base)
         .join(ebuild_obj.category())
@@ -475,6 +492,7 @@ pub async fn run_install_worker(
     };
     run_inner(
         ebuild_path,
+        Some(&cpv),
         &group,
         Some(&work_dir),
         None,
@@ -539,6 +557,12 @@ fn resolve_masters(
 #[allow(clippy::too_many_arguments)]
 async fn run_inner(
     ebuild_path: &str,
+    // The resolved plan entry's authoritative identity, when there is one —
+    // `None` only for the standalone `em ebuild` debug path, which has no
+    // plan to draw it from. `Some` always wins over deriving one from
+    // `ebuild_path`'s on-disk directory name, which is wrong for a
+    // cross-derived package (see `Ebuild::with_cpv`).
+    cpv: Option<&portage_atom::Cpv>,
     group: &PhaseGroup,
     work_dir: Option<&Utf8Path>,
     repo_override: Option<&str>,
@@ -557,7 +581,10 @@ async fn run_inner(
     binpkg: Option<&Utf8Path>,
 ) -> Result<()> {
     let path = Utf8Path::new(ebuild_path);
-    let ebuild = Ebuild::from_path(path).with_context(|| format!("loading {ebuild_path}"))?;
+    let ebuild = match cpv {
+        Some(cpv) => Ebuild::with_cpv(cpv.clone(), path),
+        None => Ebuild::from_path(path).with_context(|| format!("loading {ebuild_path}"))?,
+    };
 
     let repo_root = match repo_override {
         Some(r) => Utf8PathBuf::from(r),
@@ -1332,14 +1359,13 @@ async fn unmerge_slot_occupant(
         .join(old_pn)
         .join(format!("{old_pf}.ebuild"));
 
+    // The VDB already has this package's authoritative Cpv (`old_pkg.cpv()`),
+    // which for a cross-derived package is the virtual identity
+    // (`cross-<tuple>/gcc-...`) it was registered under — `Ebuild::from_path`
+    // would instead re-derive CATEGORY from `old_ebuild_path`'s on-disk
+    // directory name, recovering the wrong (real, not virtual) category.
     let old_ebuild = if old_ebuild_path.exists() {
-        match Ebuild::from_path(&old_ebuild_path) {
-            Ok(e) => Some(e),
-            Err(err) => {
-                eprintln!("warning: could not load old ebuild {old_ebuild_path}: {err}");
-                None
-            }
-        }
+        Some(Ebuild::with_cpv(old_pkg.cpv().clone(), &old_ebuild_path))
     } else {
         eprintln!(
             "warning: old ebuild not found at {old_ebuild_path}, skipping pkg_prerm/pkg_postrm"

@@ -549,9 +549,8 @@ async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
     let merge = outcome
         .plan
         .iter()
-        .find(|m| m.cpv.starts_with("sys-devel/gcc-"))?;
-    let version = merge.cpv.rsplit_once("/gcc-")?.1;
-    Some(version.to_string())
+        .find(|m| m.cpv.cpn.category == "sys-devel" && m.cpv.cpn.package == "gcc")?;
+    Some(merge.cpv.version.to_string())
 }
 
 /// Build the [`ProfileStack`] for the invocation's config-root (host `/`

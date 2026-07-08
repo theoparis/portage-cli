@@ -477,38 +477,40 @@ mod entry_roots_tests {
     use super::*;
     use query::depgraph::{MergeRoot, PlannedMerge};
 
-    fn planned(merge_root: MergeRoot) -> PlannedMerge {
-        PlannedMerge {
+    fn planned(merge_root: MergeRoot) -> Result<PlannedMerge> {
+        Ok(PlannedMerge {
             merge_root,
-            cpv: "dev-python/jinja2-3.1.6".to_string(),
+            cpv: portage_atom::Cpv::parse("dev-python/jinja2-3.1.6")?,
             ebuild_path: camino::Utf8PathBuf::new(),
             use_flags: Vec::new(),
             depend: Vec::new(),
             bdepend: Vec::new(),
             reinstall: false,
-        }
+        })
     }
 
     #[test]
-    fn host_entry_installs_into_outer_eroot_not_the_cross_sysroot() {
+    fn host_entry_installs_into_outer_eroot_not_the_cross_sysroot() -> Result<()> {
         let roots = cli::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
         let host_roots = cli::Roots::for_test("/var/tmp/cross-stage1");
-        let p = planned(MergeRoot::Host);
+        let p = planned(MergeRoot::Host)?;
         assert_eq!(
             entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
             "/var/tmp/cross-stage1"
         );
+        Ok(())
     }
 
     #[test]
-    fn target_entry_uses_the_plans_own_root() {
+    fn target_entry_uses_the_plans_own_root() -> Result<()> {
         let roots = cli::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
         let host_roots = cli::Roots::for_test("/var/tmp/cross-stage1");
-        let p = planned(MergeRoot::Target);
+        let p = planned(MergeRoot::Target)?;
         assert_eq!(
             entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
             "/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu"
         );
+        Ok(())
     }
 }
 
@@ -713,7 +715,7 @@ async fn merge_sequential(
         // exact version is already installed in the target root. An intentional
         // reinstall (explicit target / USE rebuild) is built anyway — emerge
         // reinstalls a requested atom by default.
-        let pkg_vdb = merge_root.join("var/db/pkg").join(&planned.cpv);
+        let pkg_vdb = merge_root.join("var/db/pkg").join(planned.cpv.to_string());
         if !emptytree && !planned.reinstall && pkg_vdb.exists() {
             println!(
                 ">>> [{}/{total}] {} is already installed — skipping",
@@ -731,7 +733,8 @@ async fn merge_sequential(
             .collect();
 
         // 1. Local binpkg reuse (`-k`, or `-g`/`-G` where local overrides remote).
-        let reused = binpkg_index.and_then(|idx| idx.find_reusable(&planned.cpv, &desired_use));
+        let reused =
+            binpkg_index.and_then(|idx| idx.find_reusable(&planned.cpv.to_string(), &desired_use));
 
         // 2. Remote binpkg (`-g`/`-G`): download the first matching binpkg into
         //    a per-run cache, then merge it. Local already took precedence.
@@ -740,7 +743,7 @@ async fn merge_sequential(
             .then(|| {
                 remote_indices
                     .iter()
-                    .find_map(|idx| idx.find_reusable(&planned.cpv, &desired_use))
+                    .find_map(|idx| idx.find_reusable(&planned.cpv.to_string(), &desired_use))
             })
             .flatten();
 
@@ -751,6 +754,7 @@ async fn merge_sequential(
                 camino::Utf8Path::from_path(binpkg_path.as_path())
                     .unwrap_or_else(|| camino::Utf8Path::new("/invalid-binpkg-path")),
                 &planned.ebuild_path,
+                &planned.cpv,
                 &planned.use_flags,
                 work_base,
                 merge_root,
@@ -768,6 +772,7 @@ async fn merge_sequential(
                     ebuild::merge_binpkg(
                         &path,
                         &planned.ebuild_path,
+                        &planned.cpv,
                         &planned.use_flags,
                         work_base,
                         merge_root,
@@ -783,8 +788,8 @@ async fn merge_sequential(
                     eprintln!(">>> Failed to fetch binpkg {url} — {e:#}");
                     if enforce_no_source {
                         failures.push(MergeFailure {
-                            cpv: planned.cpv.clone(),
-                            log: work_base.join(&planned.cpv).join("build.log"),
+                            cpv: planned.cpv.to_string(),
+                            log: work_base.join(planned.cpv.to_string()).join("build.log"),
                             cause: format!("remote binpkg fetch failed: {e:#}"),
                         });
                         if !keep_going {
@@ -795,6 +800,7 @@ async fn merge_sequential(
                     // Fall through to a source build.
                     ebuild::build_and_merge(
                         &planned.ebuild_path,
+                        &planned.cpv,
                         &planned.use_flags,
                         work_base,
                         merge_root,
@@ -815,8 +821,8 @@ async fn merge_sequential(
                 planned.cpv
             );
             failures.push(MergeFailure {
-                cpv: planned.cpv.clone(),
-                log: work_base.join(&planned.cpv).join("build.log"),
+                cpv: planned.cpv.to_string(),
+                log: work_base.join(planned.cpv.to_string()).join("build.log"),
                 cause: "no matching binpkg and source builds disabled (--getbinpkgonly)".into(),
             });
             if !keep_going {
@@ -826,6 +832,7 @@ async fn merge_sequential(
         } else {
             ebuild::build_and_merge(
                 &planned.ebuild_path,
+                &planned.cpv,
                 &planned.use_flags,
                 work_base,
                 merge_root,
@@ -844,8 +851,8 @@ async fn merge_sequential(
             Err(e) => {
                 eprintln!(">>> Failed to emerge {} — {e:#}", planned.cpv);
                 failures.push(MergeFailure {
-                    cpv: planned.cpv.clone(),
-                    log: work_base.join(&planned.cpv).join("build.log"),
+                    cpv: planned.cpv.to_string(),
+                    log: work_base.join(planned.cpv.to_string()).join("build.log"),
                     cause: format!("{e:#}"),
                 });
                 if !keep_going {
@@ -974,7 +981,10 @@ async fn merge_parallel(
             let merge_root = entry_roots.merge_root();
             if !emptytree
                 && !planned.reinstall
-                && merge_root.join("var/db/pkg").join(&planned.cpv).exists()
+                && merge_root
+                    .join("var/db/pkg")
+                    .join(planned.cpv.to_string())
+                    .exists()
             {
                 println!(">>> {} is already installed — skipping", planned.cpv);
                 skipped += 1;
@@ -987,14 +997,15 @@ async fn merge_parallel(
                 .iter()
                 .map(|f| f.as_str().to_string())
                 .collect();
-            let reused = binpkg_index.and_then(|idx| idx.find_reusable(&planned.cpv, &desired_use));
+            let reused = binpkg_index
+                .and_then(|idx| idx.find_reusable(&planned.cpv.to_string(), &desired_use));
             // Local overrides remote; only look remote when no local match.
             let remote_url = reused
                 .is_none()
                 .then(|| {
                     remote_indices
                         .iter()
-                        .find_map(|idx| idx.find_reusable(&planned.cpv, &desired_use))
+                        .find_map(|idx| idx.find_reusable(&planned.cpv.to_string(), &desired_use))
                 })
                 .flatten();
             let tag = if reused.is_some() {
@@ -1024,6 +1035,7 @@ async fn merge_parallel(
                     ebuild::merge_binpkg(
                         binpkg_path,
                         &planned.ebuild_path,
+                        &planned.cpv,
                         &planned.use_flags,
                         work_base,
                         merge_root,
@@ -1040,6 +1052,7 @@ async fn merge_parallel(
                             ebuild::merge_binpkg(
                                 &path,
                                 &planned.ebuild_path,
+                                &planned.cpv,
                                 &planned.use_flags,
                                 work_base,
                                 merge_root,
@@ -1060,6 +1073,7 @@ async fn merge_parallel(
                 } else {
                     ebuild::build_and_merge(
                         &planned.ebuild_path,
+                        &planned.cpv,
                         &planned.use_flags,
                         work_base,
                         merge_root,
@@ -1088,8 +1102,8 @@ async fn merge_parallel(
             Err(e) => {
                 eprintln!(">>> Failed to emerge {} — {e:#}", plan[i].cpv);
                 failures.push(MergeFailure {
-                    cpv: plan[i].cpv.clone(),
-                    log: work_base.join(&plan[i].cpv).join("build.log"),
+                    cpv: plan[i].cpv.to_string(),
+                    log: work_base.join(plan[i].cpv.to_string()).join("build.log"),
                     cause: format!("{e:#}"),
                 });
                 // Dependents stay blocked (their count never reaches 0), so a
@@ -1115,6 +1129,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
         }
         Applet::Worker {
             ebuild,
+            cpv,
             use_flags,
             work_base,
             root,
@@ -1128,6 +1143,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
         } => {
             ebuild::run_install_worker(
                 ebuild,
+                cpv,
                 use_flags,
                 work_base,
                 root,

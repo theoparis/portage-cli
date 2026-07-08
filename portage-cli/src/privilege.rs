@@ -187,6 +187,13 @@ pub fn install_wrap_backend() -> Option<Backend> {
 /// `build_and_merge`'s args that cross the process boundary.
 pub struct WorkerArgs<'a> {
     pub ebuild_path: &'a str,
+    /// The resolved plan entry's authoritative `Cpv` (e.g.
+    /// `cross-riscv64-unknown-linux-gnu/gcc-16.1.1`) — carried across the
+    /// process boundary explicitly so the worker never re-derives it from
+    /// `ebuild_path`'s on-disk directory name, which is wrong for a
+    /// cross-derived package (`todo/cross-derive-on-the-fly.md`, "The
+    /// merge-path decoupling").
+    pub cpv: &'a str,
     pub use_flags: &'a str,
     pub work_base: &'a str,
     pub root: &'a str,
@@ -216,6 +223,8 @@ pub async fn spawn_install_worker(backend: Backend, args: &WorkerArgs<'_>) -> st
     cmd.arg("__worker")
         .arg("--ebuild")
         .arg(args.ebuild_path)
+        .arg("--cpv")
+        .arg(args.cpv)
         .arg("--use-flags")
         .arg(args.use_flags)
         .arg("--work-base")

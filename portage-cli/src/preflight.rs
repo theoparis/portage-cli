@@ -82,10 +82,10 @@ pub fn check(
         // Within-run visibility: this entry satisfies later entries' deps once
         // merged. Slot is left unknown (None) — a permissive presence check,
         // which is the right bias for a guard that must not block a valid plan.
-        if let Ok(cpv) = Cpv::parse(&planned.cpv) {
-            match planned.merge_root {
-                MergeRoot::Host => bdepend_avail.record_merge_bdepend(cpv),
-                MergeRoot::Target => bdepend_avail.record_target_merge(&mut depend_avail, cpv),
+        match planned.merge_root {
+            MergeRoot::Host => bdepend_avail.record_merge_bdepend(planned.cpv.clone()),
+            MergeRoot::Target => {
+                bdepend_avail.record_target_merge(&mut depend_avail, planned.cpv.clone())
             }
         }
     }
@@ -104,16 +104,27 @@ pub fn check(
 mod tests {
     use super::*;
 
-    fn planned(merge_root: MergeRoot, cpv: &str, depend: &str) -> PlannedMerge {
-        PlannedMerge {
+    /// Build a plan entry from an already-parsed [`Cpv`] — never re-derives
+    /// identity from a string internally, matching the rest of the merge
+    /// path (`todo/cross-derive-on-the-fly.md`, "The merge-path decoupling").
+    fn planned(merge_root: MergeRoot, cpv: Cpv, depend: &str) -> Result<PlannedMerge> {
+        Ok(PlannedMerge {
             merge_root,
-            cpv: cpv.to_string(),
+            cpv,
             ebuild_path: camino::Utf8PathBuf::new(),
             use_flags: Vec::new(),
-            depend: DepEntry::parse(depend).unwrap(),
+            depend: DepEntry::parse(depend)?,
             bdepend: Vec::new(),
             reinstall: false,
-        }
+        })
+    }
+
+    fn roots_at(tmp: &tempfile::TempDir) -> Result<Roots> {
+        let path = tmp
+            .path()
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("tempdir path is not valid UTF-8"))?;
+        Ok(Roots::for_test(path))
     }
 
     /// Regression test for the riscv64 stage3 shakeout (#31): a `Host`
@@ -128,36 +139,38 @@ mod tests {
     /// host `/var/db/pkg`, which may already have `gdbm`/`perl` installed on
     /// the machine running the test, silently passing regardless of the fix.
     #[test]
-    fn host_entry_depend_satisfied_by_earlier_host_entry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let roots = Roots::for_test(tmp.path().to_str().unwrap());
+    fn host_entry_depend_satisfied_by_earlier_host_entry() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let roots = roots_at(&tmp)?;
         let plan = vec![
-            planned(MergeRoot::Host, "sys-libs/gdbm-1.26", ""),
+            planned(MergeRoot::Host, Cpv::parse("sys-libs/gdbm-1.26")?, "")?,
             planned(
                 MergeRoot::Host,
-                "dev-lang/perl-5.42.2",
+                Cpv::parse("dev-lang/perl-5.42.2")?,
                 ">=sys-libs/gdbm-1.8.3:=",
-            ),
+            )?,
         ];
         assert!(check(&plan, &roots, &roots, &[]).is_ok());
+        Ok(())
     }
 
     /// Negative control: a `Target` entry's DEPEND on a `Host`-only merge is
     /// *not* satisfied — the two roots are genuinely different, and Host
     /// merges must not leak into the Target/base-system view.
     #[test]
-    fn target_entry_depend_not_satisfied_by_host_only_entry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let roots = Roots::for_test(tmp.path().to_str().unwrap());
+    fn target_entry_depend_not_satisfied_by_host_only_entry() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let roots = roots_at(&tmp)?;
         let plan = vec![
-            planned(MergeRoot::Host, "sys-libs/gdbm-1.26", ""),
+            planned(MergeRoot::Host, Cpv::parse("sys-libs/gdbm-1.26")?, "")?,
             planned(
                 MergeRoot::Target,
-                "dev-lang/perl-5.42.2",
+                Cpv::parse("dev-lang/perl-5.42.2")?,
                 ">=sys-libs/gdbm-1.8.3:=",
-            ),
+            )?,
         ];
         assert!(check(&plan, &roots, &roots, &[]).is_err());
+        Ok(())
     }
 
     /// A `:slot` build dep on a system-supplied `package.provided` package is
@@ -165,23 +178,21 @@ mod tests {
     /// python packages `DEPEND` on `dev-lang/python:3.14`, which is provided by
     /// the host and never merged). Without the seed the check fails.
     #[test]
-    fn provided_slotted_dep_is_satisfied() {
-        let tmp = tempfile::tempdir().unwrap();
-        let roots = Roots::for_test(tmp.path().to_str().unwrap());
+    fn provided_slotted_dep_is_satisfied() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let roots = roots_at(&tmp)?;
         let plan = vec![planned(
             MergeRoot::Host,
-            "dev-python/wheel-0.47.0",
+            Cpv::parse("dev-python/wheel-0.47.0")?,
             "dev-lang/python:3.14",
-        )];
+        )?];
         assert!(
             check(&plan, &roots, &roots, &[]).is_err(),
             "unseeded control"
         );
 
-        let provided = vec![(
-            Cpv::parse("dev-lang/python-3.14.0").unwrap(),
-            Some("3.14".into()),
-        )];
+        let provided = vec![(Cpv::parse("dev-lang/python-3.14.0")?, Some("3.14".into()))];
         assert!(check(&plan, &roots, &roots, &provided).is_ok());
+        Ok(())
     }
 }

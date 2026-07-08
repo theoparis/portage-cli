@@ -39,8 +39,14 @@ use crate::cli::DepgraphFormat;
 pub struct PlannedMerge {
     /// Where this package is merged (`BROOT` host vs target `ROOT`).
     pub merge_root: MergeRoot,
-    /// `category/name-version` (display + work-dir naming).
-    pub cpv: String,
+    /// The identity to build/register under (display + work-dir naming +
+    /// VDB category) — for a cross-derived package this is the *virtual*
+    /// cpv (`cross-<tuple>/gcc-...`), which may differ from the real cpn
+    /// `ebuild_path` was resolved through. Kept as a real `Cpv`, not a
+    /// formatted string, so nothing downstream has to re-derive it by
+    /// parsing a path or string — see `todo/cross-derive-on-the-fly.md`,
+    /// "The merge-path decoupling".
+    pub cpv: Cpv,
     /// Absolute path to the ebuild.
     pub ebuild_path: camino::Utf8PathBuf,
     /// Effective enabled USE flags for this build: the global config and
@@ -1046,7 +1052,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 .join(format!("{}-{}.ebuild", real_cpn.package, ver));
             PlannedMerge {
                 merge_root: entry.merge_root,
-                cpv: format!("{}/{}-{}", cpn.category, cpn.package, ver),
+                cpv: cpv.clone(),
                 ebuild_path,
                 use_flags: flags,
                 depend,
@@ -1075,11 +1081,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     let index_of: HashMap<(MergeRoot, Cpn), usize> = plan
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| {
-            Cpv::parse(&p.cpv)
-                .ok()
-                .map(|cpv| ((p.merge_root, cpv.cpn), i))
-        })
+        .map(|(i, p)| ((p.merge_root, p.cpv.cpn), i))
         .collect();
     let mut build_blockers: Vec<Vec<usize>> = vec![Vec::new(); plan.len()];
     for e in &edges {
