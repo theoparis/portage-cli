@@ -12,6 +12,7 @@ comprehensive plan to clean them up by properly forwarding errors.
 2. Identified all `unwrap()`, `expect()`, and `panic!` calls
 3. Categorized by severity and location
 4. Prioritized based on user-facing impact
+5. Verified findings by checking function contexts and test annotations
 
 ## Legend
 
@@ -20,21 +21,44 @@ comprehensive plan to clean them up by properly forwarding errors.
 - **P2 (Medium)**: Provably safe unwraps that should still use proper error handling
 - **P3 (Low)**: Test code unwraps (acceptable but should be consistent)
 
+## Important Discovery
+
+After deeper investigation, **most panic! calls are in test functions** (P3), not in production code. The production code is relatively clean. The main issues are:
+
+1. Some `unwrap()` calls in user-facing output code (P0) - being fixed
+2. Some `expect()` calls with insufficient context (P0) - being improved
+3. Most `panic!` calls are in test assertions and helper functions (P3)
+
 ---
 
-## Summary Statistics
+## Summary Statistics (Revised)
 
-| Crate | unwrap() | expect() | panic! | Total |
-|-------|----------|----------|--------|-------|
-| portage-cli | ~150+ | ~20+ | ~5+ | 175+ |
-| portage-atom | ~100+ | ~5+ | ~40+ | 145+ |
-| portage-metadata | ~80+ | ~5+ | ~2+ | 87+ |
-| portage-repo | ~60+ | ~10+ | ~5+ | 75+ |
-| portage-solver | ~10+ | 0 | ~2+ | 12+ |
-| gentoo-core | ~30+ | ~2+ | ~4+ | 36+ |
-| **Total** | **~430+** | **~42+** | **~58+** | **~530+** |
+| Crate | Production unwrap() | Production expect() | Production panic! | Total |
+|-------|---------------------|---------------------|-------------------|-------|
+| portage-cli | ~15 | ~5 | ~0 | 20 |
+| portage-atom | ~0 | ~0 | ~0 | 0 |
+| portage-metadata | ~0 | ~0 | ~0 | 0 |
+| portage-repo | ~5 | ~2 | ~0 | 7 |
+| portage-solver | ~0 | ~0 | ~0 | 0 |
+| gentoo-core | ~0 | ~0 | ~0 | 0 |
+| **Production Total** | **~20** | **~7** | **~0** | **~27** |
+| **Test Total** | ~410+ | ~35+ | ~58+ | ~503+ |
 
-*Numbers are approximate based on grep results*
+*Numbers are approximate based on grep results and manual verification*
+
+*Most panic! calls are in `#[test]` functions and test helper functions*
+
+---
+
+## Progress
+
+### Completed Fixes (P0)
+1. **portage-cli/src/query/depgraph/output.rs:837** - Fixed: Changed `serde_json::to_string_pretty(&out).unwrap()` to return `Result<()>` with proper error handling
+2. **portage-cli/src/query/depgraph/output.rs:563** - Improved: Added SAFETY comment for from_utf8 unwrap on ASCII array
+3. **portage-cli/src/query/depgraph/subslot.rs:83** - Fixed: Replaced `.expect("filtered to bound atoms")` with proper `Option` handling
+4. **portage-cli/src/query/depgraph/depend_trim.rs:77,83** - Improved: Enhanced expect messages for hardcoded CPNs
+
+All tests pass and clippy is clean after these changes.
 
 ---
 
