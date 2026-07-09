@@ -528,12 +528,54 @@ stage3, no host contamination):
     wiped its stale `/opt/xp` before retesting. `em` binary copied to
     `/opt/em/em` inside it, driven via `crossdev-stages sandbox run --name
     aarch64-20260618T101350Z "..."`.
-- 🔴 **Full cross stage1 under `--prefix` — unblocked 2026-07-09, ready to
-  attempt.** The toolchain now completes (see above). Next command:
-  `em --prefix /opt/xp --target riscv64-unknown-linux-gnu stages --stage1`
-  in `~/.cache/crossdev-stages/sandboxes/aarch64-20260618T101350Z`. Not yet
-  attempted this session — a fresh long-running build, natural next step but
-  a separate pass.
+- 🟡 **Full cross stage1 under `--prefix` — plan now computes, found and
+  fixed a fourth real bug (host-arch cross-tool keyword acceptance), real
+  build not yet run.** Attempting `em --prefix /opt/xp --target
+  riscv64-unknown-linux-gnu stages --stage1` hit `maybe_weave_in_gcc_update`'s
+  gcc-refresh sub-resolve failing outright: `resolution failed: __internal__/
+  root 0 depends on cross-riscv64-unknown-linux-gnu/gcc 16.1.1_p20260613`.
+  - **Root cause, precisely isolated**: `query/depgraph/mod.rs`'s
+    `accept_arch = cross.target_arch().unwrap_or(arch)` is one blanket arch
+    for the *entire* resolve. `cross-<tuple>/{binutils,gcc,
+    clang-crossdev-wrappers}` are host-arch tools (they run *on* the build
+    host; only their *output* targets the CTARGET), but get keyword-checked
+    against whichever arch happens to be active for the invocation — the
+    sysroot's target arch under `--target` (whose own generated make.conf
+    happens to permissively accept `"{arch} ~{arch}"`, masking the problem),
+    the bare host's real arch otherwise (typically stable-keywords-only, so
+    a not-yet-stable gcc version is genuinely rejected there). Confirmed by
+    isolating the exact repro: `em --prefix P -p '=cross-.../gcc-16.1.1...'`
+    (no `--target`) failed the same way; the identical atom with `--target`
+    also set succeeded — same package, same version, different result,
+    purely from which arch axis was active.
+  - Initially misdiagnosed as a generic "autounmask doesn't cover a masked
+    *top-level/pinned* target atom" gap (traced `find_autounmask_candidates`,
+    `query/depgraph/repo.rs:1037`, to confirm it only computes suggestions
+    from `dropped_deps` — droppable dependency *edges* with an alternative,
+    not a hard top-level atom pin with none) — real gap, but not what this
+    needed; corrected after re-reading `accept_arch`'s own construction.
+  - **Fix, much smaller than either of the above**: real portage's `**`
+    keyword token ("accept regardless of keywords") already exists in `em`
+    (`AcceptToken::Any`/`ArchAccept.any`, `query/depgraph/repo.rs:48,95-99`)
+    and is arch-agnostic by construction. `write_cross_env`
+    (`crossdev/mod.rs`) now also writes a `package.accept_keywords` entry
+    (`{category}/{pkg} **`) for the host-arch tools (`!is_target_package`),
+    reusing the exact same directory-of-files convention already used for
+    `package.env` there. No solver/AcceptKeywords changes needed at all —
+    this was the user's own suggested direction ("use the autounmask
+    machinery we have... crossdev hacks in sad ways the right masks in a
+    very ad hoc way") once the real per-package mechanism was found instead
+    of a per-resolve dual-config-read.
+  - Live-verified: after re-running `crossdev --init-target` (regenerates
+    the config), `em --prefix P -p '=cross-.../gcc-16.1.1_p20260613'` (no
+    `--target`) now resolves; `em --prefix P --target T stages --stage1 -p`
+    now computes a full, real stage1 plan (hundreds of packages) instead of
+    hard-failing. Remaining output at that point is a normal `-p` REQUIRED_USE
+    advisory (`sys-apps/util-linux`'s `su? ( pam )`, `net-misc/curl`'s `quic?
+    (...)`) — expected `-p` behaviour (matches emerge's own "changes are
+    necessary" preview semantics), not a bug.
+  - Not yet attempted: the actual (non-`-p`) stage1 build — a long,
+    real compile, natural next step but its own separate pass.
 
 ## Verification (outstanding)
 

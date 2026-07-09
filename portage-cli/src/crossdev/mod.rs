@@ -1000,6 +1000,21 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
     std::fs::create_dir_all(&env_dir).with_context(|| format!("creating {env_dir}"))?;
 
     let mut mappings = String::new();
+    // Host-arch tools (binutils/gcc/clang-crossdev-wrappers) run *on* the
+    // build host, not the target, even though they live in the target-
+    // influenced `cross-<tuple>` category. Their own keyword acceptance must
+    // never depend on whichever arch happens to be active for a given
+    // invocation (the sysroot's target arch, under `--target`, vs the bare
+    // host arch otherwise) -- found live 2026-07-09: a newer `cross-<tuple>/
+    // gcc` resolved fine under `--target` (the generated sysroot make.conf's
+    // own `ACCEPT_KEYWORDS="{arch} ~{arch}"` happens to cover it) but failed
+    // outright without `--target` (the bare host's real, normally
+    // stable-only ACCEPT_KEYWORDS does not). `**` ("accept regardless of
+    // keywords" -- portage's own escape hatch, `AcceptToken::Any` in
+    // `query/depgraph/repo.rs`) is the correct fix: these tools always run
+    // on the host, so no keyword/arch check makes sense for them at all,
+    // matching how real crossdev packages are treated.
+    let mut keyword_entries = String::new();
     for (_, pkg) in target.packages() {
         let body = format!(
             "{header}{}",
@@ -1008,12 +1023,20 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
         let conf = env_dir.join(format!("{pkg}.conf"));
         std::fs::write(&conf, &body).with_context(|| format!("writing {conf}"))?;
         mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
+        if !is_target_package(pkg) {
+            keyword_entries.push_str(&format!("{category}/{pkg} **\n"));
+        }
     }
 
     let pe_dir = portage.join("package.env");
     std::fs::create_dir_all(&pe_dir).with_context(|| format!("creating {pe_dir}"))?;
     let pe = pe_dir.join(&category);
-    std::fs::write(&pe, &mappings).with_context(|| format!("writing {pe}"))
+    std::fs::write(&pe, &mappings).with_context(|| format!("writing {pe}"))?;
+
+    let ak_dir = portage.join("package.accept_keywords");
+    std::fs::create_dir_all(&ak_dir).with_context(|| format!("creating {ak_dir}"))?;
+    let ak = ak_dir.join(&category);
+    std::fs::write(&ak, &keyword_entries).with_context(|| format!("writing {ak}"))
 }
 
 /// Whether `pkg` compiles code for `<CTARGET>` (libc, kernel headers, runtimes —
