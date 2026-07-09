@@ -50,13 +50,40 @@ After deeper investigation, **most panic! calls are in test functions** (P3), no
 
 ---
 
+## Module layout (post housekeeping)
+
+`portage-cli` is now a library + thin binary. User-facing resolve/merge logic
+moved out of `main.rs`:
+
+| Module | Role |
+|--------|------|
+| `src/main.rs` | Entry point, allocator, fakeroost/pseudoroot init, tokio runtime |
+| `src/dispatch.rs` | Subcommand routing (`run()` body) |
+| `src/emerge.rs` | `expand_sets`, `EmergeOpts`, resolve + merge orchestration |
+| `src/merge/mod.rs` | Staged merge driver, cache regen, parallel jobs |
+| `src/vdb.rs` | `open_cli_vdb()` — VDB at `--vdb` or `<merge_root>/var/db/pkg` |
+
+Line numbers below for `main.rs` / set expansion refer to these modules unless
+noted otherwise.
+
+---
+
 ## Progress
 
 ### Completed Fixes (P0)
-1. **portage-cli/src/query/depgraph/output.rs:837** - Fixed: Changed `serde_json::to_string_pretty(&out).unwrap()` to return `Result<()>` with proper error handling
-2. **portage-cli/src/query/depgraph/output.rs:563** - Improved: Added SAFETY comment for from_utf8 unwrap on ASCII array
-3. **portage-cli/src/query/depgraph/subslot.rs:83** - Fixed: Replaced `.expect("filtered to bound atoms")` with proper `Option` handling
-4. **portage-cli/src/query/depgraph/depend_trim.rs:77,83** - Improved: Enhanced expect messages for hardcoded CPNs
+1. **portage-cli/src/query/depgraph/output.rs:837** — Fixed: `serde_json::to_string_pretty` returns `Result<()>` with proper error handling
+2. **portage-cli/src/query/depgraph/output.rs:563** — Improved: SAFETY comment for `from_utf8` unwrap on ASCII array
+3. **portage-cli/src/query/depgraph/subslot.rs:83** — Fixed: replaced `.expect("filtered to bound atoms")` with proper `Option` handling
+4. **portage-cli/src/query/depgraph/depend_trim.rs:77,83** — Improved: enhanced expect messages for hardcoded CPNs
+5. **portage-cli/src/main.rs** — Fixed: tokio runtime `.build()` failure prints `error:` and exits 1 (no `expect`)
+6. **portage-cli/src/cli.rs` (`base_roots`)** — Fixed: `--prefix` path via `path()` closure (`if let Some(prefix) = path(&self.prefix)`); invalid UTF-8 falls through to default `Roots` instead of panicking
+7. **portage-cli/src/emerge.rs` (`expand_sets`)** — Fixed: profile stack held in `stack_holder.get_or_insert(st)`; set expansion errors are warnings, not panics
+8. **portage-repo/src/package_conf.rs** — Fixed: production `PackageConf::parse(…).unwrap()` removed (tests only)
+
+### Completed housekeeping (non-P0)
+- **portage-repo** — `#![warn(missing_docs)]` enabled; 21 doc gaps filled
+- **portage-binpkg** — `#![warn(missing_docs)]` enabled
+- Test modules extracted to sibling files (`provider/tests.rs`, `solver_tests.rs`, `shell/tests.rs`)
 
 All tests pass and clippy is clean after these changes.
 
@@ -69,13 +96,18 @@ All tests pass and clippy is clean after these changes.
 #### Critical Issues (P0)
 
 ##### `src/main.rs`
-- Line 88, 92: `stack_holder.as_ref().unwrap()` - **SAFE** with comment explaining safety
-- Line 151: `.expect("failed to build the tokio runtime")` - Runtime initialization, should be proper error
+- **No production unwrap/expect/panic** — runtime init and `portage_cli::run()` dispatch only.
+
+##### `src/emerge.rs`
+- `expand_sets` — **FIXED** (see Progress §5–7). No remaining production panics.
+
+##### `src/dispatch.rs`, `src/merge/mod.rs`, `src/vdb.rs`
+- **No production unwrap/expect/panic** in current scan.
 
 ##### `src/cli.rs`
-- Line 335: `.expect("prefix path conversion should succeed when prefix.is_some()")` - P0
-- Line 418, 420: `.unwrap()` in assertions (test code?)
-- Line 459, 486: `.unwrap()` on repo paths - P0
+- `base_roots()` — **FIXED**: `path` closure maps `Option<String>` → `Option<Utf8PathBuf>` without expect
+- `repo_path()` / `repo_paths()` — still use `unwrap_or_default()` for repo layout fallbacks (P2)
+- Lines 414–416, 455, 482: `.unwrap()` in `#[cfg(test)]` assertions only — P3
 
 ##### `src/package_env.rs`
 - Line 99: `Cpv::parse(s).unwrap()` - Parsing user input without error handling - **P0**
@@ -190,8 +222,8 @@ Similar patterns in parsing implementations
 - Line 383: `MakeConf::parse(src.to_owned()).expect("parse failed")`
 
 ##### `src/package_conf.rs`
-- Line 386: `PackageConf::parse(s.to_owned()).unwrap()`
-- Lines 393, 402, 410, 429, 445, 459, 468, 477: `.unwrap()` in test code
+- Production parse unwrap — **FIXED** (housekeeping)
+- `#[cfg(test)]` helper `parse()` and assertions — P3
 
 ##### `src/repo/` modules
 Various `.unwrap()` in test helper functions
@@ -303,17 +335,10 @@ Dep::parse(s)
 
 **Files**: `src/query/depgraph/force_mask.rs:167,169-170,175`
 
-#### 1.4 portage-cli/src/cli.rs
-**Issues**:
-- Line 335: `.expect("prefix path conversion should succeed when prefix.is_some()")`
+#### 1.4 portage-cli/src/cli.rs — **DONE**
+`base_roots()` uses a `path` closure; invalid `--prefix` UTF-8 is ignored (falls through to default `Roots`).
 
-**Fix**:
-```rust
-// If this is in a context where prefix.is_some() is guaranteed, add a debug_assert
-// Otherwise, handle the error properly
-```
-
-**Files**: `src/cli.rs:335`
+**Files**: `src/cli.rs` (`base_roots`)
 
 #### 1.5 portage-cli/src/query/depgraph/installed.rs
 **Issues**: Lines 207-212, 217, 219 - tempfile and fs operations
@@ -389,8 +414,8 @@ match something {
 ### Phase 3: Safe Unwraps and Doc Tests (P2) - Week 5
 
 #### 3.1 Safe unwraps
-- `portage-cli/src/main.rs:88,92` - Add better SAFETY comments
 - `portage-cli/src/query/depgraph/output.rs:563` - Use `from_utf8_lossy` instead
+- `portage-cli/src/cli.rs` `repo_path()` - `unwrap_or_default()` repo fallbacks (document or propagate)
 
 #### 3.2 Doc test unwraps
 Hundreds of `.unwrap()` in doc tests. For library crates, use `// # ` comments to hide from doctest or use `.expect()` with messages.
@@ -448,5 +473,5 @@ After each phase:
 
 ---
 
-*Generated: 2026-07-08*
-*Status: Draft - Requires review and prioritization*
+*Generated: 2026-07-08; refreshed: 2026-07-09*
+*Status: Active — P0 backlog in `query/depgraph/` and `package_env.rs`; housekeeping items above marked done*
