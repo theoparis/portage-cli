@@ -1000,7 +1000,7 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
     std::fs::create_dir_all(&env_dir).with_context(|| format!("creating {env_dir}"))?;
 
     let mut mappings = String::new();
-    // Host-arch tools (binutils/gcc/clang-crossdev-wrappers/gdb — see
+    // Host-arch tools (binutils/gcc/clang-crossdev-wrappers — see
     // `PackageArch` on `CrossTarget::packages`) run *on* the build host, not
     // the target, even though they live in the target-influenced
     // `cross-<tuple>` category. Their own keyword acceptance must never

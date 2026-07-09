@@ -613,17 +613,51 @@ stage3, no host contamination):
     `clippy::items_after_test_module` from `merge/mod.rs`'s
     `entry_roots_tests` sitting before later non-test items — moved that
     module to the end of the file, no logic change.
-  - Live-verified the `gdb` gap and its fix in the pre-existing
-    `aarch64-20260618T101350Z` sandbox: with the *old* binary still copied
-    in, `package.accept_keywords/cross-riscv64-unknown-linux-gnu` had only
-    `binutils`/`gcc` (`**`), no `gdb` line, and `gdb.conf`'s env block was
-    not yet regenerated with host ABI. After copying in the fixed binary and
-    re-running `crossdev --init-target`, `gdb **` appeared in
-    `package.accept_keywords`, and `gdb.conf` now carries `ABI='arm64'
-    MULTILIB_ABIS='arm64' DEFAULT_ABI='arm64'` (the sandbox host's aarch64
-    ABI) matching `binutils.conf`/`gcc.conf` exactly, vs `glibc.conf`'s
-    target `ABI='lp64d'` — confirms `gdb` is now correctly on the host-ABI
-    side of the split, not silently on the target side as before.
+  - Live-verified in the pre-existing `aarch64-20260618T101350Z` sandbox
+    (before the correction below was applied): with the *old* binary still
+    copied in, `package.accept_keywords/cross-riscv64-unknown-linux-gnu` had
+    only `binutils`/`gcc` (`**`), no `gdb` line. After copying in the fixed
+    binary and re-running `crossdev --init-target`, `gdb **` appeared and
+    `gdb.conf` carried the host ABI matching `binutils.conf`/`gcc.conf`. This
+    confirmed the classification mechanism itself works — but see below,
+    the premise that `gdb` belongs in the base set at all was wrong.
+  - **Correction (same session, user caught it): `gdb` shouldn't have been
+    classified as `Host` — it shouldn't be in the base package set at all.**
+    Asked "why gdb entered the list though?", then "gdb is optional in
+    crossdev. did you get confused?" — yes. Checked `/usr/bin/crossdev`
+    directly (`ex_gdb() { [[ ${EX_GDB} == "yes" ]]; }`, `--ex-gdb` sets
+    `EX_GDB=yes`, `ex_gdb && doemerge ${DPKG}` at the very end): real
+    crossdev only builds a cross gdb when `--ex-gdb` is explicitly passed —
+    it's an opt-in "extra" alongside `--ex-pkg`, not part of the base
+    binutils→headers→gcc→libc toolchain. `em`'s own design notes
+    (`todo/crossdev-target.md:358`) already documented this correctly:
+    `"Extra (after stages): --ex-gcc→$GPKG-extra, --ex-gdb→$DPKG, --ex-pkg
+    X→doemerge X"`. `em` has no `--ex-gdb`/`--ex-pkg` mechanism yet, so
+    `dev-debug/gdb` being unconditionally in `CrossTarget::packages()`'s
+    GCC-mode list (since the very first commit introducing it, `a3c7727`)
+    was simply a mistake, not a deliberate "always build it" choice — it
+    had nothing to opt out into. Fix: removed the `gdb` push from
+    `packages()` entirely (not reclassified — removed); updated the one test
+    that asserted its presence to assert its *absence* instead. Re-verified
+    `cargo fmt --check`/clippy/full test suite clean, and the live sandbox
+    toolchain preview (`--show-target-cfg`) no longer lists a `.../gdb` row.
+    The `PackageArch` classification refactor itself (previous bullet)
+    stands on its own merits independent of this correction — `binutils`/
+    `gcc`/`clang-crossdev-wrappers` are still `Host`, `linux-headers`/libc/
+    LLVM runtimes still `Target`, still declared at each push site instead
+    of a separate name list.
+  - **Open follow-up, not yet implemented**: the user's next question —
+    "let's avoid hardcoding optionals like this, `--ex-gdb` should be just a
+    shorthand for a matching `--ex-pkg`, isn't it?" — points at the right
+    shape for adding this back *properly* later: a general `--ex-pkg <atom>`
+    mechanism (arbitrary extra package merged onto the established cross
+    target, `em`'s equivalent of crossdev's `<CTARGET>-emerge <pkg>` /
+    `--ex-pkg`), with `--ex-gdb` as pure sugar that expands to `--ex-pkg
+    dev-debug/gdb` (or a configured `DPKG` override) rather than a
+    hardcoded special case anywhere in `em`. Not designed or implemented
+    yet — flagged here so it isn't lost; `--ex-gcc`/`--ex-gdb`/`--ex-pkg`
+    in `todo/crossdev-target.md`'s "Extra" section is the existing design
+    note to build from.
 
 ## Verification (outstanding)
 

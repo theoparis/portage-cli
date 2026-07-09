@@ -131,7 +131,7 @@ printf 'DEFAULT_ABI=%s\n' "${{DEFAULT_ABI}}"
 /// per-ABI tables of `host` and `target` are merged (every file carries both);
 /// the unprefixed `ABI`/`MULTILIB_ABIS`/`DEFAULT_ABI` is the **target's** for a
 /// target package (libc/headers/runtimes — code that runs on `<CTARGET>`) and
-/// the **host's** (plus `TARGET_*`) for a host tool (binutils/gcc/gdb).
+/// the **host's** (plus `TARGET_*`) for a host tool (binutils/gcc/the clang wrapper).
 pub fn env_block(host: &MultilibEnv, target: &MultilibEnv, target_package: bool) -> String {
     let mut merged = host.vars.clone();
     merged.extend(target.vars.iter().map(|(k, v)| (k.clone(), v.clone())));

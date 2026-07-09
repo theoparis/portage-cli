@@ -147,10 +147,18 @@ impl CrossTarget {
     ///
     /// Each entry also states its [`PackageArch`] right here, at the single
     /// place a cross package is declared — not in a separate, easily-desynced
-    /// name list (the old `is_target_package`, which missed `dev-debug/gdb`
-    /// until this was fixed). Adding a future host-arch tool (e.g. `rust-std`
-    /// for an LLVM+Rust cross build) forces picking `Host` or `Target` right
-    /// where it's introduced.
+    /// name list (the old `is_target_package`). Adding a future host-arch
+    /// tool (e.g. `rust-std` for an LLVM+Rust cross build) forces picking
+    /// `Host` or `Target` right where it's introduced.
+    ///
+    /// `dev-debug/gdb` is deliberately NOT here: real crossdev only builds a
+    /// cross gdb when `--ex-gdb` is explicitly passed (`EX_GDB` defaults
+    /// unset, `/usr/bin/crossdev` — `ex_gdb && doemerge $DPKG`), same as any
+    /// other `--ex-pkg`; it's an opt-in extra, not part of the base
+    /// binutils/headers/gcc/libc toolchain. `em` has no `--ex-gdb`/`--ex-pkg`
+    /// equivalent yet (see `todo/crossdev-target.md`'s "Extra" section), so
+    /// there's nothing to wire it to — it was previously here unconditionally
+    /// by mistake.
     pub fn packages(&self) -> Vec<(&'static str, &'static str, PackageArch)> {
         use PackageArch::{Host, Target};
         let mut pkgs: Vec<(&'static str, &'static str, PackageArch)> = Vec::new();
@@ -176,10 +184,6 @@ impl CrossTarget {
             pkgs.push(("sys-devel", "gcc", Host));
             let (cat, pkg) = self.libc.package();
             pkgs.push((cat, pkg, Target));
-            // Runs on the host to debug target binaries — not a target-ABI
-            // build, same as binutils/gcc. Was missing from the old
-            // `is_target_package` exclusion list (a real, live gap).
-            pkgs.push(("dev-debug", "gdb", Host));
         }
         pkgs
     }
@@ -220,7 +224,8 @@ mod tests {
         assert_eq!(t.category(), "cross-riscv64-unknown-linux-gnu");
         assert_eq!(t.gentoo_arch(), "riscv");
         assert_eq!(t.profile_path(), "default/linux/riscv/23.0/rv64/lp64d");
-        // binutils, linux-headers, gcc, glibc, gdb
+        // binutils, linux-headers, gcc, glibc — no gdb (that's --ex-gdb, an
+        // opt-in extra in real crossdev, not part of the base toolchain)
         assert!(
             t.packages()
                 .contains(&("sys-libs", "glibc", PackageArch::Target))
@@ -229,9 +234,8 @@ mod tests {
             t.packages()
                 .contains(&("sys-kernel", "linux-headers", PackageArch::Target))
         );
-        // gdb runs on the host, debugging target binaries — not target-ABI
         assert!(
-            t.packages()
+            !t.packages()
                 .contains(&("dev-debug", "gdb", PackageArch::Host))
         );
     }
