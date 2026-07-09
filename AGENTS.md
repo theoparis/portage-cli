@@ -4,16 +4,13 @@
 
 ```bash
 cargo build                        # Build the em binary
-cargo test                         # Run all tests
-cargo clippy -- -D warnings        # Lint — must be warning-free
-cargo fmt --check                  # Format check — must pass
+cargo test --workspace --exclude portage-bench
+cargo clippy --workspace --exclude portage-bench -- -D warnings
+cargo fmt --all -- --check
 
 # MSRV verification (use the project's cargo-msrv tool)
 cargo install cargo-msrv
-cargo msrv verify                  # Verifies the rust-version declared in Cargo.toml
-# For a specific crate or version:
-# cargo msrv verify --manifest-path portage-cli/Cargo.toml
-# cargo msrv verify --rust-version 1.88
+cargo msrv verify --rust-version 1.95 --path portage-cli
 ```
 
 ## Architecture
@@ -22,7 +19,8 @@ cargo msrv verify                  # Verifies the rust-version declared in Cargo
   [clap](https://crates.io/crates/clap) derive macros, subcommands of the
   top-level `Cli` struct. Keep `main.rs` thin; extract modules as complexity grows.
 - Business logic is delegated to the library crates (`portage-atom`,
-  `portage-metadata`, `portage-repo`, `portage-atom-pubgrub`, …).
+  `portage-metadata`, `portage-solver`, `portage-repo`, `portage-atom-pubgrub`,
+  `portage-vdb`, `portage-binpkg`, `portage-distfiles`, …).
 - **Read [`docs/architecture.md`](./docs/architecture.md) first** — it is the
   main architecture reference (crate catalog, the `em -p` resolution pipeline,
   USE stacking precedence, the USE/solver boundary, post-solve validation, and
@@ -30,13 +28,30 @@ cargo msrv verify                  # Verifies the rust-version declared in Cargo
 
 ## Dependencies
 
+Workspace members (14 crates + `portage-bench`):
+
+- `gentoo-interner` — string interning
+- `gentoo-core` — architecture and variant types
 - `portage-atom` — PMS atom parsing (Cpn, Cpv, Dep, etc.)
 - `portage-metadata` — md5-cache metadata, `RequiredUseExpr`, keywords, IUSE
+- `portage-solver` — solver-agnostic trait and shared vocabulary
+- `portage-atom-pubgrub` — PubGrub solver bridge (`em` resolves through this by default)
+- `portage-atom-resolvo` — Resolvo SAT solver bridge (cross-check)
 - `portage-repo` — repository layout, profile stack, embedded ebuild shell
-- `portage-atom-pubgrub` — the PubGrub solver bridge `em` resolves through
-- `clap` — CLI argument parsing
-- `tokio` — async runtime
-- `thiserror` — error derive macros
+- `portage-vdb` — installed package database (`/var/db/pkg`)
+- `portage-binpkg` — GPKG binary package read/write
+- `portage-distfiles` — distfile fetch and mirror resolution
+- `gentoo-stages` — stage3 tarball fetch/cache
+- `portage-cli` — the `em` binary (unpublished)
+- `portage-bench` — benchmark harness (excluded from CI)
+
+CLI/runtime deps: `clap`, `tokio`, `anyhow`, `thiserror`.
+
+## Local dependency overrides
+
+Machine-specific `[patch.crates-io]` paths in `.cargo/config.toml` (for local
+`brush`/`pkgcraft` worktrees) are expected during development and are gitignored.
+Do not commit them.
 
 ## Coding Style
 
@@ -67,15 +82,25 @@ listed. The agent never adds a `Signed-off-by` (DCO) — that is the human's.
 ## MSRV
 
 Until the first complete release, the workspace tracks **latest stable**
-dependencies and bumps `rust-version` as needed (currently **1.92**, driven by
-`pubgrub` 0.4). Do not pin crates to older releases to satisfy a lower MSRV.
+dependencies and bumps `rust-version` as needed (currently **1.95**, driven by
+`cfg_select!` stabilization). Do not pin crates to older releases to satisfy a
+lower MSRV.
 
-CI runs `stable` and the declared workspace minimum (`1.92`). After a release,
+CI runs `stable` and the declared workspace minimum (`1.95`). After a release,
 foundational crates may again advertise a lower standalone MSRV; the workspace
 floor follows whatever latest deps require.
 
-When a dependency bump needs a newer compiler, raise `rust-version` in every
-affected `Cargo.toml` and the CI matrix entry, then `cargo msrv verify`.
+When a dependency bump needs a newer compiler, raise `rust-version` in
+`[workspace.package]` and the CI matrix entry, then `cargo msrv verify`.
+
+## Gentoo host tests
+
+Five integration tests in `portage-cli/tests/comparison.rs` compare `em query`
+output against `qfile`/`qlist` and are `#[ignore]` by default. On a Gentoo host:
+
+```bash
+cargo test -p portage-cli -- --ignored
+```
 
 ## Slop Warning
 

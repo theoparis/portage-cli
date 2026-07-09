@@ -2,7 +2,7 @@
 
 ## Language
 
-Rust (edition 2024, MSRV 1.92)
+Rust (edition 2024, MSRV 1.95 — follows `[workspace.package] rust-version`)
 
 ## Key Dependencies
 

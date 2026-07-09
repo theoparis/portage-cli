@@ -182,14 +182,23 @@ dependency graph, per-crate API catalog, and design reference.
 
 | Crate | Purpose | Status |
 |-------|---------|--------|
+| `gentoo-interner` | String interning | Published |
+| `gentoo-core` | Architecture and variant types | Published |
+| `gentoo-stages` | Stage3 tarball fetch/cache | Published |
 | `portage-atom` | PMS atom parser (`Cpn`, `Cpv`, `Dep`, `Version`) | Published |
 | `portage-metadata` | md5-cache entry parser, EAPI, phases, keywords | Published |
-| `portage-repo` | Repo layout, profiles, metadata cache, ebuild sourcing | Local only |
-| `portage-vdb` | Installed package database reader (`/var/db/pkg`) | Published |
+| `portage-solver` | Solver-agnostic trait and shared vocabulary | Published |
+| `portage-atom-pubgrub` | PubGrub solver bridge (default in `em`) | Published |
 | `portage-atom-resolvo` | SAT dependency solver (resolvo bridge) | Published |
-| `portage-atom-pubgrub` | Alternative solver (PubGrub bridge) | Published |
-| `gentoo-core` | Architecture types | Published |
-| `gentoo-stages` | Stage3 tarball fetch/cache | Published |
+| `portage-vdb` | Installed package database (`/var/db/pkg`) | Published |
+| `portage-binpkg` | GPKG binary package read/write | Published |
+| `portage-repo` | Repo layout, profiles, metadata cache, ebuild sourcing | Local only |
+| `portage-distfiles` | Distfile fetch and mirror resolution | Local only |
+| `portage-cli` | The `em` binary | Local only |
+| `portage-bench` | Benchmark harness (`benchmarks/`) | Local only |
+
+Further reading: [`docs/build-roadmap.md`](./docs/build-roadmap.md),
+[`todo/PENDING.md`](./todo/PENDING.md).
 
 ### brush integration
 
@@ -222,9 +231,10 @@ local checkout.
 
 ```bash
 cargo build
-cargo test
-cargo clippy -- -D warnings
-cargo fmt --check
+cargo test --workspace --exclude portage-bench
+cargo clippy --workspace --exclude portage-bench -- -D warnings
+cargo fmt --all -- --check
+cargo msrv verify --rust-version 1.95 --path portage-cli
 ```
 
 ## License

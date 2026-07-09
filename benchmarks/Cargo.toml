@@ -42,7 +42,7 @@ mimalloc = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { workspace = true, features = ["html_reports"] }
 tokio = { workspace = true, features = ["rt"] }
 
 [[bench]]

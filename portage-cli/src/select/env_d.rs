@@ -110,10 +110,8 @@ fn global_env_path<T: EnvDProfile>(roots: &Roots, target: &str) -> Utf8PathBuf {
 
 /// A profile with its target.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Profile<T: EnvDProfile> {
     pub name: String,
-    pub target: String,
     /// Whether this profile is from the host system or the current config root
     pub is_host: bool,
     /// The module type marker
@@ -211,7 +209,6 @@ fn collect_profiles<T: EnvDProfile>(
             .or_default()
             .push(Profile {
                 name: name.clone(),
-                target: profile_target,
                 is_host,
                 _marker: std::marker::PhantomData,
             });

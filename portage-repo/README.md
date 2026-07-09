@@ -2,7 +2,7 @@
 
 [![LICENSE](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 [![Build Status](https://github.com/lu-zero/portage-repo/workflows/CI/badge.svg)](https://github.com/lu-zero/portage-repo/actions?query=workflow:CI)
-[![Crates.io](https://img.shields.io/crates/v/portage-repo.svg)](https://crates.io/crates/portage-repo)
+<!-- Historical crates.io publish; workspace crate is `publish = false` until brush is on crates.io. -->
 [![dependency status](https://deps.rs/repo/github/lu-zero/portage-repo/status.svg)](https://deps.rs/repo/github/lu-zero/portage-repo)
 [![docs.rs](https://docs.rs/portage-repo/badge.svg)](https://docs.rs/portage-repo)
 

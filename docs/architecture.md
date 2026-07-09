@@ -18,10 +18,12 @@ gentoo-interner ─┐
 portage-atom ────┤
    │             ├─ portage-metadata ─┐
    │             │                    ├─ portage-repo ───── portage-distfiles
-   ├─ portage-atom-pubgrub ──────────┼─────────────────────┐
-   └─ portage-atom-resolvo ──────────┘                      │
-                                        portage-vdb ────────┤
-                                                             portage-cli (em)
+   ├─ portage-solver ─┬─ portage-atom-pubgrub ─────────────┐
+   │                  └─ portage-atom-resolvo ─────────────┤
+   │                                                       │
+   │                  portage-binpkg ───────────────────────┤
+   │                  portage-vdb ──────────────────────────┤
+   └──────────────────────────────────────────────────────── portage-cli (em)
 ```
 
 `portage-bench` (in `benchmarks/`) depends on both solver bridges plus
@@ -33,27 +35,29 @@ portage-atom ────┤
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `gentoo-interner` | 0.3.0 | String interning |
+| `gentoo-interner` | 0.3.1 | String interning |
 | `gentoo-core` | 0.5.1 | Architecture types, variants |
-| `portage-atom` | 0.9.1 | PMS atom parsing |
-| `portage-metadata` | 0.7.1 | md5-cache entry parsing, EAPI, keywords |
-| `portage-atom-resolvo` | 0.7.0 | SAT dependency solver (resolvo bridge) |
+| `portage-atom` | 0.10.0 | PMS atom parsing |
+| `portage-metadata` | 0.8.0 | md5-cache entry parsing, EAPI, keywords |
+| `portage-atom-pubgrub` | 0.6.0 | PubGrub solver bridge (default in `em`) |
+| `portage-atom-resolvo` | 0.7.1 | SAT dependency solver (resolvo bridge) |
+| `portage-solver` | 0.1.0 | Solver-agnostic trait and shared vocabulary |
+| `portage-vdb` | 0.1.0 | Installed package database (`/var/db/pkg`) |
+| `portage-binpkg` | 0.1.0 | GPKG binary package read/write |
 | `gentoo-stages` | 0.5.1 | Stage3 tarball fetch/cache |
 
-### Local only (not yet on crates.io)
+### Local only (`publish = false` in workspace)
 
 | Crate | Version | Purpose | Blocker |
 |-------|---------|---------|---------|
-| `portage-repo` | 0.1.0 | Repo layout, ebuilds, profiles, manifests | Depends on `brush-*` via local paths |
-| `portage-atom-pubgrub` | 0.4.1 | PubGrub solver bridge | Workspace path dep on `portage-atom` |
-| `portage-vdb` | 0.1.0 | Installed package database (`/var/db/pkg`) | Workspace path dep |
-| `portage-distfiles` | 0.1.0 | Source distfile fetching & resolution | Workspace path dep |
+| `portage-repo` | 0.1.0 | Repo layout, ebuilds, profiles, manifests | Depends on `brush-*` (not on crates.io) |
+| `portage-distfiles` | 0.1.0 | Source distfile fetching & resolution | Workspace-only for now |
 | `portage-bench` | 0.1.0 | Benchmark harness | Dev tool, not a library |
-| `portage-cli` | 0.1.0 | The `em` binary | Depends on everything above |
+| `portage-cli` | 0.1.0 | The `em` binary | Unpublished binary crate |
 
 ## Per-crate public API
 
-### `gentoo-interner` (v0.3.0)
+### `gentoo-interner` (v0.3.1)
 
 String interning foundation. Default backend is **papaya** (concurrent
 hash map); `lasso` and `symbol-table` backends available as feature flags.
@@ -73,7 +77,7 @@ Architecture and release-variant types.
 - `type ExoticKey<I>` — alias for `Interned<I>`
 - `struct Variant<I>` — release media variant (`arch-flavor`): `parse()`, `flavor()`
 
-### `portage-atom` (v0.9.1)
+### `portage-atom` (v0.10.0)
 
 PMS atom parser — the vocabulary every other crate speaks.
 
@@ -95,7 +99,7 @@ PMS atom parser — the vocabulary every other crate speaks.
 - Builder types *(feature: `builder`)*: `CpnBuilder`, `CpvBuilder`, `DepBuilder`, `SlotBuilder`, `UseDepBuilder`, `SuffixBuilder`, `VersionBuilder`
 - Re-exports `gentoo_interner as interner`
 
-### `portage-metadata` (v0.7.1)
+### `portage-metadata` (v0.8.0)
 
 Ebuild metadata cache parser.
 
@@ -109,7 +113,18 @@ Ebuild metadata cache parser.
 - `struct LicenseExpr`, `struct RequiredUseExpr`, `struct RestrictExpr`, `struct SrcUriEntry`
 - Re-exports `portage_atom::interner`
 
-### `portage-atom-resolvo` (v0.7.0)
+### `portage-solver` (v0.1.0)
+
+Solver-agnostic vocabulary shared by both solver bridges.
+
+- `trait Solver` — single abstraction both bridges implement
+- `trait PackageRepository`, `struct VersionFacts`, `struct PackageDeps` — facts fed to a solver
+- `struct UseConfig`, `enum UseFlagState` — per-package resolved USE policy (computed by consumer, not solver)
+- `struct SelectedPackage`, `struct DepEdge`, `struct TargetSpec` — solution/plan vocabulary in Portage terms
+- `enum RequiredUse` — REQUIRED_USE encoding vocabulary
+- Depends only on `portage-atom` and `thiserror`; no pubgrub or resolvo
+
+### `portage-atom-resolvo` (v0.7.1)
 
 SAT-based dependency solver bridge using resolvo.
 
@@ -124,7 +139,7 @@ SAT-based dependency solver bridge using resolvo.
 - `struct InMemoryRepository` — HashMap-backed test impl
 - `fn version_matches()` — PMS version matching
 
-### `portage-atom-pubgrub` (v0.4.1)
+### `portage-atom-pubgrub` (v0.6.0)
 
 PubGrub-based dependency solver bridge — the solver `em` uses by default.
 
@@ -177,6 +192,16 @@ Installed package database reader/writer for `/var/db/pkg`.
 - `struct Collision` — File collision between planned and installed packages
 - `struct MergeSpec` — Specification for registering a new installed package
 - Directory iterators: `AllPackages`, `Category`, `Categories`, `Packages`
+
+### `portage-binpkg` (v0.1.0)
+
+Gentoo binary package (GPKG) read/write per [GLEP 78](https://www.gentoo.org/glep/glep-0078.html).
+
+- `fn write_gpkg()` — GPKG container writer (GNU `tar` + `zstd`)
+- `fn read_metadata()` — read GPKG metadata without full extraction
+- `fn extract_image()` — extract installed image from a GPKG
+- `struct GpkgInput` — input specification for writing
+- Used by `em` for `-b`/`--buildpkg`, `-k`/`--usepkg`, and `-g`/`--getbinpkg`
 
 ### `portage-distfiles` (v0.1.0)
 

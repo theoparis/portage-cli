@@ -9,6 +9,7 @@
 //! The writer shells out to GNU `tar` and `zstd` (so file capabilities, ACLs and
 //! device nodes in the image survive natively), matching Portage's own approach.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod error;
 pub mod gpkg;

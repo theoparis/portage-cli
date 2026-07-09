@@ -44,7 +44,8 @@ pub struct PackageConf {
 enum Entry {
     /// Comment, blank line, or any line we can't parse as a data line.
     /// Reproduced verbatim on serialisation.
-    Opaque(#[allow(dead_code)] Range<usize>),
+    /// A comment, blank, or unparseable line (preserved verbatim in `src`).
+    Opaque(Range<usize>),
     /// A `atom [value ...]` line.
     Data {
         /// Full byte span in `src` including the trailing `\n`.
@@ -298,22 +299,29 @@ fn parse_entries(src: &str) -> Vec<Entry> {
         cursor += end;
     }
 
+    debug_assert!(validate_spans(src, &entries));
     entries
+}
+
+fn validate_spans(src: &str, entries: &[Entry]) -> bool {
+    entries.iter().all(|e| {
+        let span = match e {
+            Entry::Data { span, .. } => span,
+            Entry::Opaque(span) => span,
+        };
+        span.start <= span.end && span.end <= src.len()
+    })
 }
 
 // ---------------------------------------------------------------------------
 
 struct DataLineResult {
-    #[allow(dead_code)]
-    span: Range<usize>,
     atom_span: Range<usize>,
     atom: Dep,
     values: Vec<Token>,
 }
 
 fn data_line(input: &mut Stream<'_>) -> winnow::Result<DataLineResult> {
-    let start = input.current_token_start();
-
     // Leading whitespace (no newlines).
     space0.parse_next(input)?;
 
@@ -356,10 +364,7 @@ fn data_line(input: &mut Stream<'_>) -> winnow::Result<DataLineResult> {
     // Newline or EOF.
     alt(('\n'.void(), winnow::combinator::eof.void())).parse_next(input)?;
 
-    let end = input.current_token_start();
-
     Ok(DataLineResult {
-        span: start..end,
         atom_span: atom_start..atom_end,
         atom,
         values,

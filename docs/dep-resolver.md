@@ -1,5 +1,9 @@
 # Dep Resolver Investigation
 
+> **Status (2026-07):** This investigation is largely complete. The gaps below
+> were closed in 2026-06; see [`architecture.md`](./architecture.md) for the
+> current `em -p` / `em query depgraph` pipeline and known emerge divergences.
+
 ## Goal
 
 Close the gap between `em query depgraph <atom>` and `emerge -p <atom>` output.

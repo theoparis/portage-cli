@@ -50,9 +50,8 @@ All public types must reference the relevant PMS section in their doc comments
 
 ## MSRV
 
-Minimum Supported Rust Version is **1.85** (edition 2024). (This crate is
-foundational and supports the lower MSRV; see root AGENTS.md for the
-per-crate split and confirmation pass details.)
+MSRV follows the workspace floor (**1.95**, `rust-version.workspace = true` in
+`Cargo.toml`). See root [`AGENTS.md`](../AGENTS.md).
 CI tests against both stable and MSRV. Do not use features that require a newer
 version without updating `rust-version` in `Cargo.toml` and the CI matrix.
 
