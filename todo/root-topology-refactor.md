@@ -938,21 +938,92 @@ stage3, no host contamination):
 
 ## Verification (outstanding)
 
-- 🔴 **New: pre-flight dependency check false-positive on a self-referential/
-  sibling BDEPEND — blocks the real riscv64 crossdev `--setup` toolchain
-  build.** Found 2026-07-10 running the real (non-`-p`) `--setup` in the
+- 🔴 **Pre-flight dependency check failure — real, pre-existing, root cause
+  narrowed to a duplicate/misordered plan entry in `install_order`, not yet
+  fixed.** Found 2026-07-10 running the real (non-`-p`) `--setup` in the
   `aarch64-20260618T101350Z` sandbox: `dev-perl/Digest-HMAC-1.50.0 needs:
   >=virtual/perl-Digest-MD5-2.0.0, >=virtual/perl-Digest-SHA-1.0.0` and
   `dev-vcs/git-9999-r3 needs: >=dev-vcs/git-1.8.2.1[curl],
-  app-text/asciidoc` — reproduces identically on a fully clean target with
-  no `--ex-pkg` involved (isolated from the hand-edit-survival work, not
-  caused by it). Surfaced via `app-text/asciidoc` (a doc-build BDEPEND of
-  `sys-devel/binutils`) pulling in a perl+git closure; not yet root-caused
-  whether this is `preflight.rs`'s check not recognizing an atom's own
-  earlier-in-plan `virtual/*` provider, or a genuine self-dependency
-  (`dev-vcs/git` depending on itself) that needs special-casing. Not
-  investigated further this session — next concrete blocker before the
-  real riscv64 stage1/toolchain build can complete.
+  app-text/asciidoc`. Surfaced via `app-text/asciidoc` (a doc-build BDEPEND
+  of `sys-devel/binutils`) pulling in a perl+git closure.
+  - **Confirmed pre-existing, not a session regression** — user asked
+    directly ("you are telling me that setup is failing on normal usage
+    now?"). Inference alone (no session commit touches `preflight.rs`/
+    `portage-atom-pubgrub`, confirmed via `git log 71ff3bf..HEAD --
+    portage-cli/src/preflight.rs portage-atom-pubgrub/src/` returning
+    nothing) wasn't good enough — verified empirically. Built `65e91bf`
+    (the commit on `origin/master` before this session's first push) in a
+    sibling worktree, swapped it into the *same* sandbox (old `--cross`/
+    `-t` flags, its old on-disk-symlink overlay, not this session's alias
+    mechanism), ran the identical real `--setup`: byte-for-byte identical
+    failure. Worktree removed, sandbox binary/config restored to current
+    `em` afterward.
+  - **False lead, corrected**: `-p --jobs 4 --keep-going` appeared to
+    "succeed" (no error) right after the real run failed with plain
+    defaults, and was briefly taken as "the flags fix it." Wrong —
+    `emerge.rs:267`'s `if cli.pretend { return ...; }` returns *before*
+    `preflight::check` is ever called (`emerge.rs:298`), so **no `-p` run
+    has ever exercised this check at all**, regardless of flags. The real
+    (non-`-p`) run fails identically every time, with or without
+    `--jobs`/`--keep-going`, on both today's code and the `65e91bf`
+    baseline. This is itself a separate, real gap — see the `-p`/`-a`
+    depgraph item just below.
+  - **Root cause, narrowed via the full untruncated plan output** (`em
+    --prefix /opt/xp --target riscv64-unknown-linux-gnu crossdev --setup`,
+    no `-p`, captured whole, only 38 lines): `dev-perl/Digest-HMAC-1.50.0`
+    appears **twice** in the plan (once before `virtual/perl-Digest-MD5`/
+    `Digest-SHA`, once correctly after them); `virtual/perl-Digest-MD5`/
+    `Digest-SHA` themselves are also each listed twice. `preflight::check`
+    is a strictly sequential scan (`for planned in plan`, checking each
+    entry only against what's been "recorded" from *earlier* entries) — it
+    is correctly reporting that the *first* occurrence isn't satisfied by
+    what precedes it; the second, later, correctly-placed occurrence
+    doesn't change that. So the bug is upstream of `preflight.rs`: the
+    installed order (`PortagePackage::install_order`,
+    `portage-atom-pubgrub/src/graph.rs:149`) or the plan-building pipeline
+    around it (`query/depgraph/mod.rs`'s `order`/`full_order`/
+    `bdepend_trim` handling, ~line 640-740) is emitting the same package
+    twice at two different positions instead of once, correctly placed.
+    `preflight.rs` itself looks sound for what it claims to do (a
+    sequential growing-availability scan matching its own doc comment); the
+    user's "possibly redundant" framing may still be right in spirit — if
+    `install_order` genuinely guaranteed a valid, deduplicated topological
+    order (which is what it's *supposed* to do per its own doc comment),
+    this check should structurally never fire, making it a pure guard rail
+    around a solver invariant rather than something doing its own
+    independent work.
+  - **Next hypothesis to check (not yet verified)**: user's own guess —
+    "preflight doesn't differentiate between host and target" — worth
+    checking first. `check()`'s own DEPEND branch *does* switch on
+    `planned.merge_root` (Host → checked against `bdepend_avail`/BROOT,
+    Target → `depend_avail`), but BDEPEND is always checked against the
+    same `bdepend_avail` regardless of `merge_root`, and it's not yet
+    confirmed whether the two duplicate `Digest-HMAC`/`Digest-MD5`/
+    `Digest-SHA` occurrences differ in `merge_root` (one Host-routed, one
+    Target-routed — a legitimate "build once for host, once for target"
+    case whose *ordering/interleaving* is what's actually broken) or are
+    exact duplicates of the identical `(pkg, merge_root)` (a plain
+    dedup bug in `install_order` with nothing to do with Host/Target at
+    all). Check `full_order`'s two entries for `dev-perl/Digest-HMAC`
+    directly (their `MergeRoot` field) before going further into
+    `graph.rs`'s Tarjan/condensation ordering logic.
+  - Not fixed this session — next concrete blocker before the real riscv64
+    stage1/toolchain build can complete.
+- 🔴 **New: `em crossdev --setup -p`/`-a` should show the full depgraph
+  (including preflight validation), not just the config-init preview.**
+  User: "setup -p and -a should provide the depgraph not just the init
+  info." Concretely: `emerge.rs`'s `if cli.pretend { return ...; }`
+  (line 267) returns before `preflight::check` (line 298) ever runs, so a
+  `-p` preview currently can never reveal a plan that would fail preflight
+  during a real run — exactly what made the false "the flags fix it" lead
+  above look plausible for a moment. Likely fix shape (not yet designed in
+  detail): run `preflight::check` — and surface its result — before the
+  pretend-early-return, not just after it, so `-p`/`-a` both show whether
+  the plan is preflight-clean as part of the normal preview output, the
+  same way the merge plan itself is already shown under `-p`. Needs care:
+  confirm this doesn't change behavior for the `--nodeps` case (which
+  currently skips `preflight::check` entirely, deliberately, per
+  `emerge.rs`'s existing comment).
 - 🔴 **Re-derive "stage1 complete" — accepted 2026-07-09, next up.** From a
   clean `--jobs 1` run of the 4 stragglers (bzip2, xz-utils, gettext×2), not
   the VDB spot check (`session-status-2026-07-05-needs-review.md`).
