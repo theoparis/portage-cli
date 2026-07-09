@@ -101,7 +101,7 @@ impl PortageDependencyProvider {
                             if !seen.insert(dp) {
                                 continue;
                             }
-                            if let Some(vdata) = self.packages.get(dp) {
+                            if let Some(vdata) = self.package_data(dp) {
                                 for vver in vdata.versions.values() {
                                     for (idp, idvs, _) in vver.by_class.iter().flatten() {
                                         work.push((idp, idvs));

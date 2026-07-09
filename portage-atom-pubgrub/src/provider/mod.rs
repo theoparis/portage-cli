@@ -189,7 +189,16 @@ pub struct UseFlagRequirement {
 /// Pre-computes all dependency information at construction time, then serves
 /// it to the PubGrub solver.
 pub struct PortageDependencyProvider {
-    pub(crate) packages: HashMap<PortagePackage, PackageData>,
+    /// Keyed by the `Target`-flavored identity only — a `Host`-flavored
+    /// package's data lives under its alias (see `host_aliases`). Private
+    /// (not even `pub(crate)`) so `package_data()`/`package_data_key()` are
+    /// the only way to look this up outside `provider`'s own submodules — a
+    /// raw `.get()` on a possibly-Host-flavored key (e.g. anything sourced
+    /// from a solved `SelectedDependencies`) silently misses instead of
+    /// resolving the alias. `dependency_graph` (`graph.rs`) forgot this once
+    /// (`208c818`); the same bug class was later found in `validate.rs`/
+    /// `post_solve.rs`/this module's own public API too.
+    packages: HashMap<PortagePackage, PackageData>,
     pub(crate) installed: HashMap<PortagePackage, (Version, InstalledPolicy)>,
     pub(crate) installed_cpns: HashSet<Cpn>,
     pub(crate) installed_use: HashMap<PortagePackage, Vec<Interned<DefaultInterner>>>,
@@ -810,8 +819,7 @@ impl PortageDependencyProvider {
 
     /// Return all versions registered for a given package, sorted ascending.
     pub fn versions_for_pkg(&self, pkg: &PortagePackage) -> Vec<Version> {
-        self.packages
-            .get(pkg)
+        self.package_data(pkg)
             .map(|d| d.versions.keys().cloned().collect())
             .unwrap_or_default()
     }
@@ -823,7 +831,7 @@ impl PortageDependencyProvider {
         pkg: &PortagePackage,
         ver: &Version,
     ) -> Option<Vec<(PortagePackage, PortageVersionSet)>> {
-        let data = self.packages.get(pkg)?;
+        let data = self.package_data(pkg)?;
         let vd = data.versions.get(ver)?;
         if let Dependencies::Available(reqs) = &vd.merged {
             Some(reqs.iter().cloned().collect::<Vec<_>>())
@@ -1018,7 +1026,7 @@ impl PortageDependencyProvider {
     /// with the newer installed version wins (matching emerge's `dep_zapdeps`),
     /// avoiding a needless `[NS]` of the first-listed provider's newest slot.
     pub(crate) fn branch_best_installed(&self, pkg: &PortagePackage) -> Option<Version> {
-        let data = self.packages.get(pkg)?;
+        let data = self.package_data(pkg)?;
         data.versions
             .values()
             .filter_map(|vd| self.branch_installed_ver(vd))

@@ -205,7 +205,7 @@ impl PortageDependencyProvider {
 
             // -- main solution packages --
             for (pkg, ver) in solution.iter() {
-                let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(ver)) else {
+                let Some(vd) = self.package_data(pkg).and_then(|d| d.versions.get(ver)) else {
                     continue;
                 };
                 // "Installed" for parent-flag evaluation means *selected at its
@@ -233,8 +233,7 @@ impl PortageDependencyProvider {
                 .filter(|(pkg, _)| self.installed.contains_key(pkg))
                 .filter(|(pkg, _)| !upgrade_to.contains_key(*pkg))
                 .filter_map(|(pkg, (inst_ver, _, _, _))| {
-                    self.packages
-                        .get(pkg)
+                    self.package_data(pkg)
                         .and_then(|d| d.versions.keys().filter(|v| v > &inst_ver).max())
                         .map(|new_ver| (pkg.clone(), new_ver.clone()))
                 })
@@ -246,8 +245,7 @@ impl PortageDependencyProvider {
                 // Expand the newer version's USE dep constraints. The "parent" is
                 // the upgraded package itself at its new version.
                 let Some(vd) = self
-                    .packages
-                    .get(&pkg)
+                    .package_data(&pkg)
                     .and_then(|d| d.versions.get(&new_ver))
                 else {
                     continue;
@@ -342,7 +340,7 @@ impl PortageDependencyProvider {
         flag: Interned<DefaultInterner>,
         dep_default: Option<UseDefault>,
     ) -> bool {
-        let vd = self.packages.get(pkg).and_then(|d| d.versions.get(ver));
+        let vd = self.package_data(pkg).and_then(|d| d.versions.get(ver));
         let in_iuse = vd.is_some_and(|v| v.iuse.contains(&flag));
         if !in_iuse {
             return matches!(dep_default, Some(UseDefault::Enabled));

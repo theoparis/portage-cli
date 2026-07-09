@@ -51,7 +51,7 @@ impl PortageDependencyProvider {
     ) -> Vec<Error> {
         let mut errors = Vec::new();
         for (pkg, version) in solution.iter() {
-            let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
+            let Some(vd) = self.package_data(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
             };
             for constraint in &vd.use_deps {
@@ -64,8 +64,7 @@ impl PortageDependencyProvider {
                 };
 
                 let target_iuse = self
-                    .packages
-                    .get(target_pkg)
+                    .package_data(target_pkg)
                     .and_then(|d| d.versions.get(target_ver))
                     .map(|v| v.iuse.as_slice())
                     .unwrap_or(&[]);
@@ -148,7 +147,7 @@ impl PortageDependencyProvider {
     ) -> Vec<Error> {
         let mut errors = Vec::new();
         for (pkg, version) in solution.iter() {
-            let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
+            let Some(vd) = self.package_data(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
             };
             for constraint in &vd.repo_constraints {
@@ -160,8 +159,7 @@ impl PortageDependencyProvider {
                     continue;
                 };
                 let target_repo = self
-                    .packages
-                    .get(target_pkg_key)
+                    .package_data(target_pkg_key)
                     .and_then(|d| d.versions.get(target_ver))
                     .and_then(|v| v.repo.as_ref());
                 match target_repo {
@@ -205,7 +203,7 @@ impl PortageDependencyProvider {
         // side matters for e.g. `systemd[resolvconf]` blocking an installed
         // net-dns/openresolv that nothing pulls into the solve.
         for (pkg, version) in solution.iter() {
-            let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
+            let Some(vd) = self.package_data(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
             };
             for blocker in &vd.blockers {
@@ -320,7 +318,7 @@ impl PortageDependencyProvider {
     ) -> Vec<SlotOperatorBinding> {
         let mut bindings = Vec::new();
         for (pkg, version) in solution.iter() {
-            let Some(vd) = self.packages.get(pkg).and_then(|d| d.versions.get(version)) else {
+            let Some(vd) = self.package_data(pkg).and_then(|d| d.versions.get(version)) else {
                 continue;
             };
             for op_dep in &vd.slot_operator_deps {
@@ -594,6 +592,75 @@ mod tests {
         assert!(
             !conflicts.is_empty(),
             "should detect blocker conflict between openssl and libressl"
+        );
+    }
+
+    /// Regression test for the same bug class as `graph.rs`'s
+    /// `host_package_bdepend_on_another_host_package_orders_correctly`
+    /// (`208c818`'s alias-miss bug, found again in `validate.rs`): a
+    /// `Host`-flavored solved package's own data lives under its
+    /// `Target`-flavored alias, so a raw `self.packages.get(pkg)` in
+    /// `check_blockers`'s main loop silently missed it — dropping every
+    /// blocker a Host-routed package declares, regardless of what it
+    /// targets. `dev-build/user` here is scheduled as an unsatisfied Host
+    /// BDEPEND (mirroring the `graph.rs` test's setup) and blocks
+    /// `dev-build/blocked`, which is separately pulled in as a normal
+    /// Target-side RDEPEND — so both are genuinely present in the solution
+    /// and the conflict must be detected.
+    #[test]
+    fn check_blockers_fires_from_a_host_routed_packages_own_blocker() {
+        let mut repo = InMemoryRepository::new();
+        let empty = || PackageDeps {
+            depend: vec![],
+            rdepend: vec![],
+            bdepend: vec![],
+            pdepend: vec![],
+            idepend: vec![],
+        };
+
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/user-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                depend: vec![DepEntry::Atom(Dep::parse("!dev-build/blocked").unwrap())],
+                ..empty()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-build/blocked-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            empty(),
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+            Some(Interned::intern("0")),
+            None,
+            PackageDeps {
+                bdepend: vec![DepEntry::Atom(Dep::parse("dev-build/user").unwrap())],
+                rdepend: vec![DepEntry::Atom(Dep::parse("dev-build/blocked").unwrap())],
+                ..empty()
+            },
+        );
+
+        let mut provider = PortageDependencyProvider::new(repo);
+        provider.set_cross_active(true);
+        provider.set_with_bdeps(true);
+        // No `add_host_installed`: the host lacks `user`, so it schedules as
+        // an unsatisfied Host BDEPEND — a genuinely Host-flavored solved
+        // package whose own `!dev-build/blocked` declaration must still be
+        // read via the alias.
+
+        let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+        let solution = provider
+            .resolve_targets(vec![(a, PortageVersionSet::any())])
+            .unwrap();
+
+        let conflicts = provider.check_blockers(&solution);
+        assert!(
+            !conflicts.is_empty(),
+            "Host-routed user's own blocker on blocked must be detected"
         );
     }
 
