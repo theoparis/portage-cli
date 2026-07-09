@@ -859,9 +859,100 @@ stage3, no host contamination):
     correctly flags all three. Full workspace `fmt`/clippy/test clean.
   - Added an explicit "don't hand-edit the generated config" note to
     `docs/crossdev.md`'s gotchas covering this.
+- ✅ **`--setup`'s implied config-laydown no longer clobbers hand edits made
+  after an earlier `--init-target`.** User: "we should allow the hand edits
+  to survive between init and setup." Real tension surfaced before landing
+  this: the just-shipped drift-refresh behaviour (always resync) is also
+  exactly what makes `--setup --ex-pkg X`/`--ex-gdb` work against an
+  already-initialized target, and file content alone can't distinguish "the
+  user hand-edited this" from "`--ex-pkg` legitimately changed what should
+  be here." Presented the trade-off and asked; user picked the
+  straightforward policy split over a fingerprinting scheme or a
+  file-by-file split.
+  - **Design**: new `config_plan::RefreshPolicy` (`Sync` — always reconcile
+    to the freshly-computed state, what explicit `--init-target` uses;
+    `FillGapsOnly` — only create what's missing, anything already present
+    (hand-edited or not) is left alone, what `--setup`'s own implied
+    config-laydown step now uses). `ConfigEntry::present()` is the
+    existence-only check `FillGapsOnly` stops at, per entry kind. `apply()`
+    (the top-level plan function) and `apply_now()` now skip entries whose
+    `change()` is `Unchanged` in the final write loop, not just the printed
+    summary — a real correctness requirement for `FillGapsOnly` (previously
+    every entry was unconditionally re-applied at the end regardless of
+    what `change()` said, harmless under `Sync`'s always-identical-content
+    "Unchanged", but would have defeated `FillGapsOnly` entirely).
+  - **Accepted, documented trade-off**: `--setup --ex-pkg X`/`--ex-gdb`
+    against an *already-initialized* target does not add `X` — run
+    `--init-target --ex-pkg X` (`Sync`) first. A fresh target being
+    `--setup` directly still gets everything written correctly (nothing
+    exists yet, so `FillGapsOnly` creates it all). Documented in both the
+    `RefreshPolicy` enum's doc comment and `docs/crossdev.md`.
+  - New tests: `fill_gaps_only_never_touches_an_existing_file`,
+    `fill_gaps_only_still_creates_missing_files`,
+    `fill_gaps_only_never_touches_an_existing_alias_even_with_a_different_packages_line`.
+  - Live-verified in the `aarch64-20260618T101350Z` sandbox end to end: (1)
+    `--init-target` (clean baseline); (2) hand-edited `make.conf` (added a
+    var) and the alias-packages line (added a package by hand); (3) `--setup
+    -p` showed no config-changes preview at all and both hand edits survived
+    on disk; (4) ran the **real** (non-`-p`) `--setup` — both hand edits
+    still survived after actual execution, confirming the fix holds under
+    `apply()`'s real write path, not just the diff/preview path; (5)
+    confirmed the accepted trade-off directly: `--setup --ex-gdb` against
+    this already-initialized target correctly did *not* add `gdb` to the
+    alias; (6) a subsequent explicit `--init-target` (no extras) correctly
+    reverted both hand edits back to the clean computed state, confirming
+    `Sync` vs `FillGapsOnly` are cleanly distinguished by caller.
+  - **Found a real, pre-existing, unrelated bug while doing (4)**: the real
+    `--setup` run failed at the pre-flight dependency check —
+    `dev-perl/Digest-HMAC-1.50.0 needs: >=virtual/perl-Digest-MD5-2.0.0,
+    >=virtual/perl-Digest-SHA-1.0.0` and `dev-vcs/git-9999-r3 needs:
+    >=dev-vcs/git-1.8.2.1[curl], app-text/asciidoc` — both look like
+    self-referential/ordering issues (a package's own BDEPEND pointing at
+    itself, or at sibling `virtual/*` packages providing the exact thing
+    just listed earlier in the same plan, not being recognized as satisfied
+    by an earlier plan entry). Confirmed this reproduces identically on a
+    *fully clean* target (no `--ex-pkg` involved at all) — it's a genuine,
+    pre-existing preflight/dependency-graph gap surfaced by `app-text/
+    asciidoc`'s doc-build closure (a BDEPEND of `sys-devel/binutils`'s doc
+    USE flag, pulling in a perl+git chain), **not** anything caused by this
+    session's crossdev work. Not investigated further — flagged here as a
+    new, separate item for a future session. This is what actually blocked
+    getting the real riscv64 toolchain bootstrap to completion this
+    session (the "run the real --setup, ~20 min" goal from earlier).
+  - **Also fixed while investigating**: `dev-vcs/git` was a poor choice of
+    example package for `--ex-pkg` in this session's docs/tests (used
+    earlier for the drift/hand-edit testing) — user: "dev-vcs/git makes no
+    sense as --ex-pkg" — precisely because it's already an ordinary
+    transitive dependency of things in the toolchain's own build closure
+    (confirmed by the bug above), so using it as the `--ex-pkg` example
+    conflated "did --ex-pkg do this" with "was this already going to be
+    pulled in anyway." Tried `dev-debug/strace` next (better — a genuine
+    standalone host-arch tool), but the user pointed at the real intended
+    example instead: `sys-devel/rust-std` — its own `::gentoo` ebuild
+    `DESCRIPTION` literally reads "Rust standard library, standalone (for
+    crossdev)", confirmed by reading the ebuild directly. This is also the
+    concrete package the user meant much earlier in the session ("if we want
+    to --ex-pkg the clang wrappers or rust-std we need to autounmask them
+    properly"). Replaced in `docs/crossdev.md` and all of `mod.rs`'s
+    `--ex-pkg` tests.
 
 ## Verification (outstanding)
 
+- 🔴 **New: pre-flight dependency check false-positive on a self-referential/
+  sibling BDEPEND — blocks the real riscv64 crossdev `--setup` toolchain
+  build.** Found 2026-07-10 running the real (non-`-p`) `--setup` in the
+  `aarch64-20260618T101350Z` sandbox: `dev-perl/Digest-HMAC-1.50.0 needs:
+  >=virtual/perl-Digest-MD5-2.0.0, >=virtual/perl-Digest-SHA-1.0.0` and
+  `dev-vcs/git-9999-r3 needs: >=dev-vcs/git-1.8.2.1[curl],
+  app-text/asciidoc` — reproduces identically on a fully clean target with
+  no `--ex-pkg` involved (isolated from the hand-edit-survival work, not
+  caused by it). Surfaced via `app-text/asciidoc` (a doc-build BDEPEND of
+  `sys-devel/binutils`) pulling in a perl+git closure; not yet root-caused
+  whether this is `preflight.rs`'s check not recognizing an atom's own
+  earlier-in-plan `virtual/*` provider, or a genuine self-dependency
+  (`dev-vcs/git` depending on itself) that needs special-casing. Not
+  investigated further this session — next concrete blocker before the
+  real riscv64 stage1/toolchain build can complete.
 - 🔴 **Re-derive "stage1 complete" — accepted 2026-07-09, next up.** From a
   clean `--jobs 1` run of the 4 stragglers (bzip2, xz-utils, gettext×2), not
   the VDB spot check (`session-status-2026-07-05-needs-review.md`).

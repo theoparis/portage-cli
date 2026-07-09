@@ -63,6 +63,25 @@ enum Change {
     Unchanged,
 }
 
+/// How aggressively to reconcile a [`ConfigEntry`] plan against what's
+/// already on disk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RefreshPolicy {
+    /// Always regenerate to match the freshly-computed desired state.
+    /// Explicit `--init-target`: an intentional "make this exactly right"
+    /// action, including picking up a changed package set or `--ex-pkg`
+    /// selection and re-detecting drift in a hand-edited file.
+    Sync,
+    /// Only create what's missing; anything already on disk — hand-edited
+    /// or not — is left untouched, whatever its content. `--setup`'s own
+    /// implied config-laydown step: a hand edit made between an earlier
+    /// explicit `--init-target` and this `--setup` must survive. Trade-off:
+    /// `--setup --ex-pkg X` against an *already-initialized* target won't
+    /// pick up the new extra either — run `--init-target --ex-pkg X`
+    /// (`Sync`) first for that.
+    FillGapsOnly,
+}
+
 impl ConfigEntry {
     fn path(&self) -> &Utf8Path {
         match self {
@@ -74,7 +93,26 @@ impl ConfigEntry {
         }
     }
 
-    fn change(&self) -> Change {
+    /// Whether something is already at this entry's path/link, regardless of
+    /// content — the check [`RefreshPolicy::FillGapsOnly`] stops at.
+    fn present(&self) -> bool {
+        match self {
+            ConfigEntry::File { path, .. }
+            | ConfigEntry::CreateOnly { path, .. }
+            | ConfigEntry::Alias { path, .. } => path.exists(),
+            ConfigEntry::Dir { path } => path.is_dir(),
+            ConfigEntry::Symlink { link, .. } => std::fs::symlink_metadata(link).is_ok(),
+        }
+    }
+
+    fn change(&self, policy: RefreshPolicy) -> Change {
+        if policy == RefreshPolicy::FillGapsOnly {
+            return if self.present() {
+                Change::Unchanged
+            } else {
+                Change::Create
+            };
+        }
         match self {
             ConfigEntry::File { path, desired } => match std::fs::read_to_string(path) {
                 Ok(existing) if &existing == desired => Change::Unchanged,
@@ -157,13 +195,16 @@ impl ConfigEntry {
     }
 }
 
-/// Apply every entry unconditionally, no diff/preview/confirm — for a caller
-/// that is already externally gated by `!globals.pretend` (the native
-/// toolchain `--setup` path, which has its own, separately-established
-/// pretend handling and doesn't need its own preview here).
+/// Apply every entry unconditionally (`RefreshPolicy::Sync`, no
+/// diff/preview/confirm) — for a caller that is already externally gated by
+/// `!globals.pretend` (the native toolchain `--setup` path, which has its
+/// own, separately-established pretend handling and doesn't need its own
+/// preview here).
 pub(super) fn apply_now(entries: &[ConfigEntry]) -> Result<()> {
     for e in entries {
-        e.apply()?;
+        if !matches!(e.change(RefreshPolicy::Sync), Change::Unchanged) {
+            e.apply()?;
+        }
     }
     Ok(())
 }
@@ -189,17 +230,23 @@ impl Outcome {
     }
 }
 
-/// Diff `entries` against disk and, per `globals.pretend`/`globals.ask`,
-/// preview, confirm, or apply them.
-pub(super) fn apply(entries: Vec<ConfigEntry>, globals: &Cli) -> Result<Outcome> {
+/// Diff `entries` against disk under `policy` and, per
+/// `globals.pretend`/`globals.ask`, preview, confirm, or apply them.
+pub(super) fn apply(
+    entries: Vec<ConfigEntry>,
+    globals: &Cli,
+    policy: RefreshPolicy,
+) -> Result<Outcome> {
+    let mut to_apply: Vec<&ConfigEntry> = Vec::new();
     let mut changed: Vec<(Utf8PathBuf, &'static str)> = Vec::new();
     for e in &entries {
-        let verb = match e.change() {
+        let verb = match e.change(policy) {
             Change::Create => "create",
             Change::Update => "update",
             Change::Unchanged => continue,
         };
         changed.push((e.path().to_owned(), verb));
+        to_apply.push(e);
     }
 
     if changed.is_empty() {
@@ -220,7 +267,7 @@ pub(super) fn apply(entries: Vec<ConfigEntry>, globals: &Cli) -> Result<Outcome>
         return Ok(Outcome::Declined);
     }
 
-    for e in &entries {
+    for e in to_apply {
         e.apply()?;
     }
     Ok(Outcome::Applied)
@@ -259,7 +306,7 @@ mod tests {
             path: path.clone(),
             desired: "CHOST=riscv64-unknown-linux-gnu\n".to_owned(),
         }];
-        let outcome = apply(entries, &cli(&["-p"])).unwrap();
+        let outcome = apply(entries, &cli(&["-p"]), RefreshPolicy::Sync).unwrap();
         assert!(matches!(outcome, Outcome::Previewed));
         assert!(!path.exists(), "pretend must not write {path}");
     }
@@ -274,7 +321,7 @@ mod tests {
             path: path.clone(),
             desired: desired.clone(),
         }];
-        let outcome = apply(entries, &cli(&[])).unwrap();
+        let outcome = apply(entries, &cli(&[]), RefreshPolicy::Sync).unwrap();
         assert!(matches!(outcome, Outcome::Applied));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), desired);
     }
@@ -293,7 +340,7 @@ mod tests {
             path: path.clone(),
             desired,
         }];
-        let outcome = apply(entries, &cli(&[])).unwrap();
+        let outcome = apply(entries, &cli(&[]), RefreshPolicy::Sync).unwrap();
         assert!(matches!(outcome, Outcome::NothingToApply));
         assert!(outcome.applied());
     }
@@ -309,7 +356,7 @@ mod tests {
             path: path.clone(),
             desired: "[gentoo]\nlocation = /var/db/repos/gentoo\n".to_owned(),
         }];
-        apply(entries, &cli(&[])).unwrap();
+        apply(entries, &cli(&[]), RefreshPolicy::Sync).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "[gentoo]\nlocation = /somewhere/else\n"
@@ -322,7 +369,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().join("var/db/pkg")).unwrap();
         assert!(!path.is_dir());
-        apply(vec![ConfigEntry::Dir { path: path.clone() }], &cli(&[])).unwrap();
+        apply(
+            vec![ConfigEntry::Dir { path: path.clone() }],
+            &cli(&[]),
+            RefreshPolicy::Sync,
+        )
+        .unwrap();
         assert!(path.is_dir());
     }
 
@@ -339,7 +391,7 @@ mod tests {
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils".to_owned(),
         }];
-        let outcome = apply(entries, &cli(&[])).unwrap();
+        let outcome = apply(entries, &cli(&[]), RefreshPolicy::Sync).unwrap();
         assert!(matches!(outcome, Outcome::NothingToApply));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
     }
@@ -367,12 +419,71 @@ mod tests {
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils".to_owned(),
         }];
-        let outcome = apply(entries, &cli(&[])).unwrap();
+        let outcome = apply(entries, &cli(&[]), RefreshPolicy::Sync).unwrap();
         assert!(matches!(outcome, Outcome::Applied));
         assert!(
             !std::fs::read_to_string(&path)
                 .unwrap()
                 .contains("dev-vcs/git")
         );
+    }
+
+    /// `FillGapsOnly` (`--setup`'s own implied config-laydown step): an
+    /// existing file is left completely alone, no matter how far its
+    /// content has drifted from `desired` — a hand edit made between an
+    /// earlier `--init-target` and this `--setup` must survive.
+    #[test]
+    fn fill_gaps_only_never_touches_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("make.conf")).unwrap();
+        std::fs::write(&path, "CHOST=hand-edited\n").unwrap();
+        let entries = vec![ConfigEntry::File {
+            path: path.clone(),
+            desired: "CHOST=riscv64-unknown-linux-gnu\n".to_owned(),
+        }];
+        let outcome = apply(entries, &cli(&[]), RefreshPolicy::FillGapsOnly).unwrap();
+        assert!(matches!(outcome, Outcome::NothingToApply));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "CHOST=hand-edited\n"
+        );
+    }
+
+    /// `FillGapsOnly` still creates a file that's genuinely missing — a
+    /// fresh target being `--setup` directly (no prior `--init-target`)
+    /// still gets fully written.
+    #[test]
+    fn fill_gaps_only_still_creates_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("make.conf")).unwrap();
+        let desired = "CHOST=riscv64-unknown-linux-gnu\n".to_owned();
+        let entries = vec![ConfigEntry::File {
+            path: path.clone(),
+            desired: desired.clone(),
+        }];
+        let outcome = apply(entries, &cli(&[]), RefreshPolicy::FillGapsOnly).unwrap();
+        assert!(matches!(outcome, Outcome::Applied));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), desired);
+    }
+
+    /// `FillGapsOnly` also leaves an existing `Alias` entry alone even when
+    /// its `packages_line` no longer matches what this run would compute
+    /// (e.g. a different `--ex-pkg` selection than an earlier explicit
+    /// `--init-target` used) — the accepted trade-off for hand edits
+    /// surviving `--setup`.
+    #[test]
+    fn fill_gaps_only_never_touches_an_existing_alias_even_with_a_different_packages_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("crossdev.conf")).unwrap();
+        let existing = alias_body("cross-riscv64-unknown-linux-gnu", "sys-devel/binutils");
+        std::fs::write(&path, &existing).unwrap();
+        let entries = vec![ConfigEntry::Alias {
+            path: path.clone(),
+            category: "cross-riscv64-unknown-linux-gnu".to_owned(),
+            packages_line: "sys-devel/binutils dev-vcs/git".to_owned(),
+        }];
+        let outcome = apply(entries, &cli(&[]), RefreshPolicy::FillGapsOnly).unwrap();
+        assert!(matches!(outcome, Outcome::NothingToApply));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
     }
 }

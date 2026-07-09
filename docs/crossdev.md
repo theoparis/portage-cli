@@ -196,12 +196,23 @@ that omits the flag drops the extra again, exactly like real crossdev.
 # Build a cross-gdb (dev-debug/gdb) alongside the toolchain:
 em --target riscv64-unknown-linux-gnu crossdev --init-target --ex-gdb
 
-# Any other host-arch extra:
-em --target riscv64-unknown-linux-gnu crossdev --init-target --ex-pkg dev-vcs/git
+# The Rust standard library for this target (sys-devel/rust-std — its own
+# ::gentoo DESCRIPTION literally says "standalone (for crossdev)"), needed
+# to cross-compile Rust code targeting the tuple:
+em --target riscv64-unknown-linux-gnu crossdev --init-target --ex-pkg sys-devel/rust-std
 
 # Multiple extras, repeatable:
-em --target riscv64-unknown-linux-gnu crossdev --init-target --ex-gdb --ex-pkg dev-vcs/git
+em --target riscv64-unknown-linux-gnu crossdev --init-target --ex-gdb --ex-pkg sys-devel/rust-std
 ```
+
+Pick a genuine standalone host-arch tool for `--ex-pkg` — something that
+isn't already an ordinary transitive dependency of anything in the
+toolchain's own build closure (`sys-devel/rust-std`, like `dev-debug/gdb`,
+is built purpose-made for this — real crossdev's own `--ex-gdb` precedent).
+A widely-depended-on package (e.g. `dev-vcs/git`) is a poor choice: it's
+liable to already be pulled in transitively by something else in the
+closure (e.g. a doc-build BDEPEND), which only creates confusion about what
+`--ex-pkg` actually added.
 
 After that, the extra resolves like any other cross-category package — no
 `--target` needed:

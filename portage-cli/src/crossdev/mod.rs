@@ -132,7 +132,7 @@ pub async fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
         return show_target_cfg(&target, globals, &extras);
     }
     if args.init_target {
-        return init_target(&target, globals, &extras);
+        return init_target(&target, globals, &extras, config_plan::RefreshPolicy::Sync);
     }
     if args.setup {
         return setup(&target, globals, args, &extras).await;
@@ -169,7 +169,11 @@ fn ex_pkg_atoms(args: &CrossdevArgs) -> Result<Vec<Cpn>> {
 /// gcc-stage1 → libc → gcc-stage2) — the compiler is not usable until the libc
 /// step lands, so toolchain and stage1 libc are one bootstrap.
 ///
-/// Lays down the FS config (idempotent), then runs each step of the ordered
+/// Lays down the FS config via `init_target`'s `FillGapsOnly` policy — only
+/// creates what's missing, never touches an already-existing file, so a hand
+/// edit made between an earlier explicit `--init-target` and this `--setup`
+/// survives (a fresh target still gets everything written, since nothing
+/// exists yet) — then runs each step of the ordered
 /// [`StagePlan`](stages::StagePlan) through the shared merge path
 /// ([`crate::emerge_atoms`]) — per-step `USE` override + `--nodeps`. With `-p`
 /// each step prints its plan instead of building.
@@ -182,7 +186,18 @@ async fn setup(
     // `init_target` is itself `-p`/`-a`-aware now (see `config_plan`), so
     // this no longer needs its own `!globals.pretend` gate — under `-p` it
     // previews the config-plan changes instead of skipping them silently.
-    init_target(target, globals, extras)?;
+    // `FillGapsOnly`: this is `--setup`'s own *implied* config-laydown step,
+    // not an explicit `--init-target` — only create what's missing, so a
+    // hand edit made between an earlier `--init-target` and this `--setup`
+    // survives. Trade-off: `--setup --ex-pkg X` against an already-
+    // initialized target won't add X either; run `--init-target --ex-pkg X`
+    // first for that (documented in docs/crossdev.md).
+    init_target(
+        target,
+        globals,
+        extras,
+        config_plan::RefreshPolicy::FillGapsOnly,
+    )?;
     // A self-contained `--root DIR` EPREFIX has no host-shared merged-usr
     // skeleton or libs, so the plan needs the same from-scratch treatment as
     // native. `outer_roots()`, not `roots()`: this must stay anchored to the
@@ -723,7 +738,18 @@ fn show_target_cfg(target: &CrossTarget, globals: &Cli, extras: &[Cpn]) -> Resul
 /// additional packages onto the established cross target, beyond
 /// [`CrossTarget::packages`]'s fixed base set — always host-arch, matching
 /// real crossdev's `set_env` treatment of `--ex-pkg`.
-fn init_target(target: &CrossTarget, globals: &Cli, extras: &[Cpn]) -> Result<()> {
+///
+/// `policy` distinguishes the explicit `--init-target` flag (`Sync`: always
+/// reconcile to the freshly-computed state, including re-detecting a hand
+/// edit as drift) from `--setup`'s own implied config-laydown step
+/// (`FillGapsOnly`: only create what's missing, so a hand edit made between
+/// an earlier `--init-target` and this `--setup` survives).
+fn init_target(
+    target: &CrossTarget,
+    globals: &Cli,
+    extras: &[Cpn],
+    policy: config_plan::RefreshPolicy,
+) -> Result<()> {
     // For a retargeted prefix (`--local`/`--prefix`/`--root`) bootstrap it first:
     // `setup::bootstrap` writes the prefix `bashrc` that re-adds `<EROOT>/usr/bin`
     // to the build PATH (the shell sanitiser strips `$HOME` paths, so a `--local`
@@ -767,7 +793,7 @@ fn init_target(target: &CrossTarget, globals: &Cli, extras: &[Cpn]) -> Result<()
         extras,
     ));
 
-    if !config_plan::apply(entries, globals)?.applied() {
+    if !config_plan::apply(entries, globals, policy)?.applied() {
         return Ok(());
     }
 
@@ -1315,9 +1341,9 @@ mod tests {
     #[test]
     fn ex_pkg_atoms_parses_category_pn() {
         let mut args = crossdev_args(false);
-        args.ex_pkg = vec!["dev-vcs/git".to_owned()];
+        args.ex_pkg = vec!["sys-devel/rust-std".to_owned()];
         let atoms = ex_pkg_atoms(&args).unwrap();
-        assert_eq!(atoms, vec![Cpn::new("dev-vcs", "git")]);
+        assert_eq!(atoms, vec![Cpn::new("sys-devel", "rust-std")]);
     }
 
     #[test]
@@ -1336,11 +1362,14 @@ mod tests {
         assert_eq!(atoms, vec![Cpn::new("dev-debug", "gdb")]);
 
         // Combines with explicit --ex-pkg atoms too, in order.
-        args.ex_pkg = vec!["dev-vcs/git".to_owned()];
+        args.ex_pkg = vec!["sys-devel/rust-std".to_owned()];
         let atoms = ex_pkg_atoms(&args).unwrap();
         assert_eq!(
             atoms,
-            vec![Cpn::new("dev-vcs", "git"), Cpn::new("dev-debug", "gdb")]
+            vec![
+                Cpn::new("sys-devel", "rust-std"),
+                Cpn::new("dev-debug", "gdb")
+            ]
         );
     }
 
@@ -1361,18 +1390,18 @@ mod tests {
         let globals = test_cli_at_root(root);
 
         // Missing extra: rejected up front, same shape as a missing base package.
-        let missing = [Cpn::new("dev-vcs", "git")];
+        let missing = [Cpn::new("sys-devel", "rust-std")];
         let err = alias_repo_conf_entry(&globals, &gentoo, &target, &category, &missing)
             .expect_err("missing --ex-pkg source rejected");
-        assert!(format!("{err:#}").contains("dev-vcs/git"));
+        assert!(format!("{err:#}").contains("sys-devel/rust-std"));
 
         // Present: appended to the alias-packages line.
-        std::fs::create_dir_all(gentoo.join("dev-vcs").join("git")).unwrap();
+        std::fs::create_dir_all(gentoo.join("sys-devel").join("rust-std")).unwrap();
         let entry = alias_repo_conf_entry(&globals, &gentoo, &target, &category, &missing).unwrap();
         let config_plan::ConfigEntry::Alias { packages_line, .. } = &entry else {
             panic!("expected an Alias entry");
         };
-        assert!(packages_line.ends_with("dev-vcs/git"));
+        assert!(packages_line.ends_with("sys-devel/rust-std"));
 
         // `cross_env_entries`'s host-ABI/`**`-keyword treatment for extras
         // needs a real `multilib.eclass` (sourced via brush) that a bare
