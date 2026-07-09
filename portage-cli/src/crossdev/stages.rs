@@ -535,7 +535,7 @@ mod tests {
             let packages_set: std::collections::HashSet<(String, String)> = t
                 .packages()
                 .into_iter()
-                .map(|(c, p)| (c.to_string(), p.to_string()))
+                .map(|(c, p, _)| (c.to_string(), p.to_string()))
                 .collect();
             for step in &plan.steps {
                 for atom in &step.atoms {

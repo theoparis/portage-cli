@@ -576,6 +576,54 @@ stage3, no host contamination):
     necessary" preview semantics), not a bug.
   - Not yet attempted: the actual (non-`-p`) stage1 build — a long,
     real compile, natural next step but its own separate pass.
+- ✅ **Host-arch classification made robust, not a hardcoded name list.**
+  The `**`-keyword fix above shipped with `is_target_package(pkg: &str)
+  -> bool` — `!matches!(pkg, "binutils" | "gcc" | "clang-crossdev-wrappers")`
+  — a name list kept separately from `CrossTarget::packages()`, the actual
+  source of the package set. User flagged this directly as "a crossdev
+  limitation we should avoid" (relevant if `--ex-pkg`ing the clang wrappers
+  or a future `rust-std` for LLVM+Rust cross builds) — and it was already a
+  *live* bug, not just a future risk: `("dev-debug", "gdb")` is in the
+  GCC-mode package list but isn't in `is_target_package`'s exclusion set, so
+  `gdb` (which runs on the host to debug target binaries, exactly like
+  binutils/gcc) was silently getting the *target* multilib env block and no
+  `**` keyword entry.
+  - **Fix**: `CrossTarget::packages()` now returns
+    `Vec<(&'static str, &'static str, PackageArch)>` — a new
+    `PackageArch { Host, Target }` enum stated at each package's own push
+    site in `target.rs`, the single place a cross package is declared.
+    `gdb` is now `Host`. Adding a future package (`rust-std`, etc.) forces
+    picking `Host`/`Target` right there — no separate list to remember to
+    update. `is_target_package` removed entirely; `write_cross_env` reads
+    `arch.is_target()` (for `multilib::env_block`'s ABI selection) and
+    `arch == PackageArch::Host` (for the `**` keyword entry) straight off
+    the tuple instead.
+  - All non-classification callers of `.packages()` (`show_target_cfg`,
+    `write_alias_repo_conf`, `alias_packages_line`, and their tests) just
+    destructure and ignore the third field — no behaviour change for them.
+  - Verified: `cargo fmt --check`, `cargo clippy --workspace --exclude
+    portage-bench --tests -- -D warnings`, `cargo test --workspace --exclude
+    portage-bench` all clean; `crossdev::target::tests::
+    riscv_gnu_is_glibc_with_kernel` now asserts `gdb` is `PackageArch::Host`
+    directly (previously only checked glibc/linux-headers presence).
+  - While fixing this, found and fixed two **pre-existing, unrelated**
+    clippy breaks already on `master` before this fix (from the earlier
+    `--prefix` BDEPEND-weave commit): `clippy::err_expect` in
+    `write_alias_repo_conf_rejects_a_missing_source_package`, and
+    `clippy::items_after_test_module` from `merge/mod.rs`'s
+    `entry_roots_tests` sitting before later non-test items — moved that
+    module to the end of the file, no logic change.
+  - Live-verified the `gdb` gap and its fix in the pre-existing
+    `aarch64-20260618T101350Z` sandbox: with the *old* binary still copied
+    in, `package.accept_keywords/cross-riscv64-unknown-linux-gnu` had only
+    `binutils`/`gcc` (`**`), no `gdb` line, and `gdb.conf`'s env block was
+    not yet regenerated with host ABI. After copying in the fixed binary and
+    re-running `crossdev --init-target`, `gdb **` appeared in
+    `package.accept_keywords`, and `gdb.conf` now carries `ABI='arm64'
+    MULTILIB_ABIS='arm64' DEFAULT_ABI='arm64'` (the sandbox host's aarch64
+    ABI) matching `binutils.conf`/`gcc.conf` exactly, vs `glibc.conf`'s
+    target `ABI='lp64d'` — confirms `gdb` is now correctly on the host-ABI
+    side of the split, not silently on the target side as before.
 
 ## Verification (outstanding)
 

@@ -672,7 +672,7 @@ fn show_target_cfg(target: &CrossTarget, globals: &Cli) -> Result<()> {
     row(&mut out, "CFLAGS", target.cflags());
     writeln!(out, "  {C_LABEL}Packages{C_LABEL:#}").ok();
     let category = target.category();
-    for (cat, pkg) in target.packages() {
+    for (cat, pkg, _) in target.packages() {
         writeln!(out, "    {C_PKG}{category}/{pkg}{C_PKG:#} → {cat}/{pkg}").ok();
     }
     Ok(())
@@ -733,7 +733,7 @@ fn write_alias_repo_conf(
 ) -> Result<()> {
     // Validate every source package exists under ::gentoo, with a clear error
     // naming the cross package it's needed for, before declaring the alias.
-    for (real_cat, pkg) in target.packages() {
+    for (real_cat, pkg, _) in target.packages() {
         let dst = gentoo.join(real_cat).join(pkg);
         if !dst.is_dir() {
             bail!("{real_cat}/{pkg} not found at {dst} (needed for {category}/{pkg})");
@@ -802,7 +802,7 @@ fn alias_packages_line(target: &CrossTarget) -> String {
     target
         .packages()
         .into_iter()
-        .map(|(cat, pkg)| format!("{cat}/{pkg}"))
+        .map(|(cat, pkg, _)| format!("{cat}/{pkg}"))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1000,14 +1000,15 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
     std::fs::create_dir_all(&env_dir).with_context(|| format!("creating {env_dir}"))?;
 
     let mut mappings = String::new();
-    // Host-arch tools (binutils/gcc/clang-crossdev-wrappers) run *on* the
-    // build host, not the target, even though they live in the target-
-    // influenced `cross-<tuple>` category. Their own keyword acceptance must
-    // never depend on whichever arch happens to be active for a given
-    // invocation (the sysroot's target arch, under `--target`, vs the bare
-    // host arch otherwise) -- found live 2026-07-09: a newer `cross-<tuple>/
-    // gcc` resolved fine under `--target` (the generated sysroot make.conf's
-    // own `ACCEPT_KEYWORDS="{arch} ~{arch}"` happens to cover it) but failed
+    // Host-arch tools (binutils/gcc/clang-crossdev-wrappers/gdb — see
+    // `PackageArch` on `CrossTarget::packages`) run *on* the build host, not
+    // the target, even though they live in the target-influenced
+    // `cross-<tuple>` category. Their own keyword acceptance must never
+    // depend on whichever arch happens to be active for a given invocation
+    // (the sysroot's target arch, under `--target`, vs the bare host arch
+    // otherwise) -- found live 2026-07-09: a newer `cross-<tuple>/gcc`
+    // resolved fine under `--target` (the generated sysroot make.conf's own
+    // `ACCEPT_KEYWORDS="{arch} ~{arch}"` happens to cover it) but failed
     // outright without `--target` (the bare host's real, normally
     // stable-only ACCEPT_KEYWORDS does not). `**` ("accept regardless of
     // keywords" -- portage's own escape hatch, `AcceptToken::Any` in
@@ -1015,15 +1016,15 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
     // on the host, so no keyword/arch check makes sense for them at all,
     // matching how real crossdev packages are treated.
     let mut keyword_entries = String::new();
-    for (_, pkg) in target.packages() {
+    for (_, pkg, arch) in target.packages() {
         let body = format!(
             "{header}{}",
-            multilib::env_block(&host_ml, &target_ml, is_target_package(pkg))
+            multilib::env_block(&host_ml, &target_ml, arch.is_target())
         );
         let conf = env_dir.join(format!("{pkg}.conf"));
         std::fs::write(&conf, &body).with_context(|| format!("writing {conf}"))?;
         mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
-        if !is_target_package(pkg) {
+        if arch == target::PackageArch::Host {
             keyword_entries.push_str(&format!("{category}/{pkg} **\n"));
         }
     }
@@ -1037,13 +1038,6 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
     std::fs::create_dir_all(&ak_dir).with_context(|| format!("creating {ak_dir}"))?;
     let ak = ak_dir.join(&category);
     std::fs::write(&ak, &keyword_entries).with_context(|| format!("writing {ak}"))
-}
-
-/// Whether `pkg` compiles code for `<CTARGET>` (libc, kernel headers, runtimes —
-/// crossdev's `K|L`) so its env uses the target ABI, vs a host tool
-/// (`binutils`/`gcc`/the clang wrapper) that runs on `CBUILD` and uses the host ABI.
-fn is_target_package(pkg: &str) -> bool {
-    !matches!(pkg, "binutils" | "gcc" | "clang-crossdev-wrappers")
 }
 
 /// Create the ABI osdir compatibility symlinks the libc leaves out, so the cross
@@ -1153,7 +1147,7 @@ mod tests {
         let expected: Vec<String> = target
             .packages()
             .into_iter()
-            .map(|(c, p)| format!("{c}/{p}"))
+            .map(|(c, p, _)| format!("{c}/{p}"))
             .collect();
         assert_eq!(
             tokens,
@@ -1185,7 +1179,7 @@ mod tests {
         // Skeleton ::gentoo with just the source packages' dirs present.
         let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
         let category = target.category();
-        for (cat, pkg) in target.packages() {
+        for (cat, pkg, _) in target.packages() {
             std::fs::create_dir_all(gentoo.join(cat).join(pkg)).unwrap();
         }
         let globals = test_cli_at_root(root);
@@ -1208,7 +1202,7 @@ mod tests {
             .get(&category)
             .expect("alias target category present");
         let got: std::collections::HashSet<String> = pkgs.iter().map(|c| c.to_string()).collect();
-        for (cat, pkg) in target.packages() {
+        for (cat, pkg, _) in target.packages() {
             assert!(
                 got.contains(&format!("{cat}/{pkg}")),
                 "{cat}/{pkg} missing from parsed alias set {got:?}"
@@ -1234,8 +1228,7 @@ mod tests {
         let category = target.category();
         let globals = test_cli_at_root(root);
         let err = write_alias_repo_conf(&globals, &gentoo, &target, &category)
-            .err()
-            .expect("missing source package rejected");
+            .expect_err("missing source package rejected");
         let msg = format!("{err:#}");
         assert!(
             msg.contains("not found") && msg.contains(&category),

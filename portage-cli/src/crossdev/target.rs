@@ -144,31 +144,66 @@ impl CrossTarget {
     /// The `(real_category, package)` set to symlink into the overlay category,
     /// in stage order. The cross magic lives in the eclasses, triggered by the
     /// `cross-*` category, so these point at the ordinary `::gentoo` ebuilds.
-    pub fn packages(&self) -> Vec<(&'static str, &'static str)> {
-        let mut pkgs: Vec<(&'static str, &'static str)> = Vec::new();
+    ///
+    /// Each entry also states its [`PackageArch`] right here, at the single
+    /// place a cross package is declared — not in a separate, easily-desynced
+    /// name list (the old `is_target_package`, which missed `dev-debug/gdb`
+    /// until this was fixed). Adding a future host-arch tool (e.g. `rust-std`
+    /// for an LLVM+Rust cross build) forces picking `Host` or `Target` right
+    /// where it's introduced.
+    pub fn packages(&self) -> Vec<(&'static str, &'static str, PackageArch)> {
+        use PackageArch::{Host, Target};
+        let mut pkgs: Vec<(&'static str, &'static str, PackageArch)> = Vec::new();
         if self.llvm {
             // Clang already cross-targets: no per-target compiler, just the
             // wrapper + the target runtimes built into the sysroot.
-            pkgs.push(("sys-devel", "clang-crossdev-wrappers"));
+            pkgs.push(("sys-devel", "clang-crossdev-wrappers", Host));
             if self.has_kernel {
-                pkgs.push(("sys-kernel", "linux-headers"));
+                pkgs.push(("sys-kernel", "linux-headers", Target));
             }
-            pkgs.push(self.libc.package());
-            pkgs.push(("llvm-runtimes", "compiler-rt"));
-            pkgs.push(("llvm-runtimes", "libunwind"));
-            pkgs.push(("llvm-runtimes", "libcxxabi"));
-            pkgs.push(("llvm-runtimes", "libcxx"));
+            let (cat, pkg) = self.libc.package();
+            pkgs.push((cat, pkg, Target));
+            pkgs.push(("llvm-runtimes", "compiler-rt", Target));
+            pkgs.push(("llvm-runtimes", "libunwind", Target));
+            pkgs.push(("llvm-runtimes", "libcxxabi", Target));
+            pkgs.push(("llvm-runtimes", "libcxx", Target));
         } else {
             // GCC: the classic binutils → headers → gcc → libc toolchain.
-            pkgs.push(("sys-devel", "binutils"));
+            pkgs.push(("sys-devel", "binutils", Host));
             if self.has_kernel {
-                pkgs.push(("sys-kernel", "linux-headers"));
+                pkgs.push(("sys-kernel", "linux-headers", Target));
             }
-            pkgs.push(("sys-devel", "gcc"));
-            pkgs.push(self.libc.package());
-            pkgs.push(("dev-debug", "gdb"));
+            pkgs.push(("sys-devel", "gcc", Host));
+            let (cat, pkg) = self.libc.package();
+            pkgs.push((cat, pkg, Target));
+            // Runs on the host to debug target binaries — not a target-ABI
+            // build, same as binutils/gcc. Was missing from the old
+            // `is_target_package` exclusion list (a real, live gap).
+            pkgs.push(("dev-debug", "gdb", Host));
         }
         pkgs
+    }
+}
+
+/// Whether a cross package runs on the build host (`CBUILD`) or compiles code
+/// for `<CTARGET>` (crossdev's `K|L`) — decides both which multilib env block
+/// it gets ([`multilib::env_block`](super::multilib::env_block)) and whether
+/// it needs a `**` `package.accept_keywords` entry (host tools must never be
+/// keyword-checked against the target's arch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageArch {
+    /// Runs on the host — the toolchain itself (binutils/gcc/clang wrapper)
+    /// and host-side tools like gdb.
+    Host,
+    /// Installs into the target sysroot, built for `<CTARGET>`.
+    Target,
+}
+
+impl PackageArch {
+    /// `true` for [`PackageArch::Target`] — the historical bool shape
+    /// `multilib::env_block`'s third argument expects.
+    pub fn is_target(self) -> bool {
+        self == PackageArch::Target
     }
 }
 
@@ -186,8 +221,19 @@ mod tests {
         assert_eq!(t.gentoo_arch(), "riscv");
         assert_eq!(t.profile_path(), "default/linux/riscv/23.0/rv64/lp64d");
         // binutils, linux-headers, gcc, glibc, gdb
-        assert!(t.packages().contains(&("sys-libs", "glibc")));
-        assert!(t.packages().contains(&("sys-kernel", "linux-headers")));
+        assert!(
+            t.packages()
+                .contains(&("sys-libs", "glibc", PackageArch::Target))
+        );
+        assert!(
+            t.packages()
+                .contains(&("sys-kernel", "linux-headers", PackageArch::Target))
+        );
+        // gdb runs on the host, debugging target binaries — not target-ABI
+        assert!(
+            t.packages()
+                .contains(&("dev-debug", "gdb", PackageArch::Host))
+        );
     }
 
     #[test]
@@ -195,8 +241,14 @@ mod tests {
         let t = CrossTarget::parse("riscv64-unknown-elf", false).unwrap();
         assert_eq!(t.libc, Libc::Newlib);
         assert!(!t.has_kernel);
-        assert!(!t.packages().contains(&("sys-kernel", "linux-headers")));
-        assert!(t.packages().contains(&("sys-libs", "newlib")));
+        assert!(
+            !t.packages()
+                .contains(&("sys-kernel", "linux-headers", PackageArch::Target))
+        );
+        assert!(
+            t.packages()
+                .contains(&("sys-libs", "newlib", PackageArch::Target))
+        );
         // bare metal uses the arch-neutral embedded profile, not a linux one
         assert_eq!(t.profile_path(), "embedded");
     }
@@ -205,13 +257,20 @@ mod tests {
     fn llvm_uses_cross_llvm_category_and_runtimes() {
         let t = CrossTarget::parse("aarch64-unknown-linux-musl", true).unwrap();
         assert_eq!(t.category(), "cross_llvm-aarch64-unknown-linux-musl");
+        assert!(t.packages().contains(&(
+            "sys-devel",
+            "clang-crossdev-wrappers",
+            PackageArch::Host
+        )));
         assert!(
             t.packages()
-                .contains(&("sys-devel", "clang-crossdev-wrappers"))
+                .contains(&("llvm-runtimes", "compiler-rt", PackageArch::Target))
         );
-        assert!(t.packages().contains(&("llvm-runtimes", "compiler-rt")));
         // no per-target gcc/binutils
-        assert!(!t.packages().contains(&("sys-devel", "gcc")));
+        assert!(
+            !t.packages()
+                .contains(&("sys-devel", "gcc", PackageArch::Host))
+        );
     }
 
     #[test]

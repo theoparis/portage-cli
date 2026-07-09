@@ -68,65 +68,6 @@ fn entry_roots<'a>(
     }
 }
 
-#[cfg(test)]
-mod entry_roots_tests {
-    use super::*;
-    use query::depgraph::{MergeRoot, PlannedMerge};
-
-    fn planned(merge_root: MergeRoot) -> Result<PlannedMerge> {
-        Ok(PlannedMerge {
-            merge_root,
-            cpv: portage_atom::Cpv::parse("dev-python/jinja2-3.1.6")?,
-            ebuild_path: camino::Utf8PathBuf::new(),
-            use_flags: Vec::new(),
-            depend: Vec::new(),
-            bdepend: Vec::new(),
-            reinstall: false,
-        })
-    }
-
-    #[test]
-    fn host_entry_installs_into_outer_eroot_not_the_cross_sysroot() -> Result<()> {
-        let roots = cli::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
-        let host_roots = cli::Roots::for_test("/var/tmp/cross-stage1");
-        let p = planned(MergeRoot::Host)?;
-        assert_eq!(
-            entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
-            "/var/tmp/cross-stage1"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn target_entry_uses_the_plans_own_root() -> Result<()> {
-        let roots = cli::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
-        let host_roots = cli::Roots::for_test("/var/tmp/cross-stage1");
-        let p = planned(MergeRoot::Target)?;
-        assert_eq!(
-            entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
-            "/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu"
-        );
-        Ok(())
-    }
-
-    /// `--prefix`: an unsatisfied `MergeRoot::Host` entry must merge into
-    /// the prefix, not the real host — an unprivileged overlay can't write
-    /// `/`. `host_roots` here is `Cli::broot()`'s output for `--prefix`,
-    /// which now resolves to the prefix (`outer_roots()`), not the host.
-    #[test]
-    fn host_entry_installs_into_the_prefix_under_overlay_not_the_host() -> Result<()> {
-        let roots = cli::Roots::for_test("/opt/p");
-        let host_roots = cli::Roots::for_test_overlay("/", "/opt/p");
-        let p = planned(MergeRoot::Host)?;
-        assert_eq!(
-            entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
-            "/opt/p",
-            "an unsatisfied Host-routed entry must merge into the prefix, not the real host"
-        );
-        Ok(())
-    }
-}
-
 /// Build and merge a resolved plan in install order.
 ///
 /// Resume comes for free from the target VDB: a package already recorded
@@ -736,4 +677,63 @@ async fn merge_parallel(
         }
     }
     (merged, skipped, failures)
+}
+
+#[cfg(test)]
+mod entry_roots_tests {
+    use super::*;
+    use query::depgraph::{MergeRoot, PlannedMerge};
+
+    fn planned(merge_root: MergeRoot) -> Result<PlannedMerge> {
+        Ok(PlannedMerge {
+            merge_root,
+            cpv: portage_atom::Cpv::parse("dev-python/jinja2-3.1.6")?,
+            ebuild_path: camino::Utf8PathBuf::new(),
+            use_flags: Vec::new(),
+            depend: Vec::new(),
+            bdepend: Vec::new(),
+            reinstall: false,
+        })
+    }
+
+    #[test]
+    fn host_entry_installs_into_outer_eroot_not_the_cross_sysroot() -> Result<()> {
+        let roots = cli::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
+        let host_roots = cli::Roots::for_test("/var/tmp/cross-stage1");
+        let p = planned(MergeRoot::Host)?;
+        assert_eq!(
+            entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
+            "/var/tmp/cross-stage1"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn target_entry_uses_the_plans_own_root() -> Result<()> {
+        let roots = cli::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
+        let host_roots = cli::Roots::for_test("/var/tmp/cross-stage1");
+        let p = planned(MergeRoot::Target)?;
+        assert_eq!(
+            entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
+            "/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu"
+        );
+        Ok(())
+    }
+
+    /// `--prefix`: an unsatisfied `MergeRoot::Host` entry must merge into
+    /// the prefix, not the real host — an unprivileged overlay can't write
+    /// `/`. `host_roots` here is `Cli::broot()`'s output for `--prefix`,
+    /// which now resolves to the prefix (`outer_roots()`), not the host.
+    #[test]
+    fn host_entry_installs_into_the_prefix_under_overlay_not_the_host() -> Result<()> {
+        let roots = cli::Roots::for_test("/opt/p");
+        let host_roots = cli::Roots::for_test_overlay("/", "/opt/p");
+        let p = planned(MergeRoot::Host)?;
+        assert_eq!(
+            entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
+            "/opt/p",
+            "an unsatisfied Host-routed entry must merge into the prefix, not the real host"
+        );
+        Ok(())
+    }
 }
