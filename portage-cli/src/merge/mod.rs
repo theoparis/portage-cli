@@ -45,10 +45,10 @@ pub(crate) fn confirm_merge(count: usize) -> Result<bool> {
 
 /// Which [`cli::Roots`] a plan entry actually installs into: the outer EROOT
 /// (`host_roots`) for a Host-rooted entry — an unsatisfied BDEPEND scheduled
-/// onto the build host by a `--cross` solve (see `cross_target_runtime_deps`
-/// in portage-atom-pubgrub) — or the `--cross`-substituted sysroot (`roots`,
+/// onto the build host by a `--target` solve (see `cross_target_runtime_deps`
+/// in portage-atom-pubgrub) — or the `--target`-substituted sysroot (`roots`,
 /// the resolved install target) for everything else. `host_roots` equals
-/// `roots` outside `--cross`, so this is a no-op there.
+/// `roots` outside `--target`, so this is a no-op there.
 ///
 /// Found live: the merge loop used a single, plan-wide root for every entry
 /// regardless of `PlannedMerge.merge_root`, so a Host BDEPEND (e.g.
@@ -203,14 +203,19 @@ pub(crate) async fn run_merge_plan(
         Vec::new()
     };
 
-    // A `--cross` plan can carry `MergeRoot::Host` entries (an unsatisfied
+    // A `--target` plan can carry `MergeRoot::Host` entries (an unsatisfied
     // BDEPEND scheduled onto the build host — see `cross_target_runtime_deps`
-    // in portage-atom-pubgrub). `roots` here is the `--cross`-substituted
-    // sysroot; `base_roots()` is the outer EROOT a Host entry actually belongs
-    // in (matching where crossdev's own `cross-*` toolchain packages live —
-    // see `Cli::base_roots`'s doc comment). Equal to `roots` when `--cross`
+    // in portage-atom-pubgrub). `roots` here is the `--target`-substituted
+    // sysroot; `broot()` is where a Host entry actually belongs — the real
+    // host `/` for plain `--root` (portage `ROOT=` parity: BDEPEND resolves
+    // and installs on the host, full stop), matching `base_roots()` for
+    // `--prefix`/`--local`. NOT `base_roots()` directly: that's "the outer
+    // EROOT" (where crossdev's own `cross-*` toolchain *bootstrap* packages
+    // land via the separate `bypass_cross_root` mechanism in `emerge.rs`) —
+    // a different, unprivileged-writable-location concern from "where does
+    // an ordinary package's BDEPEND resolve". Equal to `roots` when `--target`
     // isn't active, so this is a no-op outside cross builds.
-    let host_roots = globals.base_roots();
+    let host_roots = globals.broot();
     let (merged, skipped, failures) = if jobs <= 1 {
         merge_sequential(
             plan,

@@ -83,7 +83,7 @@ const BASHRC_PREFIX: &str = r#"# Overlay search paths for `em --prefix DIR` (cre
 # emit harmless host-absolute -I/-L while the real files are found via the flags.
 #
 # Two guards: ROOT-keyed (a plain --prefix build where ROOT is the prefix) and
-# EPREFIX-keyed (a --prefix --cross build where ROOT is the sysroot's "/" but
+# EPREFIX-keyed (a --prefix --target build where ROOT is the sysroot's "/" but
 # the cross toolchain wrappers live under ${EPREFIX}/usr/bin). Without the
 # EPREFIX guard, tc-getCC can't find ${CTARGET}-gcc and falls back to the host
 # ${CHOST}-gcc, breaking cross glibc/gcc builds with target-flag-on-host-gcc
@@ -101,7 +101,7 @@ if [[ -n ${ROOT} && ${ROOT%/} != "" && ${ROOT%/} != "/" ]]; then
 	unset _ov _libdir
 fi
 
-# EPREFIX-keyed: a --prefix --cross build (ROOT = sysroot "/", EPREFIX = the
+# EPREFIX-keyed: a --prefix --target build (ROOT = sysroot "/", EPREFIX = the
 # overlay prefix). The cross toolchain wrappers (${CTARGET}-gcc etc.) live
 # under ${EPREFIX}/usr/bin; without this on PATH, tc-getCC falls back to the
 # host compiler and the cross build dies on target-specific flags.

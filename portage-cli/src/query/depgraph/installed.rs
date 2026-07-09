@@ -77,7 +77,7 @@ pub(super) struct HostInstalledEntry {
 /// `base_roots()` (`entry_roots()` in `main.rs`), so satisfaction must be
 /// checked against that same root's VDB, or a package built there on one run
 /// is never recognized as already-satisfied on the next. Found live: jinja2
-/// rebuilt into `base_roots()` for a `--cross` stage3 was still reported
+/// rebuilt into `base_roots()` for a `--target` stage3 was still reported
 /// unsatisfied because this read the bare host `/var/db/pkg` regardless — see
 /// todo/stage-build-shakeout.md #28/#30.
 pub(super) fn load_host_installed(host_roots: &crate::cli::Roots) -> Vec<HostInstalledEntry> {

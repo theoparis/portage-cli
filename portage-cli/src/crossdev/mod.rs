@@ -39,7 +39,7 @@
 //!   version is resolved completely independently of `cross-<CTARGET>/gcc`.
 //!
 //! Because these are separate, independently-resolved atoms, they can drift:
-//! `em stages --stage1 --cross <t>` installing a newer `sys-devel/gcc` into
+//! `em stages --stage1 --target <t>` installing a newer `sys-devel/gcc` into
 //! the target sysroot does **not** upgrade the `cross-<t>/gcc` cross-compiler
 //! actually used to *build* it — and GCC cannot reliably self-bootstrap a
 //! newer major version using an older one as `CC_FOR_TARGET` (a real GCC
@@ -115,7 +115,15 @@ fn merge_merge_flags(globals: &Cli, args: &MergeFlags) -> MergeFlags {
 const OVERLAY_NAME: &str = "crossdev";
 
 pub async fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
-    let target = CrossTarget::parse(&args.target, args.llvm)?;
+    // `--target` is global (`Cli`, not `CrossdevArgs`): one flag, read the
+    // same way whether it's setting a target up (here) or using an
+    // already-set-up one elsewhere (`stages --stage1`, plain atom builds) —
+    // not two separate flags that can disagree.
+    let tuple = globals
+        .target
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("em crossdev needs a target tuple: pass --target/-T"))?;
+    let target = CrossTarget::parse(&tuple, args.llvm)?;
 
     if args.show_target_cfg {
         return show_target_cfg(&target, globals);
@@ -150,7 +158,9 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
     // A self-contained `--root DIR` EPREFIX (`roots.config()` is `Some` — see
     // [[stage-build-shakeout]]) has no host-shared merged-usr skeleton or
     // libs, so the plan needs the same from-scratch treatment as native.
-    let self_contained = globals.roots().config().is_some();
+    // `outer_roots()`, not `roots()`: this must stay anchored to the outer
+    // EROOT even if `--target` happens to also be set on this invocation.
+    let self_contained = globals.outer_roots().config().is_some();
     let plan = stages::toolchain_plan(
         &stages::BootstrapKind::Cross(target.clone()),
         self_contained,
@@ -191,7 +201,7 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
             out,
             "\n>>> cross toolchain {} ready in {}/usr/{}",
             target.tuple,
-            globals.roots().merge_root(),
+            globals.outer_roots().merge_root(),
             target.tuple,
         )
         .ok();
@@ -218,9 +228,9 @@ fn post_step_cross(target: &CrossTarget, globals: &Cli, step: &stages::StageStep
 /// This is the shared driver both `--setup` (cross) and `stage1` (native) run.
 ///
 /// `bypass_cross_root` forces every step's merge into the plain outer EROOT
-/// even when `globals.cross` is set — for `cross-*` toolchain plans woven
-/// into a `--cross`-active `stage1` run (see `maybe_weave_in_gcc_update`),
-/// which must never install under `--cross`'s sysroot substitution.
+/// even when `globals.target` is set — for `cross-*` toolchain plans woven
+/// into a `--target`-active `stage1` run (see `maybe_weave_in_gcc_update`),
+/// which must never install under `--target`'s sysroot substitution.
 async fn run_staged(
     plan: &stages::StagePlan,
     globals: &Cli,
@@ -292,9 +302,9 @@ fn atom_is_package(atom: &str, pkg: &str) -> bool {
 /// Always activates against `globals.base_roots()`, never `globals.roots()`:
 /// `cross-<CTARGET>/*` toolchain packages always install into the plain outer
 /// EROOT (see this module's doc comment), regardless of whether the *caller*
-/// (`setup()` vs `stage1()`'s woven-in refresh) has `--cross` set on
+/// (`setup()` vs `stage1()`'s woven-in refresh) has `--target` set on
 /// `globals` for its own, unrelated purposes. For `setup()` the two are the
-/// same root anyway (it never sets `--cross`), so this is a no-op change
+/// same root anyway (it never sets `--target`), so this is a no-op change
 /// there.
 fn activate_toolchain(target: &CrossTarget, globals: &Cli, step: &stages::StageStep) -> Result<()> {
     let Some(atom) = step.atoms.first() else {
@@ -352,7 +362,9 @@ pub(crate) async fn toolchain(args: &crate::cli::ToolchainArgs, globals: &Cli) -
              native toolchain into --root"
         );
     }
-    let merge_root = globals.roots().merge_root().to_owned();
+    // outer_roots(), not roots(): a native toolchain bootstrap must anchor to
+    // the outer EROOT even if a global --target happens to also be set.
+    let merge_root = globals.outer_roots().merge_root().to_owned();
     if merge_root.as_str() == "/" {
         bail!(
             "em toolchain --setup needs --root <dir>: a native toolchain into / is \
@@ -412,7 +424,7 @@ pub(crate) async fn stage1(args: &crate::cli::StagesArgs, globals: &Cli) -> Resu
 
     // The `cross-<CTARGET>/gcc` refresh (if needed) is a separate run: it
     // always installs into the outer EROOT (`bypass_cross_root: true`),
-    // never `--cross`'s sysroot substitution the stage1 packages below use.
+    // never `--target`'s sysroot substitution the stage1 packages below use.
     if let Some((target, refresh_plan)) = &refresh {
         writeln!(
             out,
@@ -480,7 +492,7 @@ async fn maybe_weave_in_gcc_update(
     stack: &ProfileStack,
     globals: &Cli,
 ) -> Option<(CrossTarget, stages::StagePlan)> {
-    let tuple = globals.cross.clone()?;
+    let tuple = globals.target.clone()?;
     let stage1_atoms = stack.stage1_packages().ok()?;
     if !stage1_atoms.iter().any(|d| d.cpn.package.as_str() == "gcc") {
         return None;
@@ -525,7 +537,7 @@ fn gcc_needs_refresh(active_slot: Option<&str>, needed_slot: &str) -> bool {
 async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
     let repo_path_str = globals.repo_path();
     let roots = globals.roots();
-    let host_roots = globals.base_roots();
+    let host_roots = globals.broot();
     let outcome = crate::query::depgraph::depgraph(crate::query::depgraph::DepgraphOpts {
         repo_path: Utf8Path::new(&repo_path_str),
         atoms: &["sys-devel/gcc".to_string()],
@@ -567,14 +579,23 @@ fn profile_stack(globals: &Cli) -> Result<ProfileStack> {
 
 /// `EROOT`/prefix the overlay, `repos.conf`, and `package.env` are written under
 /// (`~/.gentoo` for `--local`), so an unprivileged setup is writable + readable.
+///
+/// `outer_roots()`, not `roots()`: this is the outer EROOT the overlay lives
+/// in, which must stay stable even if a global `--target` happens to also be
+/// set on the invocation (`roots()` would already be `--target`'s sysroot
+/// substitution, doubly-nesting anything joined onto it below).
 fn setup_root(globals: &Cli) -> Utf8PathBuf {
-    globals.roots().merge_root().to_owned()
+    globals.outer_roots().merge_root().to_owned()
 }
 
 /// The target sysroot `<EROOT>/usr/<CTARGET>` (EROOT = `/` by default, the prefix
 /// for `--local`/`--prefix`, the root for `--root`).
 fn sysroot(target: &CrossTarget, globals: &Cli) -> Utf8PathBuf {
-    globals.roots().merge_root().join("usr").join(&target.tuple)
+    globals
+        .outer_roots()
+        .merge_root()
+        .join("usr")
+        .join(&target.tuple)
 }
 
 /// The configured main repo (`gentoo`) — the real ebuilds the overlay links to.
@@ -588,7 +609,7 @@ fn sysroot(target: &CrossTarget, globals: &Cli) -> Utf8PathBuf {
 /// `--init-target` on a fresh root can still find the real ebuild tree to
 /// symlink/reference.
 fn main_repo(globals: &Cli) -> Result<Repository> {
-    let target_conf = globals.roots().repos_conf().ok();
+    let target_conf = globals.outer_roots().repos_conf().ok();
     let host_conf = ReposConf::load_rooted(Utf8Path::new("/"), &[]).ok();
     let entry = target_conf
         .as_ref()
@@ -726,7 +747,7 @@ fn write_alias_repo_conf(
 /// real from-scratch native + cross toolchain bootstrap, see
 /// [[stage-build-shakeout]]. Returns the resolved `::gentoo` repo path.
 fn ensure_self_contained_prefix(globals: &Cli) -> Result<Utf8PathBuf> {
-    let roots = globals.roots();
+    let roots = globals.outer_roots();
     if roots.merge_root().as_str() != "/" {
         crate::setup::bootstrap(&roots)?;
     }
@@ -766,7 +787,7 @@ fn alias_packages_line(target: &CrossTarget) -> String {
 /// `--local`/`--prefix` (`roots.config()` is `None`, config already comes from
 /// the host).
 fn ensure_prefix_profile(globals: &Cli) -> Result<()> {
-    if globals.roots().config().is_none() {
+    if globals.outer_roots().config().is_none() {
         return Ok(());
     }
     let link = setup_root(globals).join("etc/portage/make.profile");
@@ -1028,7 +1049,46 @@ fn symlink_force(dst: &Utf8Path, link: &Utf8Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
+
+    fn crossdev_args(show_target_cfg: bool) -> CrossdevArgs {
+        CrossdevArgs {
+            llvm: false,
+            init_target: false,
+            setup: false,
+            show_target_cfg,
+            depgraph_flags: crate::cli::DepgraphFlags::default(),
+            merge_flags: crate::cli::MergeFlags::default(),
+        }
+    }
+
+    /// `--target` is global: `em --target T crossdev --show-target-cfg`
+    /// reads it straight off `Cli`. One flag for both "set up" and "use" —
+    /// no local `-t` to disagree with it. `--show-target-cfg` only prints
+    /// (no filesystem writes), so `run()` is safe to exercise directly here.
+    #[tokio::test]
+    async fn run_reads_the_global_target() {
+        let cli = crate::cli::Cli::parse_from([
+            "em",
+            "--target",
+            "riscv64-unknown-linux-gnu",
+            "crossdev",
+            "--show-target-cfg",
+        ]);
+        let args = crossdev_args(true);
+        let result = run(&args, &cli).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    /// Neither given: a clear error, not a panic or a silent bare-host guess.
+    #[tokio::test]
+    async fn run_without_target_is_an_error() {
+        let cli = crate::cli::Cli::parse_from(["em", "crossdev", "--show-target-cfg"]);
+        let args = crossdev_args(true);
+        assert!(run(&args, &cli).await.is_err());
+    }
 
     #[test]
     fn alias_packages_line_is_the_real_cpns_in_stage_order() {
@@ -1203,7 +1263,7 @@ mod tests {
     }
 
     /// The sysroot make.conf is the *only* config `sys-devel/gcc` and every
-    /// other ordinary stage1 package resolved against `--cross` ever reads —
+    /// other ordinary stage1 package resolved against `--target` ever reads —
     /// unlike the self-contained `--root`'s own make.conf
     /// (`setup::host_makeopts`'s doc comment), there is no fallback host
     /// config to inherit build parallelism from. Missing this made a real

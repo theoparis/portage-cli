@@ -1528,6 +1528,53 @@ from-scratch into `--root`" section already tracks, just now with a
 concrete, motivating BDEPEND case (jinja2/gpep517/flit-core, and by
 extension any python-build-time tool: sphinx, cython, setuptools_scm).
 
+**2026-07-09 — independently re-verified, then root-caused for real (this
+write-up's first pass, below, misdiagnosed it).** Rebuilt `em` fresh and
+re-ran the exact task-#17 target (`--autosolve-use --privilege pseudoroot
+--root /var/tmp/cross-stage1-riscv64 --cross riscv64-unknown-linux-gnu
+--emptytree sys-apps/systemd-utils --with-bdeps --keep-going --jobs 16
+--buildpkg`) as a clean invocation (not a VDB-presence check):
+`docbook-xml-dtd-4.2-r3` merges, `systemd-utils` still dies identically,
+`Program python3 (jinja2) found: NO`. Traced it through meson's own source
+(`mesonbuild/modules/python.py`, `find_installation`) and confirmed the
+actual `meson` process is the bare host's own `dev-build/meson`, under the
+host's own `/usr/bin/python3.13` — jinja2 was built into `base_roots()`'s
+`python3.14` site-packages, invisible to that process.
+
+The first-pass conclusion here ("this EROOT needs a full native stage1")
+was wrong about *why*. The user corrected the framing: real
+`ROOT=/tmp/staging emerge pkg` / `{target}-emerge` always resolve `BDEPEND`
+against the **real host `/`** — only the install *target* moves. `em`'s own
+`docs/root-topology.md` already specifies this (scenario 1: `--root` is
+`Dual { broot: /, target: <offset> }`), but `cli.rs::base_roots()` had
+`base: R, target: R` for plain `--root` — BROOT was the *offset*, not the
+host. So `bdepend_avail::initial_bdepend`/`preflight`/`load_host_installed`
+all checked jinja2's BDEPEND satisfaction against the *offset's* (mostly
+empty) VDB instead of the real host's — which already has jinja2 for
+python3.13, exactly what the host's own `meson` needs. **Fixed**, in two
+passes — full story in `todo/root-topology-refactor.md`. Short version:
+`--root`'s BROOT is now always the host `/`, but that lives in a new,
+dedicated `Cli::broot()`, not `base_roots()` itself (a first attempt to
+change `base_roots()` directly broke crossdev's own unprivileged
+toolchain-install path, which relies on `base_roots()` staying "the outer
+EROOT" for `--root`, a genuinely different question from BROOT). The old
+self-contained-BROOT-in-an-offset workflow (what this sysroot was actually
+doing) now has its own explicit name: `--local DIR` (parameterized to
+accept a path, previously hardcoded to `~/.gentoo`). Unit-tested
+(`cli.rs`'s `root_broot_is_host_not_offset`); live-reverified that
+`em --root R --cross riscv64-unknown-linux-gnu crossdev -t
+riscv64-unknown-linux-gnu --init-target` completes cleanly and
+unprivileged (this exact command was what caught the first pass's
+regression). Not yet re-verified end-to-end against a full rebuilt riscv64
+sysroot through `sys-apps/systemd-utils` itself (the old one was wiped) —
+that's a long real build, left as a follow-up.
+
+**`app-text/opensp` is not part of `sys-apps/systemd-utils`'s own
+dependency closure** (checked the ebuild — no reference at all); the
+2026-07-05 "2 failures" must have come from a broader target in that
+session. Review-checklist item "are jinja2/opensp the same bug class?" is
+answered: no, and opensp doesn't reproduce from this target.
+
 ## 29. `sys-devel/binutils` cross build fails with `#error unsupported ABI` — upstream binutils bug, not em
 
 The #28 write-up left this as an unexamined `make exited 2` amid parallel

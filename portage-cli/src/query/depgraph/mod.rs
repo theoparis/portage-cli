@@ -102,13 +102,13 @@ pub struct DepgraphOpts<'a> {
     pub multi_repo: bool,
     /// The resolved root set (config / base / target). See docs/root-model.md.
     pub roots: &'a crate::cli::Roots,
-    /// The outer EROOT (`--root`'s own value, before any `--cross` sysroot
+    /// The outer EROOT (`--root`'s own value, before any `--target` sysroot
     /// substitution — see `Cli::base_roots`). Host-routed BDEPEND/IDEPEND
     /// satisfaction is checked against *this* root's VDB, not the bare
     /// system `/`: an unsatisfied Host BDEPEND (`entry_roots()` in
     /// `main.rs`) builds into `base_roots()`, so that's also where the
     /// solver must look to see whether it's already satisfied. Equal to
-    /// `roots` outside `--cross`.
+    /// `roots` outside `--target`.
     pub host_roots: &'a crate::cli::Roots,
     /// `--onlydeps`: drop the explicitly-requested targets from the plan,
     /// keeping only their dependencies (emerge's `--onlydeps`).

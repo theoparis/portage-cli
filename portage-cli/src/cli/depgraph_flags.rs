@@ -3,7 +3,7 @@
 use clap::Args;
 
 /// Flags related to dependency graph resolution that can be used by multiple commands.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default)]
 pub struct DepgraphFlags {
     /// Re-examine transitive dependencies for updates. Bumps `:*` any-slot deps
     /// to the newest slot rather than keeping a satisfying installed slot.

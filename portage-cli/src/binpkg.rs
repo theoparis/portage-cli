@@ -39,7 +39,7 @@ const MAKE_GLOBALS: &str = "/usr/share/portage/config/make.globals";
 /// The `make.globals`/hardcoded-default steps are **host** defaults — real
 /// portage's own system-wide install convention, unconditionally
 /// `/var/cache/binpkgs` (confirmed: this repo's own `make.globals` hardcodes
-/// exactly that). For a `--root`/`--cross`/`--local`/`--prefix` build (any
+/// exactly that). For a `--root`/`--target`/`--local`/`--prefix` build (any
 /// merge root other than `/`), consulting that host default is wrong: it's a
 /// real, root-owned system path the build has no business writing to, and
 /// unprivileged builds can't anyway. Caught live: a stage3 `--buildpkg` run
@@ -358,7 +358,7 @@ mod tests {
         );
     }
 
-    /// A plain host build (root `/`, no --root/--prefix/--local/--cross) is
+    /// A plain host build (root `/`, no --root/--prefix/--local/--target) is
     /// unaffected by the root-aware branch — it still falls through to the
     /// pre-existing make.globals/hardcoded-default lookup, exactly as before
     /// this change.

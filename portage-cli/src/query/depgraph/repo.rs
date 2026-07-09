@@ -1532,7 +1532,7 @@ mod tests {
         }
     }
 
-    // Regression for the em stages --stage1 --cross riscv64 finding
+    // Regression for the em stages --stage1 --target riscv64 finding
     // (todo/stage-build-shakeout.md): util-linux's
     // REQUIRED_USE="python? ( foo ) su? ( pam )" has two independent
     // top-level clauses. Only `su? ( pam )` is violated (su on, pam off);

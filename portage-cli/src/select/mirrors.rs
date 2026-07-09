@@ -3,7 +3,7 @@
 //! Lists, shows, and sets Gentoo distfile mirrors. The mirror list comes from
 //! [`portage_distfiles::MirrorList`] (Gentoo's structured XML API). `GENTOO_MIRRORS`
 //! is written to the `make.conf` selected by the global root flags
-//! (`--config-root`/`--root`/`--local`/`--prefix`/`--cross`) via
+//! (`--config-root`/`--root`/`--local`/`--prefix`/`--target`) via
 //! [`config_portage_dir`].
 
 use anyhow::{Context, Result, bail};

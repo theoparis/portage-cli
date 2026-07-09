@@ -66,10 +66,11 @@ pub struct Cli {
     #[arg(long, value_name = "DIR", global = true)]
     pub prefix: Option<String>,
 
-    /// Unprivileged in-place Gentoo-Prefix at ~/.gentoo (EPREFIX=~/.gentoo);
-    /// config from the host, overlaid by ~/.gentoo/etc/portage.
-    #[arg(long, global = true)]
-    pub local: bool,
+    /// Unprivileged, standalone Gentoo-Prefix: own VDB/BROOT/config, not
+    /// overlaid on the host (see --prefix for the overlay). Defaults to
+    /// ~/.gentoo (EPREFIX=~/.gentoo) when no DIR is given.
+    #[arg(long, global = true, num_args = 0..=1, default_missing_value = "", value_name = "DIR")]
+    pub local: Option<String>,
 
     /// How an unprivileged build gets root for chown/setuid: auto (best
     /// compiled-in fake root), pseudoroot, fakeroost, hakoniwa (userns mapped
@@ -105,13 +106,17 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     pub vdb: Option<String>,
 
-    /// Cross-build for a crossdev target tuple: resolve/install into the target
-    /// sysroot `<EROOT>/usr/<TUPLE>` (the crossdev `<TUPLE>-emerge` entry point).
-    /// Sugar for `--config-root <sysroot> --root <sysroot>`; the cross context
-    /// (CHOST/CBUILD, `--root-deps=rdeps`) is read from the sysroot make.conf.
-    /// Set the target up first with `em crossdev -t <TUPLE> --init-target`.
-    #[arg(long, value_name = "TUPLE", global = true)]
-    pub cross: Option<String>,
+    /// Cross-build/setup for a crossdev target tuple. The single source for
+    /// "which tuple" everywhere: `em --target T crossdev --init-target`
+    /// sets T up; `em --target T stages --stage1` (or any plain atom build)
+    /// resolves/installs into the target sysroot `<EROOT>/usr/<TUPLE>` (the
+    /// crossdev `<TUPLE>-emerge` entry point) — sugar for `--config-root
+    /// <sysroot> --root <sysroot>`, with the cross context (CHOST/CBUILD,
+    /// `--root-deps=rdeps`) read from the sysroot make.conf. One flag for
+    /// both roles, not two that can disagree — `crossdev` no longer has its
+    /// own `-t`/`--target`.
+    #[arg(long, short = 'T', value_name = "TUPLE", global = true)]
+    pub target: Option<String>,
 
     #[command(subcommand)]
     pub applet: Option<Applet>,
@@ -237,13 +242,92 @@ fn home_dir() -> camino::Utf8PathBuf {
         .unwrap_or_else(|| camino::Utf8PathBuf::from("/root"))
 }
 
+/// The four filesystem roles (docs/root-topology.md § "The four roles"),
+/// collapsed by how many coincide. `Cli::base_roots()` (BROOT view) and
+/// `Cli::roots()` (install-target view) both derive from the same
+/// `Cli::root_set()`, so they can't drift independently — see
+/// `todo/root-topology-refactor.md`.
+enum RootSet {
+    /// All four roles collapse to one path: the bare invocation, or
+    /// `--local` (a standalone Gentoo-Prefix owns its own BROOT too).
+    Single { root: camino::Utf8PathBuf },
+    /// BROOT distinct from the install target. `--root R`: BROOT is always
+    /// the real host `/` (portage `ROOT=`/`{target}-emerge` parity) — an
+    /// offset install borrows the host's own BDEPEND tools; it does not
+    /// need its own copy of them.
+    #[allow(dead_code)] // target isn't read yet: base_roots()/roots() keep their
+    // own, separate "outer EROOT" derivation (see broot()'s doc comment on
+    // why that's a different question from BROOT). Kept here to match
+    // docs/root-topology.md's proposed shape for the fuller migration this
+    // enum is a first step of (todo/root-topology-refactor.md).
+    Dual {
+        broot: camino::Utf8PathBuf,
+        target: camino::Utf8PathBuf,
+    },
+    /// BROOT, base (build-against sysroot), and target all distinct.
+    /// `--prefix P`: broot = base = the host `/` (the overlay borrows host
+    /// tools and builds against them), target = P.
+    #[allow(dead_code)] // base/target aren't read yet, same reason as Dual above.
+    Overlayed {
+        broot: camino::Utf8PathBuf,
+        base: camino::Utf8PathBuf,
+        target: camino::Utf8PathBuf,
+    },
+}
+
+impl RootSet {
+    /// Where `BDEPEND` tools run and are checked against (BROOT).
+    fn broot(&self) -> &camino::Utf8Path {
+        match self {
+            RootSet::Single { root } => root,
+            RootSet::Dual { broot, .. } | RootSet::Overlayed { broot, .. } => broot,
+        }
+    }
+}
+
+/// `s.as_deref()` parsed as a path, or `None`.
+fn opt_path(s: &Option<String>) -> Option<camino::Utf8PathBuf> {
+    s.as_deref().map(camino::Utf8PathBuf::from)
+}
+
+impl Cli {
+    /// The root model (docs/root-topology.md) from `--local`/`--prefix`/
+    /// `--root`, before config/overlay concerns. `--local` > `--prefix` >
+    /// `--root` > bare, matching `base_roots()`'s existing precedence.
+    fn root_set(&self) -> RootSet {
+        let host = camino::Utf8PathBuf::from("/");
+        if let Some(local) = &self.local {
+            let root = if local.is_empty() {
+                home_dir().join(".gentoo")
+            } else {
+                camino::Utf8PathBuf::from(local)
+            };
+            return RootSet::Single { root };
+        }
+        if let Some(prefix) = opt_path(&self.prefix) {
+            return RootSet::Overlayed {
+                broot: host.clone(),
+                base: host,
+                target: prefix,
+            };
+        }
+        if let Some(root) = opt_path(&self.root) {
+            return RootSet::Dual {
+                broot: host,
+                target: root,
+            };
+        }
+        RootSet::Single { root: host }
+    }
+}
+
 impl Cli {
     /// Resolve the root model (docs/root-topology.md) from the global flags.
     ///
-    /// `--cross <tuple>` layers on top of the base model: it targets the crossdev
+    /// `--target <tuple>` layers on top of the base model: it targets the crossdev
     /// sysroot `<EROOT>/usr/<tuple>` as both config-root and root (crossdev's
     /// `PORTAGE_CONFIGROOT == ROOT == SYSROOT`). The `<EROOT>` it sits under still
-    /// comes from `--local`/`--prefix`/`--root`, so `em --local --cross <t>`
+    /// comes from `--local`/`--prefix`/`--root`, so `em --local --target <t>`
     /// targets `~/.gentoo/usr/<t>`.
     ///
     /// Under `--prefix`, the returned `Roots`'s `merge_root()` is the **prefix**
@@ -252,34 +336,19 @@ impl Cli {
     /// genuinely differ for an overlay; this split is what lets preflight check
     /// BDEPEND against the host while the merge lands in the prefix.
     pub fn roots(&self) -> Roots {
-        // --cross: layer the sysroot on top of the overlay target (the prefix),
+        // --target: layer the sysroot on top of the overlay target (the prefix),
         // not base_roots's BROOT (host /). Under --prefix the cross sysroot is
         // <prefix>/usr/<tuple>, and base_roots's merge_root is the host — so
         // derive the sysroot from the overlay's prefix (eprefix) when set.
-        let base = self.base_roots();
-        let Some(tuple) = self.cross.as_deref() else {
-            // No --cross. Under --prefix, base_roots()'s merge_root is the host
-            // (BROOT); the actual install target is the prefix. Reconstruct the
-            // overlay view here so callers see target=prefix.
-            if let Some(prefix) = base.eprefix.as_deref().filter(|_| base.is_overlay()) {
-                return Roots {
-                    config: base.config.clone(),
-                    base: None,
-                    target: Some(prefix.to_path_buf()),
-                    eprefix: Some(prefix.to_path_buf()),
-                    config_overlay: Some(prefix.join("etc/portage")),
-                    relocate: true,
-                };
-            }
-            return base;
+        let Some(tuple) = self.target.as_deref() else {
+            return self.outer_roots();
         };
         // The outer EROOT the sysroot sits under: the overlay prefix when set
-        // (--prefix), else base_roots's merge_root (host / for plain --cross).
-        let eroot = base
-            .eprefix
-            .as_deref()
-            .map(camino::Utf8PathBuf::from)
-            .unwrap_or_else(|| base.merge_root().to_owned());
+        // (--prefix), else the offset (--root) or host / (bare) — never
+        // `base_roots()`/`roots()` directly, which would double-apply this
+        // same substitution if called recursively; `outer_roots()` is always
+        // the pre-substitution view.
+        let eroot = self.outer_roots().merge_root().to_owned();
         let sysroot = eroot.join("usr").join(tuple);
         Roots {
             config: Some(sysroot.clone()),
@@ -291,30 +360,70 @@ impl Cli {
         }
     }
 
+    /// The root view with any `--target` sysroot substitution undone: what
+    /// [`roots`](Self::roots) returns when `--target` isn't set, computed
+    /// **unconditionally** regardless of whether `self.target` happens to
+    /// also be set. This is the "outer EROOT" — `--local`/`--prefix`'s
+    /// prefix, `--root`'s offset, or host `/` — that every crossdev *setup*
+    /// action (`crossdev/mod.rs`: `sysroot`, `setup_root`,
+    /// `ensure_self_contained_prefix`, `ensure_prefix_profile`, `main_repo`,
+    /// and `setup()`/`toolchain()`'s own top-level checks) must anchor to
+    /// instead of `roots()`. Using `roots()` there was a real bug: if
+    /// `--target T` happens to also be set on the same invocation as
+    /// `crossdev -t T --init-target`, `roots()` is *already* the sysroot,
+    /// so appending `usr/T` again doubly-nested it
+    /// (`<EROOT>/usr/T/usr/T` instead of `<EROOT>/usr/T`) — reproduced live,
+    /// see `todo/root-topology-refactor.md`.
+    ///
+    /// `stage1()`/`profile_stack()`/`resolve_gcc_version` deliberately keep
+    /// using plain `roots()` — those genuinely want `--target`'s sysroot
+    /// substitution (`em --target T stages --stage1` builds *into* the
+    /// sysroot, by design).
+    pub(crate) fn outer_roots(&self) -> Roots {
+        let base = self.base_roots();
+        if let Some(prefix) = base.eprefix.as_deref().filter(|_| base.is_overlay()) {
+            return Roots {
+                config: base.config.clone(),
+                base: None,
+                target: Some(prefix.to_path_buf()),
+                eprefix: Some(prefix.to_path_buf()),
+                config_overlay: Some(prefix.join("etc/portage")),
+                relocate: true,
+            };
+        }
+        base
+    }
+
     /// The root model from `--local`/`--prefix`/`--root`/`--config-root`, before
-    /// any `--cross` sysroot override (see [`roots`](Self::roots)). Exposed at
+    /// any `--target` sysroot override (see [`roots`](Self::roots)). Exposed at
     /// `pub(crate)` so the staged-build driver can install `cross-*` toolchain
     /// packages (which always live in the outer EROOT, never the sysroot
     /// subdirectory — see `crossdev/mod.rs`'s module doc) even from a
-    /// `--cross`-active invocation.
+    /// `--target`-active invocation.
     ///
-    /// `merge_root()` of the returned `Roots` is the **BROOT** — where BDEPEND
-    /// tools run and are checked against (docs/root-topology.md § "Override
-    /// semantics"). Under `--prefix` BROOT is the host `/` (the overlay borrows
-    /// host tools); under `--local`/`--root` BROOT is the offset itself
-    /// (standalone/self-contained). Under `--cross` BROOT is the outer EROOT
-    /// (the sysroot substitution is undone here, applied in `roots()`).
+    /// `merge_root()` of the returned `Roots` is **the outer EROOT** (with
+    /// `--target`'s sysroot substitution undone) — where `bypass_cross_root`
+    /// toolchain-install steps land and where `write_cross_env`/
+    /// `write_sysroot_config` (`crossdev/mod.rs`) write config. Under
+    /// `--prefix` that's the host `/` (the overlay borrows host tools);
+    /// under `--local`/`--root` it's the offset itself. **This is not
+    /// necessarily BROOT** — for plain `--root` the two differ (BROOT is
+    /// always the host, see [`broot`](Self::broot)); they only coincide for
+    /// `--prefix`/`--local`, which is why this function used to be (mis)used
+    /// for BDEPEND checks too. Use [`broot`](Self::broot) for that.
     pub(crate) fn base_roots(&self) -> Roots {
-        let path = |s: &Option<String>| s.as_deref().map(camino::Utf8PathBuf::from);
-        // `--local`: standalone Gentoo-Prefix at ~/.gentoo. Full closure (base
-        // == target == ~/.gentoo), self-contained VDB. EPREFIX makes installed
+        let path = opt_path;
+        // `--local`: standalone Gentoo-Prefix, own BROOT. Full closure (base
+        // == target == the prefix), self-contained VDB. EPREFIX makes installed
         // scripts relocatable (shebangs reference ${EPREFIX}/usr/bin/...). The
         // prefix builds its own python via `toolchain --setup`; during bootstrap
         // the host compiler is reached via PATH, never via a symlink masquerading
         // as a prefix-owned file (that's the overlay's job — see --prefix below).
         // See docs/root-topology.md § "Override semantics".
-        if self.local {
-            let prefix = home_dir().join(".gentoo");
+        if self.local.is_some() {
+            let RootSet::Single { root: prefix } = self.root_set() else {
+                unreachable!("--local always resolves to RootSet::Single")
+            };
             return Roots {
                 config: None,
                 base: Some(prefix.clone()),
@@ -347,11 +456,42 @@ impl Cli {
             config: path(&self.config_root).or_else(|| path(&self.root)),
             // base: --root; host otherwise.
             base: path(&self.root),
-            // target: --root (install destination). BROOT == target for --root.
+            // target: --root (install destination). This is "the outer EROOT"
+            // (bypass_cross_root, write_cross_env/write_sysroot_config in
+            // crossdev/mod.rs all rely on this staying the offset for --root)
+            // — a DIFFERENT thing from BROOT, see broot()'s doc comment.
             target: path(&self.root),
             eprefix: None,
             config_overlay: None,
             relocate: false,
+        }
+    }
+
+    /// The BROOT view: where `BDEPEND` tools run and are checked against
+    /// (PMS table 8.2, docs/root-topology.md). Differs from
+    /// [`base_roots`](Self::base_roots) **only** for plain `--root`: BROOT
+    /// is always the real host `/` there (portage `ROOT=`/`{target}-emerge`
+    /// parity), while `base_roots()` deliberately keeps returning the
+    /// offset for `--root` — it means "the outer EROOT, undoing `--target`'s
+    /// sysroot substitution" for `bypass_cross_root`'s toolchain-install
+    /// call sites (`crossdev/mod.rs`), which is a genuinely different
+    /// question from "where does BDEPEND resolve". For `--prefix`/`--local`
+    /// the two already agree (BROOT and the outer EROOT coincide there), so
+    /// this is a no-op on top of `base_roots()`.
+    ///
+    /// Use this (never `base_roots()`) for anything checking or merging
+    /// unsatisfied `BDEPEND`/`IDEPEND`: `preflight`, `bdepend_avail`,
+    /// `load_host_installed`, and `entry_roots`'s `MergeRoot::Host` case.
+    pub(crate) fn broot(&self) -> Roots {
+        let base = self.base_roots();
+        let broot = self.root_set().broot().to_owned();
+        Roots {
+            config: base.config.clone(),
+            base: Some(broot.clone()),
+            target: Some(broot),
+            eprefix: base.eprefix.clone(),
+            config_overlay: base.config_overlay.clone(),
+            relocate: base.relocate,
         }
     }
 
@@ -398,13 +538,13 @@ mod tests {
 
     #[test]
     fn cross_targets_sysroot_under_eroot() {
-        // `--cross` sits under the `--root` EROOT and pins config == base ==
+        // `--target` sits under the `--root` EROOT and pins config == base ==
         // target to `<EROOT>/usr/<tuple>` (PORTAGE_CONFIGROOT == ROOT == SYSROOT).
         let cli = Cli::parse_from([
             "em",
             "--root",
             "/srv/x",
-            "--cross",
+            "--target",
             "riscv64-unknown-linux-gnu",
             "-p",
             "sys-libs/zlib",
@@ -420,7 +560,7 @@ mod tests {
     #[test]
     fn cross_defaults_to_root_eroot() {
         // No `--root`: EROOT is `/`, so the sysroot is `/usr/<tuple>`.
-        let cli = Cli::parse_from(["em", "--cross", "riscv64-unknown-linux-gnu", "-p", "zlib"]);
+        let cli = Cli::parse_from(["em", "--target", "riscv64-unknown-linux-gnu", "-p", "zlib"]);
         assert_eq!(
             cli.roots().merge_root().as_str(),
             "/usr/riscv64-unknown-linux-gnu"
@@ -508,6 +648,47 @@ mod tests {
             "/opt/p",
             "roots().merge_root() must be the prefix (install target) under --prefix"
         );
+    }
+
+    /// Portage `ROOT=`/`{target}-emerge` parity: `--root R`'s BROOT is the
+    /// real host `/`, not `R`. `R` only receives the *install*; BDEPEND
+    /// tools run against (and are checked against) the host, exactly like
+    /// `--prefix`. Previously `base_roots().merge_root()` was (mis)used for
+    /// this and returned `R`, making an offset build check BDEPEND against
+    /// the (usually near-empty) offset VDB instead of the host's —
+    /// `broot()` is the dedicated accessor now; `base_roots()` keeps its
+    /// own, different "outer EROOT" meaning (see both their doc comments).
+    /// See todo/root-topology-refactor.md.
+    #[test]
+    fn root_broot_is_host_not_offset() {
+        let cli = Cli::parse_from(["em", "--root", "/srv/x", "-p", "sys-libs/zlib"]);
+        assert_eq!(
+            cli.broot().merge_root().as_str(),
+            "/",
+            "broot().merge_root() (BROOT) must be the host under --root"
+        );
+        assert_eq!(
+            cli.base_roots().merge_root().as_str(),
+            "/srv/x",
+            "base_roots().merge_root() (outer EROOT) must stay the offset under --root"
+        );
+        assert_eq!(
+            cli.roots().merge_root().as_str(),
+            "/srv/x",
+            "roots().merge_root() (install target) must stay the offset under --root"
+        );
+    }
+
+    /// `--local DIR` uses `DIR` directly as the standalone prefix root (not
+    /// `DIR/.gentoo` — that expansion only applies to the bare-flag default,
+    /// covered by `local_is_standalone_not_overlay`).
+    #[test]
+    fn local_with_path_uses_dir_directly() {
+        let cli = Cli::parse_from(["em", "--local", "/tmp/x", "-p", "sys-libs/zlib"]);
+        let r = cli.base_roots();
+        assert_eq!(r.base().unwrap().as_str(), "/tmp/x");
+        assert_eq!(r.target().unwrap().as_str(), "/tmp/x");
+        assert_eq!(r.eprefix().unwrap().as_str(), "/tmp/x");
     }
 }
 
@@ -750,11 +931,6 @@ pub enum Applet {
 /// no-build subset for now; building the toolchain is future work).
 #[derive(clap::Args)]
 pub struct CrossdevArgs {
-    /// Target tuple ARCH-VENDOR-OS-LIBC (e.g. `riscv64-unknown-linux-gnu`,
-    /// `aarch64-unknown-linux-musl`, `riscv64-unknown-elf`).
-    #[arg(short = 't', long = "target", value_name = "TUPLE")]
-    pub target: String,
-
     /// Use the LLVM/Clang model (`cross_llvm-*`: host clang cross-targets, no
     /// per-target compiler). Rejects glibc — use musl or a bare-metal target.
     #[arg(short = 'L', long)]

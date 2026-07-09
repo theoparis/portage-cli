@@ -41,7 +41,7 @@ impl Avail {
     /// `BROOT`.
     ///
     /// `host_roots` must be `Cli::base_roots()` (the outer EROOT, *before*
-    /// any `--cross` sysroot substitution), never the possibly
+    /// any `--target` sysroot substitution), never the possibly
     /// cross-substituted `Roots` the solver targets: an unsatisfied Host
     /// BDEPEND builds into `base_roots()` (`entry_roots()` in `main.rs`), so
     /// satisfaction must be checked against that same root's VDB, or a

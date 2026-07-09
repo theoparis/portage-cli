@@ -154,7 +154,7 @@ config from one root (`--config-root`) and installs into another (`--root`),
 with build tools resolved against the host (`BROOT`). On top of that it can
 bootstrap toolchains and assemble stages.
 
-- **`em crossdev -t <tuple> --init-target`** lays down a cross sysroot + overlay
+- **`em --target <tuple> crossdev --init-target`** lays down a cross sysroot + overlay
   (a `crossdev` workalike); **`--setup`** then runs the staged
   `binutils → headers → gcc-stage1 → libc → gcc-stage2` bootstrap into
   `/usr/<tuple>`. Validated end-to-end for `riscv64-unknown-linux-gnu`.

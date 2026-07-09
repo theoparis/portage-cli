@@ -2,7 +2,29 @@
 
 Open items from the toolchain → stage → binhost work, grouped. Each links to the
 file with the detail. Status: 🔴 not started · 🟡 partial/decided · ✅ done (kept
-here briefly for context). Updated 2026-06-27.
+here briefly for context). Updated 2026-07-09.
+
+**2026-07-09 (later)**: the global `--cross <tuple>` flag is now
+**`--target <tuple>`/`-T`** (no clash), and `em crossdev` no longer has its
+own `-t`/`--target` — one flag drives both "set up a target"
+(`em --target T crossdev --init-target`) and "use one"
+(`em --target T stages --stage1`). Also fixed: `crossdev`'s own setup
+helpers were using the already-`--cross`-substituted `roots()`, so a
+redundant global flag doubly-nested the sysroot — see
+[[root-topology-refactor]] for the full story (same `Roots`-accessor-
+confusion class as the `--root` BROOT fix above, one level up: flags, not
+just methods).
+
+**Since 2026-06-27**: the cross overlay was retired —
+[[cross-derive-on-the-fly]] landed ✅ (2026-07-08, `d7ac770`+`b3df565`+
+`363e9aa`+`42d9903`): `cross-<tuple>/<pkg>` is now derived from `::gentoo`
+at resolve time via `Location::Alias`, no on-disk symlink overlay, `--prefix`
+crossdev setup runs unprivileged end-to-end. [[crossdev-target]] reflects
+the same landing. Unrelated to this: `portage_cli` was split into a lib
+crate + `main.rs` thinned to 62 lines, inline tests extracted to sibling
+`tests.rs` files, and `#![warn(missing_docs)]` enabled on `portage-repo`
+(commits through `27de5af`) — pure code-health work, no behaviour change,
+verified clean (`fmt`/clippy/full test suite) independently of this arc.
 
 ## RESUME HERE (2026-07-05) — flagged for independent review
 
@@ -31,24 +53,66 @@ independently re-verified**, see the review file.
 One more real, deferred bug (#36): `app-alternatives/gpg`'s VDB-written
 `IUSE` drops eclass-injected flags (`ebuild.rs`'s `iuse: env.iuse`
 sources from live post-execution shell state, not the metadata cache).
-Unblocked via a **manual, hand-edited VDB file patch** (not a code fix)
-— flagged in the review file for scrutiny.
+Unblocked via a **manual, hand-edited VDB file patch** (not a code fix).
+**2026-07-09: root cause now precisely nailed down** (not just "needs a
+design pass") — read real Portage's own `inherit()` in `ebuild.sh`
+(`/usr/lib/portage/python3.13/ebuild.sh:284-344`): before sourcing each
+eclass it stashes any pre-existing `IUSE`/`*DEPEND` into `B_IUSE` etc. and
+unsets the live var, sources the eclass, appends whatever the eclass set to
+an `E_IUSE` accumulator, then **rolls the live var back** to its pre-inherit
+value — so an ebuild's own later plain `IUSE=` assignment never stomps on
+what an eclass contributed. At the end, `IUSE+="${IUSE:+ }${E_IUSE}"`
+appends the accumulated eclass contribution to the ebuild's own final value.
+Verified against real portage's md5-cache for this exact ebuild:
+`IUSE=nls ssl +reference freepg sequoia` (ebuild's own tokens first, eclass
+tokens appended — reproduces exactly). em's `collect_env`/`EbuildEnv` has no
+equivalent stash/accumulate/rollback around `inherit`, hence the drop. Fix
+is well-specified now (mirror this for IUSE/REQUIRED_USE/*DEPEND/PROPERTIES/
+RESTRICT around em's `inherit` implementation) but touches the core shell
+interpreter, not attempted yet — **keep the manual VDB patch until it
+lands**, don't revert it prematurely.
 
-**Currently open, interrupted mid-investigation**: retrying task #17's
-target (`sys-apps/systemd-utils --cross riscv64-unknown-linux-gnu
---emptytree --with-bdeps --keep-going --jobs 16 --buildpkg`) got to 99 of
-101 merged, 2 failing:
-- `sys-apps/systemd-utils` itself: meson can't find `jinja2` for
-  python3 — `dev-python/jinja2` is installed in the Host-flavor VDB
-  location but not the Target-flavor one, which *smells* like another
-  instance of the Host/Target root-conflation bug class, but this was
-  **not yet root-caused** when the session was interrupted.
-- `app-text/opensp`: `make: -c: No such file or directory` (Error 127)
-  — **not investigated at all** beyond the raw error line.
+**Task #17 — re-verified 2026-07-09 (fresh `em` build, clean run, not a VDB
+spot check), root-caused for real, and fixed.**
+`--autosolve-use --privilege pseudoroot --root /var/tmp/cross-stage1-riscv64
+--cross riscv64-unknown-linux-gnu --emptytree sys-apps/systemd-utils
+--with-bdeps --keep-going --jobs 16 --buildpkg` → `docbook-xml-dtd-4.2-r3`
+merges, `systemd-utils` dies: `Program python3 (jinja2) found: NO`. First
+pass here blamed "this EROOT needs a full native stage1" — wrong. Real
+cause, found after the user corrected the framing: real `ROOT=`/
+`{target}-emerge` always resolve `BDEPEND` against the **host `/`**, only
+the install target moves; `cli.rs::base_roots()` had `--root R` set
+`base: R, target: R`, so every BDEPEND check (`preflight`,
+`bdepend_avail::initial_bdepend`, `load_host_installed`) read the *offset's*
+VDB instead of the host's — which already has jinja2 for python3.13,
+exactly what the host's own `meson` needs. **Fixed**, in two passes (see
+[[root-topology-refactor]] for the full story — the first pass changed
+`base_roots()` directly and broke crossdev's own unprivileged toolchain
+install path; landed as a new, separate `Cli::broot()` instead, leaving
+`base_roots()` untouched): `--root`'s BROOT is now always the host via
+`broot()`; `--local` is now parameterized (`--local DIR`, was a bare bool
+hardcoded to `~/.gentoo`) so the old self-contained-BROOT-in-an-offset
+workflow (what this sysroot was actually doing) stays expressible under its
+own name. Unit-tested (`root_broot_is_host_not_offset`,
+`local_with_path_uses_dir_directly`); full workspace test suite green.
+**Re-verified live**: `em --root R --cross riscv64-unknown-linux-gnu
+crossdev -t riscv64-unknown-linux-gnu --init-target` now completes cleanly
+and unprivileged (this exact command hit a real, self-inflicted permission
+wall during the first pass — fixed, see [[root-topology-refactor]]).
+**Not yet re-verified against a full rebuilt riscv64 sysroot through
+`sys-apps/systemd-utils`** (the old one was wiped per the user's
+instruction) — that's a long real build, left as a follow-up. **`app-text/
+opensp` is unrelated** — it isn't in `sys-apps/systemd-utils`'s dependency
+closure at all; the 2026-07-05 "2 failures" pairing was a broader run's
+artifact, not this target's. See [[stage-build-shakeout]] finding #28's
+2026-07-09 addendum and [[root-topology-refactor]].
 
-**Next**: do the independent-review checklist in
-[[session-status-2026-07-05-needs-review]] first, then pick up the
-jinja2/opensp failures.
+**Next**: re-run the full task #17 target end-to-end against a freshly
+bootstrapped riscv64 cross sysroot to confirm the fix closes it completely
+(the fast pretend-mode check already confirms jinja2 is seen as
+host-satisfied). The rest of the 2026-07-05 review checklist (re-derive
+"stage1 is clean" from a fresh run; spot-check the 4 committed fixes) is
+still open.
 
 ## Stage building (the active goal: a real stage3)
 

@@ -52,6 +52,93 @@ to land as part of (or before) the refactor.
   of the host's, failing the jinja2 build with "not satisfied" even though the
   host had all of gpep517/flit-core/python:3.14. Regression test:
   `prefix_overlay_broot_is_host_not_prefix`.
+- ✅ **`--root`'s BROOT is the host, not the offset (portage `ROOT=`
+  parity).** The fifth behaviour change, missing from this list until
+  2026-07-09: `base_roots()` had `base: R, target: R` for plain `--root R`,
+  so `merge_root()` (read as BROOT by `preflight`/`bdepend_avail`/
+  `load_host_installed`) was the offset itself — BDEPEND satisfaction
+  checked the (usually near-empty) offset VDB instead of the real host's.
+  Found live: task #17's `--root .../cross-stage1-riscv64 --cross riscv64...
+  systemd-utils` kept failing on `jinja2 found: NO` even though the real
+  host already has jinja2 for its own python.
+  - **The fix went through two passes.** First pass introduced a `RootSet`
+    enum (`Single`/`Dual`/`Overlayed`, matching `docs/root-topology.md`'s
+    proposed shape) and made `base_roots()` itself return the host for
+    `--root`. That broke a *different* thing: `base_roots()` is also relied
+    on as "the outer EROOT, `--cross`-substitution undone" by
+    `crossdev/mod.rs`'s `bypass_cross_root` (where crossdev's own
+    toolchain-bootstrap packages install) and by `write_cross_env`/
+    `write_sysroot_config` (which write config those steps read back) — all
+    of which correctly need the *offset* for `--root`, not the host. Caught
+    it by re-testing `em --root R --cross T crossdev --init-target`, which
+    started hitting a real, *new* permission error (`write_cross_env` trying
+    to write `/etc/portage/env/...` — the real host — instead of `R/etc/portage`).
+  - **Second pass, landed:** reverted `base_roots()` to its original
+    behaviour (still "the outer EROOT", unchanged for every flag) and added
+    a new, dedicated `Cli::broot()` — the *only* thing that differs from
+    `base_roots()`, and only for plain `--root` (BROOT = host `/` there;
+    identical to `base_roots()` for `--prefix`/`--local`, where the two
+    already agreed). Repointed the four call sites that actually mean BDEPEND
+    satisfaction (`emerge.rs`, `dispatch.rs`'s `equery depgraph`,
+    `crossdev::resolve_gcc_version`, `merge/mod.rs`'s `entry_roots` host
+    routing) from `base_roots()` to `broot()`; left `bypass_cross_root`/
+    `write_cross_env`/`write_sysroot_config`/`activate_toolchain` on
+    `base_roots()`, untouched. Regression test: `root_broot_is_host_not_offset`
+    (checks `broot()` **and** `base_roots()` diverge correctly for `--root`).
+  - **Re-verified end-to-end after the second pass**: `em --root R --cross
+    riscv64-unknown-linux-gnu crossdev -t riscv64-unknown-linux-gnu
+    --init-target` now completes cleanly, unprivileged, with no `/etc/portage`
+    write at all — `write_cross_env` correctly lands in `R/etc/portage`. The
+    permission wall was **our own bug** from the first pass, not an inherent
+    `--root --cross` limitation — corrected the record here (an earlier
+    version of this note wrongly called it expected/by-design).
+  - The old self-contained-BROOT-in-an-offset workflow (build everything,
+    including BDEPEND tools, into the offset itself — what
+    `/var/tmp/cross-stage1-riscv64` was actually doing) still has a home:
+    `--local`, parameterized to accept a path (`--local DIR`, was a bare
+    bool hardcoded to `~/.gentoo`) instead of plain `--root`.
+  - Also found while verifying: the solver's BDEPEND routing genuinely
+    differs by scenario, and this is by design, not a bug — `broot_filtered`
+    (same-arch native `--root`, no `--cross`) routes an unsatisfied BDEPEND
+    to `MergeRoot::Target` (build it into the offset itself); only
+    `cross_target_runtime_deps` (true cross-arch, `--cross` with
+    `CHOST != CBUILD`) routes it to `MergeRoot::Host`, which is what
+    `broot()` now correctly feeds. So this fix's effect is specific to cross
+    builds — a same-arch `--root pkg` (no `--cross`) was never affected by
+    the BROOT bug in the first place, since that path doesn't consult BROOT
+    for BDEPEND routing at all.
+
+- ✅ **`crossdev -t T` doubly-nested the sysroot when a global `--cross T`
+  was also set, and `--cross`/`-t` were two separate flags for the same
+  concept.** Found while reviewing this arc: `crossdev/mod.rs`'s own
+  `sysroot()`/`setup_root()`/`main_repo()`/`ensure_self_contained_prefix()`/
+  `ensure_prefix_profile()` (the setup-action helpers) used `globals.roots()`
+  — which is *already* `--cross`-substituted to the sysroot when the global
+  flag is set — so appending `usr/<tuple>` again doubly-nested it
+  (`<EROOT>/usr/T/usr/T`). Reproduced live with matching tuples (not just
+  mismatched ones). Fixed by adding `Cli::outer_roots()` (extracted from
+  `roots()`'s own "no `--cross`" branch, deduplicating that logic) and
+  repointing every setup-only helper to it instead of `roots()`;
+  `stage1()`/`profile_stack()`/`resolve_gcc_version` correctly keep `roots()`
+  (they genuinely want the sysroot substitution).
+  - User pushed back on the follow-up fix (a "reject if `-t` and `--cross`
+    disagree" guard): two flags for the same concept that need a mismatch
+    check are the smell, not something to validate around. Resolved by
+    **removing `crossdev`'s local `-t`/`--target` entirely** and renaming
+    the global `--cross` to **`--target`/`-T`** (no clash — `t`/`T` were
+    unused everywhere). One flag now serves both roles: `em --target T
+    crossdev --init-target` sets T up; `em --target T stages --stage1` (or
+    any plain atom build) uses it. `CrossdevArgs.target` is gone;
+    `crossdev::run` reads `globals.target` directly. Verified live: `em
+    --root R --target T crossdev --init-target` (no local `-t` at all) lays
+    down the sysroot at `R/usr/T` correctly, and running with no `--target`
+    at all gives a clear error instead of silently guessing.
+  - This is a case of the same underlying issue as the enum-migration
+    item below, one level up: not just "which of several `Roots`-returning
+    methods do I call", but "which of several *flags* mean the same thing".
+    Worth keeping in mind during the `RootTopology` migration — check for
+    other near-duplicate flag pairs while touching this code, not just
+    near-duplicate accessor methods.
 
 ## The variant refactor (structural)
 

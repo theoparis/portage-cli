@@ -31,7 +31,7 @@ use crate::style::{C_HOST, C_PREFIX};
 /// activation). Takes `Roots` directly, not `&Cli` — the `cross-<CTARGET>/*`
 /// toolchain always lives in the plain outer EROOT (see `crossdev/mod.rs`'s
 /// module doc), so callers must pass `Cli::base_roots`, never `Cli::roots`
-/// (which would substitute in a `--cross`-active sysroot instead).
+/// (which would substitute in a `--target`-active sysroot instead).
 pub fn activate_binutils(roots: &Roots, target: &str) -> Result<bool> {
     binutils::activate_latest(roots, target)
 }
@@ -71,7 +71,7 @@ fn config_portage_dir(globals: &Cli) -> Utf8PathBuf {
 /// [`config_portage_dir`], but from an already-computed [`Roots`] rather than
 /// `&Cli` — used by [`env_d`] so its crossdev-facing entry points
 /// ([`activate_binutils`]/[`activate_compiler`]) can be handed
-/// `Cli::base_roots` instead of the `--cross`-substituted `Cli::roots`.
+/// `Cli::base_roots` instead of the `--target`-substituted `Cli::roots`.
 pub(super) fn config_portage_dir_for(roots: &Roots) -> Utf8PathBuf {
     // If config root is explicitly set (--config-root), use it
     if let Some(config) = roots.config() {
