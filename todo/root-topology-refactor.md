@@ -770,6 +770,53 @@ stage3, no host contamination):
     the "ready" summary with no `config changes` noise — matches emerge's
     own `-p`/`-a` UX exactly.
   - Full workspace `fmt`/clippy/test clean.
+- ✅ **`--ex-pkg`/`--ex-gdb` implemented — crossdev's own "Extra Fun".** New
+  `CrossdevArgs` fields (`cli.rs`): `ex_pkg: Vec<String>` (`CATEGORY/PN`,
+  repeatable) and `ex_gdb: bool` (sugar for `--ex-pkg dev-debug/gdb`, per
+  the user's own framing: "`--ex-gdb` should just be a shorthand for a
+  matching `--ex-pkg`"). `ex_pkg_atoms(args) -> Result<Vec<Cpn>>`
+  (`crossdev/mod.rs`) parses each with `portage_atom::Cpn::parse` (not a
+  hand-rolled `split_once('/')` — user: "let's make it slightly less sloppy
+  and parse as cpn and possibly validate against the main repo") and appends
+  `dev-debug/gdb` for `--ex-gdb`.
+  - Per the confirmed design (previous entries): `--ex-pkg` is a `crossdev`
+    concern, not a general `em` one — it means adding an entry to the alias
+    map, and extras are always host-arch to be meaningful (checked against
+    `/usr/bin/crossdev` directly: `for_each_extra_pkg set_portage X` always
+    takes `set_env`'s host-ABI branch for `l=X`).
+  - `extras: &[Cpn]` threaded through `alias_repo_conf_entry` (existence
+    validated against `::gentoo` in the same loop as the base set, same
+    error shape, appended to the alias-packages line),
+    `sysroot_repos_conf_entries` (same, for the sysroot's own copy),
+    `cross_env_entries` (each extra gets a host-ABI env file — always
+    `arch.is_target() == false`, never the target branch — plus a `**`
+    `package.accept_keywords` entry, unconditionally) and
+    `show_target_cfg` (an "Extra (--ex-pkg, host-arch)" section).
+  - **Per-invocation, not sticky** — matches real crossdev's own `--ex-pkg`
+    semantics exactly (`XPKGS` is a per-run CLI list, never persisted): a
+    later `--init-target` that omits a previously-added extra regenerates
+    the alias/env/keywords without it, same as the drift-refresh behaviour
+    the staleness fix already established. Considered and rejected a
+    "sticky" (union-with-existing-file) design — real crossdev has no such
+    memory either, and it would contradict the "config always exactly
+    reflects what this invocation asked for" philosophy just built.
+  - New tests: `ex_pkg_atoms_parses_category_pn`,
+    `ex_pkg_atoms_rejects_bad_shape`, `ex_gdb_is_sugar_for_ex_pkg_dev_debug_gdb`,
+    `ex_pkg_extras_are_validated_aliased_and_host_classified` (existence
+    check + alias-packages line; `cross_env_entries`'s host-ABI/`**`
+    treatment is live-verified only, like the rest of `write_cross_env`'s
+    multilib-dependent behaviour — no unit test sources a real
+    `multilib.eclass`). Full workspace `fmt`/clippy/test clean.
+  - Live-verified in the `aarch64-20260618T101350Z` sandbox: `--show-target-cfg
+    --ex-gdb` previews the extra; `--init-target --ex-gdb` writes `dev-debug/
+    gdb` into the alias, `**` into `package.accept_keywords`, and a
+    host-ABI env file (`ABI='arm64'`, matching binutils/gcc, not the
+    target's `lp64d`) — `em --prefix P -p cross-.../gdb` (no `--target`)
+    then resolves it correctly to the prefix. A fresh `--ex-pkg dev-vcs/git`
+    (never in the base set) resolves the same way. A malformed `--ex-pkg
+    not-a-cpn` is rejected with a clear `Cpn::parse` error. A later
+    `--init-target` without either flag correctly drops both extras again
+    (confirming the per-invocation, non-sticky design).
 
 ## Verification (outstanding)
 

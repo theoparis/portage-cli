@@ -1112,6 +1112,21 @@ pub struct CrossdevArgs {
     #[arg(long)]
     pub show_target_cfg: bool,
 
+    /// Build an extra package onto the established cross target (may be
+    /// given multiple times). `CATEGORY/PN` — crossdev's own `--ex-pkg`: it
+    /// always runs on the host (like `binutils`/`gcc`), not the target
+    /// sysroot, matching real crossdev's `set_env` treatment of `--ex-pkg`
+    /// extras. Applies to `--init-target`/`--setup` only (a config-time
+    /// concern, not a build one); named per invocation, like real crossdev —
+    /// not remembered across a later run that omits it.
+    #[arg(long, value_name = "CATEGORY/PN")]
+    pub ex_pkg: Vec<String>,
+
+    /// Build a cross gdb (`dev-debug/gdb`) — shorthand for `--ex-pkg
+    /// dev-debug/gdb`, crossdev's own `--ex-gdb`.
+    #[arg(long)]
+    pub ex_gdb: bool,
+
     #[command(flatten)]
     pub depgraph_flags: DepgraphFlags,
 

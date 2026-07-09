@@ -56,6 +56,7 @@ use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
+use portage_atom::Cpn;
 use portage_repo::{MakeConf, ProfileStack, ReposConf, Repository};
 
 use crate::cli::{Cli, CrossdevArgs, DepgraphFlags, MergeFlags};
@@ -125,20 +126,42 @@ pub async fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("em crossdev needs a target tuple: pass --target/-T"))?;
     let target = CrossTarget::parse(&tuple, args.llvm)?;
 
+    let extras = ex_pkg_atoms(args)?;
+
     if args.show_target_cfg {
-        return show_target_cfg(&target, globals);
+        return show_target_cfg(&target, globals, &extras);
     }
     if args.init_target {
-        return init_target(&target, globals);
+        return init_target(&target, globals, &extras);
     }
     if args.setup {
-        return setup(&target, globals, args).await;
+        return setup(&target, globals, args, &extras).await;
     }
     bail!(
         "em crossdev does setup only for now — pass --init-target to lay down the \
          overlay + sysroot config, --setup to bootstrap the cross toolchain, or \
          --show-target-cfg to preview the derived config"
     );
+}
+
+/// Parse `--ex-pkg CATEGORY/PN` atoms (plus `--ex-gdb`'s `dev-debug/gdb`
+/// shorthand) into `(category, pn)` pairs — crossdev's own `--ex-pkg`/
+/// `--ex-gdb`: extra packages built onto an already-established cross
+/// target, after the base toolchain. These always run on the host (like
+/// `binutils`/`gcc`), never the target sysroot — real crossdev's
+/// `for_each_extra_pkg set_portage X` always takes `set_env`'s host-ABI
+/// branch for them, regardless of what the package actually does.
+fn ex_pkg_atoms(args: &CrossdevArgs) -> Result<Vec<Cpn>> {
+    let mut atoms = Vec::new();
+    for pkg in &args.ex_pkg {
+        let cpn = Cpn::parse(pkg)
+            .map_err(|e| anyhow::anyhow!("--ex-pkg {pkg:?} is not CATEGORY/PN: {e}"))?;
+        atoms.push(cpn);
+    }
+    if args.ex_gdb {
+        atoms.push(Cpn::new("dev-debug", "gdb"));
+    }
+    Ok(atoms)
 }
 
 /// `em crossdev <tuple> --setup`: bootstrap the cross toolchain into the prefix
@@ -150,11 +173,16 @@ pub async fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
 /// [`StagePlan`](stages::StagePlan) through the shared merge path
 /// ([`crate::emerge_atoms`]) — per-step `USE` override + `--nodeps`. With `-p`
 /// each step prints its plan instead of building.
-async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Result<()> {
-    // `-p` only previews the staged builds — don't write the overlay/sysroot.
-    if !globals.pretend {
-        init_target(target, globals)?;
-    }
+async fn setup(
+    target: &CrossTarget,
+    globals: &Cli,
+    args: &CrossdevArgs,
+    extras: &[Cpn],
+) -> Result<()> {
+    // `init_target` is itself `-p`/`-a`-aware now (see `config_plan`), so
+    // this no longer needs its own `!globals.pretend` gate — under `-p` it
+    // previews the config-plan changes instead of skipping them silently.
+    init_target(target, globals, extras)?;
     // A self-contained `--root DIR` EPREFIX has no host-shared merged-usr
     // skeleton or libs, so the plan needs the same from-scratch treatment as
     // native. `outer_roots()`, not `roots()`: this must stay anchored to the
@@ -657,7 +685,7 @@ fn main_repo(globals: &Cli) -> Result<Repository> {
     }
 }
 
-fn show_target_cfg(target: &CrossTarget, globals: &Cli) -> Result<()> {
+fn show_target_cfg(target: &CrossTarget, globals: &Cli, extras: &[Cpn]) -> Result<()> {
     let mut out = anstream::stdout();
     let row = |out: &mut dyn Write, k: &str, v: &str| {
         writeln!(out, "  {C_LABEL}{k:<9}{C_LABEL:#} {v}").ok();
@@ -675,6 +703,13 @@ fn show_target_cfg(target: &CrossTarget, globals: &Cli) -> Result<()> {
     for (cat, pkg, _) in target.packages() {
         writeln!(out, "    {C_PKG}{category}/{pkg}{C_PKG:#} → {cat}/{pkg}").ok();
     }
+    if !extras.is_empty() {
+        writeln!(out, "  {C_LABEL}Extra (--ex-pkg, host-arch){C_LABEL:#}").ok();
+        for cpn in extras {
+            let pkg = cpn.package;
+            writeln!(out, "    {C_PKG}{category}/{pkg}{C_PKG:#} → {cpn}").ok();
+        }
+    }
     Ok(())
 }
 
@@ -683,7 +718,12 @@ fn show_target_cfg(target: &CrossTarget, globals: &Cli) -> Result<()> {
 /// hands the whole batch to [`config_plan::apply`] — so this now honours
 /// `-p` (preview instead of writing) and `-a` (confirm before writing) like
 /// any other mutating `em` path, instead of writing blindly.
-fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
+///
+/// `extras` are `--ex-pkg`/`--ex-gdb` atoms (crossdev's own "Extra Fun"):
+/// additional packages onto the established cross target, beyond
+/// [`CrossTarget::packages`]'s fixed base set — always host-arch, matching
+/// real crossdev's `set_env` treatment of `--ex-pkg`.
+fn init_target(target: &CrossTarget, globals: &Cli, extras: &[Cpn]) -> Result<()> {
     // For a retargeted prefix (`--local`/`--prefix`/`--root`) bootstrap it first:
     // `setup::bootstrap` writes the prefix `bashrc` that re-adds `<EROOT>/usr/bin`
     // to the build PATH (the shell sanitiser strips `$HOME` paths, so a `--local`
@@ -710,8 +750,9 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
         &gentoo_path,
         target,
         &category,
+        extras,
     )?);
-    entries.extend(cross_env_entries(target, globals, &gentoo_path)?);
+    entries.extend(cross_env_entries(target, globals, &gentoo_path, extras)?);
     entries.extend(sysroot_config_entries(
         target,
         &sysroot,
@@ -723,6 +764,7 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
         &gentoo_path,
         target,
         &category,
+        extras,
     ));
 
     if !config_plan::apply(entries, globals)?.applied() {
@@ -757,13 +799,28 @@ fn alias_repo_conf_entry(
     gentoo: &Utf8Path,
     target: &CrossTarget,
     category: &str,
+    extras: &[Cpn],
 ) -> Result<config_plan::ConfigEntry> {
     // Validate every source package exists under ::gentoo, with a clear error
     // naming the cross package it's needed for, before declaring the alias.
+    // Covers `--ex-pkg`/`--ex-gdb` extras too — same requirement, same error
+    // shape, so a typo'd or nonexistent extra is rejected up front instead of
+    // surfacing later as an opaque resolver `NoVersions`.
     for (real_cat, pkg, _) in target.packages() {
         let dst = gentoo.join(real_cat).join(pkg);
         if !dst.is_dir() {
             bail!("{real_cat}/{pkg} not found at {dst} (needed for {category}/{pkg})");
+        }
+    }
+    for cpn in extras {
+        let dst = gentoo
+            .join(cpn.category.as_str())
+            .join(cpn.package.as_str());
+        if !dst.is_dir() {
+            bail!(
+                "--ex-pkg {cpn} not found at {dst} (needed for {category}/{})",
+                cpn.package
+            );
         }
     }
 
@@ -771,7 +828,7 @@ fn alias_repo_conf_entry(
     Ok(config_plan::ConfigEntry::Alias {
         path: conf_dir.join(format!("{OVERLAY_NAME}.conf")),
         category: category.to_owned(),
-        packages_line: alias_packages_line(target),
+        packages_line: alias_packages_line(target, extras),
     })
 }
 
@@ -826,15 +883,17 @@ fn ensure_self_contained_prefix(globals: &Cli) -> Result<Utf8PathBuf> {
     Ok(gentoo_path)
 }
 
-/// The whitespace-separated real-cpn list for `alias-packages`, in stage
-/// order (matching [`CrossTarget::packages`]). The parser re-parses each
-/// token as a `Cpn`, so this is pure config-file serialisation — no identity
-/// is carried as an opaque string downstream.
-fn alias_packages_line(target: &CrossTarget) -> String {
+/// The whitespace-separated real-cpn list for `alias-packages`: the base set
+/// from [`CrossTarget::packages`] in stage order, followed by any `--ex-pkg`/
+/// `--ex-gdb` `extras`. The parser re-parses each token as a `Cpn`, so this
+/// is pure config-file serialisation — no identity is carried as an opaque
+/// string downstream.
+fn alias_packages_line(target: &CrossTarget, extras: &[Cpn]) -> String {
     target
         .packages()
         .into_iter()
         .map(|(cat, pkg, _)| format!("{cat}/{pkg}"))
+        .chain(extras.iter().map(Cpn::to_string))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -924,6 +983,7 @@ fn sysroot_repos_conf_entries(
     gentoo: &Utf8Path,
     target: &CrossTarget,
     category: &str,
+    extras: &[Cpn],
 ) -> Vec<config_plan::ConfigEntry> {
     let dir = sysroot.join("etc/portage/repos.conf");
     vec![
@@ -934,7 +994,7 @@ fn sysroot_repos_conf_entries(
         config_plan::ConfigEntry::Alias {
             path: dir.join(format!("{OVERLAY_NAME}.conf")),
             category: category.to_owned(),
-            packages_line: alias_packages_line(target),
+            packages_line: alias_packages_line(target, extras),
         },
     ]
 }
@@ -1010,6 +1070,7 @@ fn cross_env_entries(
     target: &CrossTarget,
     globals: &Cli,
     gentoo: &Utf8Path,
+    extras: &[Cpn],
 ) -> Result<Vec<config_plan::ConfigEntry>> {
     let eclass_dir = gentoo.join("eclass");
     let host_ml = multilib::query(&host_chost(), &eclass_dir)?;
@@ -1080,6 +1141,23 @@ fn cross_env_entries(
         if arch == target::PackageArch::Host {
             keyword_entries.push_str(&format!("{category}/{pkg} **\n"));
         }
+    }
+    // `--ex-pkg`/`--ex-gdb` extras: always the host-ABI branch, matching real
+    // crossdev's `for_each_extra_pkg set_portage X` (set_env's `case ${l} in
+    // K|L) target ;; *) host` always falls to the host branch for `l=X`) —
+    // and always get `**`, same reasoning as the base host-arch tools above.
+    for cpn in extras {
+        let pkg = cpn.package;
+        let body = format!(
+            "{header}{}",
+            multilib::env_block(&host_ml, &target_ml, false)
+        );
+        entries.push(config_plan::ConfigEntry::File {
+            path: env_dir.join(format!("{pkg}.conf")),
+            desired: body,
+        });
+        mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
+        keyword_entries.push_str(&format!("{category}/{pkg} **\n"));
     }
 
     entries.push(config_plan::ConfigEntry::File {
@@ -1159,6 +1237,8 @@ mod tests {
             init_target: false,
             setup: false,
             show_target_cfg,
+            ex_pkg: Vec::new(),
+            ex_gdb: false,
             depgraph_flags: crate::cli::DepgraphFlags::default(),
             merge_flags: crate::cli::MergeFlags::default(),
         }
@@ -1174,7 +1254,7 @@ mod tests {
         target: &CrossTarget,
         category: &str,
     ) -> Result<()> {
-        let entry = alias_repo_conf_entry(globals, gentoo, target, category)?;
+        let entry = alias_repo_conf_entry(globals, gentoo, target, category, &[])?;
         config_plan::apply_now(std::slice::from_ref(&entry))
     }
 
@@ -1207,7 +1287,7 @@ mod tests {
     #[test]
     fn alias_packages_line_is_the_real_cpns_in_stage_order() {
         let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
-        let line = alias_packages_line(&target);
+        let line = alias_packages_line(&target, &[]);
         // Every token is a real ::gentoo cpn, in packages() order, no cross
         // category, no version — pure derivation source for Location::Alias.
         let tokens: Vec<&str> = line.split_whitespace().collect();
@@ -1230,6 +1310,76 @@ mod tests {
             );
         }
         assert!(!tokens.contains(&"sys-devel/gcc") || line.contains("sys-devel/gcc"));
+    }
+
+    #[test]
+    fn ex_pkg_atoms_parses_category_pn() {
+        let mut args = crossdev_args(false);
+        args.ex_pkg = vec!["dev-vcs/git".to_owned()];
+        let atoms = ex_pkg_atoms(&args).unwrap();
+        assert_eq!(atoms, vec![Cpn::new("dev-vcs", "git")]);
+    }
+
+    #[test]
+    fn ex_pkg_atoms_rejects_bad_shape() {
+        let mut args = crossdev_args(false);
+        args.ex_pkg = vec!["not-a-cpn".to_owned()];
+        let err = ex_pkg_atoms(&args).expect_err("bare package name rejected");
+        assert!(format!("{err:#}").contains("not-a-cpn"));
+    }
+
+    #[test]
+    fn ex_gdb_is_sugar_for_ex_pkg_dev_debug_gdb() {
+        let mut args = crossdev_args(false);
+        args.ex_gdb = true;
+        let atoms = ex_pkg_atoms(&args).unwrap();
+        assert_eq!(atoms, vec![Cpn::new("dev-debug", "gdb")]);
+
+        // Combines with explicit --ex-pkg atoms too, in order.
+        args.ex_pkg = vec!["dev-vcs/git".to_owned()];
+        let atoms = ex_pkg_atoms(&args).unwrap();
+        assert_eq!(
+            atoms,
+            vec![Cpn::new("dev-vcs", "git"), Cpn::new("dev-debug", "gdb")]
+        );
+    }
+
+    /// `--ex-pkg` extras: validated for existence like the base set, appended
+    /// to the alias-packages line, and always get the host-ABI env +
+    /// `**` keyword treatment (real crossdev's `--ex-pkg` is always host-arch,
+    /// regardless of what the package actually does).
+    #[test]
+    fn ex_pkg_extras_are_validated_aliased_and_host_classified() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let gentoo = root.join("gentoo");
+        let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let category = target.category();
+        for (cat, pkg, _) in target.packages() {
+            std::fs::create_dir_all(gentoo.join(cat).join(pkg)).unwrap();
+        }
+        let globals = test_cli_at_root(root);
+
+        // Missing extra: rejected up front, same shape as a missing base package.
+        let missing = [Cpn::new("dev-vcs", "git")];
+        let err = alias_repo_conf_entry(&globals, &gentoo, &target, &category, &missing)
+            .expect_err("missing --ex-pkg source rejected");
+        assert!(format!("{err:#}").contains("dev-vcs/git"));
+
+        // Present: appended to the alias-packages line.
+        std::fs::create_dir_all(gentoo.join("dev-vcs").join("git")).unwrap();
+        let entry = alias_repo_conf_entry(&globals, &gentoo, &target, &category, &missing).unwrap();
+        let config_plan::ConfigEntry::Alias { packages_line, .. } = &entry else {
+            panic!("expected an Alias entry");
+        };
+        assert!(packages_line.ends_with("dev-vcs/git"));
+
+        // `cross_env_entries`'s host-ABI/`**`-keyword treatment for extras
+        // needs a real `multilib.eclass` (sourced via brush) that a bare
+        // temp-dir fixture doesn't have — live-verified separately instead
+        // (see todo/root-topology-refactor.md), same as the rest of
+        // `write_cross_env`'s multilib-dependent behaviour, which has no
+        // unit test either for the same reason.
     }
 
     /// `write_alias_repo_conf` emits a `Location::Alias` repos.conf entry that
@@ -1324,7 +1474,7 @@ mod tests {
         let expected = format!(
             "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
              alias-packages = {}\n",
-            alias_packages_line(&target)
+            alias_packages_line(&target, &[])
         );
         assert_eq!(refreshed, expected);
     }

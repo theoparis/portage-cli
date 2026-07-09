@@ -19,6 +19,7 @@ use super::symlink_force;
 use crate::util::write_if_absent;
 
 /// One file/dir/symlink `init_target` wants in a particular state.
+#[derive(Debug)]
 pub(super) enum ConfigEntry {
     /// Regenerated every run: em owns the full content, so a rewrite always
     /// wins over whatever is currently on disk.
