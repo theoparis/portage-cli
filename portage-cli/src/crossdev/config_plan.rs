@@ -15,8 +15,18 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::cli::Cli;
 
-use super::symlink_force;
+use super::{OVERLAY_NAME, symlink_force};
 use crate::util::write_if_absent;
+
+/// The full `[crossdev]` `Location::Alias` body for `category`/`packages_line`
+/// — the single formatter both `ConfigEntry::Alias`'s `change()` (comparison)
+/// and `apply()` (write) use, so they can never drift apart from each other.
+fn alias_body(category: &str, packages_line: &str) -> String {
+    format!(
+        "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
+         alias-packages = {packages_line}\n"
+    )
+}
 
 /// One file/dir/symlink `init_target` wants in a particular state.
 #[derive(Debug)]
@@ -83,10 +93,16 @@ impl ConfigEntry {
                 category,
                 packages_line,
             } => match std::fs::read_to_string(path) {
-                Ok(existing)
-                    if existing.contains(&format!("alias-target = {category}"))
-                        && existing.contains(&format!("alias-packages = {packages_line}")) =>
-                {
+                // Exact match, not a substring check: a hand-edited
+                // `alias-packages` line that merely *contains* our computed
+                // line as a prefix/substring (e.g. someone appended a
+                // package by hand instead of using `--ex-pkg`) must still
+                // count as drift, not "already up to date" — found live:
+                // a `.contains()` check here let a hand-added trailing
+                // package silently survive while an edit anywhere else in
+                // the line would just as silently have been clobbered, an
+                // inconsistency with no principled reason to keep.
+                Ok(existing) if existing == alias_body(category, packages_line) => {
                     Change::Unchanged
                 }
                 // Foreign (no `alias-target =` key at all) — never touch.
@@ -130,11 +146,8 @@ impl ConfigEntry {
                 {
                     return Ok(());
                 }
-                let body = format!(
-                    "[crossdev]\nalias-source = gentoo\nalias-target = {category}\n\
-                     alias-packages = {packages_line}\n"
-                );
-                std::fs::write(path, body).with_context(|| format!("writing {path}"))
+                std::fs::write(path, alias_body(category, packages_line))
+                    .with_context(|| format!("writing {path}"))
             }
             ConfigEntry::Dir { path } => {
                 std::fs::create_dir_all(path).with_context(|| format!("creating {path}"))
@@ -329,5 +342,37 @@ mod tests {
         let outcome = apply(entries, &cli(&[])).unwrap();
         assert!(matches!(outcome, Outcome::NothingToApply));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
+    }
+
+    /// A hand-edited `alias-packages` line that happens to *contain* the
+    /// computed line as a substring (e.g. someone appended a package by hand
+    /// instead of using `--ex-pkg`) must still count as drift and be
+    /// refreshed — a loose `.contains()` check previously let this slip
+    /// through as "already up to date", silently discarding the hand edit
+    /// on any later re-run instead of visibly overwriting it (or, depending
+    /// on where in the line the edit landed, inconsistently doing the
+    /// opposite). Exact-body comparison fixes both.
+    #[test]
+    fn alias_entry_treats_a_hand_extended_line_as_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(dir.path().join("crossdev.conf")).unwrap();
+        std::fs::write(
+            &path,
+            "[crossdev]\nalias-source = gentoo\nalias-target = cross-riscv64-unknown-linux-gnu\n\
+             alias-packages = sys-devel/binutils dev-vcs/git\n",
+        )
+        .unwrap();
+        let entries = vec![ConfigEntry::Alias {
+            path: path.clone(),
+            category: "cross-riscv64-unknown-linux-gnu".to_owned(),
+            packages_line: "sys-devel/binutils".to_owned(),
+        }];
+        let outcome = apply(entries, &cli(&[])).unwrap();
+        assert!(matches!(outcome, Outcome::Applied));
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("dev-vcs/git")
+        );
     }
 }

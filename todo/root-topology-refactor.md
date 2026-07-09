@@ -817,6 +817,48 @@ stage3, no host contamination):
     not-a-cpn` is rejected with a clear `Cpn::parse` error. A later
     `--init-target` without either flag correctly drops both extras again
     (confirming the per-invocation, non-sticky design).
+- ✅ **Audited whether `--init-target`/`--setup` overwrites hand edits made
+  between runs — found and fixed a real bug in the process.** User: "let's
+  try to check if we did not leave gaps: --init-target, following by edits
+  and then --setup would overwrite the edits?" Went through every
+  `ConfigEntry` kind and live-tested each:
+  - **`File` entries (sysroot `make.conf`, per-package `env/<cat>/<pkg>.conf`,
+    `package.env`, `package.accept_keywords`) are unconditionally
+    regenerated — hand edits never survive a later run.** This is by
+    design (`em` owns this content entirely) and matches real crossdev's
+    own behaviour for the same files (`set_env` always writes them via a
+    plain `>` redirect) — not a gap, but worth being explicit about, so
+    `docs/crossdev.md`'s gotchas section should say so plainly (not yet
+    added there — see follow-up below).
+  - **`CreateOnly` entries** (bare `gentoo.conf` location strings) correctly
+    preserve hand edits — never a problem.
+  - **`Alias` entries had a real bug**: `change()` compared with
+    `.contains()` instead of exact equality, so a hand-edited
+    `alias-packages` line that happened to contain the freshly-computed
+    line as a *substring* (e.g. manually appending a package instead of
+    using `--ex-pkg`) was wrongly reported "already up to date" and the
+    hand edit silently survived — while the same kind of edit landing
+    anywhere else in the line (not a clean prefix) would just as silently
+    have been clobbered instead. No principled reason for the
+    inconsistency. **Fixed**: extracted `alias_body(category,
+    packages_line)`, used by both `change()` (now an exact `existing ==
+    alias_body(...)` comparison) and `apply()` (previously duplicated the
+    format string independently, drift risk of its own) — and both now
+    reference the `OVERLAY_NAME` constant instead of a second hardcoded
+    `"crossdev"` literal. New test:
+    `alias_entry_treats_a_hand_extended_line_as_drift`.
+  - **`Symlink` entries** (make.profile links) get corrected back to the
+    target's own derived profile if hand-repointed — intentional
+    self-healing (the profile is derived from the tuple, never meant to be
+    hand-chosen), not a gap.
+  - Live-verified the fix in the `aarch64-20260618T101350Z` sandbox: hand-
+    appended `dev-vcs/git` to the alias-packages line, hand-added a bogus
+    line to `package.env`, hand-added a var to the sysroot `make.conf`.
+    With the pre-fix binary, `-p` only flagged `make.conf`/`package.env` as
+    changing — the alias hand-edit was invisible. With the fix, `-p`
+    correctly flags all three. Full workspace `fmt`/clippy/test clean.
+  - Added an explicit "don't hand-edit the generated config" note to
+    `docs/crossdev.md`'s gotchas covering this.
 
 ## Verification (outstanding)
 

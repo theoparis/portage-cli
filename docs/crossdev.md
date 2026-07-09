@@ -241,3 +241,13 @@ clang wrapper + LLVM runtimes (`compiler-rt`/`libunwind`/`libcxxabi`/
   `--setup`; the latter is whatever ordinary compiler version
   `stages --stage1`/plain merges install *into* the target sysroot. Upgrading
   one doesn't upgrade the other.
+- **Don't hand-edit the generated config.** The sysroot `make.conf`, the
+  per-package `env/<category>/<pkg>.conf` files, `package.env`, and
+  `package.accept_keywords` are entirely `em`-owned and unconditionally
+  regenerated on every `--init-target`/`--setup` re-run — any hand edit is
+  silently discarded (this matches real crossdev, which does the same for
+  its equivalent files). The `[crossdev]` alias `repos.conf` entry behaves
+  the same way once it's recognisable as `em`'s own. The one thing that *is*
+  left alone is a **foreign** `[crossdev]` entry — one with no
+  `alias-target =` key, e.g. a real crossdev/eselect-managed physical
+  overlay — `em` never touches that.
