@@ -13,6 +13,10 @@ categories = ["command-line-utilities", "development-tools"]
 # Unpublishable: depends on portage-repo/portage-distfiles, which pull in the brush fork via git.
 publish = false
 
+[lib]
+name = "portage_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "em"
 path = "src/main.rs"

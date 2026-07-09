@@ -1,6 +1,6 @@
 use std::time::{Duration, UNIX_EPOCH};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use camino::{Utf8Path, Utf8PathBuf};
 use humansize::{BINARY, format_size};
 use portage_vdb::Vdb;
@@ -100,6 +100,21 @@ pub(crate) fn find_packages(vdb: &Vdb, pattern: &str) -> Vec<portage_vdb::Instal
             .filter(|p| p.cpn().package.as_ref() == pattern || p.pf() == pattern)
             .collect()
     }
+}
+
+/// Open the VDB for a CLI invocation (explicit `--vdb` or the merge root default).
+pub(crate) fn open_cli_vdb(globals: &crate::cli::Cli) -> Result<Vdb> {
+    let vdb_path = globals
+        .vdb
+        .as_deref()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "{}/var/db/pkg",
+                globals.roots().merge_root().as_str().trim_end_matches('/')
+            )
+        });
+    Vdb::open(vdb_path.as_str()).with_context(|| format!("failed to open VDB at {vdb_path}"))
 }
 
 fn resolve_path(path_str: &str) -> Utf8PathBuf {

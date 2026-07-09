@@ -328,11 +328,7 @@ impl Cli {
         // destination (target), but base_roots()'s merge_root() must be the host
         // because that's what preflight/bdepend_avail check BDEPEND against.
         // roots() reconstructs the prefix-target view on top of this.
-        if self.prefix.is_some() {
-            // SAFETY: self.prefix.is_some() is true, so path(&self.prefix) returns Some(_).
-            // The unwrap is safe but we use expect for clarity.
-            let prefix = path(&self.prefix)
-                .expect("prefix path conversion should succeed when prefix.is_some()");
+        if let Some(prefix) = path(&self.prefix) {
             return Roots {
                 config: path(&self.config_root),
                 base: None,
