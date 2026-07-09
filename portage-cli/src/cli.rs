@@ -3,6 +3,7 @@ use std::str::FromStr;
 use clap::builder::styling::{AnsiColor as ClapAnsiColor, Styles};
 use clap::{Parser, Subcommand};
 use gentoo_core::Arch;
+use portage_atom_pubgrub::DepClass;
 
 mod depgraph_flags;
 mod merge_flags;
@@ -133,6 +134,14 @@ pub struct Roots {
     config: Option<camino::Utf8PathBuf>,
     base: Option<camino::Utf8PathBuf>,
     target: Option<camino::Utf8PathBuf>,
+    /// Where `BDEPEND`/`IDEPEND` (cross) resolve — always the true build
+    /// host, independent of any `--target` sysroot substitution. `None`
+    /// only where it trivially equals `merge_root()` (bare, `--local`).
+    /// See [`satisfaction_root`](Self::satisfaction_root).
+    broot: Option<camino::Utf8PathBuf>,
+    /// `CHOST != CBUILD` for the currently active topology — the one cell
+    /// `satisfaction_root` needs it for (`IDEPEND`).
+    is_cross_arch: bool,
     /// `EPREFIX`: when set (`--local`), packages are configured for and
     /// installed in place at this offset (`target == eprefix`, so `EROOT ==
     /// target` and `ROOT == /`). `None` for ROOT-offset / host builds.
@@ -203,6 +212,33 @@ impl Roots {
         self.relocate
     }
 
+    /// Where an unsatisfied dependency of `class` resolves and is checked
+    /// against (docs/root-topology.md's satisfaction-root table, PMS table
+    /// 8.2): `BDEPEND` always resolves on `broot` (the true build host,
+    /// independent of any `--target` sysroot substitution); `IDEPEND` is
+    /// `broot` for a cross build, else the same as `RDEPEND`/`PDEPEND`;
+    /// `DEPEND` resolves against `base` when it genuinely differs from the
+    /// target (an overlay, e.g. `--prefix`) else the target itself;
+    /// `RDEPEND`/`PDEPEND` always resolve against the target (`merge_root()`).
+    ///
+    /// This replaces threading a second `host_roots: &Roots` alongside
+    /// `roots` everywhere just to answer the `BDEPEND` question — `broot`
+    /// is carried on the same `Roots` value now, so one value answers both.
+    pub(crate) fn satisfaction_root(&self, class: DepClass) -> &camino::Utf8Path {
+        match class {
+            DepClass::Bdepend => self.broot.as_deref().unwrap_or_else(|| self.merge_root()),
+            DepClass::Idepend if self.is_cross_arch => self.satisfaction_root(DepClass::Bdepend),
+            DepClass::Idepend | DepClass::Rdepend | DepClass::Pdepend => self.merge_root(),
+            DepClass::Depend => {
+                if self.base.as_deref().is_some_and(|b| b != self.merge_root()) {
+                    self.base.as_deref().unwrap()
+                } else {
+                    self.merge_root()
+                }
+            }
+        }
+    }
+
     /// `ESYSROOT` / cross sysroot: `PORTAGE_CONFIGROOT` when set, else base.
     pub fn sysroot(&self) -> Option<&camino::Utf8Path> {
         self.config.as_deref().or(self.base.as_deref())
@@ -217,16 +253,19 @@ impl Roots {
         portage_repo::ReposConf::load_rooted(cfg, &extra)
     }
 
-    /// Test-only: a `Roots` with `base` and `target` both set to the same
-    /// path (matching a plain `--root DIR` invocation), for exercising
-    /// root-selection logic without a full CLI parse and without any VDB
-    /// lookup silently falling through to the real bare host's.
+    /// Test-only: a `Roots` with `base`, `target`, and `broot` all set to
+    /// the same path (matching a plain `--root DIR` invocation, BROOT
+    /// included, so BDEPEND-satisfaction tests see the same root without a
+    /// separate `host_roots` value), for exercising root-selection logic
+    /// without a full CLI parse and without any VDB lookup silently falling
+    /// through to the real bare host's.
     #[cfg(test)]
     pub(crate) fn for_test(target: &str) -> Self {
         let path = camino::Utf8PathBuf::from(target);
         Roots {
             base: Some(path.clone()),
-            target: Some(path),
+            target: Some(path.clone()),
+            broot: Some(path),
             ..Default::default()
         }
     }
@@ -348,12 +387,22 @@ impl Cli {
         // `base_roots()`/`roots()` directly, which would double-apply this
         // same substitution if called recursively; `outer_roots()` is always
         // the pre-substitution view.
-        let eroot = self.outer_roots().merge_root().to_owned();
+        let outer = self.outer_roots();
+        let eroot = outer.merge_root().to_owned();
         let sysroot = eroot.join("usr").join(tuple);
         Roots {
             config: Some(sysroot.clone()),
             base: Some(sysroot.clone()),
             target: Some(sysroot),
+            // BROOT never moves with `--target`: BDEPEND always resolves on
+            // the true build host, carried over from the outer (pre-
+            // substitution) view rather than left as the sysroot itself.
+            broot: outer.broot.clone(),
+            // `--target` is crossdev's cross-tuple flag; every real
+            // invocation of it is a foreign-arch build (a same-arch use
+            // would just be `--root`). No `IDepend` caller exists yet to
+            // need finer CHOST/CBUILD-derived precision than this.
+            is_cross_arch: true,
             eprefix: None,
             config_overlay: None,
             relocate: false,
@@ -386,6 +435,8 @@ impl Cli {
                 config: base.config.clone(),
                 base: None,
                 target: Some(prefix.to_path_buf()),
+                broot: base.broot.clone(),
+                is_cross_arch: base.is_cross_arch,
                 eprefix: Some(prefix.to_path_buf()),
                 config_overlay: Some(prefix.join("etc/portage")),
                 relocate: true,
@@ -428,6 +479,8 @@ impl Cli {
                 config: None,
                 base: Some(prefix.clone()),
                 target: Some(prefix.clone()),
+                broot: Some(prefix.clone()),
+                is_cross_arch: false,
                 eprefix: Some(prefix.clone()),
                 config_overlay: Some(prefix.join("etc/portage")),
                 relocate: true,
@@ -442,6 +495,8 @@ impl Cli {
                 config: path(&self.config_root),
                 base: None,
                 target: None, // BROOT = host `/`, NOT the prefix
+                broot: Some(camino::Utf8PathBuf::from("/")),
+                is_cross_arch: false,
                 eprefix: Some(prefix.clone()),
                 config_overlay: Some(prefix.join("etc/portage")),
                 relocate: true,
@@ -459,29 +514,26 @@ impl Cli {
             // target: --root (install destination). This is "the outer EROOT"
             // (bypass_cross_root, write_cross_env/write_sysroot_config in
             // crossdev/mod.rs all rely on this staying the offset for --root)
-            // — a DIFFERENT thing from BROOT, see broot()'s doc comment.
+            // — a DIFFERENT thing from BROOT, see satisfaction_root's doc comment.
             target: path(&self.root),
+            broot: Some(self.root_set().broot().to_owned()),
+            is_cross_arch: false,
             eprefix: None,
             config_overlay: None,
             relocate: false,
         }
     }
 
-    /// The BROOT view: where `BDEPEND` tools run and are checked against
-    /// (PMS table 8.2, docs/root-topology.md). Differs from
-    /// [`base_roots`](Self::base_roots) **only** for plain `--root`: BROOT
-    /// is always the real host `/` there (portage `ROOT=`/`{target}-emerge`
-    /// parity), while `base_roots()` deliberately keeps returning the
-    /// offset for `--root` — it means "the outer EROOT, undoing `--target`'s
-    /// sysroot substitution" for `bypass_cross_root`'s toolchain-install
-    /// call sites (`crossdev/mod.rs`), which is a genuinely different
-    /// question from "where does BDEPEND resolve". For `--prefix`/`--local`
-    /// the two already agree (BROOT and the outer EROOT coincide there), so
-    /// this is a no-op on top of `base_roots()`.
-    ///
-    /// Use this (never `base_roots()`) for anything checking or merging
-    /// unsatisfied `BDEPEND`/`IDEPEND`: `preflight`, `bdepend_avail`,
-    /// `load_host_installed`, and `entry_roots`'s `MergeRoot::Host` case.
+    /// The full `Roots` view anchored at BROOT: same `config`/`eprefix`/
+    /// `config_overlay`/`relocate` as [`base_roots`](Self::base_roots), but
+    /// `base`/`target` (and so `merge_root()`) are BROOT itself, not
+    /// `base_roots()`'s "outer EROOT" (they differ for plain `--root` —
+    /// `base_roots()` keeps the offset there on purpose, see its doc
+    /// comment). Distinct from [`satisfaction_root`](Roots::satisfaction_root):
+    /// that gives a bare path for VDB-lookup purposes; this gives a full
+    /// `Roots` for `merge/mod.rs`'s `entry_roots`, which needs to actually
+    /// merge a Host-routed package there (config/`build_sysroot`/`eprefix`
+    /// and all), not just check whether one is already satisfied.
     pub(crate) fn broot(&self) -> Roots {
         let base = self.base_roots();
         let broot = self.root_set().broot().to_owned();
@@ -489,6 +541,8 @@ impl Cli {
             config: base.config.clone(),
             base: Some(broot.clone()),
             target: Some(broot),
+            broot: base.broot.clone(),
+            is_cross_arch: base.is_cross_arch,
             eprefix: base.eprefix.clone(),
             config_overlay: base.config_overlay.clone(),
             relocate: base.relocate,
@@ -656,16 +710,16 @@ mod tests {
     /// `--prefix`. Previously `base_roots().merge_root()` was (mis)used for
     /// this and returned `R`, making an offset build check BDEPEND against
     /// the (usually near-empty) offset VDB instead of the host's —
-    /// `broot()` is the dedicated accessor now; `base_roots()` keeps its
-    /// own, different "outer EROOT" meaning (see both their doc comments).
-    /// See todo/root-topology-refactor.md.
+    /// `roots().satisfaction_root(DepClass::BDepend)` is the dedicated
+    /// accessor now; `base_roots()` keeps its own, different "outer EROOT"
+    /// meaning (see both their doc comments). See todo/root-topology-refactor.md.
     #[test]
     fn root_broot_is_host_not_offset() {
         let cli = Cli::parse_from(["em", "--root", "/srv/x", "-p", "sys-libs/zlib"]);
         assert_eq!(
-            cli.broot().merge_root().as_str(),
+            cli.roots().satisfaction_root(DepClass::Bdepend).as_str(),
             "/",
-            "broot().merge_root() (BROOT) must be the host under --root"
+            "roots().satisfaction_root(BDepend) must be the host under --root"
         );
         assert_eq!(
             cli.base_roots().merge_root().as_str(),

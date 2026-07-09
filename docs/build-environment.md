@@ -43,7 +43,7 @@ not explicitly named was invisible to a real subprocess. This is exactly how
 `CHOST` went missing: `dev-libs/openssl`'s own `bash
 "${FILESDIR}/gentoo.config"` subshell saw no `$CHOST` at all, so its
 `Configure` fell back to `uname`-based autodetection and silently picked the
-**build host's** real kernel architecture under a `riscv64` `--cross` build —
+**build host's** real kernel architecture under a `riscv64` `--target` build —
 while `CC`/`CFLAGS` (forwarded explicitly by the `econf` Rust builtin,
 bypassing export entirely) were already correctly cross-targeted. The
 mismatch produced a build that used the right compiler but the wrong

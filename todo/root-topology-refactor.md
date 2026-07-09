@@ -142,31 +142,55 @@ to land as part of (or before) the refactor.
 
 ## The variant refactor (structural)
 
-- 🟡 **Replace `Roots` with `RootTopology`** per `docs/root-topology.md`:
-  ```rust
-  struct RootTopology {
-      config: PathBuf,                       // PORTAGE_CONFIGROOT, default /
-      config_overlay: Option<PathBuf>,       // --prefix P/etc/portage
-      roots: RootSet,                        // Single | Dual | Overlayed
-      cross: CrossArch,                      // SameArch | ForeignArch(triples)
-  }
-  enum RootSet {
-      Single { root: PathBuf },
-      Dual { broot: PathBuf, target: PathBuf },
-      Overlayed { broot: PathBuf, base: PathBuf, target: PathBuf },
-  }
-  ```
-  - 🔴 `RootSet::Single`/`Dual`/`Overlayed` + the `satisfaction_root(class)`
-    method (table in `docs/root-topology.md` § "What `satisfaction_root`
-    returns"). `IDEPEND` is the one cell needing `self.cross`.
-  - 🔴 Constructors from `Cli` flags (the override matrix). Normalize
-    `Dual { broot, target }` with `broot == target` to `Single`? — open
-    question (see doc).
-  - 🔴 Migrate the 9 files currently threading `host_roots: &Roots`
-    (`preflight.rs`, `bdepend_avail.rs`, `query/depgraph/{mod,installed,
-    bdepend_trim,depend_trim}.rs`, `crossdev/mod.rs`, `main.rs`, …) to ask
-    `topology.satisfaction_root(class)` instead. This retires the
-    `host_roots`-positional smell.
+- ✅ **`Roots.satisfaction_root(DepClass)` — landed 2026-07-09.** Scoped down
+  from the doc's original `RootTopology`/`RootSet`-as-storage proposal to a
+  smaller, lower-churn fix with the same payoff: rather than replacing
+  `Roots`'s flat-field shape with the enum (and renaming the type), added
+  two fields — `broot: Option<Utf8PathBuf>` and `is_cross_arch: bool` — so
+  **one** `Roots` value carries BROOT correctly even under an active
+  `--target` sysroot substitution (previously `roots()`'s `--target`-active
+  branch built a fresh `Roots` with `base = target = sysroot`, silently
+  dropping BROOT — *that* was why a second `host_roots: &Roots` had to be
+  threaded everywhere). `satisfaction_root(class)` is a small match using
+  the table in `docs/root-topology.md` § "What `satisfaction_root` returns":
+  `Bdepend` → `broot`; `Idepend` → `broot` if `is_cross_arch` else
+  `merge_root()`; `Depend` → `base` when it genuinely differs from
+  `merge_root()` (an overlay, e.g. `--prefix`) else `merge_root()`;
+  `Rdepend`/`Pdepend` → `merge_root()`. Reused the **existing** canonical
+  `portage_atom_pubgrub::DepClass` (`Bdepend`/`Idepend`/`Depend`/`Rdepend`/
+  `Pdepend`, already shared by the solver's own dependency graph) instead of
+  inventing a second, near-identical enum — caught this mid-implementation
+  by the same "don't add something redundant" instinct this whole session
+  has been about.
+  - Migrated every call site that threaded a `roots`+`host_roots` pair
+    purely to answer "where does BDEPEND resolve": `preflight::check` (now
+    one `roots` param), `bdepend_avail::Avail::initial_bdepend`,
+    `bdepend_trim::TrimCtx` (now one `roots` field), `query/depgraph/mod.rs`'s
+    `DepgraphOpts` (dropped `host_roots`), `installed::load_host_installed`,
+    `crossdev::resolve_gcc_version`, `dispatch.rs`'s `equery depgraph`,
+    `emerge.rs`.
+  - **`base_roots()`/`broot()` (the method) were *not* fully retired** —
+    caught this correcting the plan mid-implementation: `merge/mod.rs`'s
+    `entry_roots` needs a *full* `Roots` for a Host-routed entry (its own
+    `config()`/`build_sysroot()`/`eprefix()`, to actually merge the package
+    there), not just a satisfaction path — `satisfaction_root` can't replace
+    that need, only the path-only call sites above. `broot()` stays, now
+    documented as explicitly distinct from `satisfaction_root` (a full
+    merge-destination `Roots` vs. a bare VDB-lookup path) rather than one of
+    several same-shaped near-duplicates.
+  - Regression tests updated to call `.satisfaction_root(DepClass::Bdepend)`
+    instead of the old `.broot()`-as-a-path pattern; `Roots::for_test` now
+    also sets `broot` so BDEPEND-satisfaction tests still see the same root
+    without a separate `host_roots` value. Full workspace fmt/clippy/test
+    clean; live-reverified `em --root R --target T crossdev --init-target`
+    (single-nested sysroot, unprivileged) and a `--target`-active BDEPEND
+    satisfaction path.
+  - Did not pursue: the `CrossArch`-as-triples enum, or normalizing
+    `Dual{broot,target}` with `broot == target` to `Single` — the `Roots`
+    struct's own `is_cross_arch: bool` field covers the one thing the doc's
+    `CrossArch` was needed for (the `IDEPEND` cell), and there was no
+    `Single`/`Dual` variant distinction to normalize once the fix stayed
+    field-based rather than enum-based.
 - 🔴 **Privatize `provider.packages` behind `package_data()`.** Today
   `host_aliases` (`provider/mod.rs:708`) maps `Host`→`Target` identity, and
   every consumer must remember to call the alias-resolving `package_data()`.

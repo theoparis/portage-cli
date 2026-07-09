@@ -9,9 +9,9 @@
 //!   point at);
 //! - a **Host**-routed entry's `DEPEND` — it's built *at* `BROOT`, so its
 //!   own build-time deps live there too — and every entry's `BDEPEND` are
-//!   both resolved against the build host's own `BROOT`: `Cli::base_roots()`,
+//!   both resolved against the build host's own `BROOT` (`roots.satisfaction_root(DepClass::BDepend)`),
 //!   *not* unconditionally bare `/` (a `--root`/`--prefix`/`--local`
-//!   invocation's Host merges land in `base_roots()`, so that's what must be
+//!   invocation's Host merges land at that BROOT, so that's what must be
 //!   checked — see `todo/stage-build-shakeout.md` #28/#30/#31).
 //!
 //! Both sets grow with each earlier plan entry: a package merged earlier in the
@@ -34,18 +34,21 @@ use crate::query::depgraph::PlannedMerge;
 
 /// Verify the plan's build dependencies are satisfiable in install order.
 ///
-/// `host_roots` must be `Cli::base_roots()` — see [`Avail::initial_bdepend`].
+/// One `roots` value answers both `DEPEND` (via `initial_depend`) and
+/// `BDEPEND` (via `initial_bdepend`, `roots.satisfaction_root(DepClass::BDepend)`)
+/// — `roots.broot` is carried correctly even under an active `--target`
+/// sysroot substitution, so a separate `host_roots` parameter is no longer
+/// needed (see `Cli::roots`'s doc comment).
 ///
 /// Returns an error listing every unsatisfied requirement (package → missing
 /// atoms) when the check fails; `Ok(())` otherwise.
 pub fn check(
     plan: &[PlannedMerge],
     roots: &Roots,
-    host_roots: &Roots,
     provided: &[(Cpv, Option<String>)],
 ) -> Result<()> {
     let mut depend_avail = Avail::initial_depend(roots);
-    let mut bdepend_avail = Avail::initial_bdepend(host_roots);
+    let mut bdepend_avail = Avail::initial_bdepend(roots);
 
     // `package.provided` packages are supplied by the system on both roots.
     for (cpv, slot) in provided {
@@ -150,7 +153,7 @@ mod tests {
                 ">=sys-libs/gdbm-1.8.3:=",
             )?,
         ];
-        assert!(check(&plan, &roots, &roots, &[]).is_ok());
+        assert!(check(&plan, &roots, &[]).is_ok());
         Ok(())
     }
 
@@ -169,7 +172,7 @@ mod tests {
                 ">=sys-libs/gdbm-1.8.3:=",
             )?,
         ];
-        assert!(check(&plan, &roots, &roots, &[]).is_err());
+        assert!(check(&plan, &roots, &[]).is_err());
         Ok(())
     }
 
@@ -186,13 +189,10 @@ mod tests {
             Cpv::parse("dev-python/wheel-0.47.0")?,
             "dev-lang/python:3.14",
         )?];
-        assert!(
-            check(&plan, &roots, &roots, &[]).is_err(),
-            "unseeded control"
-        );
+        assert!(check(&plan, &roots, &[]).is_err(), "unseeded control");
 
         let provided = vec![(Cpv::parse("dev-lang/python-3.14.0")?, Some("3.14".into()))];
-        assert!(check(&plan, &roots, &roots, &provided).is_ok());
+        assert!(check(&plan, &roots, &provided).is_ok());
         Ok(())
     }
 }

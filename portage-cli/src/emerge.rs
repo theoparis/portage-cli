@@ -222,7 +222,6 @@ async fn emerge_atoms_inner(
         .as_ref()
         .map(|f| (f.deep, f.newuse))
         .unwrap_or((cli.depgraph_flags.deep, cli.depgraph_flags.newuse));
-    let host_roots = cli.broot();
     let outcome = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
         repo_path,
         atoms: &atoms,
@@ -234,7 +233,6 @@ async fn emerge_atoms_inner(
         autosolve_use: merge_flags.autosolve_use,
         multi_repo: cli.repo.is_none(),
         roots: &roots,
-        host_roots: &host_roots,
         onlydeps: merge_flags.onlydeps,
         with_bdeps: merge_flags.with_bdeps,
         root_deps_rdeps: merge_flags.root_deps,
@@ -278,7 +276,7 @@ async fn emerge_atoms_inner(
     // libxml2 -> meson -> python -> gawk, which has no valid dependency
     // order and must be seeded out of order somewhere).
     if !nodeps {
-        preflight::check(&outcome.plan, &roots, &host_roots, &outcome.provided)?;
+        preflight::check(&outcome.plan, &roots, &outcome.provided)?;
     }
 
     if cli.ask && !confirm_merge(outcome.plan.len())? {

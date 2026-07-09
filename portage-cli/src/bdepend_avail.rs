@@ -5,7 +5,7 @@
 
 use camino::Utf8Path;
 use portage_atom::{Cpn, Cpv, Dep, DepEntry, UseDefault, UseDep, UseDepKind};
-use portage_atom_pubgrub::MergeRoot;
+use portage_atom_pubgrub::{DepClass, MergeRoot};
 use portage_vdb::Vdb;
 
 use crate::cli::Roots;
@@ -38,21 +38,20 @@ pub struct Avail(Vec<AvailEntry>);
 
 impl Avail {
     /// `BDEPEND` availability at the start of a run: the build host's own
-    /// `BROOT`.
-    ///
-    /// `host_roots` must be `Cli::base_roots()` (the outer EROOT, *before*
-    /// any `--target` sysroot substitution), never the possibly
-    /// cross-substituted `Roots` the solver targets: an unsatisfied Host
-    /// BDEPEND builds into `base_roots()` (`entry_roots()` in `main.rs`), so
-    /// satisfaction must be checked against that same root's VDB, or a
-    /// package built there on one run is never recognized as already
-    /// satisfied on the next. This mirrors the `load_host_installed` fix —
-    /// see `todo/stage-build-shakeout.md` #28/#30 — for the same bug in the
-    /// solver's own host-installed view. For `--local`, `base_roots()`'s
-    /// `merge_root()` already *is* the prefix (`EPREFIX == target`), so no
-    /// separate bare-host union is needed.
-    pub fn initial_bdepend(host_roots: &Roots) -> Self {
-        Self(vdb_avail_entries(Some(host_roots.merge_root())))
+    /// `BROOT` — `roots.satisfaction_root(DepClass::Bdepend)`, which is
+    /// carried correctly on `roots` even under an active `--target` sysroot
+    /// substitution (see `Cli::roots`'s doc comment), so the *same* `Roots`
+    /// value passed for `DEPEND` checks answers this too: an unsatisfied
+    /// Host BDEPEND builds into that BROOT (`entry_roots()` in
+    /// `merge/mod.rs`), so satisfaction must be checked against that same
+    /// root's VDB, or a package built there on one run is never recognized
+    /// as already satisfied on the next. This mirrors the
+    /// `load_host_installed` fix — see `todo/stage-build-shakeout.md`
+    /// #28/#30 — for the same bug in the solver's own host-installed view.
+    pub fn initial_bdepend(roots: &Roots) -> Self {
+        Self(vdb_avail_entries(Some(
+            roots.satisfaction_root(DepClass::Bdepend),
+        )))
     }
 
     /// `DEPEND` availability at the start of a run: `VDB(base) ∪ VDB(target)`.

@@ -8,9 +8,13 @@ the `bashrc`/overlay recipe and the per-phase env (`SYSROOT`/`ESYSROOT`/`BROOT`
 assignment in `run_phase`).
 
 > **Slop warning.** Verify any claim here against the code before relying on
-> it. The current `Roots` struct (`portage-cli/src/cli.rs`) is the
-> single-root-bag shape this doc argues we should move *away* from; the
-> variant enum below is the proposed target, not the present reality.
+> it. `Roots` (`portage-cli/src/cli.rs`) landed `satisfaction_root(DepClass)`
+> 2026-07-09 — the payoff this doc's `RootTopology`/`RootSet` enum proposal
+> targets — but as two new fields on the existing flat struct, not the
+> `RootSet` enum below; the enum itself, `CrossArch`, and the
+> `provider.packages` privatization are still proposal, not present reality.
+> See the "Status" section at the bottom and `todo/root-topology-refactor.md`
+> for exactly what landed vs. what's still open.
 
 ## The four roles
 
@@ -54,7 +58,7 @@ knob overrides — no more, no less:
 | `--root R --config-root C` | R | R | C | — | — |
 | `--prefix P` | P | **`/`** *(host seeds plan)* | `/` | P/etc/portage | P |
 | `--local` | ~/.gentoo | **~/.gentoo** *(self-contained)* | ~/.gentoo/etc/portage | ~/.gentoo | ~/.gentoo |
-| `--cross T` (on EROOT) | EROOT/usr/T | EROOT/usr/T | EROOT/usr/T | — | — |
+| `--target T` (on EROOT) | EROOT/usr/T | EROOT/usr/T | EROOT/usr/T | — | — |
 
 - **`--root` vs `--prefix` differ in two cells: base and EPREFIX.** `--root`
   moves base to R (empty R → full closure → stage build) and leaves EPREFIX
@@ -71,14 +75,14 @@ knob overrides — no more, no less:
   `em setup` places the profile). Unlike `--prefix`, it does **not** assume the
   host is Gentoo — the prefix carries its own VDB, config, and (after
   `--setup`) its own toolchain. This is what makes it work on a foreign host
-  (Debian/Arch/Fedora) and what makes `--local --cross <T>` build a real BROOT
+  (Debian/Arch/Fedora) and what makes `--local --target <T>` build a real BROOT
   into `~/.gentoo` rather than reading a nonexistent `/`.
   - **`--prefix` vs `--local`** mirror the `--root` vs `--prefix` distinction:
   `--prefix P` is the overlay (host stays base, delta only — fast path on a
   Gentoo host); `--local` is standalone (full closure, self-contained — works
   anywhere). Current code makes `--local` an overlay (base=`/`); the refactor
   makes it standalone to match its actual purpose.
-- **`--cross` points config at the sysroot** because crossdev physically writes
+- **`--target` points config at the sysroot** because crossdev physically writes
   the target profile + `make.conf` there; the host's `etc/portage` remains
   BROOT's config.
 
@@ -131,7 +135,7 @@ enum RootSet {
     /// `em <atom>` as root.
     Single { root: PathBuf },
     /// BROOT (build host) distinct from target. Sysroot == target.
-    /// `--root R` (BROOT=/), `--cross` (BROOT=outer EROOT).
+    /// `--root R` (BROOT=/), `--target` (BROOT=outer EROOT).
     Dual { broot: PathBuf, target: PathBuf },
     /// BROOT, base (sysroot source), and target all distinct.
     /// `--prefix P` (base=/, target=P, BROOT=/).
@@ -246,7 +250,7 @@ C=~/.gentoo/etc/portage  B=T=~/.gentoo  S=~/.gentoo  EPREFIX=~/.gentoo   CBUILD=
   `~/.gentoo` once the prefix toolchain exists — axis 2 (runtime BROOT
   identity), not a topology field.
 - Topology: **`Single { root: ~/.gentoo }`** (all roles collapse to the
-  prefix once bootstrapped). This is what makes `--local --cross <T>` work on
+  prefix once bootstrapped). This is what makes `--local --target <T>` work on
   a foreign host: BROOT = `~/.gentoo` (writable, real), target =
   `~/.gentoo/usr/<T>`.
 - root-model.md's **Tier 3** for the initial bootstrap phase (mutable BROOT,
@@ -266,7 +270,7 @@ Crossdev's classic flow, into `/usr/<CTARGET>`.
 C=B=T=/usr/<T>  S=/usr/<T>  BR=/     CBUILD≠CHOST
 ```
 
-- `em --cross <tuple> toolchain --setup` → binutils → headers → libc-headers
+- `em --target <tuple> toolchain --setup` → binutils → headers → libc-headers
   (`--nodeps`) → gcc-stage1 → libc → gcc-stage2. Atoms live under the
   `cross-<tuple>/` overlay; the real `::gentoo` ebuilds are symlinked in.
 - BROOT is the real host `/` (native cmake/perl/python). Every BDEPEND edge
@@ -289,7 +293,7 @@ C=B=T=<offset>/usr/<T>  S=<offset>/usr/<T>  BR=<offset>     CBUILD≠CHOST
   On a Gentoo host, `--prefix <offset>` (2a overlay) also works — BROOT reads
   `/` directly.
 - This is *exactly* the session's `/var/tmp/cross-stage1-riscv64`:
-  `base_roots()` = the outer EROOT (host stage1, the BROOT), `--cross` targets
+  `base_roots()` = the outer EROOT (host stage1, the BROOT), `--target` targets
   the sysroot subdir. The jinja2/perl/Host-BDEPEND routing bugs (#28–#33) were
   all about BDEPEND edges landing in `base_roots()` instead of `/` or the
   sysroot.
@@ -429,15 +433,15 @@ written by `write_alias_repo_conf` in
 
 ```
 # Privileged: classic crossdev into /usr/<T>  (config writes to /etc/portage)
-em crossdev -t <tuple> --init-target     # alias repos.conf + sysroot make.conf/profile
-em crossdev -t <tuple> --setup           # binutils→headers→gcc1→libc→gcc2 (implies --init-target)
-em --cross <tuple> stages --stage1       # target packages.build
-em --cross <tuple> --emptytree @system   # stage3 (target-native @system)
+em --target <tuple> crossdev --init-target   # alias repos.conf + sysroot make.conf/profile
+em --target <tuple> crossdev --setup         # binutils→headers→gcc1→libc→gcc2 (implies --init-target)
+em --target <tuple> stages --stage1          # target packages.build
+em --target <tuple> --emptytree @system      # stage3 (target-native @system)
 
 # Unprivileged: same, under --prefix (config writes to <prefix>/etc/portage)
-em --prefix <P> crossdev -t <tuple> --init-target
-em --prefix <P> crossdev -t <tuple> --setup
-em --prefix <P> --cross <tuple> stages --stage1
+em --prefix <P> --target <tuple> crossdev --init-target
+em --prefix <P> --target <tuple> crossdev --setup
+em --prefix <P> --target <tuple> stages --stage1
 ...
 ```
 
@@ -449,9 +453,11 @@ em --prefix <P> --cross <tuple> stages --stage1
 CTARGET/ABI-CFLAGS env is written by `write_cross_env` into the config
 overlay (`<prefix>/etc/portage` under `--prefix`/`--local`, host
 `/etc/portage` otherwise) — unprivileged under `--prefix`. `--setup` runs `BootstrapKind::Cross` (two-stage gcc) and implies
-`--init-target`. Note the two roles of the tuple: `crossdev -t <tuple>` drives
-the *setup action*; `--cross <tuple>` (global) targets the sysroot for later
-*use* (`stages`, plain `em <atom>`). Both carry the same tuple in practice.
+`--init-target`. `--target <tuple>` is a single global flag serving both
+roles — setting a target up (`crossdev`) and using an already-set-up one
+later (`stages`, plain `em <atom>`) — not two separate flags that could
+disagree (crossdev used to have its own local `-t`; retired 2026-07-09,
+see `todo/root-topology-refactor.md`).
 
 ### Lifecycle × topology map
 
@@ -461,8 +467,8 @@ the *setup action*; `--cross <tuple>` (global) targets the sysroot for later
 | `em setup --local` | `Single { ~/.gentoo }` | `/` → `~/.gentoo` (after toolchain) |
 | `em --root R toolchain --setup` | `Dual { broot: /, target: R }` | `/` |
 | `em --local toolchain --setup` | `Single { ~/.gentoo }` | `~/.gentoo` |
-| `em crossdev -t T --init-target` | `Dual { broot: EROOT, target: EROOT/usr/T }` | EROOT |
-| `em --local --cross T ...` | `Dual { broot: ~/.gentoo, target: ~/.gentoo/usr/T }` | `~/.gentoo` |
+| `em --target T crossdev --init-target` | `Dual { broot: EROOT, target: EROOT/usr/T }` | EROOT |
+| `em --local --target T ...` | `Dual { broot: ~/.gentoo, target: ~/.gentoo/usr/T }` | `~/.gentoo` |
 
 The BROOT column shows axis 2 in action: `--local`'s BROOT *moves* from `/`
 (host seed) to `~/.gentoo` (self-hosting) over its lifecycle, without the
@@ -514,11 +520,29 @@ variant refactor's payoff is that both sides ask
 - **Done** — `Roots` struct, three-root split, builder env threading
   (`run_phase` sets `PORTAGE_CONFIGROOT`/`ROOT`/`SYSROOT`/`BROOT`), per-class
   VDB checks, `MergeRoot` on solver nodes, Host-BDEPEND scheduling,
-  `BUILD_PKG_CONFIG_LIBDIR` for cross.
-- **TODO (this doc's proposal)** — replace the flat `Roots` bag with
-  `RootTopology` enum + `cross: CrossArch`; derive `satisfaction_root(class)`
-  from the variant; privatize `provider.packages` behind `package_data()` so
-  the `host_aliases` invariant can't be violated by a stray `get()`.
+  `BUILD_PKG_CONFIG_LIBDIR` for cross. **`satisfaction_root(class)` — landed
+  2026-07-09** (see `todo/root-topology-refactor.md` for the full story):
+  scoped down from a full `RootTopology`/`RootSet`-enum replacement to two
+  new fields on the existing `Roots` (`broot`, `is_cross_arch`) plus a
+  `satisfaction_root(DepClass)` method — same payoff (one `Roots` value
+  answers `BDEPEND`/`DEPEND`/`RDEPEND`/`IDEPEND`/`PDEPEND` without a second
+  `host_roots` parameter), far less churn (no type rename, no 9-file enum
+  migration). Reuses `portage_atom_pubgrub::DepClass`, the solver's own
+  existing PMS dependency-class enum, rather than a second one. `base_roots()`
+  and `broot()` (the method) still exist — `merge/mod.rs`'s `entry_roots`
+  genuinely needs a full `Roots` for a Host-routed entry (`config()`/
+  `build_sysroot()`/`eprefix()`, to actually merge there), which
+  `satisfaction_root`'s bare path can't provide.
+  Also landed the same day: `--root`'s BROOT is the host (portage `ROOT=`
+  parity, `Cli::broot()`'s original motivation), and `--cross`/`crossdev -t`
+  unified into one `--target`/`-T` flag (crossdev's local `-t` retired).
+- **Not pursued** — the `RootSet` enum (`Single`/`Dual`/`Overlayed`) as
+  `Roots`'s storage representation, a `CrossArch` triples type (the plain
+  `is_cross_arch: bool` covers `satisfaction_root`'s one cell that needs
+  it), and privatizing `provider.packages` behind `package_data()` (a
+  separate crate, a separate invariant — `host_aliases` — not the
+  `Roots`-accessor confusion this pass targeted). Still open, still tracked
+  in `todo/root-topology-refactor.md`.
 - **Deferred (out of scope here)** — Tier 3 mutable-BROOT bootstrap on a
   foreign host (`build-environment.md`), zero-config merged sysroot via
   `fuse-overlayfs` (M3).

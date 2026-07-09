@@ -72,16 +72,20 @@ pub(super) struct HostInstalledEntry {
 /// package is rebuilt). Duplicates across slots of the same package are kept
 /// (each slot is a distinct `PortagePackage`).
 ///
-/// `host_roots` is the outer EROOT (`Cli::base_roots`), *not* unconditionally
-/// the bare system `/`: an unsatisfied Host BDEPEND builds into
-/// `base_roots()` (`entry_roots()` in `main.rs`), so satisfaction must be
-/// checked against that same root's VDB, or a package built there on one run
-/// is never recognized as already-satisfied on the next. Found live: jinja2
-/// rebuilt into `base_roots()` for a `--target` stage3 was still reported
-/// unsatisfied because this read the bare host `/var/db/pkg` regardless — see
+/// `roots.satisfaction_root(DepClass::Bdepend)` is BROOT, *not* unconditionally
+/// the bare system `/`: an unsatisfied Host BDEPEND builds into that BROOT
+/// (`entry_roots()` in `merge/mod.rs`), so satisfaction must be checked
+/// against that same root's VDB, or a package built there on one run is
+/// never recognized as already-satisfied on the next. Found live: jinja2
+/// rebuilt into BROOT for a `--target` stage3 was still reported unsatisfied
+/// because this read the bare host `/var/db/pkg` regardless — see
 /// todo/stage-build-shakeout.md #28/#30.
-pub(super) fn load_host_installed(host_roots: &crate::cli::Roots) -> Vec<HostInstalledEntry> {
-    let Ok(vdb) = Vdb::open(host_roots.merge_root().join("var/db/pkg")) else {
+pub(super) fn load_host_installed(roots: &crate::cli::Roots) -> Vec<HostInstalledEntry> {
+    let Ok(vdb) = Vdb::open(
+        roots
+            .satisfaction_root(portage_atom_pubgrub::DepClass::Bdepend)
+            .join("var/db/pkg"),
+    ) else {
         return Vec::new();
     };
     vdb.packages()

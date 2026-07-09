@@ -260,7 +260,6 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 bail!("equery depgraph: no valid atoms");
             }
             let roots = globals.roots();
-            let host_roots = globals.broot();
             let outcome = query::depgraph::depgraph(query::depgraph::DepgraphOpts {
                 repo_path,
                 atoms: &atoms,
@@ -275,7 +274,6 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 autosolve_use: *autosolve_use || globals.merge_flags.autosolve_use,
                 multi_repo: globals.repo.is_none(),
                 roots: &roots,
-                host_roots: &host_roots,
                 onlydeps: *onlydeps || globals.merge_flags.onlydeps,
                 with_bdeps: *with_bdeps || globals.merge_flags.with_bdeps,
                 root_deps_rdeps: *root_deps || globals.merge_flags.root_deps,

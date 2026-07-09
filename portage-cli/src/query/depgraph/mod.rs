@@ -100,16 +100,13 @@ pub struct DepgraphOpts<'a> {
     /// Load every repo from `repos.conf` (overlays sourced as needed). Off
     /// when the user pinned a repo with `--repo`.
     pub multi_repo: bool,
-    /// The resolved root set (config / base / target). See docs/root-model.md.
+    /// The resolved root set (config / base / target / BROOT). See
+    /// docs/root-model.md. `roots.satisfaction_root(DepClass::Bdepend)`
+    /// answers the Host-routed BDEPEND/IDEPEND question directly — `roots`
+    /// carries BROOT correctly even under an active `--target` sysroot
+    /// substitution, so a separate `host_roots` field is no longer needed
+    /// (see `Cli::roots`'s doc comment).
     pub roots: &'a crate::cli::Roots,
-    /// The outer EROOT (`--root`'s own value, before any `--target` sysroot
-    /// substitution — see `Cli::base_roots`). Host-routed BDEPEND/IDEPEND
-    /// satisfaction is checked against *this* root's VDB, not the bare
-    /// system `/`: an unsatisfied Host BDEPEND (`entry_roots()` in
-    /// `main.rs`) builds into `base_roots()`, so that's also where the
-    /// solver must look to see whether it's already satisfied. Equal to
-    /// `roots` outside `--target`.
-    pub host_roots: &'a crate::cli::Roots,
     /// `--onlydeps`: drop the explicitly-requested targets from the plan,
     /// keeping only their dependencies (emerge's `--onlydeps`).
     pub onlydeps: bool,
@@ -145,7 +142,6 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         autosolve_use,
         multi_repo,
         roots,
-        host_roots,
         onlydeps,
         with_bdeps,
         root_deps_rdeps,
@@ -236,7 +232,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 ti.iter().map(conflicts::installed_blocker_atoms).collect();
             (ti, blockers)
         },
-        async { installed::load_host_installed(host_roots) },
+        async { installed::load_host_installed(roots) },
         use_env::build_use_env(&repo, config_root, roots.config_overlay()),
     );
     let use_env = use_env_result?;
@@ -700,7 +696,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     }
 
     let trim_ctx = bdepend_trim::TrimCtx {
-        host_roots,
+        roots,
         data: &data,
         use_config: &use_config,
         package_use: &package_use,

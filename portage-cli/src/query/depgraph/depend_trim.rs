@@ -181,7 +181,7 @@ mod tests {
         let reinstall = HashSet::new();
         let roots = empty_roots();
         let ctx = TrimCtx {
-            host_roots: &roots,
+            roots: &roots,
             data: &data,
             use_config: &use_config,
             package_use: &[],
