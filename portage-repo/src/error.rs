@@ -42,7 +42,12 @@ pub enum Error {
 
     /// Hash or size mismatch when verifying a file against a Manifest entry.
     #[error("manifest verify failed for {path}: {reason}")]
-    ManifestVerifyFailed { path: PathBuf, reason: String },
+    ManifestVerifyFailed {
+        /// Path to the file that failed verification.
+        path: PathBuf,
+        /// Human-readable description of the mismatch.
+        reason: String,
+    },
 
     /// Invalid or unparsable `metadata.xml` file.
     #[error("invalid metadata.xml: {0}")]

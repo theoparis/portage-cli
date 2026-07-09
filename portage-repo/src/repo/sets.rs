@@ -39,6 +39,8 @@ pub struct SetResolver<'a> {
 }
 
 impl<'a> SetResolver<'a> {
+    /// Build a resolver over `profile_stack` (for `@system`/`@profile`) and
+    /// `eroot` (for `@world`, `@selected`, and user-defined sets).
     pub fn new(profile_stack: &'a ProfileStack, eroot: &'a Utf8Path) -> Self {
         Self {
             profile_stack,

@@ -11,26 +11,41 @@ use sha2::Digest;
 pub enum ManifestEntry {
     /// `DIST` — a distfile (downloaded source archive).
     Dist {
+        /// Basename of the distfile.
         filename: String,
+        /// Expected file size in bytes.
         size: u64,
+        /// `(algorithm, hex-digest)` pairs (e.g. `BLAKE2B`, `SHA512`).
         hashes: Vec<(String, String)>,
     },
     /// `DATA` / `EBUILD` / `MISC` / `AUX` — a tracked repo file.
     Data {
+        /// Repository-relative path to the file.
         path: String,
+        /// Expected file size in bytes.
         size: u64,
+        /// `(algorithm, hex-digest)` pairs (e.g. `BLAKE2B`, `SHA512`).
         hashes: Vec<(String, String)>,
     },
     /// `MANIFEST` — a sub-manifest reference.
     SubManifest {
+        /// Repository-relative path to the nested `Manifest` file.
         path: String,
+        /// Expected file size in bytes.
         size: u64,
+        /// `(algorithm, hex-digest)` pairs (e.g. `BLAKE2B`, `SHA512`).
         hashes: Vec<(String, String)>,
     },
     /// `IGNORE` — path excluded from manifest checks.
-    Ignore { path: String },
+    Ignore {
+        /// Repository-relative path prefix or file to skip.
+        path: String,
+    },
     /// `TIMESTAMP` — last-updated RFC 3339 timestamp.
-    Timestamp { value: String },
+    Timestamp {
+        /// RFC 3339 timestamp string from the manifest line.
+        value: String,
+    },
 }
 
 impl ManifestEntry {
@@ -142,6 +157,7 @@ fn verify_hashes(path: &Path, expected_size: u64, hashes: &[(String, String)]) -
 /// `DIST` entries appear.
 #[derive(Debug, Clone)]
 pub struct Manifest {
+    /// Parsed manifest lines in file order.
     pub entries: Vec<ManifestEntry>,
 }
 

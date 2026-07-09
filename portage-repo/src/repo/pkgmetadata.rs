@@ -7,8 +7,11 @@ use crate::error::{Error, Result};
 /// Type of a package maintainer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaintainerKind {
+    /// Individual maintainer (`<maintainer type="person">`).
     Person,
+    /// Project or herd maintainer (`<maintainer type="project">`).
     Project,
+    /// Maintainer type missing or not recognised in `metadata.xml`.
     Unknown,
 }
 

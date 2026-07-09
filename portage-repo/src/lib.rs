@@ -32,6 +32,7 @@
 //! > **Warning**: This codebase was largely AI-generated and has not yet been
 //! > thoroughly audited. It may contain bugs, incomplete PMS coverage, or
 //! > surprising edge-case behaviour. Use at your own risk.
+#![warn(missing_docs)]
 
 pub(crate) mod build;
 pub mod cache;

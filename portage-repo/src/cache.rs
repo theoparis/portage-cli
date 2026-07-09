@@ -28,6 +28,7 @@ type ChecksumCache = Arc<papaya::HashMap<PathBuf, md5::Digest>>;
 /// Options for [`regen_cache`].
 #[derive(Debug, Clone, Default)]
 pub struct RegenOpts {
+    /// Ebuild sourcing options passed to [`source_parallel`].
     pub source: SourceOpts,
     /// Directory to write `md5-cache` files into. `None` = dry-run (source, don't write).
     pub output_dir: Option<PathBuf>,
@@ -36,7 +37,9 @@ pub struct RegenOpts {
 /// Result counters returned by [`regen_cache`].
 #[derive(Debug, Clone, Default)]
 pub struct RegenStats {
+    /// Number of ebuilds processed.
     pub total: usize,
+    /// Number of ebuilds that failed to source or write.
     pub errors: usize,
 }
 

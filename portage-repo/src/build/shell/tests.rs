@@ -1,0 +1,514 @@
+use super::*;
+use tempfile::tempdir;
+
+#[tokio::test]
+async fn test_use_flags() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().to_path_buf();
+
+    // Create a minimal repository structure
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::create_dir_all(repo_path.join("eclass")).unwrap();
+
+    // Write minimal layout.conf
+    std::fs::write(
+        repo_path.join("metadata").join("layout.conf"),
+        "masters = \ncache-formats = md5-dict\n",
+    )
+    .unwrap();
+
+    // Write repo_name
+    std::fs::write(repo_path.join("profiles").join("repo_name"), "test-repo\n").unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+
+    // Test setting USE flags
+    shell.set_use_flags(&["ssl", "gtk", "-doc"]).unwrap();
+    assert_eq!(shell.use_flags_string(), "gtk ssl");
+
+    // Test that USE environment variable is set
+    let use_env = shell.get_var("USE").unwrap_or_default();
+    assert!(use_env.contains("ssl"));
+    assert!(use_env.contains("gtk"));
+    assert!(!use_env.contains("doc"));
+}
+
+#[tokio::test]
+async fn eclass_search_path_prefers_own_repo_over_masters() {
+    // Build an overlay with two masters (m1, m2). The search path must put
+    // the overlay's own eclass/ first, then masters in reverse order, so
+    // first-hit-wins matches portage's last-writer-wins (own > m2 > m1).
+    fn mk_repo(base: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let p = base.join(name);
+        std::fs::create_dir_all(p.join("metadata")).unwrap();
+        std::fs::create_dir_all(p.join("profiles")).unwrap();
+        std::fs::create_dir_all(p.join("eclass")).unwrap();
+        std::fs::write(p.join("metadata/layout.conf"), "masters = \n").unwrap();
+        std::fs::write(p.join("profiles/repo_name"), format!("{name}\n")).unwrap();
+        p
+    }
+
+    let dir = tempdir().unwrap();
+    let base = dir.path();
+    let m1 = mk_repo(base, "m1");
+    let m2 = mk_repo(base, "m2");
+    let own = mk_repo(base, "own");
+
+    let m1_repo = Repository::open(&m1).unwrap();
+    let m2_repo = Repository::open(&m2).unwrap();
+    let own_repo = Repository::open(&own).unwrap();
+
+    let shell = own_repo
+        .shell_with_masters(&[&m1_repo, &m2_repo])
+        .await
+        .unwrap();
+
+    let dirs = shell.get_var("__PORTAGE_ECLASS_DIRS").unwrap_or_default();
+    let expected = format!(
+        "{}:{}:{}",
+        own.join("eclass").display(),
+        m2.join("eclass").display(),
+        m1.join("eclass").display(),
+    );
+    assert_eq!(dirs, expected);
+}
+
+#[tokio::test]
+async fn reused_shell_does_not_leak_metadata_between_ebuilds() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().to_path_buf();
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::create_dir_all(repo_path.join("dev-libs/foo")).unwrap();
+    std::fs::write(
+        repo_path.join("metadata/layout.conf"),
+        "masters = 
+cache-formats = md5-dict
+",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_path.join("profiles/repo_name"),
+        "test-repo
+",
+    )
+    .unwrap();
+    // First ebuild sets KEYWORDS; the second (a live-style ebuild)
+    // deliberately leaves it unset — it must not inherit the first's.
+    std::fs::write(
+        repo_path.join("dev-libs/foo/foo-1.0.ebuild"),
+        concat!(
+            "EAPI=8\n",
+            "DESCRIPTION=\"release\"\n",
+            "SLOT=\"0\"\n",
+            "LICENSE=\"MIT\"\n",
+            "KEYWORDS=\"~amd64 ~arm64\"\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        repo_path.join("dev-libs/foo/foo-9999.ebuild"),
+        concat!(
+            "EAPI=8\n",
+            "DESCRIPTION=\"live\"\n",
+            "SLOT=\"0\"\n",
+            "LICENSE=\"MIT\"\n",
+        ),
+    )
+    .unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+
+    let release = Ebuild::from_path(
+        camino::Utf8Path::from_path(&repo_path.join("dev-libs/foo/foo-1.0.ebuild")).unwrap(),
+    )
+    .unwrap();
+    let live = Ebuild::from_path(
+        camino::Utf8Path::from_path(&repo_path.join("dev-libs/foo/foo-9999.ebuild")).unwrap(),
+    )
+    .unwrap();
+
+    let first = shell.source_ebuild(&release).await.unwrap();
+    assert_eq!(first.metadata.keywords.len(), 2);
+    let second = shell.source_ebuild(&live).await.unwrap();
+    assert!(
+        second.metadata.keywords.is_empty(),
+        "live ebuild must not inherit the previous sourcing's KEYWORDS: {:?}",
+        second.metadata.keywords
+    );
+}
+/// `has_version`/`best_version` builtins query the VDB under the root the
+/// -b/-d/-r flag names; phase shells unset the metadata-sourcing stubs so
+/// the builtins take over (the stub shadowed them and made
+/// autotools.eclass's autoconf probe die in every build).
+#[tokio::test]
+async fn version_query_builtins_query_the_flagged_root() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+    // Synthetic BROOT with one installed package.
+    let broot = dir.path().join("broot");
+    let pkgdir = broot.join("var/db/pkg/dev-build/autoconf-2.73-r1");
+    std::fs::create_dir_all(&pkgdir).unwrap();
+    std::fs::write(pkgdir.join("SLOT"), "2.73\n").unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell
+        .run_string(&format!(
+            "unset -f has_version best_version; BROOT={}; \
+             has_version -b '=dev-build/autoconf-2.73*' && HV=yes || HV=no; \
+             BV=$(best_version -b '=dev-build/autoconf-2.73*'); \
+             has_version -b 'dev-build/automake' && HV2=yes || HV2=no",
+            broot.display()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(shell.get_var("HV").as_deref(), Some("yes"));
+    assert_eq!(
+        shell.get_var("BV").as_deref(),
+        Some("dev-build/autoconf-2.73-r1")
+    );
+    assert_eq!(shell.get_var("HV2").as_deref(), Some("no"));
+}
+
+#[tokio::test]
+async fn bashrc_files_are_sourced_during_a_phase() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+    let ebdir = repo_path.join("cat/pkg");
+    std::fs::create_dir_all(&ebdir).unwrap();
+    std::fs::write(
+        ebdir.join("pkg-1.ebuild"),
+        "EAPI=8\nDESCRIPTION=\"t\"\nSLOT=\"0\"\nLICENSE=\"MIT\"\nS=\"${WORKDIR}\"\npkg_setup() { :; }\n",
+    )
+    .unwrap();
+
+    // A bashrc hook that records that it ran with the phase env available.
+    let bashrc = dir.path().join("bashrc");
+    std::fs::write(&bashrc, "export EM_BASHRC_MARKER=\"hit:${EBUILD_PHASE}\"\n").unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell.set_bashrc_files(vec![Utf8PathBuf::from_path_buf(bashrc).unwrap()]);
+
+    let ebuild =
+        Ebuild::from_path(camino::Utf8Path::from_path(&ebdir.join("pkg-1.ebuild")).unwrap())
+            .unwrap();
+    let work = dir.path().join("work");
+    shell
+        .run_phase(&ebuild, "setup", &work, std::path::Path::new("/"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        shell.get_var("EM_BASHRC_MARKER").as_deref(),
+        Some("hit:setup")
+    );
+}
+
+#[tokio::test]
+async fn phase_aborts_on_die_not_on_trailing_exit() {
+    // Portage aborts a phase only via `die` (helpers self-die; `eapply` /
+    // explicit `die` raise it), NOT from the phase function's trailing exit
+    // status. `run_phase` must match: a phase ending on a benign non-zero
+    // command (e.g. binutils' `find … -exec rmdir {} +`) must NOT abort,
+    // while an explicit `die` must. Regression for the cross-toolchain
+    // binutils `src_install` that ends on a non-zero `find … rmdir`.
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+    let ebdir = repo_path.join("cat/pkg");
+    std::fs::create_dir_all(&ebdir).unwrap();
+    std::fs::write(
+        ebdir.join("pkg-1.ebuild"),
+        "EAPI=8\nDESCRIPTION=\"t\"\nSLOT=\"0\"\nLICENSE=\"MIT\"\nS=\"${WORKDIR}\"\n\
+         pkg_setup() { :; }\n",
+    )
+    .unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+
+    let ebuild =
+        Ebuild::from_path(camino::Utf8Path::from_path(&ebdir.join("pkg-1.ebuild")).unwrap())
+            .unwrap();
+    let work = dir.path().join("work");
+
+    // A first, succeeding phase sources the ebuild and captures the
+    // baseline, so the phases below run the function body only.
+    shell
+        .run_phase(&ebuild, "setup", &work, std::path::Path::new("/"))
+        .await
+        .unwrap();
+
+    // A phase ending on a non-zero command (no `die`) is tolerated — it
+    // must NOT abort the build.
+    shell
+        .run_string("src_compile() { true; false; }")
+        .await
+        .unwrap();
+    shell
+        .run_phase(&ebuild, "compile", &work, std::path::Path::new("/"))
+        .await
+        .expect("a benign trailing non-zero must not abort the phase");
+
+    // An explicit `die` (as the helpers raise on failure) must abort.
+    shell
+        .run_string("src_test() { die \"boom\"; }")
+        .await
+        .unwrap();
+    let err = shell
+        .run_phase(&ebuild, "test", &work, std::path::Path::new("/"))
+        .await
+        .expect_err("an explicit die must abort the build");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("die") && msg.contains("src_test"),
+        "expected the die/phase name in the error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn einstall_enforces_eapi_ban_and_requires_a_makefile() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+    let empty = dir.path().join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell
+        .run_string(&format!(
+            "unset -f einstall; cd {}; \
+             EAPI=6; einstall 2>/dev/null && BAN=ok || BAN=died; \
+             EAPI=5; einstall 2>/dev/null && NOMK=ok || NOMK=died",
+            empty.display()
+        ))
+        .await
+        .unwrap();
+    // Banned in EAPI 6+, and dies on a missing Makefile in EAPI 5.
+    assert_eq!(shell.get_var("BAN").as_deref(), Some("died"));
+    assert_eq!(shell.get_var("NOMK").as_deref(), Some("died"));
+}
+
+/// `use_with`/`use_enable`'s explicit-empty second argument
+/// (`use_with brotli '' link`, as `net-libs/gnutls` calls it) must fall
+/// back to the flag name, matching bash's `${2:-$1}` in real portage's
+/// `use_with()` — not just an omitted argument. An empty `Option<String>`
+/// still satisfies `Option::unwrap_or`'s `Some` case, so a naive
+/// translation silently drops the feature name entirely, producing
+/// `--without-` instead of `--without-brotli` (which `./configure` then
+/// warns is unrecognized and ignores, leaving the feature auto-detected
+/// regardless of the requested USE flag).
+#[tokio::test]
+async fn use_with_and_use_enable_treat_empty_feature_arg_as_omitted() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell.set_use_flags(&["-brotli", "cxx"]).unwrap();
+
+    shell
+        .run_string(
+            "WITH_OUT=$(use_with brotli '' link); \
+             ENABLE_OUT=$(use_enable cxx '')",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        shell.get_var("WITH_OUT").as_deref(),
+        Some("--without-brotli")
+    );
+    assert_eq!(shell.get_var("ENABLE_OUT").as_deref(), Some("--enable-cxx"));
+}
+
+/// A profile/make.conf-sourced variable must reach a *real* subprocess an
+/// ebuild/eclass spawns directly — not just brush's in-process variable
+/// table (which is all `get_var`/em's Rust builtins need). `MULTILIB_ABIS`
+/// stands in for any such variable em doesn't specifically know about
+/// (this is the exact shape of the CHOST bug: invisible to a real child
+/// process, even though brush itself sees it fine).
+#[tokio::test]
+async fn export_sourced_env_reaches_a_real_subprocess() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+
+    // Plain (non-exported) assignment — exactly what `source`ing a
+    // make.conf-style file produces.
+    shell.run_string("MULTILIB_ABIS=lp64d").await.unwrap();
+    shell.export_sourced_env().unwrap();
+
+    // A real external command, not a brush builtin: only sees inherited
+    // (exported) process environment variables.
+    shell
+        .run_string("OUT=$(/bin/sh -c 'printf %s \"$MULTILIB_ABIS\"')")
+        .await
+        .unwrap();
+    assert_eq!(
+        shell.get_var("OUT").as_deref(),
+        Some("lp64d"),
+        "a real subprocess must inherit a profile/make.conf-sourced var after export_sourced_env"
+    );
+}
+
+#[tokio::test]
+async fn install_helpers_are_self_contained() {
+    // The do*/new* helpers must place files purely from INSTALL_HELPERS,
+    // with no portage ebuild-helpers on PATH. Verifies the into->DESTTREE
+    // mirror and the env.d/conf.d/init.d (do*/new*) helpers.
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+    let d = dir.path().join("image");
+    let t = dir.path().join("temp");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::create_dir_all(&t).unwrap();
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("myprog"), "#!/bin/sh\n:\n").unwrap();
+    std::fs::write(src.join("foo.conf"), "X=1\n").unwrap();
+    std::fs::write(src.join("foo.envd"), "PATH=/opt/foo/bin\n").unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    // init_build_env no longer prepends portage's ebuild-helpers to PATH,
+    // so these helpers must resolve entirely from INSTALL_HELPERS (they
+    // still use coreutils like install/cp, which stay on the system PATH).
+    shell
+        .run_string(&format!(
+            "{INSTALL_HELPERS}\n\
+             unset -f dodir keepdir doins doexe dobin dosbin dodoc doheader \
+                      doinfo doman domo dolib dolib.a dolib.so dosym fperms fowners \
+                      newbin newsbin newins newexe newdoc newman newheader newlib.a newlib.so newinitd newconfd newenvd; \
+             export D={d} ED={d} T={t} CATEGORY=cat PN=pkg SLOT=0 PF=pkg-1; \
+             into /usr/local; dobin {src}/myprog; \
+             [[ ${{DESTTREE}} == /usr/local ]] || die 'into did not set DESTTREE'; \
+             newconfd {src}/foo.conf renamed.conf; \
+             doenvd {src}/foo.envd; \
+             newinitd {src}/myprog svc",
+            d = d.display(),
+            t = t.display(),
+            src = src.display(),
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        d.join("usr/local/bin/myprog").exists(),
+        "dobin into /usr/local"
+    );
+    assert!(d.join("etc/conf.d/renamed.conf").exists(), "newconfd");
+    assert!(d.join("etc/env.d/foo.envd").exists(), "doenvd");
+    assert!(d.join("etc/init.d/svc").exists(), "newinitd");
+}
+
+#[tokio::test]
+async fn new_helpers_read_stdin_for_dash_source() {
+    // `newins - <name>` (and every new* with `-`) reads the file body from
+    // stdin — e.g. acct-group.eclass's `newins - foo.conf < <(…)`. Here a
+    // here-string feeds the builtin's stdin; the content must land under the
+    // requested name. newman additionally derives the section from the name.
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+    let d = dir.path().join("image");
+    let t = dir.path().join("temp");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::create_dir_all(&t).unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    shell
+        .run_string(&format!(
+            "{INSTALL_HELPERS}\n\
+             unset -f newbin newsbin newins newexe newdoc newman newheader \
+                      newlib.a newlib.so newinitd newconfd newenvd; \
+             export D={d} ED={d} T={t} CATEGORY=cat PN=pkg SLOT=0 PF=pkg-1; \
+             newins - etc.conf <<< 'KEY=value'; \
+             newman - app.1 <<< '.TH app 1'",
+            d = d.display(),
+            t = t.display(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(d.join("etc.conf")).unwrap(),
+        "KEY=value\n",
+        "newins - reads stdin into the named file"
+    );
+    assert!(
+        d.join("usr/share/man/man1/app.1").exists(),
+        "newman - derives the section from the name"
+    );
+}
+
+#[tokio::test]
+async fn docompress_dostrip_builtins_accumulate_shared_lists() {
+    let dir = tempdir().unwrap();
+    let repo_path = dir.path().join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+
+    let repo = Repository::open(&repo_path).unwrap();
+    let mut shell = repo.shell().await.unwrap();
+    // The metadata stubs shadow the Rust builtins until init_build_env
+    // unsets them; do the same here so the builtins run.
+    shell
+        .run_string(
+            "unset -f docompress dostrip; \
+             docompress /opt/data /usr/share/extra; \
+             docompress -x /usr/share/doc/foo/html; \
+             dostrip /usr/lib/debug-me; \
+             dostrip -x /usr/lib/keep.so",
+        )
+        .await
+        .unwrap();
+
+    let paths = shell.install_paths();
+    assert_eq!(paths.compress, ["/opt/data", "/usr/share/extra"]);
+    assert_eq!(paths.compress_exclude, ["/usr/share/doc/foo/html"]);
+    assert_eq!(paths.strip, ["/usr/lib/debug-me"]);
+    assert_eq!(paths.strip_exclude, ["/usr/lib/keep.so"]);
+}
