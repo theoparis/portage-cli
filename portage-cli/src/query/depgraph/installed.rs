@@ -80,12 +80,24 @@ pub(super) struct HostInstalledEntry {
 /// rebuilt into BROOT for a `--target` stage3 was still reported unsatisfied
 /// because this read the bare host `/var/db/pkg` regardless — see
 /// todo/stage-build-shakeout.md #28/#30.
+///
+/// `--prefix` additionally weaves in the prefix's own VDB, read *after* the
+/// host's: `add_host_installed` (`provider/mod.rs`) does a plain
+/// `HashMap::insert` keyed by package, so whichever entry is appended last
+/// wins — matching "what is in the prefix drives" for a package present in
+/// both (`Cli::broot()` sends an unsatisfied BDEPEND to the prefix under
+/// `--prefix`, never to the real host).
 pub(super) fn load_host_installed(roots: &crate::cli::Roots) -> Vec<HostInstalledEntry> {
-    let Ok(vdb) = Vdb::open(
-        roots
-            .satisfaction_root(portage_atom_pubgrub::DepClass::Bdepend)
-            .join("var/db/pkg"),
-    ) else {
+    let mut out =
+        load_host_installed_at(roots.satisfaction_root(portage_atom_pubgrub::DepClass::Bdepend));
+    if roots.is_overlay() {
+        out.extend(load_host_installed_at(roots.merge_root()));
+    }
+    out
+}
+
+fn load_host_installed_at(root: &camino::Utf8Path) -> Vec<HostInstalledEntry> {
+    let Ok(vdb) = Vdb::open(root.join("var/db/pkg")) else {
         return Vec::new();
     };
     vdb.packages()
@@ -236,5 +248,72 @@ mod tests {
                 .any(|f| f.as_str() == "python_targets_python3_14"),
             "USE flags must come from the given root's VDB entry"
         );
+    }
+
+    fn write_fake_vdb_entry(root: &std::path::Path, cpv: &str, use_flags: &str) {
+        let pkg_dir = root.join("var/db/pkg").join(cpv);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("EAPI"), "8").unwrap();
+        std::fs::write(pkg_dir.join("SLOT"), "0").unwrap();
+        std::fs::write(pkg_dir.join("CONTENTS"), "").unwrap();
+        std::fs::write(pkg_dir.join("USE"), use_flags).unwrap();
+    }
+
+    /// `--prefix`: `load_host_installed` must weave in the prefix's own VDB
+    /// (not just the host's), and the prefix's entry must win when both
+    /// have the package — matching "what is in the prefix drives", since an
+    /// unsatisfied BDEPEND now merges into the prefix, never the real host.
+    #[test]
+    fn load_host_installed_weaves_prefix_over_host_under_overlay() {
+        let host = tempfile::tempdir().unwrap();
+        let prefix = tempfile::tempdir().unwrap();
+        write_fake_vdb_entry(
+            host.path(),
+            "dev-python/jinja2-3.1.6",
+            "python_targets_python3_13",
+        );
+        write_fake_vdb_entry(
+            prefix.path(),
+            "dev-python/jinja2-3.1.6",
+            "python_targets_python3_14",
+        );
+
+        let roots = crate::cli::Roots::for_test_overlay(
+            host.path().to_str().unwrap(),
+            prefix.path().to_str().unwrap(),
+        );
+        let entries = load_host_installed(&roots);
+
+        // Host is read first, prefix second: not deduplicated here (the
+        // caller's `HashMap::insert` per entry, in order, is what makes the
+        // last one — the prefix's — win; see `add_host_installed`).
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .last()
+                .unwrap()
+                .active_use
+                .iter()
+                .any(|f| f.as_str() == "python_targets_python3_14"),
+            "the prefix's entry must be read last, so it wins once inserted by package key"
+        );
+    }
+
+    /// A package present only on the host (never built into the prefix)
+    /// must still be found — the overlay weave adds the prefix, it doesn't
+    /// replace the host.
+    #[test]
+    fn load_host_installed_still_finds_host_only_entry_under_overlay() {
+        let host = tempfile::tempdir().unwrap();
+        let prefix = tempfile::tempdir().unwrap();
+        write_fake_vdb_entry(host.path(), "dev-python/jinja2-3.1.6", "");
+
+        let roots = crate::cli::Roots::for_test_overlay(
+            host.path().to_str().unwrap(),
+            prefix.path().to_str().unwrap(),
+        );
+        let entries = load_host_installed(&roots);
+
+        assert_eq!(entries.len(), 1, "must still find the host-only entry");
     }
 }

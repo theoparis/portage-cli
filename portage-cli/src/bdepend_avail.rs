@@ -48,10 +48,21 @@ impl Avail {
     /// as already satisfied on the next. This mirrors the
     /// `load_host_installed` fix — see `todo/stage-build-shakeout.md`
     /// #28/#30 — for the same bug in the solver's own host-installed view.
+    ///
+    /// `--prefix` (an unprivileged overlay) additionally weaves in the
+    /// prefix's own VDB: `Cli::broot()` now sends an unsatisfied BDEPEND
+    /// there (the overlay can't write the real host `/`), so a package
+    /// already built into the prefix by a previous run must also count as
+    /// satisfied. Not done for `--root`/`--local`: there, nothing is ever
+    /// merged anywhere but the single satisfaction root, so a second read
+    /// would only risk a false positive from an unrelated package
+    /// coincidentally present at the merge target.
     pub fn initial_bdepend(roots: &Roots) -> Self {
-        Self(vdb_avail_entries(Some(
-            roots.satisfaction_root(DepClass::Bdepend),
-        )))
+        let mut out = vdb_avail_entries(Some(roots.satisfaction_root(DepClass::Bdepend)));
+        if roots.is_overlay() {
+            out.extend(vdb_avail_entries(Some(roots.merge_root())));
+        }
+        Self(out)
     }
 
     /// `DEPEND` availability at the start of a run: `VDB(base) ∪ VDB(target)`.
@@ -529,6 +540,64 @@ mod tests {
         assert!(
             avail.atom_satisfied(dep),
             "must find the package via host_roots' VDB, not the bare host's"
+        );
+    }
+
+    fn write_fake_vdb_entry(root: &std::path::Path, cpv: &str) {
+        let pkg_dir = root.join("var/db/pkg").join(cpv);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("EAPI"), "8").unwrap();
+        std::fs::write(pkg_dir.join("SLOT"), "0").unwrap();
+        std::fs::write(pkg_dir.join("CONTENTS"), "").unwrap();
+        std::fs::write(pkg_dir.join("USE"), "").unwrap();
+    }
+
+    /// `--prefix`: a BDEPEND satisfied only by the prefix's own VDB (never
+    /// built into the real host) must still count as satisfied — the weave
+    /// this fixes, since `Cli::broot()` sends an unsatisfied one there.
+    #[test]
+    fn initial_bdepend_weaves_in_the_prefix_vdb_under_overlay() {
+        let host = tempfile::tempdir().unwrap();
+        let prefix = tempfile::tempdir().unwrap();
+        write_fake_vdb_entry(prefix.path(), "dev-python/jinja2-3.1.6");
+
+        let roots = Roots::for_test_overlay(
+            host.path().to_str().unwrap(),
+            prefix.path().to_str().unwrap(),
+        );
+        let avail = Avail::initial_bdepend(&roots);
+
+        let dep = parse("dev-python/jinja2");
+        let DepEntry::Atom(dep) = &dep[0] else {
+            unreachable!()
+        };
+        assert!(
+            avail.atom_satisfied(dep),
+            "a BDEPEND present only in the prefix's own VDB must count as satisfied"
+        );
+    }
+
+    /// The same weave also still finds a host-only entry — the overlay adds
+    /// the prefix's VDB, it doesn't replace the host's.
+    #[test]
+    fn initial_bdepend_still_finds_host_only_entry_under_overlay() {
+        let host = tempfile::tempdir().unwrap();
+        let prefix = tempfile::tempdir().unwrap();
+        write_fake_vdb_entry(host.path(), "dev-python/jinja2-3.1.6");
+
+        let roots = Roots::for_test_overlay(
+            host.path().to_str().unwrap(),
+            prefix.path().to_str().unwrap(),
+        );
+        let avail = Avail::initial_bdepend(&roots);
+
+        let dep = parse("dev-python/jinja2");
+        let DepEntry::Atom(dep) = &dep[0] else {
+            unreachable!()
+        };
+        assert!(
+            avail.atom_satisfied(dep),
+            "a BDEPEND present only in the host's VDB must still count as satisfied"
         );
     }
 }

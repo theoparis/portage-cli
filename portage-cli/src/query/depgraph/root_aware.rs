@@ -37,6 +37,11 @@ pub struct CrossContext {
     /// and the `CHOST` maps to a known arch. Derived once; drives keyword
     /// acceptance for the target.
     target_arch: Option<Arch>,
+    /// Where a `MergeRoot::Host` entry actually lands (mirrors `Cli::broot()`):
+    /// the prefix under `--prefix` (an unprivileged overlay can't write the
+    /// real host `/`), else the real host `/`. Used by [`display_root`] so
+    /// the `-p` merge list matches where the merge actually goes.
+    host_target: Utf8PathBuf,
 }
 
 impl CrossContext {
@@ -56,8 +61,14 @@ impl CrossContext {
     }
 }
 
-/// Detect cross context from CLI roots (no flag required).
-pub fn detect(roots: &Roots) -> CrossContext {
+/// Detect cross context from CLI roots (no flag required). `host_merge_root`
+/// is `Cli::broot()`'s `merge_root()` — passed in rather than derived from
+/// `roots.is_overlay()` here, because `roots` can be `--target`-substituted
+/// (its `eprefix`/overlay-ness cleared), which would wrongly report the real
+/// host as the destination for a `MergeRoot::Host` entry even under an
+/// unprivileged `--prefix` overlay (`Cli::broot()` stays overlay-aware
+/// regardless of `--target`, since it's derived from `base_roots()`).
+pub fn detect(roots: &Roots, host_merge_root: &Utf8Path) -> CrossContext {
     let sysroot = roots
         .sysroot()
         .map(|p| p.to_owned())
@@ -70,6 +81,7 @@ pub fn detect(roots: &Roots) -> CrossContext {
         (Some(c), Some(b)) => c != b,
         _ => false,
     };
+    let host_target = host_merge_root.to_owned();
 
     // Active for crossdev, config≠merge offsets (`--config-root / --root stage1/`),
     // and native stage/offset builds (`--root stage1/`) so BDEPEND/IDEPEND route to
@@ -82,6 +94,7 @@ pub fn detect(roots: &Roots) -> CrossContext {
             chost: None,
             cbuild: None,
             target_arch: None,
+            host_target,
         };
     }
 
@@ -93,6 +106,7 @@ pub fn detect(roots: &Roots) -> CrossContext {
         chost,
         cbuild,
         target_arch,
+        host_target,
     }
 }
 
@@ -120,10 +134,10 @@ pub fn build_plan(target_order: Vec<(PortagePackage, Version)>) -> Vec<PlanEntry
 pub fn display_root<'a>(
     merge_root: MergeRoot,
     target: &'a Utf8Path,
-    cross: &CrossContext,
+    cross: &'a CrossContext,
 ) -> &'a Utf8Path {
     match merge_root {
-        MergeRoot::Host => Utf8Path::new("/"),
+        MergeRoot::Host => cross.host_target.as_path(),
         MergeRoot::Target => {
             if cross.active {
                 target
@@ -146,4 +160,52 @@ fn read_chost_cbuild(root: &Utf8Path) -> (Option<String>, Option<String>) {
         }
     }
     (None, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--prefix`: a `MergeRoot::Host` entry must display as landing in the
+    /// prefix, not the real host — matching `Cli::broot()`'s merge
+    /// destination fix. Before that fix `display_root` hardcoded `/` here,
+    /// which stayed silently correct only because `Cli::broot()` itself
+    /// used to be host-anchored for every topology.
+    #[test]
+    fn host_entry_displays_as_landing_in_the_prefix_under_overlay() {
+        let roots = crate::cli::Roots::for_test_overlay("/", "/opt/p");
+        let cross = detect(&roots, Utf8Path::new("/opt/p"));
+        assert!(cross.active);
+        assert_eq!(
+            display_root(MergeRoot::Host, &cross.target, &cross).as_str(),
+            "/opt/p"
+        );
+    }
+
+    /// `--root`: a `MergeRoot::Host` entry still displays as landing on the
+    /// real host `/` — unaffected by the overlay-only display fix.
+    #[test]
+    fn host_entry_displays_as_landing_on_the_real_host_under_offset() {
+        let roots = crate::cli::Roots::for_test("/srv/x");
+        let cross = detect(&roots, Utf8Path::new("/"));
+        assert_eq!(
+            display_root(MergeRoot::Host, &cross.target, &cross).as_str(),
+            "/"
+        );
+    }
+
+    /// The combined `--prefix --target` case: `roots` here would be
+    /// `--target`-substituted (eprefix cleared), but `host_merge_root` is
+    /// passed independently (from `Cli::broot()`, unaffected by that
+    /// substitution) — the whole point of not deriving `host_target` from
+    /// `roots.is_overlay()` inside `detect`.
+    #[test]
+    fn host_entry_displays_as_landing_in_the_prefix_even_when_roots_is_target_substituted() {
+        let sysroot_roots = crate::cli::Roots::for_test("/opt/p/usr/riscv64-unknown-linux-gnu");
+        let cross = detect(&sysroot_roots, Utf8Path::new("/opt/p"));
+        assert_eq!(
+            display_root(MergeRoot::Host, &cross.target, &cross).as_str(),
+            "/opt/p"
+        );
+    }
 }

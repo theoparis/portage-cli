@@ -19,13 +19,71 @@ These are the divergences between current code and the target model in
 `docs/root-topology.md` § "Override semantics". Each is a real behaviour change
 to land as part of (or before) the refactor.
 
-- 🔴 **`--root` no longer moves config.** Current `cli.rs` does
-  `config: config_root.or(root)` — config follows `--root`. Portage `ROOT=`
-  parity requires config to stay at `/`. This is a user-visible change for
-  anyone relying on the current offset-config default; decide clean-break vs
-  compat shim. **Deferred** — tangled with `ensure_self_contained_prefix`'s use
-  of `config().is_some()` as a self-contained signal; lands cleanly once the
-  `RootTopology` enum exists (Cluster C).
+- ✅ **`--root` config resolution — resolved 2026-07-09, not the way originally
+  proposed.** Original framing: "`--root` no longer moves config" (portage
+  `ROOT=` parity, `config: config_root.or(root)` → `config: config_root`).
+  Attempted, reverted, and replaced with a narrower, correct fix after two
+  rounds of live findings:
+  - **First attempt**: make `config()` default to host, falling back to the
+    offset only when `<offset>/etc/portage/make.profile` already exists
+    (real ROOT= parity as the common case, self-contained roots still "just
+    work" once bootstrapped). **Broke `em select`'s toolchain-slot lookup**:
+    a live test (`current_slot_reads_the_active_gcc_config_profile`) caught
+    `select/mod.rs`'s `config_portage_dir_for` — a *second*, independent
+    consumer of `roots.config()` beyond `crossdev`'s bootstrap — silently
+    falling through to the **real host's** `/etc/env.d/gcc` for a
+    freshly-created, not-yet-bootstrapped self-contained root (proven with
+    real host state: this dev machine's own `riscv64-unknown-linux-gnu`
+    gcc-config slot 16 leaked into a supposedly-isolated tempdir test).
+  - **Checked real `eselect` for precedent** (at the user's suggestion):
+    `/usr/share/eselect/modules/profile.eselect`'s `get_symlink_location`
+    does `local root=${PORTAGE_CONFIGROOT-${EROOT}}` — it only ever honours
+    an *explicit* `PORTAGE_CONFIGROOT` (or `EROOT`, which a standalone
+    invocation never has set); it never cleverly derives a config root from
+    `ROOT` alone. `select/mod.rs`'s own doc comment already said as much
+    ("`--config-root`... else `--prefix`/`--local` overlay, else `/`" — no
+    mention of `--root`) — the actual code just didn't match its own
+    documented intent, a pre-existing bug the first attempt's revert
+    happened to expose, not something the first attempt caused.
+  - **Landed fix**: `Roots::config()` (the merged, build-facing value used by
+    `profile_stack`/`expand_sets`/`repos_conf`/crossdev's own bootstrap) is
+    reverted to its original, unconditional `config_root.or(root)` — this is
+    `em`'s own deliberate self-contained-bootstrap default (own config, own
+    everything), not a portage `ROOT=` gap, and touching it broke more than
+    it fixed. New, separate `Roots::config_root_explicit()` — *only*
+    `--config-root`, never derived from `--root` — is what `select/mod.rs`'s
+    `config_portage_dir_for`/`is_prefix_context_for` now use instead of
+    `config()`, matching real eselect: `em --root R select ...` reads the
+    **host's** config unless `--config-root R` is also given. New
+    `Roots::is_self_contained_root()` (topology-only: no EPREFIX, base ==
+    target, not bare host) replaces the old `config().is_some()` proxy in
+    `crossdev/mod.rs`'s `ensure_self_contained_prefix`/`ensure_prefix_profile`
+    — behaviourally identical to before, just no longer coupled to
+    `config()`'s exact definition. New
+    `Roots::with_own_config_root_if_self_contained()` covers the *internal*
+    orchestration case (`crossdev::activate_toolchain`'s own
+    gcc-config/binutils-config slot activation for a root it just
+    bootstrapped itself) — it forces its own config root without requiring
+    the user to also type `--config-root` on every crossdev invocation,
+    exactly mirroring how portage's own `{target}-emerge`/build tooling
+    exports `PORTAGE_CONFIGROOT` internally rather than expecting the user to.
+  - **`--config-root /` already gives literal portage `ROOT=` parity** for
+    anyone who wants config to stay at the host for a plain `--root` build
+    (e.g. sharing config with an already-installed host system) — no new
+    code needed for that direction, it was already the existing escape hatch.
+  - Regression tests: `cli.rs` unaffected (no `config()` behaviour change);
+    `select/compiler.rs`'s existing
+    `current_slot_reads_the_active_gcc_config_profile` updated to pass
+    `--config-root` explicitly (the new correct way to test this), plus a
+    new `current_slot_ignores_bare_root_without_explicit_config_root`
+    asserting the reverse — bare `--root` must *not* pick up the offset's
+    env.d, and the internal `with_own_config_root_if_self_contained()` path
+    does. Live-verified end-to-end: `em --root R setup` +
+    `em --root R --target T crossdev --init-target` still bootstraps
+    `R/etc/portage/{make.conf,make.profile,repos.conf}` correctly
+    (unaffected); `em --root R --config-root R select compiler show -t T`
+    reads a slot written into `R/etc/env.d/gcc` while `em --root R select
+    compiler show -t T` (no `--config-root`) reads the real host's instead.
 - ✅ **`--local` becomes standalone, not overlay.** Landed in `b3f20c1`.
   `base` goes from None (host) to Some(prefix), so base == target ==
   ~/.gentoo — full closure, self-contained VDB. Live-verified in
@@ -140,6 +198,91 @@ to land as part of (or before) the refactor.
     other near-duplicate flag pairs while touching this code, not just
     near-duplicate accessor methods.
 
+- ✅ **`--prefix`'s unsatisfied BDEPEND now weaves host∪prefix VDB and merges
+  into the prefix, never the real host.** Found 2026-07-09 by re-deriving
+  the topology from scratch: user's stated model — "if you are in --prefix
+  you are supposed to install on the prefix the bdepends, the host vdb is
+  weaved in ... what is in the prefix drives, but anything that host
+  satisfies is not merged again if not explicitly requested" — didn't match
+  the code. `Cli::broot()` (the only caller: `merge/mod.rs`'s
+  `entry_roots`, used to physically merge a `MergeRoot::Host`-stamped plan
+  entry) returned `root_set().broot()` uniformly — host `/` for both
+  `--root` (correct, privileged) and `--prefix` (wrong: an unprivileged
+  overlay can't write the real host). Latent, not yet hit live: every
+  existing `--prefix` test/run happened to have its BDEPEND already
+  satisfied by the host (`"host python3.14/gpep517/flit-core drive the
+  build"` in this same file's live-test log below — no rebuild ever fired),
+  so the wrong-merge-destination path was never exercised.
+  - Fix: `Cli::broot()` now returns `outer_roots()` (merge_root == prefix)
+    when `base_roots().is_overlay()`, instead of a host-anchored `Roots`;
+    unchanged for `--root`/`--local`/bare. `.broot` (the satisfaction root)
+    still resolves to the host either way — only the merge destination
+    differs.
+  - `Avail::initial_bdepend` (`bdepend_avail.rs`) and `load_host_installed`
+    (`query/depgraph/installed.rs`) now additionally read the prefix's own
+    VDB under `--prefix` (`roots.is_overlay()`), so a BDEPEND already built
+    into the prefix by a previous run counts as satisfied. `load_host_installed`
+    reads host first, prefix second — `add_host_installed`'s plain
+    `HashMap::insert` then makes the later (prefix) entry win for a package
+    present in both, matching "what is in the prefix drives".
+  - "Not merged again if not explicitly requested" needed no new code — the
+    solver's existing `host_satisfied_on_broot`/`append_unsatisfied_broot`
+    (`provider/solve.rs`) already drop a satisfied BDEPEND edge outright,
+    and an atom named explicitly on the command line is a separate,
+    already-existing root-target path unaffected by this.
+  - New regression tests: `cli.rs`'s
+    `prefix_overlay_broot_merges_into_prefix_not_host`,
+    `bdepend_avail.rs`'s `initial_bdepend_weaves_in_the_prefix_vdb_under_overlay`
+    / `initial_bdepend_still_finds_host_only_entry_under_overlay`,
+    `installed.rs`'s `load_host_installed_weaves_prefix_over_host_under_overlay`
+    / `load_host_installed_still_finds_host_only_entry_under_overlay`,
+    `merge/mod.rs`'s `host_entry_installs_into_the_prefix_under_overlay_not_the_host`.
+    Added `Roots::for_test_overlay(host, prefix)` (test-only constructor)
+    since the existing `for_test` collapses base/target/broot to one path.
+  - Live-verified: `em --prefix <dir> setup` then `em --prefix <dir> -p
+    dev-python/pip` (a real package with genuine `MergeRoot::Host`-routed
+    build-time deps, not just the historically-tested host-already-satisfied
+    jinja2 case) shows every single line — Host- and Target-routed alike —
+    landing `to <prefix>/`, none on the real host. Confirms both the actual
+    merge-destination fix and the sibling display fix below together.
+  - **Found live, same pass: the `-p` display was a separate, stale code
+    path.** `query/depgraph/root_aware.rs`'s `display_root` hardcoded
+    `MergeRoot::Host => "/"` — correct before this fix (when `Cli::broot()`
+    always *was* host), now stale: the pretend-mode merge list kept showing
+    Host-routed entries as landing on `/` even though the real merge
+    (`entry_roots`) now correctly sends them to the prefix. Fixed by adding
+    `CrossContext.host_target` (computed once in `root_aware::detect`,
+    mirroring `Cli::broot()`'s own `is_overlay()` check) and having
+    `display_root` read it instead of a hardcoded path. Caught by actually
+    reading live `-p` output line-by-line rather than trusting unit tests
+    alone — the unit tests cover `Cli::broot()`/the weave correctly, but
+    display formatting is a third, independent piece of code that was never
+    exercised by them.
+  - **Residual gap closed same day, on request ("low hanging fruit").** The
+    combined `em --prefix P --target T` case still showed a `MergeRoot::Host`
+    entry landing on `/` in `-p` output, because `CrossContext.host_target`
+    was derived from `depgraph()`'s `roots` parameter (`cli.roots()`), whose
+    `--target`-active branch always clears `eprefix`/`is_overlay()` — losing
+    the very signal `host_target` needs. Fixed by threading the correct value
+    in from outside instead of re-deriving it from the (possibly-substituted)
+    `roots`: new `DepgraphOpts::host_merge_root: &'a Utf8Path` field, set by
+    each of the 3 construction sites (`emerge.rs`, `dispatch.rs`,
+    `crossdev::resolve_gcc_version`) from `cli.broot().merge_root()` — the
+    same authority `merge/mod.rs`'s `entry_roots` already uses for the real
+    merge, unaffected by `--target` substitution since it's derived from
+    `base_roots()`. `root_aware::detect` now takes `host_merge_root` as a
+    parameter instead of computing it from `roots.is_overlay()`.
+    Regression test added (`root_aware.rs`'s
+    `host_entry_displays_as_landing_in_the_prefix_even_when_roots_is_target_substituted`)
+    using a `--target`-shaped `Roots` with a separately-passed prefix path,
+    reproducing exactly the bug this closes. **Live-verified**: `em --prefix
+    P --target riscv64-unknown-linux-gnu crossdev --init-target` then `-p
+    --with-bdeps sys-apps/systemd-utils` shows the Host-routed build chain
+    (dev-lang/python + its own openssl/sqlite/glibc/timezone-data) landing
+    `to P/`, while the Target-routed sysroot packages land `to
+    P/usr/riscv64-unknown-linux-gnu/` — both correct, distinguishable in one
+    `-p` run.
+
 ## The variant refactor (structural)
 
 - ✅ **`Roots.satisfaction_root(DepClass)` — landed 2026-07-09.** Scoped down
@@ -191,15 +334,67 @@ to land as part of (or before) the refactor.
     `CrossArch` was needed for (the `IDEPEND` cell), and there was no
     `Single`/`Dual` variant distinction to normalize once the fix stayed
     field-based rather than enum-based.
-- 🔴 **Privatize `provider.packages` behind `package_data()`.** Today
-  `host_aliases` (`provider/mod.rs:708`) maps `Host`→`Target` identity, and
-  every consumer must remember to call the alias-resolving `package_data()`.
-  `dependency_graph` forgot (`208c818`). Privatize `packages` so
-  `package_data()` is the only accessor — kills the bug class.
+- ✅ **Privatize `provider.packages` behind `package_data()` — landed
+  2026-07-09.** `host_aliases` (`provider/mod.rs`) maps `Host`→`Target`
+  identity, and every consumer must remember to call the alias-resolving
+  `package_data()`. `dependency_graph` forgot once already (`208c818`);
+  a full sweep found **12 more sites with the identical bug**, all reachable
+  via `solution.iter()` (which legitimately yields `Host`-flavored entries
+  under `--target`/`--prefix` builds) or public-API arguments:
+  - `validate.rs`: `check_use_deps`, `check_repo_constraints`,
+    `check_blockers`, `slot_operator_bindings` (6 call sites) — each silently
+    skipped validation for a `Host`-routed package's USE-deps/repo-constraint/
+    blocker/slot-binding.
+  - `provider/post_solve.rs`: `compute_use_flag_requirements` (3 sites) and
+    `effective_flag_new` — a `Host`-routed package's USE-flag-requirement
+    cascade silently under-computed.
+  - `provider/mod.rs`'s public `versions_for_pkg`/`deps_for` — currently
+    unused by `portage-cli`, but broken for any future `Host`-flavored caller.
+  - Also converted `branch_best_installed` (currently safe — its one caller
+    always passes a virtual package — but converted anyway for
+    defense-in-depth at zero cost) to the same accessor.
+  - Confirmed safe, left untouched: `graph.rs`'s `self.packages.get(dp)` for a
+    *virtual* `dp` (virtuals are never aliased — `ensure_host_instances`
+    filters `!p.is_virtual()` before creating an alias) — converted to
+    `package_data()` anyway purely because the field is now private and this
+    site is in a different module; `provider/mod.rs`'s own internal uses
+    (`add_installed`, the synthetic solver root insert/remove,
+    `deps_reach_installed`'s virtual-guarded lookup) — genuinely not
+    alias-sensitive, left as direct field access (same module as the
+    declaration).
+  - **Fix**: `packages` field changed from `pub(crate)` to fully private (no
+    modifier) — a compile-time enforcement, not just convention: `graph.rs`/
+    `validate.rs` are sibling modules of `provider`, not descendants, so a raw
+    `.packages.get()` there is now a hard compile error, catching exactly the
+    7 sites the privatization was meant to catch (confirmed by temporarily
+    reverting the field to `pub(crate)` and one call site back to
+    `.packages.get()` — it compiled again, proving the enforcement is real,
+    not incidental). `post_solve.rs`/`solve.rs` are `provider`'s own
+    submodules (private fields stay visible to descendants), so those needed
+    manual conversion — not compiler-forced, but done for the same
+    correctness reason.
+  - New regression test: `validate.rs`'s
+    `check_blockers_fires_from_a_host_routed_packages_own_blocker` — a
+    `Host`-routed package (an unsatisfied BDEPEND, same `set_cross_active`/
+    `set_with_bdeps` setup as `graph.rs`'s existing
+    `host_package_bdepend_on_another_host_package_orders_correctly`) declares
+    a blocker against a normal Target-side RDEPEND; verified this test
+    actually fails without the fix (reverted the field + one call site
+    temporarily, confirmed red, restored). Full workspace fmt/clippy/test
+    clean (141 passing in `portage-atom-pubgrub`, was 140).
 - 🟡 **Extract `dep_satisfaction_root(class, merge_root)` table** shared by
   the three solver functions (`cross_target_runtime_deps`/`host_native_deps`/
   `broot_filtered` in `solve.rs`) so they don't drift from `preflight`'s
   routing on the next IDEPEND shift.
+  - **2026-07-09: re-checked, description still accurate** (confirmed via
+    `git diff`/`git log` that `solve.rs` hasn't changed since the original
+    read). The three functions differ along exactly two axes — which
+    `MergeRoot` DEPEND/RDEPEND/PDEPEND get stamped with (`Target`/`Host`/
+    unstamped) and which `MergeRoot` an *unsatisfied* BDEPEND/IDEPEND edge
+    gets stamped with — so the extraction is a small `DepStampPolicy { runtime_stamp:
+    Option<MergeRoot>, broot_unsatisfied: MergeRoot, include_depend: bool,
+    include_bdepend: bool }` struct plus one shared body, not a literal
+    per-`DepClass` table. Still valid, still low priority.
 
 ## Live test results (2026-07-05, crossdev-stages aarch64 sandbox)
 
@@ -229,33 +424,127 @@ stage3, no host contamination):
 
 ## Open follow-ups (found during live testing)
 
-- 🔴 **MAKEOPTS not parallelising gcc's build.** MAKEOPTS=`-j128` is correctly
-  set in the sysroot make.conf and emake.rs reads it from the shell env, but
-  the live gcc-stage1 compile ran serial (load avg 1.15 on 128 cores). Need
-  instrumentation in emake.rs to log the actual make argv, and a check on
-  whether toolchain.eclass's gcc `src_compile` uses `emake` or bare `make`.
-  Details: `makeopts-emake-parallelism.md` (memory). Blocks the full cross
-  toolchain run being fast.
-- 🟡 **Top-level `em -j N`** that also sets MAKEOPTS (when unset) — mirrors
-  emerge's `--jobs`. Currently `--jobs` only drives parallel package merges,
-  not per-package make parallelism. Small feature.
-- 🔴 **Full cross toolchain under `--prefix`** — paused mid gcc-stage1
-  (MAKEOPTS bug above). Binutils + kernel-headers + libc-headers merged
-  cleanly (counters 2,3,4); gcc-stage1 was compiling when killed. Repro state
-  preserved in `/opt/xp`; resume by re-running `em --prefix /opt/xp crossdev
-  -t riscv64-unknown-linux-gnu --setup` (cached steps skip).
-- 🔴 **Full cross stage1 under `--prefix`** — blocked on the toolchain
-  completing; then `em --prefix /opt/xp --cross riscv64... stages --stage1`.
+- ✅ **MAKEOPTS not parallelising gcc's build — re-verified 2026-07-09 via a
+  real, complete gcc-stage1 + gcc-stage2 build.** Confirmed the sysroot's
+  make.conf carries `MAKEOPTS="-j128"` (the earlier `crossdev-sysroot-
+  makeopts` fix, still landed and test-guarded) and that `toolchain.eclass`'s
+  `gcc_do_make` goes through `emake` (not bare `make`). The full cross
+  toolchain bootstrap below (both gcc stages) completed in this session's
+  timeframe rather than hanging at a serial compile, which is the real-world
+  answer the original "load avg 1.15" observation needed. Not instrumented
+  down to an exact parallelism measurement, but no longer an open question
+  blocking anything — closing as resolved.
+- **Top-level `em -j N` also setting MAKEOPTS — rejected 2026-07-09, not
+  pursuing.** Decided against per-package/per-invocation MAKEOPTS
+  auto-derivation from `--jobs`; `--jobs` stays scoped to parallel package
+  merges only, MAKEOPTS stays purely a make.conf/env concern.
+- ✅ **Full cross toolchain under `--prefix` — DONE, completed end-to-end
+  2026-07-09**, resumed in a fresh `crossdev-stages` aarch64 sandbox (the old
+  `/opt/xp` state from the previous session's host didn't exist on this
+  machine). Found and fixed three real bugs and corrected one wrong fix along
+  the way (full story below). Final live result: `em --prefix /opt/xp
+  --target riscv64-unknown-linux-gnu crossdev --setup --jobs 4 --keep-going`
+  completed all 6 steps clean —
+  `binutils(1)→linux-headers(2)→glibc-headers(3)→gcc-stage1(4)→glibc(5)→
+  gcc-stage2(6)`, ending `>>> cross toolchain riscv64-unknown-linux-gnu ready
+  in /opt/xp/usr/riscv64-unknown-linux-gnu` with the compiler activated
+  (`Switching cross-compiler to riscv64-unknown-linux-gnu-15 ... [ ok ]`).
+  Verified no host contamination: `/opt/xp/var/db/pkg/cross-riscv64-…/`
+  correctly holds all 4 packages; the sandbox's real `/var/db/pkg` has zero
+  `cross-*` entries. This is the first time this exact combination
+  (unprivileged `--prefix` overlay + a genuine foreign-arch crossdev
+  toolchain bootstrap) has completed successfully.
+  - ✅ **Bug 1 — `bypass_cross_root` regression, the real root cause.**
+    `em --prefix P --target T crossdev --setup` failed step 1 (binutils) with
+    a 47-package DEPEND explosion tripping the os-headers preflight, then
+    (once superficially "fixed") with `gcc: error: unknown value 'rv64gc' for
+    '-march'`. Root cause: the `--cross`/`-t` -> `--target` unification
+    earlier this same session (`bcde18a`) made `crossdev --setup` always run
+    with the global `--target` flag active — but `crossdev::setup`'s own
+    `run_staged` call still passed `bypass_cross_root: false` (harmless
+    *before* the unification, since the tuple used to arrive via crossdev's
+    own separate `-t` flag, which never touched `globals.target`). After the
+    unification this silently made every toolchain-bootstrap step resolve
+    against the *sysroot* (`cli.roots()`) instead of the outer EROOT
+    (`cli.base_roots()`) — so `cross-<tuple>/binutils`, a host-arch tool,
+    read the sysroot's target-arch make.conf (`CHOST=riscv64`,
+    `CFLAGS=-march=rv64gc`) to compile itself, and its DEPEND closure
+    (including `debuginfod`'s elfutils/curl/glibc chain) was checked against
+    the empty sysroot instead of the host that actually satisfies it. Fixed:
+    `crossdev::setup`'s `run_staged` call now passes `bypass_cross_root: true`.
+    This is a **regression from earlier in this same session**, not a
+    pre-existing bug — never caught because `--init-target` (the only
+    crossdev operation live-tested right after the unification) doesn't reach
+    `run_staged` at all.
+  - ⚠️ **False fix, corrected on the user's pushback.** Before finding bug 1,
+    the os-headers explosion looked like it needed `binutils`'s `debuginfod`
+    USE flag force-dropped unconditionally (previously only dropped for
+    `is_self_contained_bootstrap`). The user flagged this immediately
+    ("smells a lot" / "you are tapering around") — rightly: once bug 1 was
+    actually fixed, a live `-p` preview confirmed `debuginfod` can stay **on**
+    (binutils shows `[ebuild R]` alone, no explosion) because `binutils`'s
+    DEPEND now correctly routes to the host, which already satisfies the
+    whole closure. Reverted the debuginfod change back to its original
+    `is_self_contained_bootstrap`-gated form (and the two tests with it) —
+    the real fix was `bypass_cross_root` alone. Lesson: a "fix" that makes a
+    symptom go away isn't verified until you check whether a more targeted
+    fix (the actual root cause) makes the workaround unnecessary.
+  - ✅ **Bug 2 — found and fixed, the actual remaining blocker.** Step 3
+    (`libc headers`) failed: `checking installed Linux kernel header
+    files... missing or too old!` even though step 2 (`linux-headers`)
+    reported a clean merge. Extensive live tracing (temporary `eprintln!`
+    instrumentation in `ebuild.rs`, since reverted) confirmed `CTARGET`/
+    `CHOST` were correctly different in the build shell, ruling out the
+    package.env/CTARGET theory and a suspected `brush`-interpreter
+    variable-scoping issue. **Independent review by a second model (Fable,
+    at the user's request — "switch the investigation to fable and have a
+    second look at the changes you made") found the real cause in ~25
+    minutes by reading the VDB directly**: `bypass_cross_root: true` (bug 1's
+    fix) routes through `cli.base_roots()`, but under `--prefix`,
+    `base_roots()`'s `merge_root()` is deliberately the **BROOT** view (host
+    `/`, `target: None` — see its own doc comment) — not the outer EROOT
+    `bypass_cross_root` actually needs. Every toolchain step was merging onto
+    the *sandbox's real host root* instead of `/opt/xp` — confirmed via the
+    VDB (`cross-riscv64-unknown-linux-gnu/linux-headers` registered under the
+    sandbox's real `/var/db/pkg`, not `/opt/xp/var/db/pkg`) and `walk_image`
+    stripping the `P` subtree out of `${ED}` (since `eprefix=Some(P)` makes
+    `ED = D + P`, so a merge rooted at `/` writes real files at `D/P/...`
+    while `${ED}` search only ever looks under `D/`). Binutils "worked" only
+    by accident (its real-arch binaries landing on the real `/usr/bin` is
+    harmless to *notice*, unlike headers going missing from the sysroot).
+    **Fixed**: every `bypass_cross_root`-adjacent call site changed from
+    `base_roots()` to `outer_roots()` — `emerge.rs`'s own `roots` selection,
+    plus `crossdev/mod.rs`'s `activate_toolchain`, `maybe_weave_in_gcc_update`,
+    and `write_sysroot_config` (three more call sites with the identical bug,
+    found by grepping for `base_roots()` after the first fix). `--root`
+    (where `outer_roots() == base_roots()`, no `eprefix`) is a no-op change;
+    `write_cross_env` already used `config_overlay()` rather than
+    `merge_root()` and needed no change. Live-verified end-to-end (see the
+    ✅ summary above) — this was the last blocker.
+  - Sandbox: destroyed the ad-hoc `em-item6-9-test` sandbox (it had gotten
+    contaminated by bug 2 merging onto its real root) and switched to the
+    pre-existing `~/.cache/crossdev-stages/sandboxes/aarch64-20260618T101350Z`
+    — already prepared from the 2026-07-05 session, so no re-sync needed;
+    wiped its stale `/opt/xp` before retesting. `em` binary copied to
+    `/opt/em/em` inside it, driven via `crossdev-stages sandbox run --name
+    aarch64-20260618T101350Z "..."`.
+- 🔴 **Full cross stage1 under `--prefix` — unblocked 2026-07-09, ready to
+  attempt.** The toolchain now completes (see above). Next command:
+  `em --prefix /opt/xp --target riscv64-unknown-linux-gnu stages --stage1`
+  in `~/.cache/crossdev-stages/sandboxes/aarch64-20260618T101350Z`. Not yet
+  attempted this session — a fresh long-running build, natural next step but
+  a separate pass.
 
 ## Verification (outstanding)
 
-- 🔴 Re-derive "stage1 complete" from a clean `--jobs 1` run of the 4
-  stragglers (bzip2, xz-utils, gettext×2), not the VDB spot check
-  (`session-status-2026-07-05-needs-review.md`).
-- 🔴 Re-merge `app-alternatives/gpg-1-r3` with current `em`, expect
-  `IUSE=nls ssl +reference freepg sequoia` in the VDB. If so, close #36 as
-  "already fixed; stale entry" — verified via `regen_only` that current code
-  produces correct IUSE (`iuse-vdb-already-fixed.md`).
+- 🔴 **Re-derive "stage1 complete" — accepted 2026-07-09, next up.** From a
+  clean `--jobs 1` run of the 4 stragglers (bzip2, xz-utils, gettext×2), not
+  the VDB spot check (`session-status-2026-07-05-needs-review.md`).
+- 🔴 **Re-merge `app-alternatives/gpg-1-r3` — accepted 2026-07-09, next up.**
+  With current `em`, expect `IUSE=nls ssl +reference freepg sequoia` in the
+  VDB. If so, close #36 as "already fixed; stale entry" — verified via
+  `regen_only` that current code produces correct IUSE
+  (`iuse-vdb-already-fixed.md`).
 
 ## Out of scope (deferred)
 

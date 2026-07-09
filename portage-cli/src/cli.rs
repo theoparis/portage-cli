@@ -151,12 +151,29 @@ pub struct Roots {
     /// so an unprivileged user can override without touching `/etc/portage`.
     config_overlay: Option<camino::Utf8PathBuf>,
     relocate: bool,
+    /// The literal `--config-root` value, if the user gave one — unlike
+    /// [`config`](Self::config), never derived from `--root`. See
+    /// [`config_root_explicit`](Self::config_root_explicit).
+    config_root_explicit: Option<camino::Utf8PathBuf>,
 }
 
 impl Roots {
     /// `PORTAGE_CONFIGROOT`: where profile and make.conf are read.
     pub fn config(&self) -> Option<&camino::Utf8Path> {
         self.config.as_deref()
+    }
+
+    /// The literal `--config-root` value, if given — unlike
+    /// [`config`](Self::config), never derived from `--root`. `em select`
+    /// uses this instead of `config()`, matching real eselect's own
+    /// behavior (its `profile.eselect` module only ever honours an explicit
+    /// `PORTAGE_CONFIGROOT`/`EROOT`, never derives a config root from `ROOT`
+    /// alone) — so a bare `em --root R select ...` operates on the host's
+    /// config unless `--config-root R` is also given, instead of silently
+    /// picking up whatever `--root`'s self-contained-bootstrap default
+    /// resolved `config()` to.
+    pub(crate) fn config_root_explicit(&self) -> Option<&camino::Utf8Path> {
+        self.config_root_explicit.as_deref()
     }
 
     /// The base root whose VDB seeds the planner's "installed" view.
@@ -186,6 +203,34 @@ impl Roots {
     /// the prefix-target view on top of `base_roots()`.
     pub(crate) fn is_overlay(&self) -> bool {
         self.eprefix.is_some() && self.base.is_none()
+    }
+
+    /// Whether this is a self-contained `--root DIR` topology (own config,
+    /// own everything — `setup.rs`'s "self-contained offset" mode): no
+    /// EPREFIX, base == target, and not the bare host. Topology-only — a
+    /// robust replacement for the old `config().is_some()` proxy
+    /// (`config()` incidentally happens to be `Some` for exactly this
+    /// topology too, but that's no longer the *reason* to detect it — see
+    /// `config_root_explicit`). Used by `crossdev/mod.rs`'s
+    /// `ensure_self_contained_prefix`/`ensure_prefix_profile`.
+    pub(crate) fn is_self_contained_root(&self) -> bool {
+        self.eprefix.is_none() && self.base == self.target && self.merge_root().as_str() != "/"
+    }
+
+    /// For internal orchestration only (`crossdev::activate_toolchain`):
+    /// a self-contained `--root` build's own `gcc-config`/`binutils-config`
+    /// slot files must live under *its own* `etc/env.d`, not the host's —
+    /// unlike `em select`'s user-facing config-root resolution
+    /// (`config_root_explicit`), which deliberately does NOT infer this from
+    /// `--root` alone (see that method's doc comment). The internal
+    /// orchestrator already knows it just bootstrapped this exact offset, so
+    /// it forces its own config root explicitly rather than requiring the
+    /// user to also type `--config-root` on every crossdev invocation.
+    pub(crate) fn with_own_config_root_if_self_contained(mut self) -> Self {
+        if self.is_self_contained_root() {
+            self.config_root_explicit = Some(self.merge_root().to_owned());
+        }
+        self
     }
 
     /// User config overlay dir (`package.use`/`bashrc` layered on host config).
@@ -266,6 +311,24 @@ impl Roots {
             base: Some(path.clone()),
             target: Some(path.clone()),
             broot: Some(path),
+            ..Default::default()
+        }
+    }
+
+    /// Test-only: a `Roots` shaped like `--prefix`'s overlay — `base: None`,
+    /// `target`/`eprefix` the prefix, `broot` a separate host path — so
+    /// `is_overlay()`/BDEPEND-weave tests can use two independent fake VDB
+    /// dirs instead of the real host `/`.
+    #[cfg(test)]
+    pub(crate) fn for_test_overlay(host: &str, prefix: &str) -> Self {
+        let prefix = camino::Utf8PathBuf::from(prefix);
+        Roots {
+            base: None,
+            target: Some(prefix.clone()),
+            broot: Some(camino::Utf8PathBuf::from(host)),
+            eprefix: Some(prefix.clone()),
+            config_overlay: Some(prefix.join("etc/portage")),
+            relocate: true,
             ..Default::default()
         }
     }
@@ -406,6 +469,7 @@ impl Cli {
             eprefix: None,
             config_overlay: None,
             relocate: false,
+            config_root_explicit: outer.config_root_explicit.clone(),
         }
     }
 
@@ -440,6 +504,7 @@ impl Cli {
                 eprefix: Some(prefix.to_path_buf()),
                 config_overlay: Some(prefix.join("etc/portage")),
                 relocate: true,
+                config_root_explicit: base.config_root_explicit.clone(),
             };
         }
         base
@@ -484,6 +549,7 @@ impl Cli {
                 eprefix: Some(prefix.clone()),
                 config_overlay: Some(prefix.join("etc/portage")),
                 relocate: true,
+                config_root_explicit: path(&self.config_root),
             };
         }
         // `--prefix` overlay: BROOT is the host `/`. The prefix is the install
@@ -500,14 +566,21 @@ impl Cli {
                 eprefix: Some(prefix.clone()),
                 config_overlay: Some(prefix.join("etc/portage")),
                 relocate: true,
+                config_root_explicit: path(&self.config_root),
             };
         }
         Roots {
-            // config: --config-root, else --root; host otherwise.
-            // (TODO: portage `ROOT=` parity — --root should NOT move config.
-            //  Deferred to Cluster B: ensure_self_contained_prefix uses
-            //  config().is_some() as a self-contained signal that breaks if
-            //  --root stops setting config. See docs/root-topology.md.)
+            // config: --config-root, else --root; host otherwise. This is
+            // `em`'s own deliberate self-contained-bootstrap default (own
+            // config, own everything — setup.rs's "self-contained offset"
+            // mode) — NOT a portage `ROOT=` parity gap: `em select`'s config
+            // resolution intentionally does NOT follow this fallback
+            // (`Roots::config_root_explicit`, matching real eselect's actual
+            // behavior — see its `profile.eselect` module, which only ever
+            // honours an explicit `PORTAGE_CONFIGROOT`/`EROOT`, never derives
+            // from `ROOT` alone), and `--config-root /` already gives literal
+            // `ROOT=`-sharing parity for anything else that wants it.
+            // Decided 2026-07-09 — see todo/root-topology-refactor.md.
             config: path(&self.config_root).or_else(|| path(&self.root)),
             // base: --root; host otherwise.
             base: path(&self.root),
@@ -521,21 +594,32 @@ impl Cli {
             eprefix: None,
             config_overlay: None,
             relocate: false,
+            config_root_explicit: path(&self.config_root),
         }
     }
 
-    /// The full `Roots` view anchored at BROOT: same `config`/`eprefix`/
-    /// `config_overlay`/`relocate` as [`base_roots`](Self::base_roots), but
-    /// `base`/`target` (and so `merge_root()`) are BROOT itself, not
-    /// `base_roots()`'s "outer EROOT" (they differ for plain `--root` —
-    /// `base_roots()` keeps the offset there on purpose, see its doc
-    /// comment). Distinct from [`satisfaction_root`](Roots::satisfaction_root):
-    /// that gives a bare path for VDB-lookup purposes; this gives a full
-    /// `Roots` for `merge/mod.rs`'s `entry_roots`, which needs to actually
-    /// merge a Host-routed package there (config/`build_sysroot`/`eprefix`
-    /// and all), not just check whether one is already satisfied.
+    /// The full `Roots` a `MergeRoot::Host`-stamped plan entry actually
+    /// merges into (`merge/mod.rs`'s `entry_roots`) — as opposed to
+    /// [`satisfaction_root`](Roots::satisfaction_root), which only gives a
+    /// bare path for checking whether one is already satisfied.
+    ///
+    /// Two different answers depending on privilege:
+    /// - `--root` (privileged offset, portage `ROOT=` parity): the real host
+    ///   `/`, same as `root_set().broot()` — an unsatisfied Host-routed
+    ///   BDEPEND installs there because the invocation has root to do so.
+    /// - `--prefix` (unprivileged overlay): the prefix itself
+    ///   (`outer_roots()`, whose `merge_root()` is already the promoted
+    ///   prefix-target view) — the overlay cannot write the real host `/`,
+    ///   so an unsatisfied BDEPEND must land in the prefix instead. Only the
+    ///   *satisfaction check* (is it already present) stays host-anchored,
+    ///   via `satisfaction_root`/`is_overlay`'s VDB-weave callers.
+    /// - `--local`/bare: BROOT already equals the merge root, so the two
+    ///   questions coincide.
     pub(crate) fn broot(&self) -> Roots {
         let base = self.base_roots();
+        if base.is_overlay() {
+            return self.outer_roots();
+        }
         let broot = self.root_set().broot().to_owned();
         Roots {
             config: base.config.clone(),
@@ -546,6 +630,7 @@ impl Cli {
             eprefix: base.eprefix.clone(),
             config_overlay: base.config_overlay.clone(),
             relocate: base.relocate,
+            config_root_explicit: base.config_root_explicit.clone(),
         }
     }
 
@@ -701,6 +786,29 @@ mod tests {
             cli.roots().merge_root().as_str(),
             "/opt/p",
             "roots().merge_root() must be the prefix (install target) under --prefix"
+        );
+    }
+
+    /// `--prefix` is an unprivileged overlay: it cannot write the real host
+    /// `/`, so an unsatisfied `MergeRoot::Host` plan entry (`entry_roots()`
+    /// in `merge/mod.rs`, fed by `Cli::broot()`) must merge into the prefix
+    /// instead — unlike `--root`, where the same entry correctly lands on
+    /// the real host because that invocation has root. `broot()`'s `.broot`
+    /// field (the *satisfaction* root) stays the host either way; only the
+    /// merge destination (`merge_root()`) differs here.
+    #[test]
+    fn prefix_overlay_broot_merges_into_prefix_not_host() {
+        let cli = Cli::parse_from(["em", "--prefix", "/opt/p", "-p", "sys-libs/zlib"]);
+        let broot = cli.broot();
+        assert_eq!(
+            broot.merge_root().as_str(),
+            "/opt/p",
+            "an unsatisfied Host-routed BDEPEND must merge into the prefix under --prefix"
+        );
+        assert_eq!(
+            broot.satisfaction_root(DepClass::Bdepend).as_str(),
+            "/",
+            "BDEPEND satisfaction must still be checked against the host under --prefix"
         );
     }
 

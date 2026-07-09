@@ -107,6 +107,13 @@ pub struct DepgraphOpts<'a> {
     /// substitution, so a separate `host_roots` field is no longer needed
     /// (see `Cli::roots`'s doc comment).
     pub roots: &'a crate::cli::Roots,
+    /// Where a `MergeRoot::Host` plan entry actually merges — `Cli::broot()`'s
+    /// `merge_root()`. Passed separately from `roots` because `roots` can be
+    /// `--target`-substituted (its `eprefix`/`is_overlay()` cleared), which
+    /// would make the `-p` display fall back to the real host even under an
+    /// unprivileged `--prefix` overlay; `Cli::broot()` is computed from
+    /// `base_roots()` and stays overlay-aware regardless of `--target`.
+    pub host_merge_root: &'a Utf8Path,
     /// `--onlydeps`: drop the explicitly-requested targets from the plan,
     /// keeping only their dependencies (emerge's `--onlydeps`).
     pub onlydeps: bool,
@@ -147,8 +154,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         root_deps_rdeps,
         deep,
         nodeps,
+        host_merge_root,
     } = opts;
-    let cross = root_aware::detect(roots);
+    let cross = root_aware::detect(roots, host_merge_root);
     let config_root = roots.config();
     let host_config_stage = cross.active && cross.sysroot.as_str() != cross.target.as_str();
     // Native `emerge -pe`: pretend nothing merged on TARGET, but BROOT still

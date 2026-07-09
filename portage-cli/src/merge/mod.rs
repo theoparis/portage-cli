@@ -108,6 +108,23 @@ mod entry_roots_tests {
         );
         Ok(())
     }
+
+    /// `--prefix`: an unsatisfied `MergeRoot::Host` entry must merge into
+    /// the prefix, not the real host — an unprivileged overlay can't write
+    /// `/`. `host_roots` here is `Cli::broot()`'s output for `--prefix`,
+    /// which now resolves to the prefix (`outer_roots()`), not the host.
+    #[test]
+    fn host_entry_installs_into_the_prefix_under_overlay_not_the_host() -> Result<()> {
+        let roots = cli::Roots::for_test("/opt/p");
+        let host_roots = cli::Roots::for_test_overlay("/", "/opt/p");
+        let p = planned(MergeRoot::Host)?;
+        assert_eq!(
+            entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
+            "/opt/p",
+            "an unsatisfied Host-routed entry must merge into the prefix, not the real host"
+        );
+        Ok(())
+    }
 }
 
 /// Build and merge a resolved plan in install order.

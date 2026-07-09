@@ -155,12 +155,12 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
     if !globals.pretend {
         init_target(target, globals)?;
     }
-    // A self-contained `--root DIR` EPREFIX (`roots.config()` is `Some` — see
-    // [[stage-build-shakeout]]) has no host-shared merged-usr skeleton or
-    // libs, so the plan needs the same from-scratch treatment as native.
-    // `outer_roots()`, not `roots()`: this must stay anchored to the outer
-    // EROOT even if `--target` happens to also be set on this invocation.
-    let self_contained = globals.outer_roots().config().is_some();
+    // A self-contained `--root DIR` EPREFIX has no host-shared merged-usr
+    // skeleton or libs, so the plan needs the same from-scratch treatment as
+    // native. `outer_roots()`, not `roots()`: this must stay anchored to the
+    // outer EROOT even if `--target` happens to also be set on this
+    // invocation.
+    let self_contained = globals.outer_roots().is_self_contained_root();
     let plan = stages::toolchain_plan(
         &stages::BootstrapKind::Cross(target.clone()),
         self_contained,
@@ -186,12 +186,26 @@ async fn setup(target: &CrossTarget, globals: &Cli, args: &CrossdevArgs) -> Resu
     // which always implies this flag — not user-togglable here.
     let mut merge_flags = merge_merge_flags(globals, &args.merge_flags);
     merge_flags.root_deps = true;
+    // `bypass_cross_root: true` — this is `crossdev --setup <T>`, which since
+    // the `--cross`/`-t` -> `--target` unification (`bcde18a`) always runs
+    // with the global `--target` flag active (that's now the only way to
+    // name the tuple). Before that unification the tuple came via crossdev's
+    // own separate `-t` flag, which never touched `globals.target`, so
+    // `cli.roots()` here was already the unsubstituted outer EROOT and
+    // `false` was harmless; afterwards it silently started resolving every
+    // toolchain-bootstrap step (`cross-<T>/binutils` and its own deps)
+    // against the *sysroot* instead — reading the sysroot's target-arch
+    // make.conf (`CHOST`/`CFLAGS=-march=...`) to build a package that must
+    // compile as a *host*-arch tool. Found live 2026-07-09 actually running
+    // `crossdev --setup` post-unification for the first time (only
+    // `--init-target`, which never reaches `run_staged`, had been
+    // live-tested since).
     run_staged(
         &plan,
         globals,
         merge_depgraph_flags(globals, &args.depgraph_flags),
         merge_flags,
-        false,
+        true,
         post_step,
     )
     .await?;
@@ -299,19 +313,28 @@ fn atom_is_package(atom: &str, pkg: &str) -> bool {
 /// the tool, creating the `<EROOT>/usr/bin/<CTARGET>-*` wrappers. Keyed off the
 /// step's package so it fires once per toolchain component.
 ///
-/// Always activates against `globals.base_roots()`, never `globals.roots()`:
+/// Always activates against `globals.outer_roots()`, never `globals.roots()`:
 /// `cross-<CTARGET>/*` toolchain packages always install into the plain outer
 /// EROOT (see this module's doc comment), regardless of whether the *caller*
 /// (`setup()` vs `stage1()`'s woven-in refresh) has `--target` set on
 /// `globals` for its own, unrelated purposes. For `setup()` the two are the
 /// same root anyway (it never sets `--target`), so this is a no-op change
 /// there.
+///
+/// `outer_roots()`, not `base_roots()`: found live 2026-07-09 alongside the
+/// matching `emerge.rs` fix — `base_roots()`'s `merge_root()` is the BROOT
+/// view (host `/` under `--prefix`), not the outer EROOT the toolchain
+/// actually merges into after that fix. Activating against the wrong root
+/// would look for the just-built binutils/gcc in the wrong place under
+/// `--prefix` specifically (host `/`, not the prefix).
 fn activate_toolchain(target: &CrossTarget, globals: &Cli, step: &stages::StageStep) -> Result<()> {
     let Some(atom) = step.atoms.first() else {
         return Ok(());
     };
     let tuple = &target.tuple;
-    let roots = globals.base_roots();
+    let roots = globals
+        .outer_roots()
+        .with_own_config_root_if_self_contained();
     let activated = if atom_is_package(atom, "binutils") {
         crate::select::activate_binutils(&roots, tuple)?
     } else if atom_is_package(atom, "gcc") {
@@ -500,7 +523,12 @@ async fn maybe_weave_in_gcc_update(
     let needed_version = resolve_gcc_version(globals).await?;
     let needed_slot = needed_version.split(['.', '_']).next()?;
     let target = CrossTarget::parse(&tuple, false).ok()?;
-    let active_slot = crate::select::current_compiler_slot(&globals.base_roots(), &target.tuple);
+    let active_slot = crate::select::current_compiler_slot(
+        &globals
+            .outer_roots()
+            .with_own_config_root_if_self_contained(),
+        &target.tuple,
+    );
     if gcc_needs_refresh(active_slot.as_deref(), needed_slot) {
         let refresh_plan = stages::gcc_refresh_plan(&target, &needed_version);
         Some((target, refresh_plan))
@@ -537,6 +565,9 @@ fn gcc_needs_refresh(active_slot: Option<&str>, needed_slot: &str) -> bool {
 async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
     let repo_path_str = globals.repo_path();
     let roots = globals.roots();
+    // See `DepgraphOpts::host_merge_root`: `Cli::broot()` stays overlay-aware
+    // under `--target` substitution, unlike `roots`.
+    let host_roots = globals.broot();
     let outcome = crate::query::depgraph::depgraph(crate::query::depgraph::DepgraphOpts {
         repo_path: Utf8Path::new(&repo_path_str),
         atoms: &["sys-devel/gcc".to_string()],
@@ -548,6 +579,7 @@ async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
         autosolve_use: false,
         multi_repo: globals.repo.is_none(),
         roots: &roots,
+        host_merge_root: host_roots.merge_root(),
         onlydeps: false,
         with_bdeps: false,
         root_deps_rdeps: false,
@@ -665,7 +697,7 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
     write_sysroot_config(
         target,
         &sysroot,
-        globals.base_roots().merge_root(),
+        globals.outer_roots().merge_root(),
         &gentoo_path,
     )?;
     write_sysroot_repos_conf(&sysroot, &gentoo_path, target, &category)?;
@@ -731,9 +763,9 @@ fn write_alias_repo_conf(
 /// `em crossdev --setup` (cross) need before merging anything into it:
 /// - the skeleton (`setup::bootstrap`, idempotent);
 /// - a `gentoo` `repos.conf` entry, for a self-contained `--root DIR` target
-///   only (`roots.config()` is `Some` — unlike `--local`/`--prefix`, which
-///   merge this same directory onto the host's real repos.conf as an extra
-///   source, so already resolve `gentoo` from there);
+///   only (`roots.is_self_contained_root()` — unlike `--local`/`--prefix`,
+///   which merge this same directory onto the host's real repos.conf as an
+///   extra source, so already resolve `gentoo` from there);
 /// - a `make.profile` link, same self-contained-only condition — the EPREFIX
 ///   builds *host-arch* packages (the crossdev toolchain lands on
 ///   `ROOT=/`-equivalent, and a native toolchain always is host-arch), so it
@@ -750,7 +782,7 @@ fn ensure_self_contained_prefix(globals: &Cli) -> Result<Utf8PathBuf> {
         crate::setup::bootstrap(&roots)?;
     }
     let gentoo_path = main_repo(globals)?.path().to_owned();
-    if roots.config().is_some() {
+    if roots.is_self_contained_root() {
         let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
         std::fs::create_dir_all(&conf_dir).with_context(|| format!("creating {conf_dir}"))?;
         write_if_absent(
@@ -782,10 +814,10 @@ fn alias_packages_line(target: &CrossTarget) -> String {
 /// packages (the crossdev toolchain lands on `ROOT=/`-equivalent, just
 /// offset), so — unlike the target sysroot, which links the target's own
 /// arch profile — this links the *host's* resolved profile. A no-op for
-/// `--local`/`--prefix` (`roots.config()` is `None`, config already comes from
-/// the host).
+/// `--local`/`--prefix` (`!roots.is_self_contained_root()`, config already
+/// comes from the host).
 fn ensure_prefix_profile(globals: &Cli) -> Result<()> {
-    if globals.outer_roots().config().is_none() {
+    if !globals.outer_roots().is_self_contained_root() {
         return Ok(());
     }
     let link = setup_root(globals).join("etc/portage/make.profile");
@@ -937,14 +969,14 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
         target.tuple
     );
 
-    // Write into the *host's* `etc/portage` (BROOT), where the `cross-<tuple>/*`
-    // builds read config. These are HOST-built packages (binutils/gcc produce
-    // target code, glibc/linux-headers carry target runtime info) managed via
-    // the host's package.env so `emerge -u cross-<tuple>/glibc` works — exactly
-    // what real crossdev does (`/etc/portage/package.env/cross-<tuple>`). The
-    // staged driver routes them through `base_roots()` (bypass_cross_root),
-    // so this must match: `base_roots().merge_root()` is the host under every
-    // topology (/, the offset under --local/--root, / under --prefix).
+    // Write into the outer EROOT's `etc/portage`, where the `cross-<tuple>/*`
+    // builds read config (the staged driver routes them through
+    // `outer_roots()` under `bypass_cross_root` — see `emerge.rs`; that's `/`
+    // for `--root`/bare, the prefix for `--prefix`/`--local`, never `--target`'s
+    // sysroot substitution). These are HOST-arch-built packages (binutils/gcc
+    // produce target code, glibc/linux-headers carry target runtime info)
+    // managed via package.env so `emerge -u cross-<tuple>/glibc` works —
+    // exactly what real crossdev does (`/etc/portage/package.env/cross-<tuple>`).
     // Write into the build config the `cross-<tuple>/*` packages read — the
     // per-target CTARGET/ABI-CFLAGS env files plus the `package.env` mapping
     // that binds them to each cross package. The read path (`env_files_for`,
@@ -954,7 +986,7 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
     // `/etc/portage`), and fall back to the bare config root otherwise
     // (`--root`/plain host). This keeps the cross env scoped to the prefix and
     // unprivileged, and is read back correctly in every mode — including
-    // `bypass_cross_root` toolchain steps, whose `base_roots()` preserves the
+    // `bypass_cross_root` toolchain steps, whose `outer_roots()` preserves the
     // same `config_overlay`.
     let base = globals.base_roots();
     let portage = if let Some(overlay) = base.config_overlay() {

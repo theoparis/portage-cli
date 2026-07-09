@@ -229,6 +229,17 @@ pub fn toolchain_plan(kind: &BootstrapKind, self_contained: bool) -> StagePlan {
     // pre-flight. The default cross EPREFIX is host-rooted, so those deps are
     // satisfied — keep it. A self-contained cross EPREFIX is just as empty as
     // native's, so it hits the exact same explosion — drop it there too.
+    //
+    // 2026-07-09 correction: this was briefly changed to *always* drop it,
+    // after `em --prefix P --target T crossdev --setup` hit exactly this
+    // explosion for a *non*-self-contained EPREFIX — but the real cause was a
+    // separate bug (`crossdev::setup`'s `run_staged` call still passing
+    // `bypass_cross_root: false` after the `--cross`/`-t` -> `--target`
+    // unification, so `cross-<tuple>/binutils` wrongly resolved DEPEND
+    // against the empty *sysroot* instead of the host). With that fixed,
+    // "the default cross EPREFIX is host-rooted" is true again, and
+    // unconditionally dropping debuginfod was an unnecessary, wrong-reason
+    // workaround layered on top of the real fix — reverted.
     let binutils_use = if is_self_contained_bootstrap {
         owned(&["-debuginfod"])
     } else {
@@ -620,7 +631,9 @@ mod tests {
     #[test]
     fn default_cross_has_no_baselayout_and_keeps_debuginfod() {
         // The default (host-shared) cross EPREFIX is unaffected by the
-        // self-contained fix above.
+        // self-contained fix above. debuginfod stays on: `bypass_cross_root`
+        // (crossdev::setup) routes this step's DEPEND check to the host,
+        // which already satisfies the closure.
         let t = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
         let plan = toolchain_plan(&BootstrapKind::Cross(t), false);
         assert!(!labels(&plan).contains(&"baselayout"));
@@ -693,8 +706,9 @@ mod tests {
 
     #[test]
     fn cross_binutils_keeps_debuginfod() {
-        // Cross binutils is host-rooted, so its debuginfod deps are
-        // host-satisfied — no need to force the flag off (behaviour-preserving).
+        // Cross binutils is host-rooted (via crossdev::setup's
+        // bypass_cross_root), so its debuginfod deps are host-satisfied —
+        // no need to force the flag off (behaviour-preserving).
         let t = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
         let plan = toolchain_plan(&BootstrapKind::Cross(t), false);
         assert_eq!(plan.steps[0].label, "binutils");

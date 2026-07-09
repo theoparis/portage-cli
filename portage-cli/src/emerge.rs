@@ -183,11 +183,29 @@ async fn emerge_atoms_inner(
     // toolchain steps only) uses the plain outer EROOT instead — that
     // category always installs there, never into `--target`'s sysroot
     // substitution (see `crossdev/mod.rs`'s module doc).
+    //
+    // `outer_roots()`, not `base_roots()`: found live 2026-07-09 (independent
+    // review) — `base_roots()`'s `merge_root()` is deliberately the *BROOT*
+    // view (host `/` under `--prefix`, `base.target: None`), not the outer
+    // EROOT this comment already says bypass steps need. Under `--root` the
+    // two happen to coincide (no eprefix, `outer_roots()` returns
+    // `base_roots()` unchanged), which is why this went unnoticed: every
+    // `bypass_cross_root` case tested before today was `--root`. Under
+    // `--prefix P`, `base_roots()` merged every crossdev toolchain step onto
+    // the real host `/` instead of `P` — silently "worked" for binutils
+    // (whose real-arch binaries just landed on host `/usr/bin`, harmless to
+    // notice) but broke `linux-headers`/`glibc[headers-only]`, whose
+    // build-against-sysroot path never saw the merged headers.
     let roots = if bypass_cross_root {
-        cli.base_roots()
+        cli.outer_roots()
     } else {
         cli.roots()
     };
+    // `Cli::broot()` (not `roots`): stays overlay-aware under `--target`
+    // substitution, so a `MergeRoot::Host` entry's `-p` display matches its
+    // real merge destination even when `roots` has had its own overlay-ness
+    // cleared by the sysroot substitution. See `DepgraphOpts::host_merge_root`.
+    let host_roots = cli.broot();
     // `--target <tuple>` targets `<EROOT>/usr/<tuple>`; fail early with a setup
     // hint if that sysroot has not been laid down by `em crossdev --init-target`
     // (otherwise the profile/make.conf read fails with an opaque ENOENT). Skipped
@@ -233,6 +251,7 @@ async fn emerge_atoms_inner(
         autosolve_use: merge_flags.autosolve_use,
         multi_repo: cli.repo.is_none(),
         roots: &roots,
+        host_merge_root: host_roots.merge_root(),
         onlydeps: merge_flags.onlydeps,
         with_bdeps: merge_flags.with_bdeps,
         root_deps_rdeps: merge_flags.root_deps,

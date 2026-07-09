@@ -229,9 +229,15 @@ C=/ (ro)  B=T=<offset>  S=T  BR=/ (ro)    CBUILD==CHOST
 - **This is just (1) minus root.** For a delta-only deployment into `~/.gentoo`
   on a Gentoo host, use `em --prefix ~/.gentoo` (overlay: host stays base).
   For a self-contained deployment, use `em --local` (see 2b).
-- Caveat: a BDEPEND the host lacks (e.g. jinja2 for a python target the host's
-  jinja2 doesn't cover) has nowhere to land under pure `--root`/`--prefix` —
-  see (2b)/(4).
+- A BDEPEND the host lacks (e.g. jinja2 for a python target the host's jinja2
+  doesn't cover): under `--root`, it lands on the real host `/` (privileged,
+  writable — portage `ROOT=` parity). Under `--prefix`, the host is
+  read-only, so it instead lands in the prefix itself (`Cli::broot()` routes
+  a `MergeRoot::Host` entry to `outer_roots()`, not the host, when
+  `is_overlay()`); satisfaction checking then reads host ∪ prefix VDB
+  (`Avail::initial_bdepend`/`load_host_installed`), so a tool already built
+  into the prefix by an earlier run is recognized without rebuilding.
+  Fixed 2026-07-09 — see `todo/root-topology-refactor.md`.
 
 **(2b) `--local`: self-contained deployment (any host).** The prefix at
 `~/.gentoo` is standalone — base = target = `~/.gentoo`, carrying its own VDB,
@@ -536,13 +542,31 @@ variant refactor's payoff is that both sides ask
   Also landed the same day: `--root`'s BROOT is the host (portage `ROOT=`
   parity, `Cli::broot()`'s original motivation), and `--cross`/`crossdev -t`
   unified into one `--target`/`-T` flag (crossdev's local `-t` retired).
+  Landed shortly after, same session: `--prefix`'s unsatisfied BDEPEND now
+  merges into the prefix (never the read-only host) and its satisfaction
+  check weaves host ∪ prefix VDB — `Cli::broot()` returns `outer_roots()`
+  for the overlay case instead of a host-anchored `Roots`; see
+  `todo/root-topology-refactor.md`'s "Behaviour changes" for the full story.
+  Also resolved, same session: `--root`'s config resolution (this doc's own
+  § "Override semantics" table below now reflects it) — `Roots::config()`
+  keeps its original `--config-root`-or-`--root` default (own everything is
+  `em`'s deliberate self-contained-bootstrap model, not a portage `ROOT=`
+  gap), but `em select` no longer follows that fallback at all — new
+  `Roots::config_root_explicit()` (only ever `--config-root`, matching real
+  eselect's `profile.eselect`, which never derives a config root from `ROOT`
+  alone) replaces `config()` in `select/mod.rs`. See
+  `todo/root-topology-refactor.md`'s "Behaviour changes" for the full story,
+  including why the first attempt (making `config()` itself parity-follow
+  `ROOT=`) broke `em select` and was reverted.
 - **Not pursued** — the `RootSet` enum (`Single`/`Dual`/`Overlayed`) as
-  `Roots`'s storage representation, a `CrossArch` triples type (the plain
-  `is_cross_arch: bool` covers `satisfaction_root`'s one cell that needs
-  it), and privatizing `provider.packages` behind `package_data()` (a
-  separate crate, a separate invariant — `host_aliases` — not the
-  `Roots`-accessor confusion this pass targeted). Still open, still tracked
-  in `todo/root-topology-refactor.md`.
+  `Roots`'s storage representation, and a `CrossArch` triples type (the plain
+  `is_cross_arch: bool` covers `satisfaction_root`'s one cell that needs it).
+- ✅ **Privatizing `provider.packages` behind `package_data()` — landed
+  2026-07-09.** A different crate, a different invariant (`host_aliases`) from
+  the `Roots`-accessor confusion this pass targeted, but the same underlying
+  lesson (a raw lookup bypassing an alias-resolving accessor). Found 12 more
+  instances of the bug class beyond the already-fixed `dependency_graph` one;
+  see `todo/root-topology-refactor.md` for the full list and the fix.
 - **Deferred (out of scope here)** — Tier 3 mutable-BROOT bootstrap on a
   foreign host (`build-environment.md`), zero-config merged sysroot via
   `fuse-overlayfs` (M3).
