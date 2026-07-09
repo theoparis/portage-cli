@@ -47,6 +47,7 @@
 //! concern — see `todo/stage-build-shakeout.md` finding #19 for the pending
 //! `crossdev --update` support and version-mismatch warning.
 
+mod config_plan;
 mod multilib;
 pub mod stages;
 mod target;
@@ -59,7 +60,6 @@ use portage_repo::{MakeConf, ProfileStack, ReposConf, Repository};
 
 use crate::cli::{Cli, CrossdevArgs, DepgraphFlags, MergeFlags};
 use crate::style::{C_LABEL, C_PKG};
-use crate::util::write_if_absent;
 use target::CrossTarget;
 
 /// Merge a subcommand's own flattened depgraph flags with the top-level one,
@@ -678,29 +678,56 @@ fn show_target_cfg(target: &CrossTarget, globals: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// Lay down the overlay + sysroot config for `target`. Collects every file
+/// `em` wants in a particular state as a [`config_plan::ConfigEntry`], then
+/// hands the whole batch to [`config_plan::apply`] — so this now honours
+/// `-p` (preview instead of writing) and `-a` (confirm before writing) like
+/// any other mutating `em` path, instead of writing blindly.
 fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
     // For a retargeted prefix (`--local`/`--prefix`/`--root`) bootstrap it first:
     // `setup::bootstrap` writes the prefix `bashrc` that re-adds `<EROOT>/usr/bin`
     // to the build PATH (the shell sanitiser strips `$HOME` paths, so a `--local`
     // prefix's own bin is otherwise invisible). That is what makes the cross
     // toolchain wrappers we install reachable by the gcc-stage builds. Idempotent.
-    let gentoo_path = ensure_self_contained_prefix(globals)?;
+    // Kept outside the config plan below (a separate, already pretend-aware
+    // subsystem) — only actually bootstraps for real when not previewing.
+    let roots = globals.outer_roots();
+    if roots.merge_root().as_str() != "/" && !globals.pretend {
+        crate::setup::bootstrap(&roots)?;
+    }
+    let gentoo_path = main_repo(globals)?.path().to_owned();
     let sysroot = sysroot(target, globals);
     let category = target.category();
 
+    let mut entries = Vec::new();
+    entries.extend(self_contained_prefix_entries(globals, &gentoo_path)?);
     // Derive the cross packages on the fly: a `Location::Alias` repos.conf
     // entry declares `cross-<tuple>/<pkg>` as a virtual alias for its real
     // `::gentoo` package, materialised in-memory at load time. No on-disk
     // symlink overlay. See todo/cross-derive-on-the-fly.md.
-    write_alias_repo_conf(globals, &gentoo_path, target, &category)?;
-    write_cross_env(target, globals, &gentoo_path)?;
-    write_sysroot_config(
+    entries.push(alias_repo_conf_entry(
+        globals,
+        &gentoo_path,
+        target,
+        &category,
+    )?);
+    entries.extend(cross_env_entries(target, globals, &gentoo_path)?);
+    entries.extend(sysroot_config_entries(
         target,
         &sysroot,
         globals.outer_roots().merge_root(),
         &gentoo_path,
-    )?;
-    write_sysroot_repos_conf(&sysroot, &gentoo_path, target, &category)?;
+    )?);
+    entries.extend(sysroot_repos_conf_entries(
+        &sysroot,
+        &gentoo_path,
+        target,
+        &category,
+    ));
+
+    if !config_plan::apply(entries, globals)?.applied() {
+        return Ok(());
+    }
 
     println!(">>> cross target {} ready", target.tuple);
     println!("    alias:     {category}  (derived from ::gentoo)");
@@ -725,12 +752,12 @@ fn init_target(target: &CrossTarget, globals: &Cli) -> Result<()> {
 /// source package would later surface as a resolver `NoVersions` with no hint
 /// at the cause); the alias declaration itself is always written so a partial
 /// tree still resolves the packages that *are* present.
-fn write_alias_repo_conf(
+fn alias_repo_conf_entry(
     globals: &Cli,
     gentoo: &Utf8Path,
     target: &CrossTarget,
     category: &str,
-) -> Result<()> {
+) -> Result<config_plan::ConfigEntry> {
     // Validate every source package exists under ::gentoo, with a clear error
     // naming the cross package it's needed for, before declaring the alias.
     for (real_cat, pkg, _) in target.packages() {
@@ -741,53 +768,16 @@ fn write_alias_repo_conf(
     }
 
     let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
-    std::fs::create_dir_all(&conf_dir).with_context(|| format!("creating {conf_dir}"))?;
-    write_or_refresh_alias_conf(
-        &conf_dir.join(format!("{OVERLAY_NAME}.conf")),
-        category,
-        &alias_packages_line(target),
-    )
+    Ok(config_plan::ConfigEntry::Alias {
+        path: conf_dir.join(format!("{OVERLAY_NAME}.conf")),
+        category: category.to_owned(),
+        packages_line: alias_packages_line(target),
+    })
 }
 
-/// Write (or refresh) a `[crossdev]` `Location::Alias` repos.conf entry,
-/// shared by the host-side entry (`write_alias_repo_conf`) and the sysroot's
-/// own copy (`write_sysroot_repos_conf`).
-///
-/// - Absent: write fresh.
-/// - Present, already matching `category`/`packages_line`: no-op.
-/// - Present, our own alias format (`alias-target =` key) but stale (a
-///   different category, or the package set drifted — e.g. `CrossTarget::
-///   packages()` changed after `gdb` was removed from it): refresh it.
-///   Found live: plain `write_if_absent` never overwrites an existing file
-///   no matter its content, so this case previously fell through to a
-///   silent no-op — a re-run of `--init-target` never actually refreshed a
-///   stale alias, and a package removed from `packages()` kept resolving
-///   (and being reported as buildable) until the file was deleted by hand.
-/// - Present, foreign (no `alias-target =` key — e.g. a real crossdev/
-///   eselect-managed physical overlay pointing `location =` at a real repo
-///   directory): never clobber it.
-fn write_or_refresh_alias_conf(file: &Utf8Path, category: &str, packages_line: &str) -> Result<()> {
-    let body = format!(
-        "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
-         alias-packages = {packages_line}\n"
-    );
-    if let Ok(existing) = std::fs::read_to_string(file) {
-        if existing.contains(&format!("alias-target = {category}"))
-            && existing.contains(&format!("alias-packages = {packages_line}"))
-        {
-            return Ok(());
-        }
-        if !existing.contains("alias-target =") {
-            return Ok(());
-        }
-        return std::fs::write(file, &body).with_context(|| format!("writing {file}"));
-    }
-    write_if_absent(file, &body)
-}
-
-/// Bootstrap the EPREFIX config that both `em toolchain --setup` (native) and
-/// `em crossdev --setup` (cross) need before merging anything into it:
-/// - the skeleton (`setup::bootstrap`, idempotent);
+/// The self-contained-`--root`-only config entries (`gentoo.conf` +
+/// `make.profile` link) that both `em toolchain --setup` (native) and `em
+/// crossdev --setup`/`--init-target` (cross) need before merging anything:
 /// - a `gentoo` `repos.conf` entry, for a self-contained `--root DIR` target
 ///   only (`roots.is_self_contained_root()` — unlike `--local`/`--prefix`,
 ///   which merge this same directory onto the host's real repos.conf as an
@@ -801,22 +791,38 @@ fn write_or_refresh_alias_conf(file: &Utf8Path, category: &str, packages_line: &
 /// Without this a self-contained `--root` target has no way to resolve any
 /// ebuild at all — the "stage1 from scratch" gap found 2026-07-03 doing a
 /// real from-scratch native + cross toolchain bootstrap, see
-/// [[stage-build-shakeout]]. Returns the resolved `::gentoo` repo path.
+/// [[stage-build-shakeout]]. `gentoo_path` here is the already-resolved
+/// `::gentoo` repo path (`init_target`'s `setup::bootstrap` call handles the
+/// rest of the EPREFIX skeleton separately, outside the config plan).
+fn self_contained_prefix_entries(
+    globals: &Cli,
+    gentoo_path: &Utf8Path,
+) -> Result<Vec<config_plan::ConfigEntry>> {
+    let roots = globals.outer_roots();
+    if !roots.is_self_contained_root() {
+        return Ok(Vec::new());
+    }
+    let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
+    let mut entries = vec![config_plan::ConfigEntry::CreateOnly {
+        path: conf_dir.join("gentoo.conf"),
+        desired: format!("[gentoo]\nlocation = {gentoo_path}\n"),
+    }];
+    entries.extend(prefix_profile_entries(globals)?);
+    Ok(entries)
+}
+
+/// Native toolchain (`em toolchain --setup`) entry point: bootstrap the
+/// EPREFIX skeleton and apply the self-contained-`--root`-only config
+/// entries eagerly, no preview/confirm — this path is already externally
+/// gated by `!globals.pretend` at its one call site. Returns the resolved
+/// `::gentoo` repo path.
 fn ensure_self_contained_prefix(globals: &Cli) -> Result<Utf8PathBuf> {
     let roots = globals.outer_roots();
     if roots.merge_root().as_str() != "/" {
         crate::setup::bootstrap(&roots)?;
     }
     let gentoo_path = main_repo(globals)?.path().to_owned();
-    if roots.is_self_contained_root() {
-        let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
-        std::fs::create_dir_all(&conf_dir).with_context(|| format!("creating {conf_dir}"))?;
-        write_if_absent(
-            &conf_dir.join("gentoo.conf"),
-            &format!("[gentoo]\nlocation = {gentoo_path}\n"),
-        )?;
-        ensure_prefix_profile(globals)?;
-    }
+    config_plan::apply_now(&self_contained_prefix_entries(globals, &gentoo_path)?)?;
     Ok(gentoo_path)
 }
 
@@ -842,50 +848,56 @@ fn alias_packages_line(target: &CrossTarget) -> String {
 /// arch profile — this links the *host's* resolved profile. A no-op for
 /// `--local`/`--prefix` (`!roots.is_self_contained_root()`, config already
 /// comes from the host).
-fn ensure_prefix_profile(globals: &Cli) -> Result<()> {
+fn prefix_profile_entries(globals: &Cli) -> Result<Vec<config_plan::ConfigEntry>> {
     if !globals.outer_roots().is_self_contained_root() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let link = setup_root(globals).join("etc/portage/make.profile");
+    // Already there: skip resolving the host profile entirely (matches the
+    // original "create once, never re-verify" behaviour) rather than paying
+    // the canonicalize cost just to report "unchanged".
     if link.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let host_profile = std::fs::canonicalize("/etc/portage/make.profile")
         .context("resolving the host's make.profile")?;
     let host_profile = Utf8PathBuf::from_path_buf(host_profile)
         .map_err(|p| anyhow::anyhow!("host make.profile path {p:?} is not valid UTF-8"))?;
-    symlink_force(&host_profile, &link)
+    Ok(vec![config_plan::ConfigEntry::Symlink {
+        link,
+        target: host_profile,
+    }])
 }
 
 /// Write the cross sysroot `etc/portage/{make.conf,make.profile}`.
-fn write_sysroot_config(
+fn sysroot_config_entries(
     target: &CrossTarget,
     sysroot: &Utf8Path,
     outer_root: &Utf8Path,
     gentoo: &Utf8Path,
-) -> Result<()> {
+) -> Result<Vec<config_plan::ConfigEntry>> {
     let portage = sysroot.join("etc/portage");
-    std::fs::create_dir_all(&portage).with_context(|| format!("creating {portage}"))?;
+    let mut entries = Vec::new();
 
     // Materialise an (empty) target package database. Without it the installed
     // loader finds no VDB at `<sysroot>/var/db/pkg` and falls back to the host
     // VDB, so host-installed packages wrongly satisfy target requests and the
     // cross plan comes up empty. An empty dir = "nothing installed in the
     // sysroot yet", which is what we want for a fresh target.
-    let vdb = sysroot.join("var/db/pkg");
-    std::fs::create_dir_all(&vdb).with_context(|| format!("creating {vdb}"))?;
+    entries.push(config_plan::ConfigEntry::Dir {
+        path: sysroot.join("var/db/pkg"),
+    });
 
     // Always regenerate: entirely em-managed (unlike the host's real
     // make.conf, never hand-edited), and its content (CTARGET/CFLAGS/`ROOT`)
     // is derived from `target`/`outer_root`, both of which can legitimately
     // change across `--init-target` re-runs (e.g. a different `--prefix`).
-    // `write_if_absent` here would leave it silently stale, the same class
+    // A create-only write here would leave it silently stale, the same class
     // of bug just fixed for the alias-packages entry.
-    std::fs::write(
-        portage.join("make.conf"),
-        make_conf_body(target, sysroot, outer_root),
-    )
-    .with_context(|| format!("writing {}", portage.join("make.conf")))?;
+    entries.push(config_plan::ConfigEntry::File {
+        path: portage.join("make.conf"),
+        desired: make_conf_body(target, sysroot, outer_root),
+    });
 
     // Link make.profile DIRECTLY (absolute) to the target-arch profile — eselect
     // profile validates against the host arch and refuses a foreign one.
@@ -896,30 +908,35 @@ fn write_sysroot_config(
             target.profile_path()
         );
     }
-    symlink_force(&profile_dir, &portage.join("make.profile"))
+    entries.push(config_plan::ConfigEntry::Symlink {
+        link: portage.join("make.profile"),
+        target: profile_dir,
+    });
+    Ok(entries)
 }
 
-/// Write `<sysroot>/etc/portage/repos.conf` referencing the host gentoo (main)
-/// repo and the crossdev overlay, so a cross build with
+/// `<sysroot>/etc/portage/repos.conf` entries referencing the host gentoo
+/// (main) repo and the crossdev overlay, so a cross build with
 /// `PORTAGE_CONFIGROOT=<sysroot>` still sees the ebuild tree — the sysroot has no
 /// repos of its own (crossdev-stages copies the host `repos.conf` likewise).
-fn write_sysroot_repos_conf(
+fn sysroot_repos_conf_entries(
     sysroot: &Utf8Path,
     gentoo: &Utf8Path,
     target: &CrossTarget,
     category: &str,
-) -> Result<()> {
+) -> Vec<config_plan::ConfigEntry> {
     let dir = sysroot.join("etc/portage/repos.conf");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {dir}"))?;
-    write_if_absent(
-        &dir.join("gentoo.conf"),
-        &format!("[DEFAULT]\nmain-repo = gentoo\n\n[gentoo]\nlocation = {gentoo}\n"),
-    )?;
-    write_or_refresh_alias_conf(
-        &dir.join(format!("{OVERLAY_NAME}.conf")),
-        category,
-        &alias_packages_line(target),
-    )
+    vec![
+        config_plan::ConfigEntry::CreateOnly {
+            path: dir.join("gentoo.conf"),
+            desired: format!("[DEFAULT]\nmain-repo = gentoo\n\n[gentoo]\nlocation = {gentoo}\n"),
+        },
+        config_plan::ConfigEntry::Alias {
+            path: dir.join(format!("{OVERLAY_NAME}.conf")),
+            category: category.to_owned(),
+            packages_line: alias_packages_line(target),
+        },
+    ]
 }
 
 /// The special cross `make.conf` body (crossdev `set_metadata`): `CHOST`/`CBUILD`
@@ -989,7 +1006,11 @@ fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path, outer_root: &Utf8Pat
 /// libc build for `<CTARGET>` instead of inheriting the host CFLAGS. em owns these
 /// generated files (like crossdev, which regenerates them each run), so they are
 /// rewritten rather than preserved.
-fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Result<()> {
+fn cross_env_entries(
+    target: &CrossTarget,
+    globals: &Cli,
+    gentoo: &Utf8Path,
+) -> Result<Vec<config_plan::ConfigEntry>> {
     let eclass_dir = gentoo.join("eclass");
     let host_ml = multilib::query(&host_chost(), &eclass_dir)?;
     let target_ml = multilib::query(&target.tuple, &eclass_dir)?;
@@ -1027,7 +1048,7 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
     let category = target.category();
 
     let env_dir = portage.join("env").join(&category);
-    std::fs::create_dir_all(&env_dir).with_context(|| format!("creating {env_dir}"))?;
+    let mut entries = Vec::new();
 
     let mut mappings = String::new();
     // Host-arch tools (binutils/gcc/clang-crossdev-wrappers — see
@@ -1051,23 +1072,25 @@ fn write_cross_env(target: &CrossTarget, globals: &Cli, gentoo: &Utf8Path) -> Re
             "{header}{}",
             multilib::env_block(&host_ml, &target_ml, arch.is_target())
         );
-        let conf = env_dir.join(format!("{pkg}.conf"));
-        std::fs::write(&conf, &body).with_context(|| format!("writing {conf}"))?;
+        entries.push(config_plan::ConfigEntry::File {
+            path: env_dir.join(format!("{pkg}.conf")),
+            desired: body,
+        });
         mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
         if arch == target::PackageArch::Host {
             keyword_entries.push_str(&format!("{category}/{pkg} **\n"));
         }
     }
 
-    let pe_dir = portage.join("package.env");
-    std::fs::create_dir_all(&pe_dir).with_context(|| format!("creating {pe_dir}"))?;
-    let pe = pe_dir.join(&category);
-    std::fs::write(&pe, &mappings).with_context(|| format!("writing {pe}"))?;
-
-    let ak_dir = portage.join("package.accept_keywords");
-    std::fs::create_dir_all(&ak_dir).with_context(|| format!("creating {ak_dir}"))?;
-    let ak = ak_dir.join(&category);
-    std::fs::write(&ak, &keyword_entries).with_context(|| format!("writing {ak}"))
+    entries.push(config_plan::ConfigEntry::File {
+        path: portage.join("package.env").join(&category),
+        desired: mappings,
+    });
+    entries.push(config_plan::ConfigEntry::File {
+        path: portage.join("package.accept_keywords").join(&category),
+        desired: keyword_entries,
+    });
+    Ok(entries)
 }
 
 /// Create the ABI osdir compatibility symlinks the libc leaves out, so the cross
@@ -1139,6 +1162,20 @@ mod tests {
             depgraph_flags: crate::cli::DepgraphFlags::default(),
             merge_flags: crate::cli::MergeFlags::default(),
         }
+    }
+
+    /// Test-only compatibility shim: build the alias `ConfigEntry` and apply
+    /// it immediately (no preview/confirm), matching the old
+    /// `write_alias_repo_conf`'s eager-write behaviour the tests below assert
+    /// against.
+    fn write_alias_repo_conf(
+        globals: &Cli,
+        gentoo: &Utf8Path,
+        target: &CrossTarget,
+        category: &str,
+    ) -> Result<()> {
+        let entry = alias_repo_conf_entry(globals, gentoo, target, category)?;
+        config_plan::apply_now(std::slice::from_ref(&entry))
     }
 
     /// `--target` is global: `em --target T crossdev --show-target-cfg`

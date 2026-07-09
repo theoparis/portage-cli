@@ -716,6 +716,60 @@ stage3, no host contamination):
     `write_alias_repo_conf_refreshes_a_stale_own_entry`,
     `write_alias_repo_conf_never_touches_a_foreign_entry`. Full workspace
     `fmt`/clippy/test clean.
+- ✅ **`--init-target` now honours `-p`/`-a` like every other mutating `em`
+  path.** Before this, `init_target()` (the standalone `--init-target` flag's
+  entry point, `crossdev/mod.rs:132`) wrote every file unconditionally and
+  immediately — no preview, no confirmation, unlike `-p`/`-a` everywhere else
+  in `em`. User: "let's try to understand better, we can weave -p and -a to
+  cover the regeneration of make.conf and package.env and such."
+  - **Design**: new `crossdev/config_plan.rs` module. A `ConfigEntry` enum
+    (`File` — always regenerated, em owns the content; `CreateOnly` — write
+    only if absent, e.g. a bare `location =` string with no real drift
+    scenario; `Alias` — the `[crossdev]` alias entry's existing absent/
+    match/stale-own/foreign logic from the previous fix, generalised;
+    `Dir`; `Symlink`) separates *computing desired state* (no I/O beyond
+    validation) from *diffing against disk* from *applying*. `config_plan::
+    apply(entries, globals)` diffs the whole batch, then: `-p` prints what
+    would change and writes nothing; `-a` prints the same and confirms once
+    (`confirm_config_write`, mirroring `merge/mod.rs`'s `confirm_merge`)
+    before writing; otherwise applies directly. Returns an `Outcome` so
+    `init_target` only prints its "cross target ready" summary when
+    something was actually applied (or there was nothing to do) — not after
+    a preview or a decline.
+  - Every existing write-helper (`write_alias_repo_conf` →
+    `alias_repo_conf_entry`, `write_sysroot_config` → `sysroot_config_entries`,
+    `write_sysroot_repos_conf` → `sysroot_repos_conf_entries`,
+    `write_cross_env` → `cross_env_entries`, `ensure_prefix_profile` →
+    `prefix_profile_entries`) now *collects* `ConfigEntry` values instead of
+    writing directly; `init_target` gathers them all and makes one
+    `config_plan::apply` call. `setup::bootstrap` (a separate, already
+    pretend-aware subsystem — EPREFIX skeleton/bashrc) stays outside the
+    plan, now gated by an explicit `!globals.pretend` inline in
+    `init_target` (previously implicit via the whole-function `if
+    !globals.pretend { init_target(...) }` gate at `setup()`'s call site,
+    which is now removed since `init_target` handles pretend internally —
+    meaning `em crossdev --setup -p` now *also* previews the config-plan
+    changes, which it previously skipped silently).
+  - `em toolchain --setup`'s native path keeps an eager, non-interactive
+    `ensure_self_contained_prefix(globals) -> Result<Utf8PathBuf>` wrapper
+    (bootstrap + `config_plan::apply_now`, no diff/preview/confirm) since
+    that call site is already externally gated by `!globals.pretend` and
+    doesn't need its own preview.
+  - New tests in `config_plan.rs`: `pretend_writes_nothing`,
+    `plain_run_applies_directly`, `no_change_is_reported_as_nothing_to_apply`,
+    `create_only_never_overwrites_existing_content`,
+    `dir_entry_creates_a_missing_directory`,
+    `alias_entry_never_touches_a_foreign_file`. Existing
+    `write_alias_repo_conf_*` tests kept via a test-only compatibility shim
+    (`alias_repo_conf_entry` + `config_plan::apply_now`).
+  - Live-verified in the `aarch64-20260618T101350Z` sandbox with an injected
+    stale alias: `-p` printed `update .../crossdev.conf` and left the file
+    untouched; `-a` piped `n` printed the same preview + `>>> Quitting.` and
+    left it untouched; `-a` piped `y` applied it and printed the normal
+    "ready" summary; a further plain re-run (nothing to change) printed only
+    the "ready" summary with no `config changes` noise — matches emerge's
+    own `-p`/`-a` UX exactly.
+  - Full workspace `fmt`/clippy/test clean.
 
 ## Verification (outstanding)
 
