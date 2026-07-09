@@ -742,21 +742,47 @@ fn write_alias_repo_conf(
 
     let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
     std::fs::create_dir_all(&conf_dir).with_context(|| format!("creating {conf_dir}"))?;
-    // Don't clobber an existing crossdev entry (crossdev/eselect may provide
-    // one); only write if absent or its target/category drifted.
-    let packages_line = alias_packages_line(target);
+    write_or_refresh_alias_conf(
+        &conf_dir.join(format!("{OVERLAY_NAME}.conf")),
+        category,
+        &alias_packages_line(target),
+    )
+}
+
+/// Write (or refresh) a `[crossdev]` `Location::Alias` repos.conf entry,
+/// shared by the host-side entry (`write_alias_repo_conf`) and the sysroot's
+/// own copy (`write_sysroot_repos_conf`).
+///
+/// - Absent: write fresh.
+/// - Present, already matching `category`/`packages_line`: no-op.
+/// - Present, our own alias format (`alias-target =` key) but stale (a
+///   different category, or the package set drifted — e.g. `CrossTarget::
+///   packages()` changed after `gdb` was removed from it): refresh it.
+///   Found live: plain `write_if_absent` never overwrites an existing file
+///   no matter its content, so this case previously fell through to a
+///   silent no-op — a re-run of `--init-target` never actually refreshed a
+///   stale alias, and a package removed from `packages()` kept resolving
+///   (and being reported as buildable) until the file was deleted by hand.
+/// - Present, foreign (no `alias-target =` key — e.g. a real crossdev/
+///   eselect-managed physical overlay pointing `location =` at a real repo
+///   directory): never clobber it.
+fn write_or_refresh_alias_conf(file: &Utf8Path, category: &str, packages_line: &str) -> Result<()> {
     let body = format!(
         "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
          alias-packages = {packages_line}\n"
     );
-    let file = conf_dir.join(format!("{OVERLAY_NAME}.conf"));
-    if let Ok(existing) = std::fs::read_to_string(&file)
-        && existing.contains(&format!("alias-target = {category}"))
-        && existing.contains(&format!("alias-packages = {packages_line}"))
-    {
-        return Ok(());
+    if let Ok(existing) = std::fs::read_to_string(file) {
+        if existing.contains(&format!("alias-target = {category}"))
+            && existing.contains(&format!("alias-packages = {packages_line}"))
+        {
+            return Ok(());
+        }
+        if !existing.contains("alias-target =") {
+            return Ok(());
+        }
+        return std::fs::write(file, &body).with_context(|| format!("writing {file}"));
     }
-    write_if_absent(&file, &body)
+    write_if_absent(file, &body)
 }
 
 /// Bootstrap the EPREFIX config that both `em toolchain --setup` (native) and
@@ -849,10 +875,17 @@ fn write_sysroot_config(
     let vdb = sysroot.join("var/db/pkg");
     std::fs::create_dir_all(&vdb).with_context(|| format!("creating {vdb}"))?;
 
-    write_if_absent(
-        &portage.join("make.conf"),
-        &make_conf_body(target, sysroot, outer_root),
-    )?;
+    // Always regenerate: entirely em-managed (unlike the host's real
+    // make.conf, never hand-edited), and its content (CTARGET/CFLAGS/`ROOT`)
+    // is derived from `target`/`outer_root`, both of which can legitimately
+    // change across `--init-target` re-runs (e.g. a different `--prefix`).
+    // `write_if_absent` here would leave it silently stale, the same class
+    // of bug just fixed for the alias-packages entry.
+    std::fs::write(
+        portage.join("make.conf"),
+        make_conf_body(target, sysroot, outer_root),
+    )
+    .with_context(|| format!("writing {}", portage.join("make.conf")))?;
 
     // Link make.profile DIRECTLY (absolute) to the target-arch profile — eselect
     // profile validates against the host arch and refuses a foreign one.
@@ -882,13 +915,10 @@ fn write_sysroot_repos_conf(
         &dir.join("gentoo.conf"),
         &format!("[DEFAULT]\nmain-repo = gentoo\n\n[gentoo]\nlocation = {gentoo}\n"),
     )?;
-    let packages_line = alias_packages_line(target);
-    write_if_absent(
+    write_or_refresh_alias_conf(
         &dir.join(format!("{OVERLAY_NAME}.conf")),
-        &format!(
-            "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
-             alias-packages = {packages_line}\n"
-        ),
+        category,
+        &alias_packages_line(target),
     )
 }
 
@@ -1209,11 +1239,83 @@ mod tests {
             );
         }
 
-        // Idempotent: a second run with the same target doesn't rewrite, and
-        // a divergent-target run (different alias-packages) is tolerated.
+        // Idempotent: a second run with the same target doesn't rewrite.
         let body_before = std::fs::read_to_string(&file).unwrap();
         write_alias_repo_conf(&globals, &gentoo, &target, &category).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), body_before);
+    }
+
+    /// A stale alias file from an earlier run (a different package set, e.g.
+    /// before `gdb` was removed from `CrossTarget::packages()`) must be
+    /// refreshed, not left in place. `write_if_absent` alone would silently
+    /// no-op here — this was a real, live bug: a re-run of `--init-target`
+    /// after a `packages()` change never actually updated the alias, so a
+    /// removed package kept resolving until the file was deleted by hand.
+    #[test]
+    fn write_alias_repo_conf_refreshes_a_stale_own_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let conf = root.join("etc/portage/repos.conf");
+        let gentoo = root.join("gentoo");
+        let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let category = target.category();
+        for (cat, pkg, _) in target.packages() {
+            std::fs::create_dir_all(gentoo.join(cat).join(pkg)).unwrap();
+        }
+        let globals = test_cli_at_root(root);
+
+        let conf_dir = conf.clone();
+        std::fs::create_dir_all(&conf_dir).unwrap();
+        let file = conf_dir.join(format!("{OVERLAY_NAME}.conf"));
+        // Simulate a stale own-entry: our alias format, but a package set
+        // that no longer matches what `packages()` computes now.
+        std::fs::write(
+            &file,
+            format!(
+                "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
+                 alias-packages = sys-devel/binutils dev-debug/gdb\n"
+            ),
+        )
+        .unwrap();
+
+        write_alias_repo_conf(&globals, &gentoo, &target, &category).unwrap();
+        let refreshed = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !refreshed.contains("dev-debug/gdb"),
+            "stale alias-packages line was not refreshed: {refreshed:?}"
+        );
+        let expected = format!(
+            "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
+             alias-packages = {}\n",
+            alias_packages_line(&target)
+        );
+        assert_eq!(refreshed, expected);
+    }
+
+    /// A foreign, non-alias `[crossdev]` entry (e.g. a real crossdev/eselect-
+    /// managed physical overlay pointing `location =` at a real repo
+    /// directory) must never be touched — only an entry recognisably written
+    /// by `em` itself (has an `alias-target =` key) is ever refreshed.
+    #[test]
+    fn write_alias_repo_conf_never_touches_a_foreign_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let conf = root.join("etc/portage/repos.conf");
+        let gentoo = root.join("gentoo");
+        let target = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let category = target.category();
+        for (cat, pkg, _) in target.packages() {
+            std::fs::create_dir_all(gentoo.join(cat).join(pkg)).unwrap();
+        }
+        let globals = test_cli_at_root(root);
+
+        std::fs::create_dir_all(&conf).unwrap();
+        let file = conf.join(format!("{OVERLAY_NAME}.conf"));
+        let foreign = format!("[{OVERLAY_NAME}]\nlocation = /var/db/repos/{OVERLAY_NAME}\n");
+        std::fs::write(&file, &foreign).unwrap();
+
+        write_alias_repo_conf(&globals, &gentoo, &target, &category).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), foreign);
     }
 
     /// A source package missing from ::gentoo is rejected before any alias is

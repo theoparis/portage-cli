@@ -646,18 +646,76 @@ stage3, no host contamination):
     `gcc`/`clang-crossdev-wrappers` are still `Host`, `linux-headers`/libc/
     LLVM runtimes still `Target`, still declared at each push site instead
     of a separate name list.
-  - **Open follow-up, not yet implemented**: the user's next question —
-    "let's avoid hardcoding optionals like this, `--ex-gdb` should be just a
-    shorthand for a matching `--ex-pkg`, isn't it?" — points at the right
-    shape for adding this back *properly* later: a general `--ex-pkg <atom>`
-    mechanism (arbitrary extra package merged onto the established cross
-    target, `em`'s equivalent of crossdev's `<CTARGET>-emerge <pkg>` /
-    `--ex-pkg`), with `--ex-gdb` as pure sugar that expands to `--ex-pkg
-    dev-debug/gdb` (or a configured `DPKG` override) rather than a
-    hardcoded special case anywhere in `em`. Not designed or implemented
-    yet — flagged here so it isn't lost; `--ex-gcc`/`--ex-gdb`/`--ex-pkg`
-    in `todo/crossdev-target.md`'s "Extra" section is the existing design
-    note to build from.
+  - **Correction #2 (same thread, user caught it again): `--ex-pkg` is
+    already fully supported — there is no missing mechanism, and my
+    "confirmed live bug" claim below this line in an earlier edit was a
+    self-inflicted false alarm.** I tested `em --prefix P --target T -p
+    cross-riscv64-unknown-linux-gnu/gdb` (with `--target` *and* an explicit
+    `cross-<tuple>` atom together) and saw it merge into the sysroot
+    instead of the host, and went and read `repo::target_package`/
+    `solve.rs`/`host_copies.rs` hunting for a classification gap. User:
+    "for cross-{riscv64-unknown-linux-gnu} you simply do `em -p` if you
+    pass a `--target T` it means that you are trying to set CHOST=T
+    CTARGET=riscv64-unknown-linux-gnu, and it would be a quite different
+    thing, isn't it?" — yes. The `cross-<tuple>` **category already fully
+    identifies the cross target**; naming `cross-riscv64-unknown-linux-gnu/
+    gdb` needs no `--target` at all. `--target T` is a separate, session-
+    wide concern (dual-root CHOST/CTARGET context for resolving *ordinary*
+    non-cross-category packages against the target sysroot, e.g. for `em
+    stages --stage1`) — combining both for a directly-named cross-category
+    atom is a redundant/conflicting invocation, not the real usage shape.
+    Re-tested without `--target`: `em --prefix /opt/xp -p
+    cross-riscv64-unknown-linux-gnu/gdb` → `cross-riscv64-unknown-linux-gnu/
+    gdb-9999 ... to /opt/xp/` — correctly lands in the prefix, no sysroot
+    involved. *(Superseded below — this test was unknowingly run against a
+    stale alias file that still declared `gdb`; see the staleness bug and
+    correction #3.)*
+  - **Correction #3: `--ex-pkg` IS a real, currently-missing feature —
+    "no --ex-pkg work needed" above was also wrong**, caught by re-testing
+    properly after fixing the staleness bug below. Once the sandbox's alias
+    file was actually regenerated fresh (deleting the stale one, since
+    `write_if_absent` never refreshes it — see next item), `em --prefix
+    /opt/xp -p cross-riscv64-unknown-linux-gnu/gdb` correctly failed with
+    `no ebuilds found` — `gdb` is no longer in `CrossTarget::packages()`'s
+    fixed compile-time list, so the alias declaration no longer exposes it,
+    and there is no CLI mechanism to add it (or any other extra) back. User:
+    "so --ex-pkg it is a concern for the __crossdev__ applet and in our
+    case it means adding an entry to the alias map. And --ex-pkg packages
+    need to be aware of ctarget to be meaningful." Confirmed against
+    `/usr/bin/crossdev` directly: `for_each_extra_pkg set_portage X` (line
+    1675) calls `set_portage` with `l=X`, and `set_env`'s `case ${l} in K|L)
+    ... ;; *) ... ;; esac` (line 1483) means `X` always takes the **host**
+    ABI branch — every `--ex-pkg` extra gets host-ABI env, unconditionally,
+    same as binutils/gcc/gdb. So `--ex-pkg` in `em`'s model means: (1) add
+    the atom to the alias-packages set (so `cross-<tuple>/<pkg>` resolves
+    at all), (2) write its `package.env` entry via the same `write_cross_env`
+    mechanism, always on the host-ABI branch. `--ex-gdb` is pure sugar for
+    `--ex-pkg dev-debug/gdb` — no separate code path. **Not yet implemented
+    — this is the next concrete task**, tracked below.
+  - **Staleness bug found and fixed while re-testing**: `write_alias_repo_conf`
+    (and `write_sysroot_repos_conf`'s own copy of the same alias entry) wrote
+    via `write_if_absent` (`util.rs:9`), which never overwrites an existing
+    file regardless of content — so the drift-detection check above it was
+    dead code; a stale alias from a prior run (e.g. still declaring `gdb`
+    after it was removed from `packages()`) was never refreshed by a later
+    `--init-target`, only by deleting the file by hand. Fixed: extracted
+    `write_or_refresh_alias_conf(file, category, packages_line)`, used by
+    both call sites — absent → write fresh; present and matching → no-op;
+    present, ours (`alias-target =` key) but stale → overwrite; present,
+    foreign (no `alias-target =` key, e.g. a real crossdev/eselect-managed
+    physical overlay) → never touch. Also fixed `write_sysroot_config`'s
+    `make.conf`, which had the identical bug (`write_if_absent`, content
+    derived from `target`/`outer_root`, both able to legitimately change
+    across `--init-target` re-runs, e.g. a different `--prefix`) — switched
+    to an unconditional `std::fs::write` like `write_cross_env` already
+    correctly does; no foreign-entry concern there (entirely em-managed,
+    unlike the host's real make.conf). Left `ensure_self_contained_prefix`'s
+    and `write_sysroot_repos_conf`'s `gentoo.conf` (bare `location =
+    <host-repo-path>`, no per-target content, no real drift scenario) as
+    `write_if_absent`. New regression tests:
+    `write_alias_repo_conf_refreshes_a_stale_own_entry`,
+    `write_alias_repo_conf_never_touches_a_foreign_entry`. Full workspace
+    `fmt`/clippy/test clean.
 
 ## Verification (outstanding)
 
