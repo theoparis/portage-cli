@@ -8,14 +8,13 @@
 //! checks `DEPEND` against the sysroot VDB only — within-run target merges do
 //! not satisfy build-time `DEPEND` on a foreign sysroot.
 
-use portage_atom::{Cpn, Cpv, DepEntry, Version};
+use portage_atom::{Cpn, Cpv, Version};
 use portage_atom_pubgrub::PortagePackage;
 
 use crate::bdepend_avail::Avail;
 
 use super::bdepend_trim::TrimCtx;
 use super::effective_use;
-use super::repo;
 
 /// Drop entries only needed for `DEPEND` edges already satisfied on the
 /// sysroot. No-op when `sysroot == target` (full offset / crossdev sysroot).
@@ -95,31 +94,26 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
         if j == cand.index {
             continue;
         }
-        let Some(cache) = repo::find_cache(cand.ctx.data, consumer, consumer_ver) else {
-            continue;
-        };
-        let effective = effective_use::effective_use(
+        let Some(deps) = effective_use::evaluated_deps(
+            cand.ctx.data,
             cand.ctx.use_config,
             cand.ctx.package_use,
             consumer,
             consumer_ver,
-            cache,
-        );
-        let depend = DepEntry::evaluate_use(&cache.metadata.depend, &effective);
+        ) else {
+            continue;
+        };
         if cand
             .sysroot_avail
-            .has_unsatisfied_atom_for_cpn(&depend, cpn)
+            .has_unsatisfied_atom_for_cpn(&deps.depend(), cpn)
         {
             return true;
         }
 
         let runtime_avail = target_avail_for_consumer(j, cand.kept, cand.kept_indices);
-        let rdepend = DepEntry::evaluate_use(&cache.metadata.rdepend, &effective);
-        let pdepend = DepEntry::evaluate_use(&cache.metadata.pdepend, &effective);
-        let idepend = DepEntry::evaluate_use(&cache.metadata.idepend, &effective);
-        if runtime_avail.has_unsatisfied_atom_for_cpn(&rdepend, cpn)
-            || runtime_avail.has_unsatisfied_atom_for_cpn(&pdepend, cpn)
-            || runtime_avail.has_unsatisfied_atom_for_cpn(&idepend, cpn)
+        if runtime_avail.has_unsatisfied_atom_for_cpn(&deps.rdepend(), cpn)
+            || runtime_avail.has_unsatisfied_atom_for_cpn(&deps.pdepend(), cpn)
+            || runtime_avail.has_unsatisfied_atom_for_cpn(&deps.idepend(), cpn)
         {
             return true;
         }
@@ -148,7 +142,7 @@ mod tests {
 
     use portage_atom_pubgrub::UseConfig;
 
-    use super::repo::RepoData;
+    use super::super::repo::RepoData;
     use super::*;
     use crate::cli::Roots;
 

@@ -10,7 +10,7 @@ use crate::bdepend_avail::Avail;
 use crate::cli::Roots;
 
 use super::effective_use;
-use super::repo::{self, RepoData};
+use super::repo::RepoData;
 
 /// Context for [`trim_within_run_bdepend`].
 pub struct TrimCtx<'a> {
@@ -74,18 +74,18 @@ pub fn trim_within_run_bdepend(
 fn runtime_required_cpns(order: &[(PortagePackage, Version)], ctx: &TrimCtx<'_>) -> HashSet<Cpn> {
     let mut out = HashSet::new();
     for (pkg, ver) in order {
-        let Some(cache) = repo::find_cache(ctx.data, pkg, ver) else {
+        let Some(deps) =
+            effective_use::evaluated_deps(ctx.data, ctx.use_config, ctx.package_use, pkg, ver)
+        else {
             continue;
         };
-        let effective =
-            effective_use::effective_use(ctx.use_config, ctx.package_use, pkg, ver, cache);
-        for field in [
-            &cache.metadata.depend,
-            &cache.metadata.rdepend,
-            &cache.metadata.pdepend,
-            &cache.metadata.idepend,
+        for entries in [
+            deps.depend(),
+            deps.rdepend(),
+            deps.pdepend(),
+            deps.idepend(),
         ] {
-            collect_cpns_from_entries(&DepEntry::evaluate_use(field, &effective), &mut out);
+            collect_cpns_from_entries(&entries, &mut out);
         }
     }
     out
@@ -127,18 +127,16 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
 
     for (j, (consumer, consumer_ver)) in cand.order.iter().enumerate().skip(cand.index + 1) {
         let avail = avail_for_consumer(j, cand.kept, cand.kept_indices, cand.ctx.roots);
-        let Some(cache) = repo::find_cache(cand.ctx.data, consumer, consumer_ver) else {
-            continue;
-        };
-        let effective = effective_use::effective_use(
+        let Some(deps) = effective_use::evaluated_deps(
+            cand.ctx.data,
             cand.ctx.use_config,
             cand.ctx.package_use,
             consumer,
             consumer_ver,
-            cache,
-        );
-        let bdepend = DepEntry::evaluate_use(&cache.metadata.bdepend, &effective);
-        if avail.has_unsatisfied_atom_for_cpn(&bdepend, cpn) {
+        ) else {
+            continue;
+        };
+        if avail.has_unsatisfied_atom_for_cpn(&deps.bdepend(), cpn) {
             return true;
         }
     }

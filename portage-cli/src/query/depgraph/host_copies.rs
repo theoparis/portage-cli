@@ -39,14 +39,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use portage_atom::{Cpn, Cpv, DepEntry, Version};
+use portage_atom::{Cpn, Cpv, Version};
 use portage_atom_pubgrub::{MergeRoot, PortagePackage};
 
 use crate::bdepend_avail::{Avail, unsatisfied_cpns};
 use crate::cli::Roots;
 
 use super::effective_use;
-use super::repo::{self, Adapter};
+use super::repo::Adapter;
 use super::root_aware::CrossContext;
 
 /// Static inputs shared across the walk.
@@ -132,22 +132,16 @@ fn visit_unsatisfied(
     ver: &Version,
     copies: &mut Vec<(PortagePackage, Version)>,
 ) {
-    let Some(cache) = repo::find_cache(ctx.adapter.data, pkg, ver) else {
-        return;
-    };
-    let effective = effective_use::effective_use(
+    let Some(deps) = effective_use::evaluated_deps(
+        ctx.adapter.data,
         ctx.adapter.use_config,
         ctx.adapter.package_use,
         pkg,
         ver,
-        cache,
-    );
-    for class in [
-        &cache.metadata.depend,
-        &cache.metadata.bdepend,
-        &cache.metadata.idepend,
-    ] {
-        let entries = DepEntry::evaluate_use(class, &effective);
+    ) else {
+        return;
+    };
+    for entries in [deps.depend(), deps.bdepend(), deps.idepend()] {
         for cpn in unsatisfied_cpns(&entries, &walk.avail) {
             if !walk.seen.insert(cpn) {
                 continue;
