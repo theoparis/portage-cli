@@ -1067,9 +1067,51 @@ stage3, no host contamination):
     dependency order, at the solver's own chosen versions (`git-2.53.0`,
     not `git-9999-r3`; `Crypt-URandom-0.540.0`, not `-0.550.0`); then ran
     the **real** (non-`-p`) `--setup` — preflight now passes cleanly and
-    the run proceeds straight into actually emerging `git-2.53.0` (which
-    then hit an unrelated, pre-existing `libpcre2-8` subproject gap in
-    git's own meson build — a separate issue, not investigated here).
+    the run proceeds straight into actually emerging `git-2.53.0`, which
+    then hit a *different*, genuine gap — see the next item, not "an
+    unrelated pre-existing meson quirk" (first-draft framing, corrected
+    after being called out for asserting "pre-existing" without actually
+    checking, same mistake as earlier in this investigation).
+- 🔴 **New: a `--prefix` host-arch build's own environment doesn't weave in
+  the host, only the satisfaction check does.** Found immediately after the
+  `host_copies` fix above, verified (not assumed) before writing this down.
+  `git-2.53.0`'s meson build (a Host-arch tool, landing `to /opt/xp/`) failed:
+  `Run-time dependency libpcre2-8 found: NO (tried pkgconfig and cmake)`, then
+  fell through to an unavailable subproject (`wrap-mode nodownload`).
+  - **Checked, not assumed**: `dev-libs/libpcre2-10.47` genuinely *is*
+    installed on the sandbox's real host `/` (`/var/db/pkg/dev-libs/
+    libpcre2-10.47`, a working `/usr/lib64/pkgconfig/libpcre2-8.pc`,
+    `pkg-config --modversion libpcre2-8` → `10.47` on the bare host env).
+    `host_copies` correctly recognized this and correctly did **not**
+    schedule a rebuild — the satisfaction decision is right.
+  - **The actual gap**: git's `meson setup` invocation (from the real
+    `meson.eclass`, not `em`'s own code — `em` doesn't reimplement
+    eclasses) was run with `--pkg-config-path /opt/xp/usr/share/pkgconfig`
+    only, derived from `ESYSROOT`/`PORTAGE_CONFIGROOT` pointing solely at
+    the prefix. The real host's `/usr/lib64/pkgconfig`, where the
+    dependency that was just judged "already satisfied, don't rebuild"
+    actually lives, is never in the search path `em` hands to the build.
+    So the decision not to rebuild is correct; the environment `em`
+    constructs for the build can't see what it decided not to rebuild.
+  - **This is the same gap the user described when dictating
+    `todo/greedy-twirling-sparrow.md`** (the plan loaded this session,
+    not yet implemented): *"the host vdb is weaved in and so the env"* —
+    that plan's drafted scope only covers the satisfaction-check weave
+    (`Avail::initial_bdepend`) and the merge-destination routing
+    (`Cli::broot()`), not the build environment (`ESYSROOT`/
+    `PKG_CONFIG_PATH`/likely `CPATH`/`LIBRARY_PATH` too) itself — an
+    under-scoping to fix before implementing that plan, not a new,
+    separate plan.
+  - **Not investigated further or fixed this session** — user's explicit
+    call: record precisely and move on, decide priority once the two
+    Fable background agents (root-cause report already in, consolidation
+    plan pending) are both in. Next step when picked back up: trace
+    exactly which env var(s) `em` sets that `meson.eclass` derives
+    `--pkg-config-path` from (grep `PORTAGE_CONFIGROOT`/`ESYSROOT` in
+    wherever `em` builds the phase environment for a Host-arch merge under
+    `--prefix`), confirm whether autotools' plain `PKG_CONFIG_PATH` env var
+    hits the identical gap, and fold the fix into
+    `greedy-twirling-sparrow.md` rather than opening a fourth document.
   - **Separately flagged by the user**: this is now the *third* place doing
     a close variant of "walk DEPEND/BDEPEND, track a growing per-root
     availability set seeded from a VDB, decide what's missing" —
