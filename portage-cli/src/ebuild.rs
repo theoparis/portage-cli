@@ -1469,9 +1469,15 @@ async fn try_run_phase_from_env_bz2(
             format!("{s}/")
         }
     };
+    // The phase function is entirely optional (PMS: an ebuild need not
+    // define pkg_prerm/pkg_postrm at all) — guard the call so a package
+    // that simply never defined it doesn't produce a spurious "command
+    // not found" for a hook nothing was ever supposed to run.
     if let Err(e) = shell
         .run_string(&format!(
-            "ROOT='{root_str}' EROOT='{root_str}' EBUILD_PHASE_FUNC='{func}' {func}"
+            "if declare -F '{func}' >/dev/null 2>&1; then \
+             ROOT='{root_str}' EROOT='{root_str}' EBUILD_PHASE_FUNC='{func}' {func}; \
+             fi"
         ))
         .await
     {
