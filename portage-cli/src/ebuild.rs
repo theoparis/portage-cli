@@ -1377,16 +1377,15 @@ async fn unmerge_slot_occupant(
     // (`cross-<tuple>/gcc-...`) it was registered under — `Ebuild::from_path`
     // would instead re-derive CATEGORY from `old_ebuild_path`'s on-disk
     // directory name, recovering the wrong (real, not virtual) category.
-    let old_ebuild = if std::fs::copy(old_ebuild_src.as_std_path(), old_ebuild_path.as_std_path())
-        .is_ok()
-    {
-        Some(Ebuild::with_cpv(old_pkg.cpv().clone(), &old_ebuild_path))
-    } else {
-        eprintln!(
-            "warning: old ebuild not found at {old_ebuild_src}, skipping pkg_prerm/pkg_postrm"
-        );
-        None
-    };
+    let old_ebuild =
+        if std::fs::copy(old_ebuild_src.as_std_path(), old_ebuild_path.as_std_path()).is_ok() {
+            Some(Ebuild::with_cpv(old_pkg.cpv().clone(), &old_ebuild_path))
+        } else {
+            eprintln!(
+                "warning: old ebuild not found at {old_ebuild_src}, skipping pkg_prerm/pkg_postrm"
+            );
+            None
+        };
 
     let old_sourced = match &old_ebuild {
         Some(e) => {
