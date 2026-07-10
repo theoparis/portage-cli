@@ -1072,8 +1072,8 @@ stage3, no host contamination):
     unrelated pre-existing meson quirk" (first-draft framing, corrected
     after being called out for asserting "pre-existing" without actually
     checking, same mistake as earlier in this investigation).
-- 🔴 **New: a `--prefix` host-arch build's own environment doesn't weave in
-  the host, only the satisfaction check does.** Found immediately after the
+- ✅ **Fixed 2026-07-11: a `--prefix` host-arch build's own environment
+  didn't weave in the host, only the satisfaction check did.** Found immediately after the
   `host_copies` fix above, verified (not assumed) before writing this down.
   `git-2.53.0`'s meson build (a Host-arch tool, landing `to /opt/xp/`) failed:
   `Run-time dependency libpcre2-8 found: NO (tried pkgconfig and cmake)`, then
@@ -1087,31 +1087,71 @@ stage3, no host contamination):
   - **The actual gap**: git's `meson setup` invocation (from the real
     `meson.eclass`, not `em`'s own code — `em` doesn't reimplement
     eclasses) was run with `--pkg-config-path /opt/xp/usr/share/pkgconfig`
-    only, derived from `ESYSROOT`/`PORTAGE_CONFIGROOT` pointing solely at
-    the prefix. The real host's `/usr/lib64/pkgconfig`, where the
+    only. The real host's `/usr/lib64/pkgconfig`, where the
     dependency that was just judged "already satisfied, don't rebuild"
     actually lives, is never in the search path `em` hands to the build.
     So the decision not to rebuild is correct; the environment `em`
     constructs for the build can't see what it decided not to rebuild.
   - **This is the same gap the user described when dictating
-    `todo/greedy-twirling-sparrow.md`** (the plan loaded this session,
-    not yet implemented): *"the host vdb is weaved in and so the env"* —
-    that plan's drafted scope only covers the satisfaction-check weave
-    (`Avail::initial_bdepend`) and the merge-destination routing
-    (`Cli::broot()`), not the build environment (`ESYSROOT`/
-    `PKG_CONFIG_PATH`/likely `CPATH`/`LIBRARY_PATH` too) itself — an
-    under-scoping to fix before implementing that plan, not a new,
-    separate plan.
-  - **Not investigated further or fixed this session** — user's explicit
-    call: record precisely and move on, decide priority once the two
-    Fable background agents (root-cause report already in, consolidation
-    plan pending) are both in. Next step when picked back up: trace
-    exactly which env var(s) `em` sets that `meson.eclass` derives
-    `--pkg-config-path` from (grep `PORTAGE_CONFIGROOT`/`ESYSROOT` in
-    wherever `em` builds the phase environment for a Host-arch merge under
-    `--prefix`), confirm whether autotools' plain `PKG_CONFIG_PATH` env var
-    hits the identical gap, and fold the fix into
-    `greedy-twirling-sparrow.md` rather than opening a fourth document.
+    `todo/greedy-twirling-sparrow.md`**: *"the host vdb is weaved in and so
+    the env"* — that plan's drafted scope only covers the satisfaction-check
+    weave (`Avail::initial_bdepend`) and the merge-destination routing
+    (`Cli::broot()`), not the build environment itself. This item **was**
+    that under-scoping; now fixed, `greedy-twirling-sparrow.md`'s remaining
+    scope is just the resolver-side pieces.
+  - **Root cause found 2026-07-11, `2b4986b`** (initial diagnosis reviewed
+    and corrected by an agent before landing — see below): the original
+    ESYSROOT/PORTAGE_CONFIGROOT speculation above was wrong. The real
+    mechanism: `portage-cli/src/setup.rs`'s `BASHRC_PREFIX` (the `--prefix
+    DIR` overlay's search-path recipe, written into the prefix's portage
+    config) had a ROOT-keyed guard (`ROOT != "/"`) that had been **silently
+    dead since `b3f20c1`** (2026-07-05, "make `--local` standalone, `--prefix`
+    the relocatable overlay") — that commit made `--prefix DIR` set `EPREFIX`
+    instead, and `em` always resolves `ROOT` to `"/"` once `EPREFIX` is set
+    (`build/shell.rs`'s `root_var`). So the guard's condition was
+    unconditionally false for every real `--prefix` build: not just
+    `PKG_CONFIG_LIBDIR` (which was never set at all, the piece originally
+    suspected), the *entire* block — `PKG_CONFIG_PATH`, `CPPFLAGS`,
+    `LDFLAGS`, `CMAKE_PREFIX_PATH` — never ran. Only a separate
+    EPREFIX-keyed guard (added later, `7482a83`, to fix cross-toolchain-
+    wrapper `PATH` specifically) survived. Confirms the original "trace
+    which env var meson.eclass derives `--pkg-config-path` from" framing
+    was the wrong mental model — nothing was being *derived wrong*, the
+    whole recipe simply never executed.
+  - **Fix**: consolidated both guards into one, keyed on `EPREFIX`
+    (matching `BASHRC_LOCAL`'s existing model), restoring `PKG_CONFIG_PATH`/
+    `CPPFLAGS`/`LDFLAGS`/`CMAKE_PREFIX_PATH`, and adding `PKG_CONFIG_LIBDIR`
+    (prefix dirs, then host — `meson.eclass` pins `PKG_CONFIG_LIBDIR` to the
+    prefix alone whenever the env var isn't already set, replacing
+    pkg-config's own built-in default entirely, unlike `PKG_CONFIG_PATH`,
+    which is additive — matching `BASHRC_LOCAL`'s already-correct handling
+    of the identical meson quirk). Autotools was never affected: plain
+    `pkg-config` (no `PKG_CONFIG_LIBDIR` override) searches `PKG_CONFIG_PATH`
+    additively over its own compiled-in host default, so it never lost host
+    visibility even while the block was dead — only lost prefix visibility
+    (see next). `CPPFLAGS`/`LDFLAGS` have no equivalent override-vs-additive
+    gap (compiler built-in `-I`/`-L` defaults already cover the host).
+  - **Wider regression the same dead guard caused, also fixed by the same
+    patch**: since the *whole* block was dead, not just `PKG_CONFIG_LIBDIR`,
+    prefix-*installed* packages were also invisible to their dependents —
+    an autotools build couldn't find a `.pc` merged into the prefix at all.
+    Fixing only `PKG_CONFIG_LIBDIR` in a guard that still never executed
+    would have fixed nothing; re-keying the whole block was required.
+  - **Verified**: a new test (`overlay_bashrc_actually_exports_search_paths_
+    at_runtime`) actually *sources* the recipe with the real runtime env
+    (`ROOT="/"`, `EPREFIX=<dir>`) and checks the resulting exports — the
+    prior test only grepped the source text for `"CPPFLAGS"`, which passed
+    against the dead guard too and would never have caught this. Also
+    live-verified directly on this host (which genuinely has
+    `libpcre2-10.47` installed): sourced the real generated `bashrc` with
+    `ROOT=/`,
+    `EPREFIX=<scratch dir>`, and a stub `get_libdir` returning this host's
+    real `lib64` — `pkg-config --modversion libpcre2-8` now succeeds
+    (`10.47`) via the constructed `PKG_CONFIG_LIBDIR`, where it failed
+    before the fix (no `PKG_CONFIG_LIBDIR` set at all → pkg-config's own
+    default, which does include the host, but meson's own fallback template
+    ignores that and hardcodes prefix-only once `PKG_CONFIG_LIBDIR` is
+    unset).
   - **Separately flagged by the user**: this is now the *third* place doing
     a close variant of "walk DEPEND/BDEPEND, track a growing per-root
     availability set seeded from a VDB, decide what's missing" —
