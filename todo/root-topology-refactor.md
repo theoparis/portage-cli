@@ -1212,17 +1212,18 @@ stage3, no host contamination):
     offers more it is fine to pick it." The mechanism is meant to track
     what the host makes available, not to wall a package off from the
     host's own policy; not a bug to fix.
-- ✅ **Fixed 2026-07-10: `crossdev --setup` package replaces always hit the
-  `environment.bz2` `declare -f` fallback and it was silently broken in
-  four different ways, plus one portage-cli-side false error.** Follow-on
-  from the same live session above: every cross-category replace (binutils,
+- ✅ **Fixed 2026-07-10/11: `crossdev --setup` package replaces always hit
+  the `environment.bz2` `declare -f` fallback (root cause fixed too) and
+  it was silently broken in four different ways, plus one portage-cli-side
+  false error.** Follow-on from the same live session above: every
+  cross-category replace (binutils,
   linux-headers, glibc, gcc) goes through `try_run_phase_from_env_bz2`
   instead of the real ebuild file, because `unmerge_slot_occupant`'s
   `old_ebuild_path` is built from `old_pkg.category()` — for cross-derived
   (virtual-alias) packages that's never the real on-disk category, so
-  `.exists()` is unconditionally false (still open, see below). This made
-  every replace exercise `declare -f`'s round-trip fidelity, which turned
-  out to be broken:
+  `.exists()` is unconditionally false (also fixed today, see below). This
+  made every replace exercise `declare -f`'s round-trip fidelity, which
+  turned out to be broken:
   1. **portage-cli, `787b399`**: `try_run_phase_from_env_bz2` unconditionally
      invoked `pkg_prerm`/`pkg_postrm` even when the ebuild never defined the
      (optional) phase at all — spurious `command not found`. Guarded with
@@ -1265,12 +1266,22 @@ stage3, no host contamination):
   - brush commits `ea00a664`/`6645924c`/`d96b3a47`/`d1359cfd` pushed to
     `mine/for-portage-repo`; `Cargo.toml`'s pinned rev bumped to `d1359cfd`
     (`23c6fc0`) so non-`[patch]`-override builds pick them up too.
-  - **Still open, not fixed today**: `unmerge_slot_occupant`'s
+  - **Root cause also fixed, `aff0745`**: `unmerge_slot_occupant`'s
     `old_ebuild_path`-uses-virtual-category bug above — it's *why* every
-    cross-category replace hits the fallback at all, not just something
-    that made the fallback's own bugs visible. Fixing it would let a
-    cross-category replace use the real ebuild file directly, same as any
-    other package.
+    cross-category replace hit the fallback at all. `run_merge` already
+    copies the ebuild into the VDB entry itself as `<PF>.ebuild`,
+    independent of category correctness — source that instead of
+    re-deriving a repo-relative path. Caught one regression along the way
+    before landing: copying it straight from `old_pkg.path()` and sourcing
+    it in place worked for `pkg_prerm` but then failed `pkg_postrm` with an
+    I/O error, because `vdb.unregister()` runs *between* the two phases and
+    deletes the VDB directory out from under the still-open reference;
+    fixed by copying into `old_work_root` (which outlives `unregister`)
+    instead. Live-verified: a full `crossdev --setup` run (fresh binutils
+    install, two replaces each of glibc and gcc-16) now shows **zero** "old
+    ebuild not found" warnings and zero errors of any kind, across every
+    single merge — cross-category replaces use the real ebuild file
+    directly, same as any other package, exactly as intended.
 - 🔴 **Re-derive "stage1 complete" — accepted 2026-07-09, next up.** From a
   clean `--jobs 1` run of the 4 stragglers (bzip2, xz-utils, gettext×2), not
   the VDB spot check (`session-status-2026-07-05-needs-review.md`).
