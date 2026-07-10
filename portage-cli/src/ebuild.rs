@@ -1878,7 +1878,18 @@ async fn capture_environment(
     shell: &mut portage_repo::EbuildShell,
     work_root: &Utf8Path,
 ) -> std::result::Result<Vec<u8>, String> {
-    capture_shell_dump(shell, work_root, "{ declare -p; declare -f; }").await
+    // `filter_declare_dump` only touches lines that literally start with
+    // `declare -` (no leading whitespace), so it strips the top-level
+    // `declare -p` variable entries it targets (readonly/dynamic bash
+    // specials like EUID, PIPESTATUS, ...) without touching any `declare -f`
+    // function definition or its (always-indented) body. Without this,
+    // `try_run_phase_from_env_bz2` re-sourcing this dump to run
+    // pkg_prerm/pkg_postrm hits "declare: cannot mutate readonly variable"
+    // for every bash-builtin-readonly var the dump captured — re-declaring
+    // them is never meaningful since a fresh shell already has them set.
+    let dump = capture_shell_dump(shell, work_root, "{ declare -p; declare -f; }").await?;
+    let text = String::from_utf8_lossy(&dump);
+    Ok(filter_declare_dump(&text).into_bytes())
 }
 
 /// Variables-only dump for the Compile→Install worker handoff. Deliberately no
