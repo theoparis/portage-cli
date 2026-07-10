@@ -10,8 +10,8 @@
 //!   in-place search-path needs.
 //! - `--prefix DIR` (overlay): EPREFIX set, base == host. Borrows host tools,
 //!   so symlinks host python into `${EPREFIX}/usr/bin` for the relocatable
-//!   shebangs EPREFIX produces. The `BASHRC_PREFIX` recipe (ROOT-based) covers
-//!   the overlay search-path needs.
+//!   shebangs EPREFIX produces. The `BASHRC_PREFIX` recipe (EPREFIX-based)
+//!   covers the overlay search-path needs.
 //! - `--root DIR` (self-contained offset): no EPREFIX. Own everything; no
 //!   CPPFLAGS injection (it actively breaks self-contained roots).
 //!
@@ -74,41 +74,46 @@ if [[ -n ${EPREFIX} ]]; then
 fi
 "#;
 
-/// The `bashrc` recipe for a ROOT-offset (`--prefix DIR`) prefix: the staged
-/// `.pc` record host-absolute `/usr` paths, so the real headers/libs are found
-/// via the compiler/linker search while pkg-config just confirms presence.
+/// The `bashrc` recipe for the relocatable overlay (`--prefix DIR`): host (/)
+/// is the build sysroot, the prefix is layered on top. Since `--prefix` sets
+/// `EPREFIX` (`b3f20c1`), `econf` passes `--prefix=${EPREFIX}/usr`, so a
+/// package's own `.pc`/headers/libs installed *into* the prefix already
+/// record prefix-relative paths, same as `--local` — this recipe only needs
+/// to put them (and the host's own) on the search path, no sysroot rewriting.
 const BASHRC_PREFIX: &str = r#"# Overlay search paths for `em --prefix DIR` (created by `em setup`).
 # Host (/) is the build sysroot; the prefix is layered on top. Do NOT set
-# PKG_CONFIG_SYSROOT_DIR (host .pc must keep their real paths); the prefix .pc
-# emit harmless host-absolute -I/-L while the real files are found via the flags.
+# PKG_CONFIG_SYSROOT_DIR — nothing here needs path rewriting, only search-path
+# additions, and rewriting would corrupt the host .pc files' own real paths
+# once they're found via PKG_CONFIG_LIBDIR below.
 #
-# Two guards: ROOT-keyed (a plain --prefix build where ROOT is the prefix) and
-# EPREFIX-keyed (a --prefix --target build where ROOT is the sysroot's "/" but
-# the cross toolchain wrappers live under ${EPREFIX}/usr/bin). Without the
-# EPREFIX guard, tc-getCC can't find ${CTARGET}-gcc and falls back to the host
-# ${CHOST}-gcc, breaking cross glibc/gcc builds with target-flag-on-host-gcc
-# errors like "-mabi=lp64d: unrecognized argument".
-
-# ROOT-keyed: a plain --prefix overlay (ROOT = the prefix itself).
-if [[ -n ${ROOT} && ${ROOT%/} != "" && ${ROOT%/} != "/" ]]; then
-	_ov="${ROOT%/}"
+# Keyed on EPREFIX, not ROOT: every `--prefix DIR` build sets EPREFIX, and
+# `em` always resolves ROOT to "/" once EPREFIX is set (`build/shell.rs`'s
+# `root_var`) — a prior ROOT-keyed version of this recipe (written before
+# `b3f20c1` flipped that) silently went dead for every `--prefix` build; only
+# caught when a meson-based host-arch build under `--prefix` couldn't see a
+# host-satisfied BDEPEND (`dev-vcs/git`'s build, missing `libpcre2-8`) —
+# it wasn't just PKG_CONFIG_LIBDIR that was missing, the *entire* previous
+# block (PKG_CONFIG_PATH, CPPFLAGS, LDFLAGS, CMAKE_PREFIX_PATH) had stopped
+# running. This also covers the cross toolchain wrappers case: without
+# ${EPREFIX}/usr/bin on PATH, tc-getCC can't find ${CTARGET}-gcc and falls
+# back to the host ${CHOST}-gcc, breaking cross glibc/gcc builds with
+# target-flag-on-host-gcc errors like "-mabi=lp64d: unrecognized argument".
+if [[ -n ${EPREFIX} && ${EPREFIX%/} != "" && ${EPREFIX%/} != "/" ]]; then
+	_ov="${EPREFIX%/}"
 	_libdir="$(get_libdir 2>/dev/null || echo lib)"
 	export PATH="${_ov}/usr/bin${PATH:+:${PATH}}"
 	export PKG_CONFIG_PATH="${_ov}/usr/${_libdir}/pkgconfig:${_ov}/usr/share/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+	# meson.eclass pins PKG_CONFIG_LIBDIR to the prefix alone when the env var
+	# isn't already set (it *replaces* pkg-config's built-in default search,
+	# unlike PKG_CONFIG_PATH, which is additive) — so a host-satisfied BDEPEND
+	# (e.g. dev-libs/libpcre2 for dev-vcs/git's meson build) becomes invisible
+	# to a meson-based build even though PKG_CONFIG_PATH alone would have
+	# found it. Search the prefix first, then the host, matching BASHRC_LOCAL.
+	export PKG_CONFIG_LIBDIR="${_ov}/usr/${_libdir}/pkgconfig:${_ov}/usr/share/pkgconfig:/usr/${_libdir}/pkgconfig:/usr/share/pkgconfig${PKG_CONFIG_LIBDIR:+:${PKG_CONFIG_LIBDIR}}"
 	export CPPFLAGS="-I${_ov}/usr/include${CPPFLAGS:+ ${CPPFLAGS}}"
 	export LDFLAGS="-L${_ov}/usr/${_libdir} -Wl,-rpath-link,${_ov}/usr/${_libdir}${LDFLAGS:+ ${LDFLAGS}}"
 	export CMAKE_PREFIX_PATH="${_ov}/usr${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
 	unset _ov _libdir
-fi
-
-# EPREFIX-keyed: a --prefix --target build (ROOT = sysroot "/", EPREFIX = the
-# overlay prefix). The cross toolchain wrappers (${CTARGET}-gcc etc.) live
-# under ${EPREFIX}/usr/bin; without this on PATH, tc-getCC falls back to the
-# host compiler and the cross build dies on target-specific flags.
-if [[ -n ${EPREFIX} && ${EPREFIX%/} != "" && ${EPREFIX%/} != "/" ]]; then
-	_ov="${EPREFIX%/}"
-	export PATH="${_ov}/usr/bin${PATH:+:${PATH}}"
-	unset _ov
 fi
 "#;
 
@@ -166,7 +171,7 @@ pub fn bootstrap(roots: &Roots) -> Result<()> {
     std::fs::create_dir_all(portage.as_std_path())
         .with_context(|| format!("creating {portage}"))?;
 
-    // `BASHRC_PREFIX`'s CPPFLAGS/LDFLAGS injection (`-I<ROOT>/usr/include`, an
+    // `BASHRC_PREFIX`'s CPPFLAGS/LDFLAGS injection (`-I<EPREFIX>/usr/include`, an
     // extra high-priority search path) is for a genuine `--prefix DIR`
     // layered *on top of* a shared host base — the host's own real headers
     // are already found by the compiler's normal default search, so the
@@ -185,7 +190,7 @@ pub fn bootstrap(roots: &Roots) -> Result<()> {
     if self_contained {
         write_if_absent(&portage.join("bashrc"), "")?;
     } else if is_overlay {
-        // --prefix: ROOT-offset overlay. Host (/) is the build sysroot; the
+        // --prefix: EPREFIX-based overlay. Host (/) is the build sysroot; the
         // prefix is layered on top.
         write_if_absent(&portage.join("bashrc"), BASHRC_PREFIX)?;
     } else {
@@ -412,6 +417,85 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let body = bashrc_body("--prefix", dir.path().to_str().unwrap());
         assert!(body.contains("CPPFLAGS"));
+    }
+
+    /// Regression test for a guard that went silently dead: `--prefix DIR`
+    /// always sets `EPREFIX`, and `em` always resolves `ROOT` to `"/"` once
+    /// `EPREFIX` is set (`build/shell.rs`'s `root_var`) — a prior ROOT-keyed
+    /// version of `BASHRC_PREFIX` never actually ran for any real
+    /// `--prefix` build. A plain `body.contains("CPPFLAGS")` check (the test
+    /// above) can't catch this: the dead guard's body still contained the
+    /// string. This test actually *sources* the recipe with the real
+    /// runtime env (`ROOT="/"`, `EPREFIX=<dir>`) and checks what comes out.
+    #[test]
+    fn overlay_bashrc_actually_exports_search_paths_at_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let prefix = dir.path().to_str().unwrap();
+        let body = bashrc_body("--prefix", prefix);
+
+        let script = format!(
+            "{body}\nprintf '%s\\n' \"$PATH\" \"$PKG_CONFIG_PATH\" \"$PKG_CONFIG_LIBDIR\" \
+             \"$CPPFLAGS\" \"$LDFLAGS\" \"$CMAKE_PREFIX_PATH\""
+        );
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("ROOT", "/")
+            .env("EPREFIX", prefix)
+            .env_remove("PKG_CONFIG_PATH")
+            .env_remove("PKG_CONFIG_LIBDIR")
+            .env_remove("CPPFLAGS")
+            .env_remove("LDFLAGS")
+            .env_remove("CMAKE_PREFIX_PATH")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "bashrc script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut lines = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let path = lines.remove(0);
+        let pkg_config_path = lines.remove(0);
+        let pkg_config_libdir = lines.remove(0);
+        let cppflags = lines.remove(0);
+        let ldflags = lines.remove(0);
+        let cmake_prefix_path = lines.remove(0);
+
+        assert!(path.contains(&format!("{prefix}/usr/bin")), "PATH: {path}");
+        assert!(
+            pkg_config_path.contains(&format!("{prefix}/usr/lib/pkgconfig")),
+            "PKG_CONFIG_PATH: {pkg_config_path}"
+        );
+        // The host-visibility fix: PKG_CONFIG_LIBDIR must list the prefix
+        // *and* the host's own pkgconfig dirs, or a meson-based build can't
+        // see a host-satisfied BDEPEND at all (meson.eclass pins
+        // PKG_CONFIG_LIBDIR to the prefix alone whenever the env var isn't
+        // already set, replacing pkg-config's own built-in default).
+        assert!(
+            pkg_config_libdir.contains(&format!("{prefix}/usr/lib/pkgconfig")),
+            "PKG_CONFIG_LIBDIR missing prefix: {pkg_config_libdir}"
+        );
+        assert!(
+            pkg_config_libdir.contains("/usr/lib/pkgconfig")
+                && pkg_config_libdir.matches("/usr/lib/pkgconfig").count() >= 2,
+            "PKG_CONFIG_LIBDIR missing host dir: {pkg_config_libdir}"
+        );
+        assert!(
+            cppflags.contains(&format!("{prefix}/usr/include")),
+            "CPPFLAGS: {cppflags}"
+        );
+        assert!(
+            ldflags.contains(&format!("{prefix}/usr/lib")),
+            "LDFLAGS: {ldflags}"
+        );
+        assert!(
+            cmake_prefix_path.contains(&format!("{prefix}/usr")),
+            "CMAKE_PREFIX_PATH: {cmake_prefix_path}"
+        );
     }
 
     #[test]
