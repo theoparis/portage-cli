@@ -1212,6 +1212,65 @@ stage3, no host contamination):
     offers more it is fine to pick it." The mechanism is meant to track
     what the host makes available, not to wall a package off from the
     host's own policy; not a bug to fix.
+- ✅ **Fixed 2026-07-10: `crossdev --setup` package replaces always hit the
+  `environment.bz2` `declare -f` fallback and it was silently broken in
+  four different ways, plus one portage-cli-side false error.** Follow-on
+  from the same live session above: every cross-category replace (binutils,
+  linux-headers, glibc, gcc) goes through `try_run_phase_from_env_bz2`
+  instead of the real ebuild file, because `unmerge_slot_occupant`'s
+  `old_ebuild_path` is built from `old_pkg.category()` — for cross-derived
+  (virtual-alias) packages that's never the real on-disk category, so
+  `.exists()` is unconditionally false (still open, see below). This made
+  every replace exercise `declare -f`'s round-trip fidelity, which turned
+  out to be broken:
+  1. **portage-cli, `787b399`**: `try_run_phase_from_env_bz2` unconditionally
+     invoked `pkg_prerm`/`pkg_postrm` even when the ebuild never defined the
+     (optional) phase at all — spurious `command not found`. Guarded with
+     `declare -F` first.
+  2. **brush `ea00a664`**: heredoc bodies/delimiters got space-reindented on
+     `declare -f` re-serialization, breaking `<<-EOF` round-trips outright.
+  3. **brush `6645924c`**: a `case` branch's last statement lost its `;`
+     before `;;` when it had no redundant trailing separator (idiomatic
+     bash); `for var; do` (implicit `$@`) got rewritten as `for var in ; do`
+     (explicit empty list, a silent no-op loop). Real constructs from
+     `multilib.eclass`/`python-utils-r1.eclass`.
+  4. **brush `d96b3a47`**: a multi-line `Word` (e.g. a `$( ... )` command
+     substitution spanning lines, itself containing a heredoc) got its
+     internal newlines reindented by whatever enclosing `write_indented` it
+     sat inside, corrupting the heredoc nested inside it. Required making
+     the printer's `SuppressIndent` guard reentrant.
+  5. **brush `d1359cfd`**: a compound command's trailing redirect (`{ cmd;
+     } 3>&1`, from `sys-libs/glibc`'s `run_locale_gen`) was rendered with no
+     separating space after the closer — `}3>&1` lexes as one broken token.
+  6. **portage-cli, `185af2e`**: `capture_environment` dumped bash's own
+     readonly/dynamic specials (`EUID`, `PIPESTATUS`, ...) unfiltered;
+     re-sourcing them later always errored `declare: cannot mutate readonly
+     variable` (noisy but non-fatal). Fixed by reusing the already-tested
+     `filter_declare_dump` (previously only applied to the Compile→Install
+     worker dump) at this call site too.
+  - **Methodology note**: bugs 3–5 were found by bisecting the *actual*
+    corrupted `environment.old` capture against real Gentoo eclass source,
+    not by guessing at synthetic repros — several hand-written minimal
+    cases parsed fine both with and without each fix, while the real file
+    kept failing, until the real source was used verbatim. See
+    `[[empirical-repro-over-synthetic]]` (Claude memory).
+  - **Live-verified end-to-end**, four full `crossdev --setup` sandbox runs
+    (each rebuilding the whole binutils→headers→glibc→gcc-stage1→glibc→
+    gcc-stage2 sequence): zero `syntax error`s once fixes 2–5 landed; zero
+    `declare: cannot mutate readonly variable` once fix 6 landed *and* a
+    package replaced against a freshly-captured (post-fix) blob — packages
+    still replacing a stale pre-fix blob in the same run keep the old noise,
+    expected, since stale blobs can't retroactively heal. Final run ended
+    with `>>> cross toolchain riscv64-unknown-linux-gnu ready`.
+  - brush commits `ea00a664`/`6645924c`/`d96b3a47`/`d1359cfd` pushed to
+    `mine/for-portage-repo`; `Cargo.toml`'s pinned rev bumped to `d1359cfd`
+    (`23c6fc0`) so non-`[patch]`-override builds pick them up too.
+  - **Still open, not fixed today**: `unmerge_slot_occupant`'s
+    `old_ebuild_path`-uses-virtual-category bug above — it's *why* every
+    cross-category replace hits the fallback at all, not just something
+    that made the fallback's own bugs visible. Fixing it would let a
+    cross-category replace use the real ebuild file directly, same as any
+    other package.
 - 🔴 **Re-derive "stage1 complete" — accepted 2026-07-09, next up.** From a
   clean `--jobs 1` run of the 4 stragglers (bzip2, xz-utils, gettext×2), not
   the VDB spot check (`session-status-2026-07-05-needs-review.md`).
