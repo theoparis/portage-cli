@@ -530,7 +530,7 @@ impl Adapter<'_> {
     /// The shared version filter: keywords, package.mask/unmask, license.
     /// `versions_for` and `slots_for` must agree, or the slot map would carry
     /// phantom slots for versions the solver can never select.
-    fn version_accepted(&self, cpv: &Cpv, cache: &portage_metadata::CacheEntry) -> bool {
+    pub(super) fn version_accepted(&self, cpv: &Cpv, cache: &portage_metadata::CacheEntry) -> bool {
         let meta = &cache.metadata;
         self.accept_keywords
             .accepts(&meta.keywords, cpv, Some(meta.slot.slot))

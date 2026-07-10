@@ -806,7 +806,19 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     // (emerge lists these `to /` alongside the ROOT runtime copy). Computed as a
     // post-solve walk over the finalized Target plan, not in the solver, to keep
     // the Target solve pristine (the dual-root aliasing balloons it otherwise).
-    let host_copies = host_copies::compute(&order, &data, &use_config, &package_use, &cross);
+    let host_copies_adapter = repo::Adapter {
+        data: &data,
+        accept_keywords: &accept_keywords,
+        package_mask: &package_mask,
+        package_unmask: &package_unmask,
+        accept_licenses: &accept_licenses,
+        use_config: &use_config,
+        package_use: &package_use,
+        force_mask: &force_mask,
+        installed_cpvs: solver_installed_cpvs,
+        autosolve_use: false,
+    };
+    let host_copies = host_copies::compute(&order, &host_copies_adapter, roots, &cross);
     if !host_copies.is_empty() {
         order.splice(0..0, host_copies);
     }

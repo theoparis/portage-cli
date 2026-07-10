@@ -992,23 +992,91 @@ stage3, no host contamination):
     this check should structurally never fire, making it a pure guard rail
     around a solver invariant rather than something doing its own
     independent work.
-  - **Next hypothesis to check (not yet verified)**: user's own guess —
-    "preflight doesn't differentiate between host and target" — worth
-    checking first. `check()`'s own DEPEND branch *does* switch on
-    `planned.merge_root` (Host → checked against `bdepend_avail`/BROOT,
-    Target → `depend_avail`), but BDEPEND is always checked against the
-    same `bdepend_avail` regardless of `merge_root`, and it's not yet
-    confirmed whether the two duplicate `Digest-HMAC`/`Digest-MD5`/
-    `Digest-SHA` occurrences differ in `merge_root` (one Host-routed, one
-    Target-routed — a legitimate "build once for host, once for target"
-    case whose *ordering/interleaving* is what's actually broken) or are
-    exact duplicates of the identical `(pkg, merge_root)` (a plain
-    dedup bug in `install_order` with nothing to do with Host/Target at
-    all). Check `full_order`'s two entries for `dev-perl/Digest-HMAC`
-    directly (their `MergeRoot` field) before going further into
-    `graph.rs`'s Tarjan/condensation ordering logic.
-  - Not fixed this session — next concrete blocker before the real riscv64
-    stage1/toolchain build can complete.
+  - **Confirmed root cause (2026-07-10, Fable deep-dive)**: the user's own
+    "host vs target" hypothesis is refuted — **both occurrences of
+    `dev-perl/Digest-HMAC-1.50.0` are `MergeRoot::Host`.** `install_order`
+    itself is innocent: instrumented `full_order` (its raw output) is
+    clean, deduplicated, and correctly ordered — `Digest-HMAC:0@host`
+    appears exactly once, correctly *after* its `Digest-MD5`/`Digest-SHA`
+    deps.
+    - The duplicates are injected **after** `install_order`, by
+      `host_copies::compute` (`portage-cli/src/query/depgraph/host_copies.rs`),
+      spliced onto the plan's front at `mod.rs:809-811`
+      (`order.splice(0..0, host_copies)`).
+    - `host_copies` exists for Tier-1 native-offset builds (`--root`/
+      `--prefix`, same arch): a post-solve closure walk that schedules
+      Host-arch build deps the host VDB lacks, kept *outside* the solver
+      to avoid a Tier-1 aliasing blowup (its own doc comment,
+      `host_copies.rs:11-17`).
+    - Its guard, `!cross.active || cross.is_cross_arch()`
+      (`host_copies.rs:66`), only excludes cross-*arch* contexts. But
+      `crossdev --setup`'s host-arch step (e.g. `cross-<T>/binutils`) runs
+      with `bypass_cross_root: true` — a same-arch offset cross context —
+      and `set_cross_active(cross.active)` (`mod.rs:402`) enables the
+      dual-root solver for *any* active cross context, not just cross-arch
+      ones. So the solver **also** emits `pkg:0@host` nodes for this case
+      (Block B in the captured plan) — and `host_copies::compute` runs too,
+      independently re-deriving the *same* closure (Block A), because it
+      has no way to see the solver's own `@host` entries in `target_order`
+      (its seeding/version-reuse filters only look at `MergeRoot::Target`,
+      `host_copies.rs:72-76,96-99`).
+    - Block A isn't just a redundant copy of Block B — it's independently
+      *wrong*: `resolve()`'s fallback (`host_copies.rs:144-159`) picks
+      `versions.iter().max_by(version)` over `RepoData`'s **unfiltered**
+      version list, ignoring keyword/mask acceptance despite the doc
+      comment's "newest accepted repo version" claim — hence `dev-vcs/
+      git-9999-r3` (a live, unkeyworded ebuild; the solver picked `2.53.0`)
+      and `Crypt-URandom-0.550.0` (solver picked `0.540.0`). Its
+      availability baseline is `vdb_cpvs(None)` — the *real* host VDB only
+      (`host_copies.rs:87`), never woven with the `--prefix` VDB the way
+      `Avail::initial_bdepend` is for `--prefix` — so it can't see Host
+      packages already merged into the prefix by an earlier run either.
+      And the BFS walk (`compute`'s `while let Some(cpn) = walk.queue
+      .pop_front()`, `host_copies.rs:105-114`) pushes a resolved package
+      onto `copies` *before* enqueueing that same package's own deps —
+      dependent-before-dependency, exactly the misordering preflight
+      caught (`Digest-HMAC@host` at position 4, its own `Digest-MD5`/
+      `Digest-SHA@host` deps at 6/7; `git-9999@host` at 5, its `asciidoc`
+      doc-BDEPEND at 8).
+    - So this was a real, live bug, not a false alarm: a genuine `--setup`
+      run would have attempted to build `dev-vcs/git-9999-r3` (nothing the
+      solver ever chose) and the wrong `Crypt-URandom` version, in an order
+      that would have failed regardless of preflight.
+  - **Fix, landed and live-verified.** `host_copies::compute`
+    (`portage-cli/src/query/depgraph/host_copies.rs`) now: (1) seeds its
+    `seen`/`avail` from the `MergeRoot::Host` entries already present in
+    `target_order`, so it never re-derives a closure the solver already
+    emitted; (2) walks recursively (`visit_unsatisfied`) and appends each
+    resolved copy to `copies` only *after* recursing into that copy's own
+    edges — deps-first, not BFS discovery order; (3) `resolve()`'s
+    fallback now filters candidate versions through `Adapter::
+    version_accepted` (keyword/mask/license), instead of a bare
+    `max_by(version)` over the raw unfiltered repo list; (4) the
+    availability baseline is now `Avail::initial_bdepend(roots)` (host VDB
+    + `--prefix` VDB weave) instead of `vdb_cpvs(None)` (real host VDB
+    only), reusing the exact same weave `preflight` relies on instead of a
+    second, incomplete copy of it. `compute`'s signature changed to take a
+    `&repo::Adapter` (already has `data`/`use_config`/`package_use` plus
+    the acceptance machinery) and `&Roots`, constructed at its one call
+    site in `mod.rs` the same way `_display_adapter` already is.
+    Verified: `cargo fmt --check`/`clippy -D warnings`/`cargo test
+    --workspace --exclude portage-bench` all clean; live-reran `em -p
+    --prefix /opt/xp --target riscv64-unknown-linux-gnu crossdev --setup`
+    in the `aarch64-20260618T101350Z` sandbox — `dev-vcs/git`, `Digest-
+    HMAC`, `Crypt-URandom` etc. each appear exactly once now, in correct
+    dependency order, at the solver's own chosen versions (`git-2.53.0`,
+    not `git-9999-r3`; `Crypt-URandom-0.540.0`, not `-0.550.0`); then ran
+    the **real** (non-`-p`) `--setup` — preflight now passes cleanly and
+    the run proceeds straight into actually emerging `git-2.53.0` (which
+    then hit an unrelated, pre-existing `libpcre2-8` subproject gap in
+    git's own meson build — a separate issue, not investigated here).
+  - **Separately flagged by the user**: this is now the *third* place doing
+    a close variant of "walk DEPEND/BDEPEND, track a growing per-root
+    availability set seeded from a VDB, decide what's missing" —
+    `preflight::check`/`bdepend_avail::Avail`, `host_copies::compute`, and
+    the solver's own dual-root `@host` aliasing in `portage-atom-pubgrub`.
+    Asked Fable for a consolidation plan to reduce this triplication; see
+    the new item below once that lands.
 - 🔴 **New: `em crossdev --setup -p`/`-a` should show the full depgraph
   (including preflight validation), not just the config-init preview.**
   User: "setup -p and -a should provide the depgraph not just the init

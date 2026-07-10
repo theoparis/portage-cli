@@ -199,16 +199,7 @@ fn use_dep_satisfied(ud: &UseDep, info: &UseInfo) -> bool {
     }
 }
 
-/// Installed `(cpv, main-slot)` pairs from a root's VDB. `None` = host
-/// `/var/db/pkg`. A missing/unreadable VDB yields an empty set.
-pub fn vdb_cpvs(root: Option<&Utf8Path>) -> Vec<(Cpv, Option<String>)> {
-    vdb_avail_entries(root)
-        .into_iter()
-        .map(|e| (e.cpv, e.slot))
-        .collect()
-}
-
-/// Like [`vdb_cpvs`], but also carries each installed package's USE + IUSE so
+/// Like [`Avail::from_cpvs`], but also carries each installed package's USE + IUSE so
 /// [`Avail::atom_satisfied`] can verify USE-dep brackets against them (see
 /// [`AvailEntry::use_info`]). `None` = host `/var/db/pkg`.
 fn vdb_avail_entries(root: Option<&Utf8Path>) -> Vec<AvailEntry> {
