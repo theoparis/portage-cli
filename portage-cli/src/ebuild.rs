@@ -826,10 +826,7 @@ async fn run_inner(
             (true, Some(wd), "merge" | "qmerge") => lock_merge_flock(wd).await,
             _ => None,
         };
-        run_one_phase(
-            &mut shell, &ebuild, &repo, &repo_root, phase, &work_root, root,
-        )
-        .await?;
+        run_one_phase(&mut shell, &ebuild, &repo, phase, &work_root, root).await?;
         drop(_merge_flock);
         drop(_merge_guard);
 
@@ -1069,7 +1066,6 @@ async fn run_one_phase(
     shell: &mut portage_repo::EbuildShell,
     ebuild: &Ebuild,
     repo: &Repository,
-    repo_root: &Utf8Path,
     phase: &str,
     work_root: &Utf8Path,
     root: &Utf8Path,
@@ -1077,7 +1073,7 @@ async fn run_one_phase(
     match phase {
         "fetch" => run_fetch(shell, ebuild, repo, work_root).await,
         "clean" => run_clean(work_root),
-        "merge" | "qmerge" => run_merge(shell, ebuild, repo_root, work_root, root).await,
+        "merge" | "qmerge" => run_merge(shell, ebuild, work_root, root).await,
         _ => shell
             .run_phase(ebuild, phase, work_root.as_std_path(), root.as_std_path())
             .await
@@ -1199,7 +1195,6 @@ async fn run_fetch(
 async fn run_merge(
     shell: &mut portage_repo::EbuildShell,
     ebuild: &Ebuild,
-    repo_root: &Utf8Path,
     work_root: &Utf8Path,
     root: &Utf8Path,
 ) -> Result<()> {
@@ -1265,7 +1260,6 @@ async fn run_merge(
         unmerge_slot_occupant(
             shell,
             old,
-            repo_root,
             work_root,
             root,
             &vdb,
@@ -1341,7 +1335,6 @@ async fn run_merge(
 async fn unmerge_slot_occupant(
     shell: &mut portage_repo::EbuildShell,
     old_pkg: &InstalledPackage,
-    repo_root: &Utf8Path,
     work_root: &Utf8Path,
     root: &Utf8Path,
     vdb: &Vdb,
@@ -1354,24 +1347,6 @@ async fn unmerge_slot_occupant(
     let old_pn = old_pkg.cpv().cpn.package.as_ref();
     let old_pvr = old_pkg.cpv().version.to_string();
     let old_pf = format!("{old_pn}-{old_pvr}");
-    let old_ebuild_path = repo_root
-        .join(old_pkg.category())
-        .join(old_pn)
-        .join(format!("{old_pf}.ebuild"));
-
-    // The VDB already has this package's authoritative Cpv (`old_pkg.cpv()`),
-    // which for a cross-derived package is the virtual identity
-    // (`cross-<tuple>/gcc-...`) it was registered under — `Ebuild::from_path`
-    // would instead re-derive CATEGORY from `old_ebuild_path`'s on-disk
-    // directory name, recovering the wrong (real, not virtual) category.
-    let old_ebuild = if old_ebuild_path.exists() {
-        Some(Ebuild::with_cpv(old_pkg.cpv().clone(), &old_ebuild_path))
-    } else {
-        eprintln!(
-            "warning: old ebuild not found at {old_ebuild_path}, skipping pkg_prerm/pkg_postrm"
-        );
-        None
-    };
 
     let old_work_root = work_root
         .parent()
@@ -1379,6 +1354,39 @@ async fn unmerge_slot_occupant(
         .join(format!("{old_pf}.old"));
     std::fs::create_dir_all(old_work_root.join("temp").as_std_path())
         .context("creating old work root")?;
+
+    // `run_merge` copies the ebuild into the VDB entry itself as `<PF>.ebuild`
+    // (see the `std::fs::copy` next to `write_environment_bz2`), so this is
+    // reliably present for any cleanly-merged package — no need to re-derive
+    // a repo-relative path from `old_pkg.category()`, which for a
+    // cross-derived package is the virtual alias identity
+    // (`cross-<tuple>`), never a real on-disk category: that always missed,
+    // forcing every cross-category replace through the `environment.bz2`
+    // fallback below unconditionally.
+    //
+    // Copied (not sourced in place) into `old_work_root`, which outlives
+    // `vdb.unregister()` below: pkg_postrm runs *after* unregister removes
+    // the VDB directory, so sourcing straight from `old_pkg.path()` would
+    // work for pkg_prerm but then fail for pkg_postrm with an I/O error once
+    // its source file is gone.
+    let old_ebuild_src = old_pkg.path().join(format!("{old_pf}.ebuild"));
+    let old_ebuild_path = old_work_root.join(format!("{old_pf}.ebuild"));
+
+    // The VDB already has this package's authoritative Cpv (`old_pkg.cpv()`),
+    // which for a cross-derived package is the virtual identity
+    // (`cross-<tuple>/gcc-...`) it was registered under — `Ebuild::from_path`
+    // would instead re-derive CATEGORY from `old_ebuild_path`'s on-disk
+    // directory name, recovering the wrong (real, not virtual) category.
+    let old_ebuild = if std::fs::copy(old_ebuild_src.as_std_path(), old_ebuild_path.as_std_path())
+        .is_ok()
+    {
+        Some(Ebuild::with_cpv(old_pkg.cpv().clone(), &old_ebuild_path))
+    } else {
+        eprintln!(
+            "warning: old ebuild not found at {old_ebuild_src}, skipping pkg_prerm/pkg_postrm"
+        );
+        None
+    };
 
     let old_sourced = match &old_ebuild {
         Some(e) => {
