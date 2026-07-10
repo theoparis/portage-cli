@@ -260,26 +260,15 @@ async fn emerge_atoms_inner(
     })
     .await?;
 
-    // Pretend: a non-zero resolver exit means USE/mask changes are needed (the
-    // change block was already printed). Surface it as a typed error so the
-    // normal Result flow yields exit 1 — `main` prints it quietly, and the
-    // staged driver stops at the step that needs the change, with step context.
-    if cli.pretend {
-        return match outcome.exit_code {
-            0 => Ok(()),
-            _ => Err(error::ConfigChangesNeeded.into()),
-        };
-    }
-
-    // em <atoms>: build and merge the resolved plan, in order.
+    // A non-zero resolver exit means USE/mask changes are needed (the change
+    // block was already printed). Surface it as a typed error so the normal
+    // Result flow yields exit 1 — `main` prints it quietly, and the staged
+    // driver stops at the step that needs the change, with step context.
+    // Checked before the `--pretend` return (not just for a real run) so
+    // `-p`/`-a` show the same signal a real run would hit.
     if outcome.exit_code != 0 {
         return Err(error::ConfigChangesNeeded.into());
     }
-    // --prefix additionally relocates distfiles and the build trees under the
-    // target (a self-contained tree); --root leaves them at the host defaults.
-    let relocate = roots.relocate().then(|| roots.merge_root());
-    let distdir = relocate.map(|p| p.join("var/cache/distfiles"));
-    let work_base = ebuild::default_work_base(relocate);
 
     if outcome.plan.is_empty() {
         return Ok(());
@@ -287,16 +276,31 @@ async fn emerge_atoms_inner(
 
     // Pre-flight: fail fast with a clear message if any plan entry's build
     // dependencies won't be present when it builds, rather than mid-build.
-    // Skipped under `--nodeps`: that flag already means "merge only the named
-    // atoms, no dependency expansion or verification" (matching emerge's own
-    // `--nodeps`) — the guard-rail would otherwise still block on real,
-    // unconditional BDEPEND that --nodeps deliberately opted out of checking
-    // (e.g. a genuine bootstrap cycle like gawk -> bison -> gettext ->
-    // libxml2 -> meson -> python -> gawk, which has no valid dependency
-    // order and must be seeded out of order somewhere).
+    // Run before the `--pretend` return (not just for a real run), so `-p`/
+    // `-a` surface whether the plan is preflight-clean, the same way the
+    // merge plan itself is already shown under `-p` — a preview could
+    // otherwise never reveal a plan that would fail preflight during a real
+    // run. Skipped under `--nodeps` regardless of `--pretend`: that flag
+    // already means "merge only the named atoms, no dependency expansion or
+    // verification" (matching emerge's own `--nodeps`) — the guard-rail
+    // would otherwise still block on real, unconditional BDEPEND that
+    // --nodeps deliberately opted out of checking (e.g. a genuine bootstrap
+    // cycle like gawk -> bison -> gettext -> libxml2 -> meson -> python ->
+    // gawk, which has no valid dependency order and must be seeded out of
+    // order somewhere).
     if !nodeps {
         preflight::check(&outcome.plan, &roots, &outcome.provided)?;
     }
+
+    if cli.pretend {
+        return Ok(());
+    }
+
+    // --prefix additionally relocates distfiles and the build trees under the
+    // target (a self-contained tree); --root leaves them at the host defaults.
+    let relocate = roots.relocate().then(|| roots.merge_root());
+    let distdir = relocate.map(|p| p.join("var/cache/distfiles"));
+    let work_base = ebuild::default_work_base(relocate);
 
     if cli.ask && !confirm_merge(outcome.plan.len())? {
         println!(">>> Quitting.");
