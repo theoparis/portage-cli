@@ -72,35 +72,17 @@ pub(super) struct HostInstalledEntry {
 /// package is rebuilt). Duplicates across slots of the same package are kept
 /// (each slot is a distinct `PortagePackage`).
 ///
-/// `roots.satisfaction_root(DepClass::Bdepend)` is BROOT, *not* unconditionally
-/// the bare system `/`: an unsatisfied Host BDEPEND builds into that BROOT
-/// (`entry_roots()` in `merge/mod.rs`), so satisfaction must be checked
-/// against that same root's VDB, or a package built there on one run is
-/// never recognized as already-satisfied on the next. Found live: jinja2
-/// rebuilt into BROOT for a `--target` stage3 was still reported unsatisfied
-/// because this read the bare host `/var/db/pkg` regardless — see
-/// todo/stage-build-shakeout.md #28/#30.
-///
-/// `--prefix` additionally weaves in the prefix's own VDB, read *after* the
-/// host's: `add_host_installed` (`provider/mod.rs`) does a plain
-/// `HashMap::insert` keyed by package, so whichever entry is appended last
-/// wins — matching "what is in the prefix drives" for a package present in
-/// both (`Cli::broot()` sends an unsatisfied BDEPEND to the prefix under
-/// `--prefix`, never to the real host).
+/// The root selection (BROOT, plus the prefix's own VDB under `--prefix`) is
+/// `crate::bdepend_avail::broot_vdb_packages` — shared with
+/// `Avail::initial_bdepend`, which the same #28/#30 bug (reading the bare
+/// host `/var/db/pkg` instead of the given BROOT) was once fixed in
+/// separately; see that function's doc comment for the full rationale.
+/// `add_host_installed` (`provider/mod.rs`) does a plain `HashMap::insert`
+/// keyed by package, so whichever entry is appended last wins — matching
+/// "what is in the prefix drives" for a package present in both (host
+/// entries come first, prefix second).
 pub(super) fn load_host_installed(roots: &crate::cli::Roots) -> Vec<HostInstalledEntry> {
-    let mut out =
-        load_host_installed_at(roots.satisfaction_root(portage_atom_pubgrub::DepClass::Bdepend));
-    if roots.is_overlay() {
-        out.extend(load_host_installed_at(roots.merge_root()));
-    }
-    out
-}
-
-fn load_host_installed_at(root: &camino::Utf8Path) -> Vec<HostInstalledEntry> {
-    let Ok(vdb) = Vdb::open(root.join("var/db/pkg")) else {
-        return Vec::new();
-    };
-    vdb.packages()
+    crate::bdepend_avail::broot_vdb_packages(roots)
         .into_iter()
         .map(|pkg| {
             let slot = pkg.slot_main().ok();

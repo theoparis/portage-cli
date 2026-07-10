@@ -6,7 +6,7 @@
 use camino::Utf8Path;
 use portage_atom::{Cpn, Cpv, Dep, DepEntry, UseDefault, UseDep, UseDepKind};
 use portage_atom_pubgrub::{DepClass, MergeRoot};
-use portage_vdb::Vdb;
+use portage_vdb::{InstalledPackage, Vdb};
 
 use crate::cli::Roots;
 
@@ -58,11 +58,7 @@ impl Avail {
     /// would only risk a false positive from an unrelated package
     /// coincidentally present at the merge target.
     pub fn initial_bdepend(roots: &Roots) -> Self {
-        let mut out = vdb_avail_entries(Some(roots.satisfaction_root(DepClass::Bdepend)));
-        if roots.is_overlay() {
-            out.extend(vdb_avail_entries(Some(roots.merge_root())));
-        }
-        Self(out)
+        Self(avail_entries_from(broot_vdb_packages(roots)))
     }
 
     /// `DEPEND` availability at the start of a run: `VDB(base) ∪ VDB(target)`.
@@ -210,8 +206,11 @@ fn vdb_avail_entries(root: Option<&Utf8Path>) -> Vec<AvailEntry> {
     let Ok(vdb) = vdb else {
         return Vec::new();
     };
-    vdb.packages()
-        .into_iter()
+    avail_entries_from(vdb.packages().collect_vec())
+}
+
+fn avail_entries_from(pkgs: Vec<InstalledPackage>) -> Vec<AvailEntry> {
+    pkgs.into_iter()
         .map(|p| AvailEntry {
             cpv: p.cpv().clone(),
             slot: p.slot_main().ok(),
@@ -221,6 +220,31 @@ fn vdb_avail_entries(root: Option<&Utf8Path>) -> Vec<AvailEntry> {
             }),
         })
         .collect()
+}
+
+/// Raw installed-package rows for the BROOT-availability seed shared by
+/// [`Avail::initial_bdepend`] and the solver's `host_installed` view
+/// (`query::depgraph::installed::load_host_installed`) — both need exactly
+/// the same root selection (the BDEPEND satisfaction root, plus the
+/// prefix's own VDB under `--prefix`, see `initial_bdepend`'s doc comment),
+/// only converting the resulting rows differently. Read once here; each
+/// caller converts to its own entry type and keeps its own merge semantics
+/// (union for `Avail`, last-wins insert for `add_host_installed`) — host
+/// entries come first, then prefix, so both behaviours fall out of
+/// iteration order.
+pub(crate) fn broot_vdb_packages(roots: &Roots) -> Vec<InstalledPackage> {
+    let mut out = vdb_packages_at(roots.satisfaction_root(DepClass::Bdepend));
+    if roots.is_overlay() {
+        out.extend(vdb_packages_at(roots.merge_root()));
+    }
+    out
+}
+
+fn vdb_packages_at(root: &Utf8Path) -> Vec<InstalledPackage> {
+    let Ok(vdb) = Vdb::open(root.join("var/db/pkg")) else {
+        return Vec::new();
+    };
+    vdb.packages().collect_vec()
 }
 
 /// The CPNs of every unsatisfied (non-blocker) atom in `entries`. An `AnyOf`
