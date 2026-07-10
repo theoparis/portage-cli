@@ -165,11 +165,7 @@ fn resolve(cpn: Cpn, ctx: &Ctx<'_>) -> Option<(Version, PortagePackage)> {
     if let Some((v, p)) = ctx.target_ver.get(&cpn) {
         return Some((v.clone(), p.clone()));
     }
-    let versions = ctx.adapter.data.versions.get(&cpn)?;
-    let (cpv, cache) = versions
-        .iter()
-        .filter(|(cpv, cache)| ctx.adapter.version_accepted(cpv, cache))
-        .max_by(|a, b| a.0.version.cmp(&b.0.version))?;
+    let (cpv, cache) = ctx.adapter.newest_accepted(cpn)?;
     let slot = &cache.metadata.slot.slot;
     let pkg = if slot.as_str() == "0" {
         PortagePackage::unslotted(cpn)

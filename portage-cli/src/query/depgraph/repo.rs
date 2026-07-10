@@ -538,6 +538,22 @@ impl Adapter<'_> {
             && self.license_ok(cpv, meta)
     }
 
+    /// The newest keyword/mask/license-accepted version of `cpn`, with its
+    /// cache entry. `None` when the CPN is absent from the repo or has no
+    /// accepted version. Centralizes the "newest accepted version" pick so a
+    /// caller can't drift from `version_accepted` the way `host_copies`'s own
+    /// inline copy once did (`todo/root-topology-refactor.md`, the
+    /// `dev-vcs/git-9999` selection bug).
+    pub(super) fn newest_accepted(&self, cpn: Cpn) -> Option<(&Cpv, &CacheEntry)> {
+        self.data
+            .versions
+            .get(&cpn)?
+            .iter()
+            .filter(|(cpv, cache)| self.version_accepted(cpv, cache))
+            .max_by(|a, b| a.0.version.cmp(&b.0.version))
+            .map(|(cpv, cache)| (cpv, cache))
+    }
+
     /// License acceptance for a version, evaluating any `use? ( … )` LICENSE
     /// branch against the version's effective USE (computed only when the
     /// expression actually has conditionals).
