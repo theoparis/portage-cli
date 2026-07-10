@@ -1195,6 +1195,23 @@ stage3, no host contamination):
     into yet; the `=cat/pkg-version **` pinned-atom code shape already
     exists in `host_arch_keyword_line` and just needs a caller once
     versioned `--ex-pkg` atoms are supported.
+  - **Live-verified the "host offers more" case too, and it's intended, not
+    a bug**: switched the sandbox host to `ACCEPT_KEYWORDS="~arm64"` and
+    really `em sys-devel/gcc`'d a new SLOT (`gcc-16.1.1_p20260613:16`,
+    alongside the existing `gcc:15`) — a subsequent `--init-target`
+    correctly re-pinned the alias to `gcc-16.1.1_p20260613:16` with no
+    manual step, exactly mirroring the host automatically. Side effect
+    caught along the way: `binutils` *also* moved, from our pinned
+    `2.46.0` to `2.46.1`, even though nothing about binutils itself
+    changed — because `binutils-2.46.1` carries only `~arm64` (no stable
+    arm64), and Portage's own per-package `accept_keywords` semantics are
+    additive onto the global decision, never exclusive (confirmed by
+    reading both ebuilds' `KEYWORDS=`): once the *host's* global policy
+    went testing, `2.46.1` became acceptable on its own, independent of our
+    pin. User's call once this was reported: **fine as-is** — "if the host
+    offers more it is fine to pick it." The mechanism is meant to track
+    what the host makes available, not to wall a package off from the
+    host's own policy; not a bug to fix.
 - 🔴 **Re-derive "stage1 complete" — accepted 2026-07-09, next up.** From a
   clean `--jobs 1` run of the 4 stragglers (bzip2, xz-utils, gettext×2), not
   the VDB spot check (`session-status-2026-07-05-needs-review.md`).
