@@ -1159,21 +1159,32 @@ stage3, no host contamination):
     the solver's own dual-root `@host` aliasing in `portage-atom-pubgrub`.
     Asked Fable for a consolidation plan to reduce this triplication; see
     the new item below once that lands.
-- 🔴 **New: `em crossdev --setup -p`/`-a` should show the full depgraph
-  (including preflight validation), not just the config-init preview.**
-  User: "setup -p and -a should provide the depgraph not just the init
-  info." Concretely: `emerge.rs`'s `if cli.pretend { return ...; }`
-  (line 267) returns before `preflight::check` (line 298) ever runs, so a
-  `-p` preview currently can never reveal a plan that would fail preflight
-  during a real run — exactly what made the false "the flags fix it" lead
-  above look plausible for a moment. Likely fix shape (not yet designed in
-  detail): run `preflight::check` — and surface its result — before the
-  pretend-early-return, not just after it, so `-p`/`-a` both show whether
-  the plan is preflight-clean as part of the normal preview output, the
-  same way the merge plan itself is already shown under `-p`. Needs care:
-  confirm this doesn't change behavior for the `--nodeps` case (which
-  currently skips `preflight::check` entirely, deliberately, per
-  `emerge.rs`'s existing comment).
+- ✅ **Fixed 2026-07-11, `d869c5c`: `em crossdev --setup -p`/`-a` now shows
+  the full depgraph (including preflight validation), not just the
+  config-init preview.** User: "setup -p and -a should provide the depgraph
+  not just the init info." `emerge.rs`'s `if cli.pretend { return ...; }`
+  used to return before `preflight::check` ever ran, so a `-p` preview
+  could never reveal a plan that would fail preflight during a real run —
+  exactly what made the false "the flags fix it" lead above look plausible
+  for a moment.
+  - **Fix**: unified the two separate exit-code checks (one per
+    pretend/non-pretend branch) into one that runs regardless of
+    `--pretend`, then moved `preflight::check` — still skipped under
+    `--nodeps`, that guard's condition untouched — before the `--pretend`
+    return. `relocate`/`distdir`/`work_base` and the `--ask` confirmation
+    stay after it: real-run-only work a preview never needed.
+  - **Verified**: full test suite (192, all passing), clippy/fmt clean, and
+    live-checked in the `aarch64-20260618T101350Z` sandbox — `crossdev
+    --setup -p` still shows the full 6-stage plan correctly (no
+    regression), and the `--nodeps`-guarded glibc-headers stage still shows
+    no preflight output under `-p`, confirming the `--nodeps` skip survived
+    the reorder untouched. The specific real preflight-failure scenario
+    this item was found from (the `dev-perl/Digest-HMAC` closure) no longer
+    reproduces in this sandbox — that closure was removed entirely by the
+    crossdev keyword-acceptance fix earlier this session — so the positive
+    "does `-p` now surface a real preflight failure" case rests on
+    `preflight::check`'s own logic being completely unchanged (only its
+    call site moved), not a fresh live repro of a failing case.
 - ✅ **Fixed 2026-07-10: crossdev's host-arch keyword acceptance was too
   eager — a blanket `**` silently preferred a live `9999` ebuild over a
   perfectly good dated snapshot.** User: "we should not auto-accept live
