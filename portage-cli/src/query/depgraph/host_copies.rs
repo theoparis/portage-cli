@@ -116,7 +116,7 @@ pub fn compute(
         .iter()
         .filter(|(p, _)| p.merge_root() == MergeRoot::Target)
     {
-        visit_unsatisfied(&ctx, &mut walk, pkg, ver, &mut copies);
+        visit_unsatisfied(&ctx, &mut walk, pkg, ver, &mut copies, true);
     }
     copies
 }
@@ -125,12 +125,26 @@ pub fn compute(
 /// edges, appending each resolved host copy to `copies` only *after* its own
 /// edges have been visited — deps-first, so a later preflight scan never
 /// sees a copy positioned before something it needs.
+///
+/// `top_level` is `true` only for the direct per-Target-package calls from
+/// [`compute`], not for edges discovered by recursing into an already-found
+/// copy's own edges. Under `cross.active`, the solver's own dual-root
+/// expansion (`append_unsatisfied_broot` in `portage-atom-pubgrub`) should
+/// already schedule a `MergeRoot::Host` node for every built Target
+/// package's unsatisfied BDEPEND/IDEPEND edge — so a *top-level* BDEPEND/
+/// IDEPEND gap reaching here means this walk's `Avail` view and the
+/// solver's own `host_installed` view disagreed, or a post-solve trim
+/// dropped a needed `@host` entry: worth surfacing, see
+/// `todo/dedup-availability-walks.md` Step 4. A copy's own recursed-into
+/// edges never trigger this: those packages never went through the solver,
+/// nothing else schedules their build deps.
 fn visit_unsatisfied(
     ctx: &Ctx<'_>,
     walk: &mut Walk,
     pkg: &PortagePackage,
     ver: &Version,
     copies: &mut Vec<(PortagePackage, Version)>,
+    top_level: bool,
 ) {
     let Some(deps) = effective_use::evaluated_deps(
         ctx.adapter.data,
@@ -141,16 +155,27 @@ fn visit_unsatisfied(
     ) else {
         return;
     };
-    for entries in [deps.depend(), deps.bdepend(), deps.idepend()] {
+    for (class, entries) in [
+        ("DEPEND", deps.depend()),
+        ("BDEPEND", deps.bdepend()),
+        ("IDEPEND", deps.idepend()),
+    ] {
         for cpn in unsatisfied_cpns(&entries, &walk.avail) {
             if !walk.seen.insert(cpn) {
                 continue;
+            }
+            if top_level && class != "DEPEND" {
+                eprintln!(
+                    "!!! host_copies: top-level {class} gap for {cpn} (from {pkg}) — \
+                     the solver should already cover this under cross.active; \
+                     see todo/dedup-availability-walks.md Step 4"
+                );
             }
             let Some((cver, cpkg)) = resolve(cpn, ctx) else {
                 continue;
             };
             let host_pkg = cpkg.at_merge_root(MergeRoot::Host);
-            visit_unsatisfied(ctx, walk, &host_pkg, &cver, copies);
+            visit_unsatisfied(ctx, walk, &host_pkg, &cver, copies, false);
             walk.avail.record_merge_bdepend(Cpv::new(cpn, cver.clone()));
             copies.push((host_pkg, cver));
         }
@@ -173,4 +198,119 @@ fn resolve(cpn: Cpn, ctx: &Ctx<'_>) -> Option<(Version, PortagePackage)> {
         PortagePackage::slotted(cpn, *slot)
     };
     Some((cpv.version.clone(), pkg))
+}
+
+#[cfg(test)]
+mod tests {
+    use portage_atom_pubgrub::UseConfig;
+    use portage_metadata::CacheEntry;
+    use portage_repo::{AcceptLicense, LicenseGroupRegistry};
+
+    use super::super::force_mask::ForceMask;
+    use super::super::repo::{self, AcceptKeywords, AcceptLicenses};
+    use super::super::root_aware;
+    use super::*;
+
+    fn accept_all_licenses() -> AcceptLicense {
+        AcceptLicense::from_tokens(&["*".into()], &LicenseGroupRegistry::default())
+    }
+
+    /// Build a `RepoData` from `(cpv, md5-cache-text)` pairs, one version per CPN
+    /// (mirrors the same-shaped helper in `bdepend_trim`'s and `depend_trim`'s
+    /// own test modules).
+    fn repo_from(entries: &[(&str, &str)]) -> repo::RepoData {
+        let mut versions: HashMap<Cpn, Vec<(Cpv, CacheEntry)>> = HashMap::new();
+        let mut cpns = Vec::new();
+        for (cpv_str, text) in entries {
+            let cpv = Cpv::parse(cpv_str).unwrap();
+            let entry = CacheEntry::parse(text).unwrap();
+            cpns.push(cpv.cpn);
+            versions.entry(cpv.cpn).or_default().push((cpv, entry));
+        }
+        repo::RepoData {
+            cpns,
+            versions,
+            repo_name: "test".into(),
+            repo_of: HashMap::new(),
+            real_cpn_of: HashMap::new(),
+        }
+    }
+
+    /// A `--prefix`-shaped `CrossContext`: `active` (target != host), not
+    /// cross-arch (no make.conf to read a foreign `CHOST` from) — the native
+    /// offset case `host_copies::compute` exists for.
+    fn native_offset_cross(roots: &Roots) -> CrossContext {
+        root_aware::detect(roots, roots.merge_root())
+    }
+
+    /// Regression test for the `5989eb1` fix (the `dev-perl/Digest-HMAC`
+    /// duplicate-plan-entry incident, `todo/root-topology-refactor.md`): when
+    /// the solver's own dual-root expansion has already scheduled a
+    /// `MergeRoot::Host` node for a CPN (simulating crossdev's host-arch
+    /// tools), `compute` must not re-derive or duplicate it. Before that fix
+    /// this produced a second, independently-versioned, anti-topologically
+    /// ordered copy; this pins the seeding behavior that stops it, which had
+    /// no test of its own — the fix was verified live only.
+    #[test]
+    fn does_not_duplicate_a_solver_seeded_host_entry() {
+        let data = repo_from(&[
+            (
+                "sys-apps/consumer-1.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nBDEPEND=dev-libs/tool\n",
+            ),
+            (
+                "dev-libs/tool-2.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+            ),
+        ]);
+
+        let consumer = (
+            PortagePackage::unslotted(Cpn::parse("sys-apps/consumer").unwrap()),
+            Version::parse("1.0").unwrap(),
+        );
+        // Stands in for the solver's own `append_unsatisfied_broot` output:
+        // this CPN's BDEPEND is already scheduled `@host`.
+        let tool_host = (
+            PortagePackage::unslotted(Cpn::parse("dev-libs/tool").unwrap())
+                .at_merge_root(MergeRoot::Host),
+            Version::parse("2.0").unwrap(),
+        );
+        let target_order = vec![consumer, tool_host];
+
+        let arch = gentoo_core::Arch::intern("amd64");
+        let accept_keywords = AcceptKeywords::from_global(&arch, &["amd64"]);
+        let use_config = UseConfig::new();
+        let force_mask = ForceMask::default();
+        let installed_cpvs = std::collections::HashSet::new();
+        let adapter = Adapter {
+            data: &data,
+            accept_keywords: &accept_keywords,
+            package_mask: &[],
+            package_unmask: &[],
+            accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
+            use_config: &use_config,
+            package_use: &[],
+            force_mask: &force_mask,
+            installed_cpvs: &installed_cpvs,
+            autosolve_use: false,
+        };
+
+        let host = tempfile::tempdir().unwrap();
+        let prefix = tempfile::tempdir().unwrap();
+        let roots = Roots::for_test_overlay(
+            host.path().to_str().unwrap(),
+            prefix.path().to_str().unwrap(),
+        );
+        let cross = native_offset_cross(&roots);
+        assert!(
+            cross.active && !cross.is_cross_arch(),
+            "test setup must land in the native-offset case compute() exists for"
+        );
+
+        let copies = compute(&target_order, &adapter, &roots, &cross);
+        assert!(
+            copies.is_empty(),
+            "must not re-derive a CPN the solver already scheduled @host: {copies:?}"
+        );
+    }
 }
