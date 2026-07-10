@@ -29,8 +29,11 @@ is derived on the fly, how root/config resolution works across `--target`/
 - **Two package classes live in the same category.** `binutils`/`gcc`/
   `clang-crossdev-wrappers` (and any `--ex-pkg` extra) are **host-arch**
   tools: they run on the build machine and produce code for the target, so
-  they install onto the host/prefix, not the sysroot, and get unconditional
-  keyword acceptance (`**`) since no arch check makes sense for them.
+  they install onto the host/prefix, not the sysroot. Their keyword
+  acceptance mirrors what the *host* would already pick for the real
+  package (installed version, or the newest available one bounded to its
+  own release branch) — not a blanket accept-anything, which used to let a
+  package's live `9999` ebuild win over a perfectly good dated snapshot.
   `linux-headers`/the libc/the LLVM runtimes are **target-arch**: they
   install into the sysroot and get target-ABI env.
 - **The sysroot** is `<EROOT>/usr/<tuple>` — `/usr/<tuple>` for a bare/

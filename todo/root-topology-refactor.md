@@ -1134,6 +1134,67 @@ stage3, no host contamination):
   confirm this doesn't change behavior for the `--nodeps` case (which
   currently skips `preflight::check` entirely, deliberately, per
   `emerge.rs`'s existing comment).
+- ✅ **Fixed 2026-07-10: crossdev's host-arch keyword acceptance was too
+  eager — a blanket `**` silently preferred a live `9999` ebuild over a
+  perfectly good dated snapshot.** User: "we should not auto-accept live
+  ebuilds... right now our auto-unmasking is too eager." This turned out to
+  be the *actual* root cause visible in the plan (`cross-riscv64-unknown-
+  linux-gnu/binutils-9999`/`gcc-17.0.9999` in every earlier capture this
+  session) — not `host_copies`, whose own fallback was already fixed
+  (`5989eb1`) and correctly picks `dev-vcs/git-2.53.0`. The `**` was written
+  unconditionally for every host-arch cross-category package (base
+  toolchain + `--ex-pkg` extras) in `crossdev/mod.rs`'s `cross_env_entries`.
+  - **Checked against real crossdev (`/usr/bin/crossdev`'s own
+    `set_keywords()`), not assumed**: its default (no explicit version
+    requested) writes `${TARCH} ~${TARCH}` — the *target's* arch, stable +
+    testing — never `**`; `**` only appears in the explicit-version branch,
+    paired with an explicit `package.mask >=pkg-9999` unless the version
+    requested *is* `9999`. Our own comment claiming "matching how real
+    crossdev packages are treated" was wrong.
+  - **Checked whether narrowing to `{target_arch} ~{target_arch}` would
+    actually work here, not assumed**: yes — `sys-devel/binutils-2.46.0` and
+    `sys-devel/gcc-16.1.1_p20260613` both carry a real `~riscv` keyword in
+    this repo snapshot, so riscv crossdev wouldn't have been stranded.
+  - **But a keyword-only fix would have broken `sys-devel/rust-std`** — our
+    own `--ex-pkg` doc example. Every version ships `#KEYWORDS="" #nowarn`:
+    permanently unkeyworded by Gentoo convention (a generated, arch-agnostic
+    artifact), not "live" in the churning-VCS sense. "Unkeyworded" and
+    "live" are different properties and need different handling.
+  - **User's design, implemented as given**: for an unversioned atom (the
+    only kind `--ex-pkg`/the base toolchain support today), look at what the
+    *host* already has installed for the real package and mirror that — pin
+    exactly to the installed version if its ebuild still exists in the
+    tree, else bound to that version's own release branch
+    (`<cat/pkg-{major}.{minor}.9999[:slot]`, which — matching the user's own
+    `<sys-devel/gcc-16.2.9999:16` example — includes every dated snapshot on
+    the branch, since `X.Y.Z_pDATE` sorts below `X.Y.9999`, but excludes the
+    branch's own live/rolling ebuild and any newer branch/slot). Nothing
+    installed at all (e.g. `rust-std`, never a host package): bound to the
+    newest available version's own branch instead. `**` still used, but
+    scoped to one version/branch, not the whole category.
+  - **Landed**: `host_installed_versions`/`ebuild_versions`/`branch_bound`/
+    `host_arch_keyword_line` in `crossdev/mod.rs`, wired into both the base
+    host-arch loop and the `--ex-pkg` extras loop in `cross_env_entries`.
+    Six new unit tests (installed+available → pinned; installed+gone →
+    branch-bounded; nothing installed+available → newest branch-bounded;
+    nothing at all → blanket fallback; `branch_bound`; `ebuild_versions`).
+  - **Live-verified, with a striking side effect**: the entire `dev-vcs/
+    git`/`app-text/asciidoc`/perl-`Digest-HMAC` closure that drove this
+    whole investigation (the original preflight failure, the `host_copies`
+    duplicate-entry bug, all of it) **disappears from the plan entirely**
+    once `binutils` resolves to the dated `2.46.0` instead of the live
+    `9999` — that whole closure was purely an artifact of the live ebuild's
+    own `doc` USE default pulling in `asciidoc`; the dated snapshot doesn't
+    have it (`USE="... -doc ..."`). Step 1 of the bootstrap plan is now a
+    single, clean `binutils` merge. Real (non-`-p`) `--setup` re-verified:
+    still passes preflight, proceeds straight into building.
+  - Deferred, explicitly out of scope for today: real crossdev's
+    explicit-version request syntax (`--ex-pkg pkg:version` pinning exactly,
+    matching the user's third design bullet) — `--ex-pkg` only accepts
+    unversioned `CATEGORY/PN` atoms today, so there's nothing to wire this
+    into yet; the `=cat/pkg-version **` pinned-atom code shape already
+    exists in `host_arch_keyword_line` and just needs a caller once
+    versioned `--ex-pkg` atoms are supported.
 - 🔴 **Re-derive "stage1 complete" — accepted 2026-07-09, next up.** From a
   clean `--jobs 1` run of the 4 stragglers (bzip2, xz-utils, gettext×2), not
   the VDB spot check (`session-status-2026-07-05-needs-review.md`).

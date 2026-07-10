@@ -56,8 +56,10 @@ use std::io::Write;
 
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
-use portage_atom::Cpn;
+use portage_atom::{Cpn, Pf, Version};
+use portage_atom_pubgrub::DepClass;
 use portage_repo::{MakeConf, ProfileStack, ReposConf, Repository};
+use portage_vdb::Vdb;
 
 use crate::cli::{Cli, CrossdevArgs, DepgraphFlags, MergeFlags};
 use crate::style::{C_LABEL, C_PKG};
@@ -1082,6 +1084,120 @@ fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path, outer_root: &Utf8Pat
     )
 }
 
+/// The host's own installed `(version, slot)` pairs for `cat/pkg`, newest
+/// first — queried against the build host's own BROOT
+/// (`roots.satisfaction_root(DepClass::Bdepend)`), the same root a Host-arch
+/// merge actually lands on and is checked against everywhere else this
+/// session (`preflight`/`bdepend_avail`/`host_copies`).
+fn host_installed_versions(
+    roots: &crate::cli::Roots,
+    cat: &str,
+    pkg: &str,
+) -> Vec<(Version, String)> {
+    let root = roots.satisfaction_root(DepClass::Bdepend);
+    let Ok(vdb) = Vdb::open(root.join("var/db/pkg")) else {
+        return Vec::new();
+    };
+    let Some(category) = vdb.category(cat) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(Version, String)> = category
+        .packages()
+        .collect_vec()
+        .into_iter()
+        .filter(|p| p.cpn().package.as_str() == pkg)
+        .filter_map(|p| Some((p.cpv().version.clone(), p.slot_main().ok()?)))
+        .collect();
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out
+}
+
+/// Every version `cat/pkg` has an ebuild for in `gentoo` (the on-disk
+/// `::gentoo` checkout), parsed from the ebuild filenames — no md5-cache
+/// read needed, matching `alias_repo_conf_entry`'s own lightweight
+/// filesystem-only existence check.
+fn ebuild_versions(gentoo: &Utf8Path, cat: &str, pkg: &str) -> Vec<Version> {
+    let dir = gentoo.join(cat).join(pkg);
+    let Ok(read_dir) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    read_dir
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name = name.to_str()?.strip_suffix(".ebuild")?;
+            let pf = Pf::parse(name).ok()?;
+            (pf.package.as_str() == pkg).then_some(pf.version)
+        })
+        .collect()
+}
+
+/// `{major}.{minor}.9999` from `version`'s first two numeric components —
+/// the upper bound of its release branch (see [`host_arch_keyword_line`]):
+/// includes every dated snapshot on that branch (`X.Y.Z_pDATE` sorts below
+/// `X.Y.9999`) but excludes the branch's own live/rolling `X.Y.9999` ebuild
+/// and any newer branch or slot.
+fn branch_bound(version: &Version) -> String {
+    let major = version.numbers.first().copied().unwrap_or(0);
+    let minor = version.numbers.get(1).copied().unwrap_or(0);
+    format!("{major}.{minor}.9999")
+}
+
+/// The `package.accept_keywords` line for a host-arch cross-category package
+/// (`{category}/{pkg}`, aliasing the real `{real_cat}/{real_pkg}`): mirror
+/// what the *host* would already select for the real package instead of
+/// blanket-accepting the whole category regardless of version — which
+/// silently preferred live `9999` ebuilds over perfectly good dated
+/// snapshots/releases (`todo/root-topology-refactor.md`, the `dev-vcs/git`
+/// finding, and this same overreach for the toolchain packages themselves —
+/// confirmed live: `sys-devel/binutils`/`sys-devel/gcc` both carry real
+/// `~riscv` keywords on recent non-live snapshots in this environment, so
+/// a blanket `**` was never actually necessary to unblock riscv crossdev).
+///
+/// - Host already has a version of the real package installed, and its
+///   exact ebuild still exists in the tree: pin exactly to that version —
+///   the cross-alias tracks the host's own installed toolchain version, so
+///   host and cross compiler don't silently drift apart.
+/// - Installed but that exact ebuild is gone from the tree (or nothing is
+///   installed at all): bound to the release branch of the reference
+///   version (the installed one, or the newest available if none is
+///   installed) via [`branch_bound`] — still `**` within that bound, since
+///   some packages (`sys-devel/rust-std`) are permanently unkeyworded by
+///   Gentoo convention, not "live" in the churning sense, and still need it.
+fn host_arch_keyword_line(
+    roots: &crate::cli::Roots,
+    gentoo: &Utf8Path,
+    category: &str,
+    pkg: &str,
+    real_cat: &str,
+    real_pkg: &str,
+) -> String {
+    let available = ebuild_versions(gentoo, real_cat, real_pkg);
+    let installed = host_installed_versions(roots, real_cat, real_pkg);
+
+    if let Some((version, slot)) = installed.first() {
+        let slot_suffix = (slot != "0")
+            .then(|| format!(":{slot}"))
+            .unwrap_or_default();
+        if available.contains(version) {
+            return format!("={category}/{pkg}-{version}{slot_suffix} **\n");
+        }
+        let bound = branch_bound(version);
+        return format!("<{category}/{pkg}-{bound}{slot_suffix} **\n");
+    }
+
+    match available.iter().max() {
+        Some(newest) => {
+            let bound = branch_bound(newest);
+            format!("<{category}/{pkg}-{bound} **\n")
+        }
+        // No ebuild at all — unreachable in practice (existence is already
+        // validated up front by `alias_repo_conf_entry`), but a blanket `**`
+        // is a safe, honest fallback rather than silently writing nothing.
+        None => format!("{category}/{pkg} **\n"),
+    }
+}
+
 /// Write the cross packages' `package.env` + `env/<category>/<pkg>.conf` into the
 /// config root's `etc/portage` (where the host-side `cross-*` builds read it).
 ///
@@ -1144,17 +1260,21 @@ fn cross_env_entries(
     // `cross-<tuple>` category. Their own keyword acceptance must never
     // depend on whichever arch happens to be active for a given invocation
     // (the sysroot's target arch, under `--target`, vs the bare host arch
-    // otherwise) -- found live 2026-07-09: a newer `cross-<tuple>/gcc`
+    // otherwise) — found live 2026-07-09: a newer `cross-<tuple>/gcc`
     // resolved fine under `--target` (the generated sysroot make.conf's own
     // `ACCEPT_KEYWORDS="{arch} ~{arch}"` happens to cover it) but failed
     // outright without `--target` (the bare host's real, normally
-    // stable-only ACCEPT_KEYWORDS does not). `**` ("accept regardless of
-    // keywords" -- portage's own escape hatch, `AcceptToken::Any` in
-    // `query/depgraph/repo.rs`) is the correct fix: these tools always run
-    // on the host, so no keyword/arch check makes sense for them at all,
-    // matching how real crossdev packages are treated.
+    // stable-only ACCEPT_KEYWORDS does not). A blanket `**` "fixed" that but
+    // overshot: it also silently preferred each package's live `9999` ebuild
+    // over a perfectly good dated snapshot, whenever the solver's own
+    // dual-root expansion or the toolchain packages' own root-atom
+    // resolution had to pick a version at all (`todo/root-topology-
+    // refactor.md`, "auto-unmasking is too eager"). `host_arch_keyword_line`
+    // mirrors what the host would already select for the real package
+    // instead — pinned to its installed version, or bounded to its release
+    // branch — using `**` only within that scope, not the whole category.
     let mut keyword_entries = String::new();
-    for (_, pkg, arch) in target.packages() {
+    for (real_cat, pkg, arch) in target.packages() {
         let body = format!(
             "{header}{}",
             multilib::env_block(&host_ml, &target_ml, arch.is_target())
@@ -1165,13 +1285,19 @@ fn cross_env_entries(
         });
         mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
         if arch == target::PackageArch::Host {
-            keyword_entries.push_str(&format!("{category}/{pkg} **\n"));
+            keyword_entries.push_str(&host_arch_keyword_line(
+                &base, gentoo, &category, pkg, real_cat, pkg,
+            ));
         }
     }
     // `--ex-pkg`/`--ex-gdb` extras: always the host-ABI branch, matching real
     // crossdev's `for_each_extra_pkg set_portage X` (set_env's `case ${l} in
     // K|L) target ;; *) host` always falls to the host branch for `l=X`) —
-    // and always get `**`, same reasoning as the base host-arch tools above.
+    // and get the same host-mirrored keyword line as the base host-arch
+    // tools above (e.g. `sys-devel/rust-std`, permanently unkeyworded by
+    // Gentoo convention — not live in the churning sense — still resolves,
+    // since nothing installed on the host falls through to the newest
+    // available version, branch-bounded).
     for cpn in extras {
         let pkg = cpn.package;
         let body = format!(
@@ -1183,7 +1309,14 @@ fn cross_env_entries(
             desired: body,
         });
         mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
-        keyword_entries.push_str(&format!("{category}/{pkg} **\n"));
+        keyword_entries.push_str(&host_arch_keyword_line(
+            &base,
+            gentoo,
+            &category,
+            pkg.as_str(),
+            cpn.category.as_str(),
+            pkg.as_str(),
+        ));
     }
 
     entries.push(config_plan::ConfigEntry::File {
@@ -1409,6 +1542,169 @@ mod tests {
         // (see todo/root-topology-refactor.md), same as the rest of
         // `write_cross_env`'s multilib-dependent behaviour, which has no
         // unit test either for the same reason.
+    }
+
+    #[test]
+    fn branch_bound_uses_major_minor() {
+        assert_eq!(
+            branch_bound(&Version::parse("16.2.1_p20260523").unwrap()),
+            "16.2.9999"
+        );
+        // Single-component version: minor defaults to 0.
+        assert_eq!(branch_bound(&Version::parse("9").unwrap()), "9.0.9999");
+    }
+
+    fn write_ebuild(gentoo: &camino::Utf8Path, cat: &str, pkg: &str, version: &str) {
+        let dir = gentoo.join(cat).join(pkg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{pkg}-{version}.ebuild")), "").unwrap();
+    }
+
+    #[test]
+    fn ebuild_versions_lists_versions_from_filenames() {
+        let dir = tempfile::tempdir().unwrap();
+        let gentoo = camino::Utf8Path::from_path(dir.path())
+            .unwrap()
+            .join("gentoo");
+        write_ebuild(&gentoo, "sys-devel", "gcc", "15.2.1_p20260214");
+        write_ebuild(&gentoo, "sys-devel", "gcc", "16.2.9999");
+
+        let mut versions = ebuild_versions(&gentoo, "sys-devel", "gcc");
+        versions.sort();
+        assert_eq!(
+            versions,
+            vec![
+                Version::parse("15.2.1_p20260214").unwrap(),
+                Version::parse("16.2.9999").unwrap(),
+            ]
+        );
+    }
+
+    fn write_vdb_entry(root: &camino::Utf8Path, cat: &str, pf: &str, slot: &str) {
+        let dir = root.join("var/db/pkg").join(cat).join(pf);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("EAPI"), "8").unwrap();
+        std::fs::write(dir.join("SLOT"), slot).unwrap();
+        std::fs::write(dir.join("CONTENTS"), "").unwrap();
+        std::fs::write(dir.join("USE"), "").unwrap();
+    }
+
+    #[test]
+    fn host_installed_versions_reads_the_given_broot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        write_vdb_entry(root, "sys-devel", "binutils-2.46.0", "2.46");
+        let roots = crate::cli::Roots::for_test(root.as_str());
+
+        let installed = host_installed_versions(&roots, "sys-devel", "binutils");
+        assert_eq!(
+            installed,
+            vec![(Version::parse("2.46.0").unwrap(), "2.46".to_owned())]
+        );
+    }
+
+    /// Nothing installed, no ebuilds at all: the safe fallback is a blanket
+    /// `**` rather than silently writing nothing (existence is otherwise
+    /// already validated up front by `alias_repo_conf_entry`).
+    #[test]
+    fn host_arch_keyword_line_falls_back_to_blanket_when_nothing_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let gentoo = root.join("gentoo");
+        let roots = crate::cli::Roots::for_test(root.as_str());
+
+        let line = host_arch_keyword_line(
+            &roots,
+            &gentoo,
+            "cross-riscv64-unknown-linux-gnu",
+            "gcc",
+            "sys-devel",
+            "gcc",
+        );
+        assert_eq!(line, "cross-riscv64-unknown-linux-gnu/gcc **\n");
+    }
+
+    /// Nothing installed, but ebuilds exist: bound to the newest available
+    /// version's branch — this is the `sys-devel/rust-std` shape (never
+    /// installed on the host, permanently unkeyworded, still needs `**`
+    /// scoped to its own branch rather than a blanket category-wide grant).
+    #[test]
+    fn host_arch_keyword_line_bounds_to_newest_when_nothing_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let gentoo = root.join("gentoo");
+        write_ebuild(&gentoo, "sys-devel", "rust-std", "1.94.0");
+        write_ebuild(&gentoo, "sys-devel", "rust-std", "1.95.0");
+        let roots = crate::cli::Roots::for_test(root.as_str());
+
+        let line = host_arch_keyword_line(
+            &roots,
+            &gentoo,
+            "cross-riscv64-unknown-linux-gnu",
+            "rust-std",
+            "sys-devel",
+            "rust-std",
+        );
+        assert_eq!(
+            line,
+            "<cross-riscv64-unknown-linux-gnu/rust-std-1.95.9999 **\n"
+        );
+    }
+
+    /// Installed, and that exact version's ebuild still exists in the tree:
+    /// pin exactly to it (host and cross-compiler track the same version).
+    #[test]
+    fn host_arch_keyword_line_pins_the_installed_version_when_still_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let gentoo = root.join("gentoo");
+        write_ebuild(&gentoo, "sys-devel", "binutils", "2.45.1");
+        write_ebuild(&gentoo, "sys-devel", "binutils", "2.46.0");
+        write_vdb_entry(root, "sys-devel", "binutils-2.46.0", "2.46");
+        let roots = crate::cli::Roots::for_test(root.as_str());
+
+        let line = host_arch_keyword_line(
+            &roots,
+            &gentoo,
+            "cross-riscv64-unknown-linux-gnu",
+            "binutils",
+            "sys-devel",
+            "binutils",
+        );
+        assert_eq!(
+            line,
+            "=cross-riscv64-unknown-linux-gnu/binutils-2.46.0:2.46 **\n"
+        );
+    }
+
+    /// Installed, but that exact version's ebuild is gone from the tree
+    /// (e.g. cleaned up after a version bump): bound to the installed
+    /// version's own branch instead of silently jumping to whatever's
+    /// newest (which could be a different, newer branch/slot).
+    #[test]
+    fn host_arch_keyword_line_bounds_to_installed_branch_when_exact_version_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let gentoo = root.join("gentoo");
+        // The installed version itself is no longer in the tree; a newer
+        // slot (17) is present but must not be silently preferred.
+        write_ebuild(&gentoo, "sys-devel", "gcc", "16.2.1_p20260523");
+        write_ebuild(&gentoo, "sys-devel", "gcc", "17.0.9999");
+        write_vdb_entry(root, "sys-devel", "gcc-16.1.0", "16");
+        let roots = crate::cli::Roots::for_test(root.as_str());
+
+        let line = host_arch_keyword_line(
+            &roots,
+            &gentoo,
+            "cross-riscv64-unknown-linux-gnu",
+            "gcc",
+            "sys-devel",
+            "gcc",
+        );
+        assert_eq!(
+            line,
+            "<cross-riscv64-unknown-linux-gnu/gcc-16.1.9999:16 **\n"
+        );
     }
 
     /// `write_alias_repo_conf` emits a `Location::Alias` repos.conf entry that
