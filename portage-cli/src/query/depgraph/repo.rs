@@ -511,7 +511,7 @@ fn apply_iuse_defaults(
 ) {
     use portage_atom_pubgrub::UseFlagState;
     for iu in &m.iuse {
-        let flag = iu.interned();
+        let flag = Interned::from(iu);
         if cfg.get_opt(flag).is_none()
             && let Some(def) = iu.default
         {
@@ -747,11 +747,16 @@ impl PackageRepository for Adapter<'_> {
                         let repo = Some(Interned::<DefaultInterner>::intern(repo_name_of(
                             self.data, cpv,
                         )));
-                        let iuse: Vec<Interned<DefaultInterner>> = meta
-                            .iuse
-                            .iter()
-                            .map(|iu| Interned::intern(iu.name()))
-                            .collect();
+                        // `Interned::from(iu)` wraps the key `CacheEntry::parse`
+                        // already produced (same `DefaultInterner`) — zero-cost.
+                        // `Interned::intern(iu.name())` would instead resolve that
+                        // key back to a `&str` just to look the same string up
+                        // again, paying a full interner resolve+get_or_intern
+                        // round trip (each pinning an epoch handle on the
+                        // lock-free backend) for a result identical to the key
+                        // already in hand.
+                        let iuse: Vec<Interned<DefaultInterner>> =
+                            meta.iuse.iter().map(Interned::from).collect();
                         let iuse_defaults: HashMap<Interned<DefaultInterner>, IUseDefault> = meta
                             .iuse
                             .iter()
@@ -765,7 +770,7 @@ impl PackageRepository for Adapter<'_> {
                                             IUseDefault::Disabled
                                         }
                                     };
-                                    (Interned::intern(iu.name()), val)
+                                    (Interned::from(iu), val)
                                 })
                             })
                             .collect();

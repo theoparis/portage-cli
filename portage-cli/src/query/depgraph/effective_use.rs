@@ -17,7 +17,7 @@ pub(super) fn iuse_defaults(cache: &CacheEntry) -> HashMap<Interned<DefaultInter
         .filter_map(|iuse| {
             iuse.default.map(|def| {
                 (
-                    iuse.interned(),
+                    iuse.into(),
                     match def {
                         MetaIUseDefault::Enabled => IUseDefault::Enabled,
                         MetaIUseDefault::Disabled => IUseDefault::Disabled,

@@ -121,7 +121,7 @@ mod pubgrub_solver {
                 && let Some((_, cache)) = entries.iter().find(|(c, _)| c.version == cpv.version)
             {
                 for iu in &cache.metadata.iuse {
-                    let flag = Interned::intern(iu.name());
+                    let flag = Interned::from(iu);
                     if cfg.get_opt(flag).is_none()
                         && let Some(def) = iu.default
                     {
@@ -161,7 +161,7 @@ mod pubgrub_solver {
                             let iuse: Vec<Interned<DefaultInterner>> = meta
                                 .iuse
                                 .iter()
-                                .map(|iu| Interned::intern(iu.name()))
+                                .map(Interned::from)
                                 .collect();
                             let iuse_defaults: HashMap<Interned<DefaultInterner>, IUseDefault> =
                                 meta.iuse
@@ -176,7 +176,7 @@ mod pubgrub_solver {
                                                     IUseDefault::Disabled
                                                 }
                                             };
-                                            (Interned::intern(iu.name()), val)
+                                            (Interned::from(iu), val)
                                         })
                                     })
                                     .collect();
@@ -428,7 +428,7 @@ mod resolvo_solver {
                             let use_flags: HashSet<Interned<DefaultInterner>> = meta
                                 .iuse
                                 .iter()
-                                .map(|iu| Interned::intern(iu.name()))
+                                .map(Interned::from)
                                 .collect();
                             PackageMetadata {
                                 cpv: cpv.clone(),

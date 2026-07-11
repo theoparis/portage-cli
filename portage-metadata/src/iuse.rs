@@ -94,12 +94,18 @@ impl<I: Interner> IUse<I> {
     }
 }
 
-impl IUse<DefaultInterner> {
-    /// The flag as an [`Interned`] handle (wraps the key stored at parse time).
-    pub fn interned(&self) -> Interned<DefaultInterner> {
-        Interned::from_key(self.name)
+/// The flag as an [`Interned`] handle — wraps the key stored at parse time,
+/// not a fresh intern lookup. Prefer `Interned::from(iu)`/`iu.into()` over
+/// `Interned::intern(iu.name())`: the latter round-trips through `resolve`
+/// (key → `&str`) and `get_or_intern` (`&str` → key) to arrive back at the
+/// same key, paying two interner lookups for a value already in hand.
+impl From<&IUse<DefaultInterner>> for Interned<DefaultInterner> {
+    fn from(iu: &IUse<DefaultInterner>) -> Self {
+        Interned::from_key(iu.name)
     }
+}
 
+impl IUse<DefaultInterner> {
     /// Parse a space-separated `IUSE` line into a list of flags.
     ///
     /// # Examples
