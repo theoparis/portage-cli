@@ -188,6 +188,27 @@ But the *inputs* — "what is installed at BROOT, with the prefix weave" —
 should come from one loader (Step 1); that is where the same bug was fixed
 twice.
 
+## Update 2026-07-11: the performance motivation is now handled separately
+
+A user-flagged performance regression (`em -p www-client/firefox` ~1.73× →
+~2.1s, only ~1.7× faster than `emerge -p`) traced back to eager USE/IUSE
+reads across exactly the duplicated scans this file describes (`Avail::
+initial_bdepend`/`initial_depend`, `load_target_installed`/
+`load_host_installed`). Fixed *without* doing Step 1's structural loader
+unification: `portage-vdb/src/field_cache.rs` adds a process-wide,
+path-keyed cache underneath `InstalledPackage::read_field`, so redundant
+reads across independent scans of the same VDB root become free regardless
+of whether the loaders themselves are unified. `em -p firefox` is back to
+~1.15s (3.17× faster than emerge). Full writeup:
+`todo/root-topology-refactor.md`'s "Performance regression" entry
+(2026-07-11).
+
+This resolves Step 1's *performance* motivation. Step 1's other motivation —
+eliminating "the same bug fixed twice" drift risk from having the BROOT+
+prefix weave logic implemented independently in two places — is unaffected
+and still worth doing; the cache is a transparent perf layer underneath both
+copies, not a replacement for unifying them.
+
 ## Staged plan
 
 Each step is independently landable. Baseline verification for every step:

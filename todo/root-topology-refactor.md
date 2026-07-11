@@ -1185,6 +1185,148 @@ stage3, no host contamination):
     "does `-p` now surface a real preflight failure" case rests on
     `preflight::check`'s own logic being completely unchanged (only its
     call site moved), not a fresh live repro of a failing case.
+- ✅ **`host_copies::compute`'s forward-reference bug, found by a second
+  Fable review — fixed 2026-07-11, `ef0cd00`.** The `5989eb1` splice-at-0
+  fix above was itself unsound in two distinct ways, both found by
+  independent review rather than live repro. First: copies were spliced at
+  plan position 0 unconditionally, wrong whenever a copy depended on a
+  seeded `MergeRoot::Host` entry not at position 0 (a forward reference). A
+  first fix attempt tracked a per-copy "not before this position" constraint
+  (`seeded_position: HashMap<Cpn, usize>` + stable-sort). Second review
+  (asked to specifically probe "does this add too much complexity" — user's
+  own instinct, confirmed correct) found that design unsound too: the
+  constraint doesn't propagate across two separate top-level consumers that
+  share a dependency already resolved by an earlier one (concrete
+  counterexample: `t1(BDEPEND=liba)`, `t2(BDEPEND=libb)`,
+  `libb(BDEPEND=liba)` — `liba`'s position constraint from `t1`'s visit
+  isn't visible when `libb` gets resolved during `t2`'s visit).
+  - **Fix, landed**: redesigned `compute` to interleave copies directly into
+    the output during the walk, instead of computing them separately and
+    splicing/sorting afterward — iterate `target_order` in original order,
+    and for each Target entry, recursively append its not-yet-emitted host
+    dependencies immediately before it, then push the entry itself. A copy
+    is always immediately before its first (and only) consumer by
+    construction — no position tracking, no sort, no offset math needed.
+    Less code than the position-tracking attempt, and provably correct for
+    the class of bug that one had.
+  - **Genuinely unsolvable case, documented, not "fixed"**: a seeded
+    `MergeRoot::Host` entry positioned *after* a Target entry that
+    transitively depends on it (via a newly-discovered copy) has no valid
+    linear order — `compute` never repositions existing `target_order`
+    entries, only inserts new copies around them. This is `preflight::
+    check`'s job to catch (fail loudly), not `compute`'s to silently
+    "solve" by reordering the solver's own seeded entries. Covered by
+    `seeded_host_entry_after_its_dependents_consumer_is_unsolvable_by_design`.
+  - **Verified**: 3 new/updated regression tests (Fable's exact
+    counterexample, the unsolvable-by-design case, the existing
+    no-duplicate-seed test updated for the new interleave shape) plus the
+    full suite/clippy/fmt, all clean.
+- ✅ **Performance regression, user-flagged ("the speed regression is
+  severe") — investigated and fixed in two parts, 2026-07-11.** Routine
+  `em -p www-client/firefox` vs `emerge -p` benchmarking (prompted by the
+  two fixes above) showed `em` had regressed from its historical ~0.79-1.0s
+  (`benchmarks/BENCHMARKS.md`, dated to `8e0e8ca`, 2026-06-14 — a ~4×
+  speedup over emerge) to ~2.1s (only ~1.7×). Ruled out the same day's
+  preflight-before-`--pretend` reorder first (direct A/B hyperfine of a
+  worktree at the pre-reorder commit vs current showed *identical* timing,
+  ~2.14s both) before reaching for `git bisect run` over the real historical
+  range.
+  - **Root cause 1, found by automated `git bisect run`** (~212 relevant
+    commits over 27 days, built+timed at each step in a dedicated worktree
+    per `[[benchmark-baseline-worktree]]`, `em -p firefox` ×3/commit, min,
+    1.5s threshold): `762e6456` ("fix(depgraph): check USE-dep brackets
+    against installed VDB packages", 2026-07-05). That fix made
+    `bdepend_avail.rs`'s `AvailEntry` eagerly call `InstalledPackage::
+    use_flags()`/`iuse()` — two separate file reads — for *every* package
+    in the VDB (712 on the dev host) at `Avail` construction time, to
+    support checking USE-dep brackets (`[flag]`) against installed
+    packages. Only a small fraction of those 712 entries are ever actually
+    checked against an atom with USE-dep brackets.
+    - **Fix, `ad98af9`**: `AvailEntry` stores `installed: Option<
+      InstalledPackage>` instead of an eagerly-extracted `use_info`; the
+      `use_flags()`/`iuse()` calls move into `use_deps_satisfied`, reached
+      only once `atom_satisfied`'s cpv/slot match already succeeded *and*
+      only when the atom actually has USE-dep brackets — the common case
+      (no USE-deps on the atom, or an early `.any()` match) touches no
+      extra files. `em -p firefox`: ~2.1s → ~1.4s.
+  - **Root cause 2, found by isolating the remaining gap**: the same
+    "eager USE/IUSE for the whole VDB" pattern existed *independently* in
+    `query/depgraph/installed.rs`'s `load_one` (feeding
+    `load_target_installed`, the ROOT/RDEPEND installed view) — a separate
+    function from `load_host_installed`, which the first suspicion (from
+    the prior session) wrongly assumed was the sole remaining
+    contributor. Isolated by stubbing each function's USE/IUSE extraction
+    independently rather than both at once (the initial combined-stub
+    measurement couldn't distinguish them): stubbing `load_host_installed`
+    alone gave *no* improvement (~1.4s unchanged); stubbing `load_one`
+    alone reproduced the full remaining gap (~1.4s → ~1.05s).
+  - **The real, deeper problem, per user**: *"the main problem is that
+    read_field shouldn't be implemented like that but be caching."*
+    `InstalledPackage::read_field`/`read_field_opt` (`portage-vdb`) re-read
+    a flat file from disk on *every* call, so independent VDB scans of the
+    same root (there are 3-4 per `em -p` invocation: `preflight::check`'s
+    `Avail::initial_depend`/`initial_bdepend`, plus `load_target_installed`/
+    `load_host_installed`) each re-read the same ~700 packages' fields from
+    scratch, with no sharing between them at all.
+    - **Design question, asked and answered**: per-instance cache (safe,
+      but doesn't dedupe across independent scans) vs. a global,
+      path-keyed cache (bigger win, but risks staleness if anything expects
+      a live view mid-run). User: *"a global cache would be correct... but
+      ideally the vdb should be locked between resolution and final merge
+      to begin with"* — then, on granularity: *"the lock should be at
+      entry-granularity though."*
+    - **Checked against real portage first** (`/usr/lib/python3.13/
+      site-packages/portage/dbapi/vartree.py`, installed on the dev host):
+      confirms the entry-granularity call. Real portage's own `vardbapi`
+      takes a whole-VDB lock (`lock()`/`unlock()`, `lockdir(self._dbroot)`)
+      only briefly for structural directory ops, but the lock actually held
+      around each individual merge/unmerge (`dblink`'s `_acquire_slot_locks`
+      / `@_slot_locked`) is scoped per `(cp, slot)` — exactly entry
+      granularity, not whole-database. Real portage also bumps each
+      package directory's mtime after any write (`_bump_mtime`, "so
+      consumers can use directory mtimes to validate caches") — a
+      pull-based staleness check; this codebase uses push-based
+      invalidation instead, which is sufficient here because (verified via
+      grep) `Vdb::register`/`unregister` are the *only* two VDB writers in
+      the whole codebase — no external-writer case to guard against the
+      way portage's mtime approach does.
+    - **Fix, landed**: a new `portage-vdb/src/field_cache.rs` module — a
+      process-wide cache keyed by absolute file path, deliberately
+      decoupled from `std::fs` (`get_or_fetch` takes a closure that
+      performs the actual read, so the cache module has zero knowledge of
+      *how* a field is fetched — future backends need no changes here).
+      `read_field`/`read_field_opt` consult/populate it;
+      `Vdb::register`/`unregister` call `invalidate_entry(pkg_dir)`
+      afterward, dropping exactly that one entry's cached fields (e.g. a
+      same-version rebuild overwriting USE in place) — every other
+      package's cache entries are untouched. New regression test
+      `register_over_existing_entry_invalidates_cached_fields` pins this:
+      registers, reads, re-registers with different USE, asserts *both* the
+      original and a fresh handle at the same path see the new value.
+      `em -p firefox`: ~1.4s → ~1.15s (3.17× faster than `emerge -p`, up
+      from ~1.73× right after fix 1). Parity unaffected across every
+      benchmarked target (`benchmarks/bench-em-vs-emerge.sh`).
+    - **Not fully back to the ~0.79-1.0s June 14 baseline** — the
+      remaining gap is most likely the *first* read of each field still
+      being real, unavoidable I/O (the cache only removes *redundant*
+      re-reads across scans, not the first one), plus the user's own
+      already-flagged, deliberately-deferred follow-up: "a second pass to
+      reduce the amount of spurious allocations and missing interning."
+      Not started.
+    - **Cross-process VDB locking (real OS-level file locks, matching
+      portage's `lockdir`/`_slot_lock`) is explicitly out of scope for this
+      fix** — this codebase never had that (pre-existing gap, not
+      introduced or worsened here) and the user deferred it: "we'll tackle
+      global locking later."
+    - **Relevant existing plan**: `todo/dedup-availability-walks.md`'s
+      "Step 1" already proposed unifying `Avail::initial_bdepend` and
+      `load_host_installed` into one shared BROOT-availability loader,
+      motivated by this exact duplication. This fix addresses the
+      *performance* consequence of that duplication (and extends the
+      benefit to `load_one`/`load_target_installed`, which Step 1 didn't
+      cover) without doing the structural unification — Step 1's other
+      motivation, eliminating "the same bug fixed twice" drift risk,
+      stands on its own and is still worth doing separately.
 - ✅ **Fixed 2026-07-10: crossdev's host-arch keyword acceptance was too
   eager — a blanket `**` silently preferred a live `9999` ebuild over a
   perfectly good dated snapshot.** User: "we should not auto-accept live
