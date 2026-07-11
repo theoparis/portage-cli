@@ -11,25 +11,34 @@ use portage_vdb::{InstalledPackage, Vdb};
 use crate::cli::Roots;
 
 /// One entry in an [`Avail`] set: an installed/available `(cpv, main-slot)`,
-/// plus USE info when it's authoritative.
+/// plus the installed package itself when it's an authoritative source of
+/// USE info.
 #[derive(Debug, Clone)]
 struct AvailEntry {
     cpv: Cpv,
     slot: Option<String>,
-    /// Installed USE + IUSE, when known. `Some` for VDB-backed entries (real
-    /// installed packages — [`vdb_avail_entries`]), letting `atom_satisfied`
-    /// verify USE-dep brackets (PMS 8.3.4) instead of just CPN/version/slot.
-    /// `None` for within-run solved-plan merges (`record_merge` and friends):
-    /// the solver's own `check_use_deps` already validates USE-dep
-    /// constraints among those packages, so re-checking here would just
-    /// duplicate that logic without the parent-flag context it needs.
-    use_info: Option<UseInfo>,
-}
-
-#[derive(Debug, Clone)]
-struct UseInfo {
-    enabled: Vec<String>,
-    iuse: Vec<String>,
+    /// The VDB-backed installed package this entry came from, when known —
+    /// letting `atom_satisfied` verify USE-dep brackets (PMS 8.3.4) against
+    /// its USE/IUSE instead of just CPN/version/slot. `None` for within-run
+    /// solved-plan merges (`record_merge` and friends): the solver's own
+    /// `check_use_deps` already validates USE-dep constraints among those
+    /// packages, so re-checking here would just duplicate that logic
+    /// without the parent-flag context it needs.
+    ///
+    /// Deliberately *not* read eagerly into a `Vec<String>` pair at
+    /// construction: `USE`/`IUSE` are separate on-disk files per package
+    /// (`InstalledPackage::use_flags`/`iuse`), and the overwhelming majority
+    /// of `AvailEntry`s constructed for a whole VDB (712 packages measured
+    /// on one real host) are never checked against a USE-dep atom at all —
+    /// eagerly reading both files for every one of them cost ~1.3s of
+    /// almost pure file-I/O overhead nobody needed, a real regression found
+    /// live via `em -p` benchmarking against `emerge -p`. Reading lazily,
+    /// only inside `use_deps_satisfied` and only for an entry that already
+    /// matched the atom's CPN/version/slot *and* only when the atom actually
+    /// has USE-dep brackets to check, keeps the common case (no USE-deps on
+    /// the atom at all, or an early match in the `.any()` scan) essentially
+    /// free.
+    installed: Option<InstalledPackage>,
 }
 
 /// Installed `(cpv, main-slot)` pairs visible for dependency presence checks.
@@ -83,7 +92,7 @@ impl Avail {
                 .map(|(cpv, slot)| AvailEntry {
                     cpv,
                     slot,
-                    use_info: None,
+                    installed: None,
                 })
                 .collect(),
         )
@@ -92,13 +101,13 @@ impl Avail {
     /// Record a `package.provided` entry (a system-supplied package) as present
     /// with its slot, so a build dep on it is satisfied without a merge. Slot is
     /// authoritative for the match; USE-deps on such an atom are treated as
-    /// satisfied (`use_info: None`), matching the solver, which counts the
+    /// satisfied (`installed: None`), matching the solver, which counts the
     /// provided package as present regardless of flags.
     pub fn record_provided(&mut self, cpv: Cpv, slot: Option<String>) {
         self.0.push(AvailEntry {
             cpv,
             slot,
-            use_info: None,
+            installed: None,
         });
     }
 
@@ -107,7 +116,7 @@ impl Avail {
         self.0.push(AvailEntry {
             cpv,
             slot: None,
-            use_info: None,
+            installed: None,
         });
     }
 
@@ -116,12 +125,12 @@ impl Avail {
         depend.0.push(AvailEntry {
             cpv: cpv.clone(),
             slot: None,
-            use_info: None,
+            installed: None,
         });
         self.0.push(AvailEntry {
             cpv,
             slot: None,
-            use_info: None,
+            installed: None,
         });
     }
 
@@ -130,14 +139,14 @@ impl Avail {
         self.0.push(AvailEntry {
             cpv,
             slot: None,
-            use_info: None,
+            installed: None,
         });
     }
 
     pub fn atom_satisfied(&self, dep: &Dep) -> bool {
         self.0.iter().any(|e| {
             dep.matches_cpv(&e.cpv, e.slot.as_deref())
-                && use_deps_satisfied(dep, e.use_info.as_ref())
+                && use_deps_satisfied(dep, e.installed.as_ref())
         })
     }
 
@@ -149,34 +158,41 @@ impl Avail {
     }
 }
 
-/// Whether `dep`'s USE-dep brackets (if any) are satisfied by `use_info`.
+/// Whether `dep`'s USE-dep brackets (if any) are satisfied by `installed`.
 ///
-/// `use_info: None` means "no authoritative USE data" (a within-run solved
+/// `installed: None` means "no authoritative USE data" (a within-run solved
 /// merge already validated by the solver) — always satisfied here. Only the
 /// simple `[flag]`/`[-flag]` forms are checked; `[flag?]`/`[flag=]` and their
 /// inverses need the *parent* package's own flag state, which `Avail` has no
 /// visibility into, so those are conservatively treated as satisfied (same as
 /// the prior behaviour for every USE-dep form).
-fn use_deps_satisfied(dep: &Dep, use_info: Option<&UseInfo>) -> bool {
+///
+/// `USE`/`IUSE` are read from `installed` here — lazily, only once a
+/// cpv/slot match already happened (see `atom_satisfied`'s `&&`) and only
+/// when `dep` actually has USE-dep brackets to check at all — not eagerly
+/// for every installed package up front. See `AvailEntry::installed`'s doc
+/// comment for why that distinction is a real, measured performance
+/// difference, not a micro-optimization.
+fn use_deps_satisfied(dep: &Dep, installed: Option<&InstalledPackage>) -> bool {
     let Some(use_deps) = &dep.use_deps else {
         return true;
     };
-    let Some(info) = use_info else {
+    let Some(pkg) = installed else {
         return true;
     };
-    use_deps.iter().all(|ud| use_dep_satisfied(ud, info))
+    let enabled = pkg.use_flags().unwrap_or_default();
+    let iuse = pkg.iuse().unwrap_or_default();
+    use_deps
+        .iter()
+        .all(|ud| use_dep_satisfied(ud, &enabled, &iuse))
 }
 
-fn use_dep_satisfied(ud: &UseDep, info: &UseInfo) -> bool {
+fn use_dep_satisfied(ud: &UseDep, enabled: &[String], iuse: &[String]) -> bool {
     let flag = ud.flag.as_str();
     // IUSE tokens keep their `+`/`-` default-state prefix (e.g. `+embedded`);
     // strip it to compare bare flag names.
-    let enabled = if info
-        .iuse
-        .iter()
-        .any(|f| f.trim_start_matches(['+', '-']) == flag)
-    {
-        info.enabled.iter().any(|f| f == flag)
+    let enabled = if iuse.iter().any(|f| f.trim_start_matches(['+', '-']) == flag) {
+        enabled.iter().any(|f| f == flag)
     } else {
         match ud.default {
             Some(UseDefault::Enabled) => true,
@@ -195,9 +211,9 @@ fn use_dep_satisfied(ud: &UseDep, info: &UseInfo) -> bool {
     }
 }
 
-/// Like [`Avail::from_cpvs`], but also carries each installed package's USE + IUSE so
+/// Like [`Avail::from_cpvs`], but keeps each installed package around so
 /// [`Avail::atom_satisfied`] can verify USE-dep brackets against them (see
-/// [`AvailEntry::use_info`]). `None` = host `/var/db/pkg`.
+/// [`AvailEntry::installed`]). `None` = host `/var/db/pkg`.
 fn vdb_avail_entries(root: Option<&Utf8Path>) -> Vec<AvailEntry> {
     let vdb = match root {
         Some(r) => Vdb::open(r.join("var/db/pkg")),
@@ -214,10 +230,7 @@ fn avail_entries_from(pkgs: Vec<InstalledPackage>) -> Vec<AvailEntry> {
         .map(|p| AvailEntry {
             cpv: p.cpv().clone(),
             slot: p.slot_main().ok(),
-            use_info: Some(UseInfo {
-                enabled: p.use_flags().unwrap_or_default(),
-                iuse: p.iuse().unwrap_or_default(),
-            }),
+            installed: Some(p),
         })
         .collect()
 }
@@ -373,17 +386,30 @@ mod tests {
         )
     }
 
-    /// Like [`atoms`], but the entry carries authoritative USE/IUSE info so
-    /// USE-dep brackets get checked (mirrors [`vdb_avail_entries`]'s output).
+    /// Like [`atoms`], but the entry carries a real installed package with
+    /// authoritative USE/IUSE, so USE-dep brackets get checked (mirrors
+    /// [`vdb_avail_entries`]'s output). `AvailEntry::installed` reads
+    /// `USE`/`IUSE` lazily from disk now (not a hand-buildable `UseInfo`
+    /// pair), so this writes a real fake VDB entry and opens it — the
+    /// tempdir is deliberately leaked (`into_path`) rather than dropped at
+    /// the end of this function, since the returned `Avail` only reads its
+    /// files on demand, when the caller's `atom_satisfied` runs.
     fn atom_with_use(spec: &str, enabled: &[&str], iuse: &[&str]) -> Avail {
-        Avail(vec![AvailEntry {
-            cpv: Cpv::parse(spec).unwrap(),
-            slot: None,
-            use_info: Some(UseInfo {
-                enabled: enabled.iter().map(|s| s.to_string()).collect(),
-                iuse: iuse.iter().map(|s| s.to_string()).collect(),
-            }),
-        }])
+        let cpv = Cpv::parse(spec).unwrap();
+        let tmp = tempfile::tempdir().unwrap().keep();
+        let pkg_dir = tmp
+            .join("var/db/pkg")
+            .join(cpv.cpn.category.as_ref())
+            .join(format!("{}-{}", cpv.cpn.package, cpv.version));
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("EAPI"), "8").unwrap();
+        std::fs::write(pkg_dir.join("SLOT"), "0").unwrap();
+        std::fs::write(pkg_dir.join("CONTENTS"), "").unwrap();
+        std::fs::write(pkg_dir.join("USE"), enabled.join(" ")).unwrap();
+        std::fs::write(pkg_dir.join("IUSE"), iuse.join(" ")).unwrap();
+
+        let root = Utf8Path::from_path(&tmp).unwrap();
+        Avail(avail_entries_from(vdb_packages_at(root)))
     }
 
     fn parse(dep: &str) -> Vec<DepEntry> {
