@@ -412,8 +412,7 @@ impl ConvertCtx<'_> {
             }
             Some(slots) => {
                 let id = next_choice_id();
-                let choice_pkg =
-                    PortagePackage::slot_choice(id);
+                let choice_pkg = PortagePackage::slot_choice(id);
                 let gf = self.gating_flag;
                 // Unlike `||` Choice nodes (first-listed wins via n-i numbering),
                 // slot-star deps have no listed preference: number slots so the

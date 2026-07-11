@@ -158,11 +158,8 @@ mod pubgrub_solver {
                             let subslot = meta.slot.subslot;
                             let repo =
                                 Some(Interned::<DefaultInterner>::intern(&self.data.repo_name));
-                            let iuse: Vec<Interned<DefaultInterner>> = meta
-                                .iuse
-                                .iter()
-                                .map(Interned::from)
-                                .collect();
+                            let iuse: Vec<Interned<DefaultInterner>> =
+                                meta.iuse.iter().map(Interned::from).collect();
                             let iuse_defaults: HashMap<Interned<DefaultInterner>, IUseDefault> =
                                 meta.iuse
                                     .iter()
@@ -425,11 +422,8 @@ mod resolvo_solver {
                             let subslot = meta.slot.subslot;
                             let repo =
                                 Some(Interned::<DefaultInterner>::intern(&self.data.repo_name));
-                            let use_flags: HashSet<Interned<DefaultInterner>> = meta
-                                .iuse
-                                .iter()
-                                .map(Interned::from)
-                                .collect();
+                            let use_flags: HashSet<Interned<DefaultInterner>> =
+                                meta.iuse.iter().map(Interned::from).collect();
                             PackageMetadata {
                                 cpv: cpv.clone(),
                                 slot,
