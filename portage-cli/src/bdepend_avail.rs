@@ -3,12 +3,21 @@
 //! Shared by [`crate::preflight`] (validate) and the depgraph post-solve
 //! `BDEPEND` trim pass.
 
+use std::cell::OnceCell;
+
 use camino::Utf8Path;
+use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, DepEntry, UseDefault, UseDep, UseDepKind};
 use portage_atom_pubgrub::{DepClass, MergeRoot};
 use portage_vdb::{InstalledPackage, Vdb};
 
 use crate::cli::Roots;
+
+/// Interned `(enabled, iuse)` USE state — see `AvailEntry::interned_use`.
+type InternedUse = (
+    Vec<Interned<DefaultInterner>>,
+    Vec<Interned<DefaultInterner>>,
+);
 
 /// One entry in an [`Avail`] set: an installed/available `(cpv, main-slot)`,
 /// plus the installed package itself when it's an authoritative source of
@@ -39,6 +48,15 @@ struct AvailEntry {
     /// the atom at all, or an early match in the `.any()` scan) essentially
     /// free.
     installed: Option<InstalledPackage>,
+    /// Interned `(enabled, iuse)` USE state, computed and cached on first
+    /// use-dep check against this entry. A single `preflight`/trim pass can
+    /// check the same entry against several different atoms (e.g. multiple
+    /// BDEPEND edges on the same host package), and `use_flags()`/`iuse()`
+    /// each allocate a fresh `Vec<String>` (with fresh `String`s per flag)
+    /// on every call even though the underlying file read is itself cached
+    /// (see `portage-vdb`'s `field_cache`) — this cell avoids redoing that
+    /// allocation+parse for every repeat check of the same entry.
+    interned_use: OnceCell<InternedUse>,
 }
 
 /// Installed `(cpv, main-slot)` pairs visible for dependency presence checks.
@@ -93,6 +111,7 @@ impl Avail {
                     cpv,
                     slot,
                     installed: None,
+                    interned_use: OnceCell::new(),
                 })
                 .collect(),
         )
@@ -108,6 +127,7 @@ impl Avail {
             cpv,
             slot,
             installed: None,
+            interned_use: OnceCell::new(),
         });
     }
 
@@ -117,6 +137,7 @@ impl Avail {
             cpv,
             slot: None,
             installed: None,
+            interned_use: OnceCell::new(),
         });
     }
 
@@ -126,11 +147,13 @@ impl Avail {
             cpv: cpv.clone(),
             slot: None,
             installed: None,
+            interned_use: OnceCell::new(),
         });
         self.0.push(AvailEntry {
             cpv,
             slot: None,
             installed: None,
+            interned_use: OnceCell::new(),
         });
     }
 
@@ -140,14 +163,14 @@ impl Avail {
             cpv,
             slot: None,
             installed: None,
+            interned_use: OnceCell::new(),
         });
     }
 
     pub fn atom_satisfied(&self, dep: &Dep) -> bool {
-        self.0.iter().any(|e| {
-            dep.matches_cpv(&e.cpv, e.slot.as_deref())
-                && use_deps_satisfied(dep, e.installed.as_ref())
-        })
+        self.0
+            .iter()
+            .any(|e| dep.matches_cpv(&e.cpv, e.slot.as_deref()) && use_deps_satisfied(dep, e))
     }
 
     /// `true` when `entries` contain an unsatisfied atom on `cpn`.
@@ -158,44 +181,57 @@ impl Avail {
     }
 }
 
-/// Whether `dep`'s USE-dep brackets (if any) are satisfied by `installed`.
+/// Whether `dep`'s USE-dep brackets (if any) are satisfied by `entry`.
 ///
-/// `installed: None` means "no authoritative USE data" (a within-run solved
-/// merge already validated by the solver) — always satisfied here. Only the
-/// simple `[flag]`/`[-flag]` forms are checked; `[flag?]`/`[flag=]` and their
-/// inverses need the *parent* package's own flag state, which `Avail` has no
-/// visibility into, so those are conservatively treated as satisfied (same as
-/// the prior behaviour for every USE-dep form).
+/// `entry.installed: None` means "no authoritative USE data" (a within-run
+/// solved merge already validated by the solver) — always satisfied here.
+/// Only the simple `[flag]`/`[-flag]` forms are checked; `[flag?]`/`[flag=]`
+/// and their inverses need the *parent* package's own flag state, which
+/// `Avail` has no visibility into, so those are conservatively treated as
+/// satisfied (same as the prior behaviour for every USE-dep form).
 ///
-/// `USE`/`IUSE` are read from `installed` here — lazily, only once a
+/// `USE`/`IUSE` are read from `entry.installed` here — lazily, only once a
 /// cpv/slot match already happened (see `atom_satisfied`'s `&&`) and only
 /// when `dep` actually has USE-dep brackets to check at all — not eagerly
-/// for every installed package up front. See `AvailEntry::installed`'s doc
-/// comment for why that distinction is a real, measured performance
-/// difference, not a micro-optimization.
-fn use_deps_satisfied(dep: &Dep, installed: Option<&InstalledPackage>) -> bool {
+/// for every installed package up front (see `AvailEntry::installed`'s doc
+/// comment) — and memoized per entry afterward (see
+/// `AvailEntry::interned_use`'s doc comment), so a package checked against
+/// several USE-dep atoms in the same pass only pays the read+parse once.
+fn use_deps_satisfied(dep: &Dep, entry: &AvailEntry) -> bool {
     let Some(use_deps) = &dep.use_deps else {
         return true;
     };
-    let Some(pkg) = installed else {
+    let Some(pkg) = &entry.installed else {
         return true;
     };
-    let enabled = pkg.use_flags().unwrap_or_default();
-    let iuse = pkg.iuse().unwrap_or_default();
+    let (enabled, iuse) = entry.interned_use.get_or_init(|| {
+        let enabled = pkg
+            .use_flags()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| Interned::intern(&f))
+            .collect();
+        let iuse = pkg
+            .iuse()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| Interned::intern(f.trim_start_matches(['+', '-'])))
+            .collect();
+        (enabled, iuse)
+    });
     use_deps
         .iter()
-        .all(|ud| use_dep_satisfied(ud, &enabled, &iuse))
+        .all(|ud| use_dep_satisfied(ud, enabled, iuse))
 }
 
-fn use_dep_satisfied(ud: &UseDep, enabled: &[String], iuse: &[String]) -> bool {
-    let flag = ud.flag.as_str();
-    // IUSE tokens keep their `+`/`-` default-state prefix (e.g. `+embedded`);
-    // strip it to compare bare flag names.
-    let enabled = if iuse
-        .iter()
-        .any(|f| f.trim_start_matches(['+', '-']) == flag)
-    {
-        enabled.iter().any(|f| f == flag)
+fn use_dep_satisfied(
+    ud: &UseDep,
+    enabled: &[Interned<DefaultInterner>],
+    iuse: &[Interned<DefaultInterner>],
+) -> bool {
+    let flag = ud.flag;
+    let enabled = if iuse.contains(&flag) {
+        enabled.contains(&flag)
     } else {
         match ud.default {
             Some(UseDefault::Enabled) => true,
@@ -234,6 +270,7 @@ fn avail_entries_from(pkgs: Vec<InstalledPackage>) -> Vec<AvailEntry> {
             cpv: p.cpv().clone(),
             slot: p.slot_main().ok(),
             installed: Some(p),
+            interned_use: OnceCell::new(),
         })
         .collect()
 }
