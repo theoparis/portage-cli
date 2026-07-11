@@ -191,7 +191,10 @@ fn use_dep_satisfied(ud: &UseDep, enabled: &[String], iuse: &[String]) -> bool {
     let flag = ud.flag.as_str();
     // IUSE tokens keep their `+`/`-` default-state prefix (e.g. `+embedded`);
     // strip it to compare bare flag names.
-    let enabled = if iuse.iter().any(|f| f.trim_start_matches(['+', '-']) == flag) {
+    let enabled = if iuse
+        .iter()
+        .any(|f| f.trim_start_matches(['+', '-']) == flag)
+    {
         enabled.iter().any(|f| f == flag)
     } else {
         match ud.default {

@@ -7,6 +7,7 @@ use portage_metadata::Eapi;
 use crate::Result;
 use crate::contents::ContentsEntry;
 use crate::error::Error;
+use crate::field_cache;
 
 /// A package installed in the VDB.
 ///
@@ -69,18 +70,20 @@ impl InstalledPackage {
 
     fn read_field(&self, name: &str) -> Result<String> {
         let p = self.path.join(name);
-        std::fs::read_to_string(&p)
-            .map(|s| s.trim().to_string())
-            .map_err(|source| Error::Io { path: p, source })
+        self.read_field_opt(name)?.ok_or_else(|| Error::Io {
+            path: p.clone(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "field file missing"),
+        })
     }
 
     fn read_field_opt(&self, name: &str) -> Result<Option<String>> {
         let p = self.path.join(name);
-        match std::fs::read_to_string(&p) {
+        field_cache::get_or_fetch(&p, || match std::fs::read_to_string(&p) {
             Ok(s) => Ok(Some(s.trim().to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(Error::Io { path: p, source }),
-        }
+            Err(e) => Err(e),
+        })
+        .map_err(|source| Error::Io { path: p, source })
     }
 
     /// The package description.

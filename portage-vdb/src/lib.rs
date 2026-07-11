@@ -20,6 +20,7 @@ pub mod category;
 mod collision;
 mod contents;
 mod error;
+mod field_cache;
 mod package;
 mod vdb;
 mod write;

@@ -184,6 +184,11 @@ impl Vdb {
             write_field("PROVIDES", lines(&spec.provides))?;
         }
 
+        // Drop any fields cached for this entry (e.g. a same-version rebuild
+        // overwriting USE in place) so later reads in this process see what
+        // was just written, not whatever an earlier scan cached.
+        crate::field_cache::invalidate_entry(&pkg_dir);
+
         Ok(InstalledPackage::from_dir(&pkg_dir, spec.cpv.clone()))
     }
 
@@ -193,7 +198,12 @@ impl Vdb {
     /// installed files (from `CONTENTS`) before calling this.
     pub fn unregister(&self, pkg: &InstalledPackage) -> Result<()> {
         let path: Utf8PathBuf = pkg.path().to_path_buf();
-        std::fs::remove_dir_all(&path).map_err(|source| Error::Io { path, source })
+        std::fs::remove_dir_all(&path).map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+        crate::field_cache::invalidate_entry(&path);
+        Ok(())
     }
 
     /// Find the installed package in the same main slot as the given CPN, if any.
@@ -362,6 +372,37 @@ mod tests {
         assert_eq!(vdb.next_counter().unwrap(), 1);
         assert_eq!(vdb.next_counter().unwrap(), 2);
         assert_eq!(vdb.next_counter().unwrap(), 3);
+    }
+
+    /// A same-version rebuild (e.g. a host BDEPEND rebuilt for a USE-flag
+    /// fix) overwrites its VDB entry's fields in place via a second
+    /// `register()` call at the same path. The field cache must not keep
+    /// serving the pre-rebuild value afterward.
+    #[test]
+    fn register_over_existing_entry_invalidates_cached_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root: camino::Utf8PathBuf = tmp.path().to_path_buf().try_into().unwrap();
+        let vdb = Vdb::open(root).unwrap();
+
+        let cpv = Cpv::parse("app-shells/testsh-1.0").unwrap();
+        let pkg = vdb.register(&make_spec(cpv.clone())).unwrap();
+        assert_eq!(pkg.use_flags().unwrap(), vec!["readline", "nls"]);
+
+        let mut spec = make_spec(cpv);
+        spec.use_flags = vec!["nls".into()];
+        let rebuilt = vdb.register(&spec).unwrap();
+
+        assert_eq!(
+            rebuilt.use_flags().unwrap(),
+            vec!["nls"],
+            "a fresh handle at the same path must see the rebuild's USE, not the original"
+        );
+        assert_eq!(
+            pkg.use_flags().unwrap(),
+            vec!["nls"],
+            "the pre-rebuild handle must also see the new value: it's the same on-disk \
+             entry and the cache is keyed by path, not by InstalledPackage instance"
+        );
     }
 
     #[test]
