@@ -36,6 +36,21 @@
 //! unmet build edges (deps-first, not BFS discovery order) — matching the
 //! no-forward-reference invariant `preflight::check` validates for the rest
 //! of the plan.
+//!
+//! [`compute`] returns the **whole** reordered plan, not just the new
+//! copies: each copy is interleaved directly in front of the first Target
+//! entry that (transitively) needs it, by walking `target_order` in its
+//! existing order and appending each entry's not-yet-emitted dependencies
+//! right before it. This was originally a separate step (`mod.rs` spliced a
+//! copies-only list returned here at position 0 of the whole plan) — wrong
+//! whenever a copy depended on a seeded `MergeRoot::Host` entry that wasn't
+//! already at position 0 (a forward reference, the same bug class this walk
+//! exists to prevent for copies among themselves; caught in review before
+//! landing). Interleaving during the walk itself removes the need for any
+//! separate position-tracking: a copy discovered while visiting entry `E`
+//! is always pushed immediately before `E`, so it's automatically after
+//! everything `E` doesn't depend on and before `E` itself, with no
+//! possibility of landing after a later consumer either.
 
 use std::collections::{HashMap, HashSet};
 
@@ -62,21 +77,22 @@ struct Walk {
     seen: HashSet<Cpn>,
 }
 
-/// Compute the host (`MergeRoot::Host`) build-copies for a native offset
-/// (`--root`/`--prefix`, same arch) from the finalized Target `order`.
+/// Compute the finalized plan order for a native offset (`--root`/`--prefix`,
+/// same arch), inserting host (`MergeRoot::Host`) build-copies immediately
+/// before whichever Target entry first needs each one.
 ///
-/// Returns `[]` for non-native-offset builds (plain native, cross-arch, host).
+/// Returns `target_order` unchanged for non-native-offset builds (plain
+/// native, cross-arch, host) — cross-arch uses the solver's own dual-root
+/// path, plain native has BROOT == ROOT, and neither ever schedules host
+/// build-copies here.
 pub fn compute(
     target_order: &[(PortagePackage, Version)],
     adapter: &Adapter<'_>,
     roots: &Roots,
     cross: &CrossContext,
 ) -> Vec<(PortagePackage, Version)> {
-    // Only a native offset (same-arch, target != host) schedules host
-    // build-copies; cross-arch uses the solver's dual-root path, plain native
-    // has BROOT == ROOT.
     if !cross.active || cross.is_cross_arch() {
-        return Vec::new();
+        return target_order.to_vec();
     }
 
     // CPN -> (version, target package) for version reuse: a host copy of a
@@ -101,7 +117,12 @@ pub fn compute(
 
     // Seed with whatever `MergeRoot::Host` entries the solver already put in
     // `target_order` (e.g. crossdev's own host-arch tools): never re-derive
-    // or duplicate those, just record them as already available.
+    // or duplicate those, just record them as already available. This scan
+    // is a separate upfront pass (not folded into the interleave loop below)
+    // because an *earlier* Target entry can depend on a *later* seeded Host
+    // entry — availability must see every seed regardless of where it sits;
+    // only the seed's own position in the final order is unaffected (it's
+    // never moved, only new copies are inserted around it).
     for (pkg, ver) in target_order
         .iter()
         .filter(|(p, _)| p.merge_root() == MergeRoot::Host)
@@ -111,20 +132,27 @@ pub fn compute(
             .record_merge_bdepend(Cpv::new(*pkg.cpn(), ver.clone()));
     }
 
-    let mut copies: Vec<(PortagePackage, Version)> = Vec::new();
-    for (pkg, ver) in target_order
-        .iter()
-        .filter(|(p, _)| p.merge_root() == MergeRoot::Target)
-    {
-        visit_unsatisfied(&ctx, &mut walk, pkg, ver, &mut copies, true);
+    // Interleave: walk target_order in its existing order, and for each
+    // Target entry, insert its not-yet-emitted host dependencies (deps-first,
+    // recursively) immediately before it, then emit the entry itself. Host
+    // entries pass through unchanged (already seeded above, never revisited).
+    let mut order: Vec<(PortagePackage, Version)> = Vec::with_capacity(target_order.len());
+    for (pkg, ver) in target_order {
+        if pkg.merge_root() == MergeRoot::Target {
+            visit_unsatisfied(&ctx, &mut walk, pkg, ver, &mut order, true);
+        }
+        order.push((pkg.clone(), ver.clone()));
     }
-    copies
+    order
 }
 
 /// Recurse into `pkg`'s unsatisfied-on-host `DEPEND`/`BDEPEND`/`IDEPEND`
-/// edges, appending each resolved host copy to `copies` only *after* its own
-/// edges have been visited — deps-first, so a later preflight scan never
-/// sees a copy positioned before something it needs.
+/// edges, appending each resolved host copy to `order` only *after* its own
+/// edges have been visited — deps-first, so a copy never lands before
+/// something it needs. Called just before `pkg` itself is pushed to `order`
+/// by the caller (see [`compute`]), so every copy discovered here also ends
+/// up immediately before `pkg` — its first (and closure-wide, since already-
+/// resolved copies are never revisited) consumer.
 ///
 /// `top_level` is `true` only for the direct per-Target-package calls from
 /// [`compute`], not for edges discovered by recursing into an already-found
@@ -143,7 +171,7 @@ fn visit_unsatisfied(
     walk: &mut Walk,
     pkg: &PortagePackage,
     ver: &Version,
-    copies: &mut Vec<(PortagePackage, Version)>,
+    order: &mut Vec<(PortagePackage, Version)>,
     top_level: bool,
 ) {
     let Some(deps) = effective_use::evaluated_deps(
@@ -175,9 +203,9 @@ fn visit_unsatisfied(
                 continue;
             };
             let host_pkg = cpkg.at_merge_root(MergeRoot::Host);
-            visit_unsatisfied(ctx, walk, &host_pkg, &cver, copies, false);
+            visit_unsatisfied(ctx, walk, &host_pkg, &cver, order, false);
             walk.avail.record_merge_bdepend(Cpv::new(cpn, cver.clone()));
-            copies.push((host_pkg, cver));
+            order.push((host_pkg, cver));
         }
     }
 }
@@ -307,10 +335,186 @@ mod tests {
             "test setup must land in the native-offset case compute() exists for"
         );
 
-        let copies = compute(&target_order, &adapter, &roots, &cross);
+        let result = compute(&target_order, &adapter, &roots, &cross);
+        assert_eq!(
+            result, target_order,
+            "must not re-derive a CPN the solver already scheduled @host"
+        );
+    }
+
+    /// Documents a genuinely unsolvable input, found while testing the
+    /// forward-reference fix: `consumer` needs `tool` needs `base`, but
+    /// `base` is a seeded `MergeRoot::Host` entry the solver placed *after*
+    /// `consumer` for reasons unrelated to this chain (host_copies never
+    /// repositions an existing `target_order` entry, only inserts new
+    /// copies around it). No linear order can put `tool` both after `base`
+    /// and before `consumer` when `base` itself comes after `consumer` — this
+    /// isn't a bug `compute` can fix; it's exactly the class of conflict
+    /// `preflight::check` exists to catch instead of silently mis-building.
+    /// Pinned here so a future change to `compute` that starts silently
+    /// "resolving" this by reordering seeded entries gets caught: that would
+    /// be a different, larger design (repositioning immovable solver output)
+    /// than the deps-first-copy-insertion this module does.
+    #[test]
+    fn seeded_host_entry_after_its_dependents_consumer_is_unsolvable_by_design() {
+        let data = repo_from(&[
+            (
+                "sys-apps/consumer-1.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nBDEPEND=dev-libs/tool\n",
+            ),
+            (
+                "dev-libs/tool-2.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nBDEPEND=dev-libs/base\n",
+            ),
+            (
+                "dev-libs/base-1.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+            ),
+        ]);
+
+        let consumer = (
+            PortagePackage::unslotted(Cpn::parse("sys-apps/consumer").unwrap()),
+            Version::parse("1.0").unwrap(),
+        );
+        // Seeded @host, but deliberately *not* at the front — simulates the
+        // solver placing its own dual-root entry wherever the closure walk
+        // found it, not necessarily before every Target entry.
+        let base_host = (
+            PortagePackage::unslotted(Cpn::parse("dev-libs/base").unwrap())
+                .at_merge_root(MergeRoot::Host),
+            Version::parse("1.0").unwrap(),
+        );
+        let target_order = vec![consumer, base_host];
+
+        let arch = gentoo_core::Arch::intern("amd64");
+        let accept_keywords = AcceptKeywords::from_global(&arch, &["amd64"]);
+        let use_config = UseConfig::new();
+        let force_mask = ForceMask::default();
+        let installed_cpvs = std::collections::HashSet::new();
+        let adapter = Adapter {
+            data: &data,
+            accept_keywords: &accept_keywords,
+            package_mask: &[],
+            package_unmask: &[],
+            accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
+            use_config: &use_config,
+            package_use: &[],
+            force_mask: &force_mask,
+            installed_cpvs: &installed_cpvs,
+            autosolve_use: false,
+        };
+
+        let host = tempfile::tempdir().unwrap();
+        let prefix = tempfile::tempdir().unwrap();
+        let roots = Roots::for_test_overlay(
+            host.path().to_str().unwrap(),
+            prefix.path().to_str().unwrap(),
+        );
+        let cross = native_offset_cross(&roots);
+
+        let result = compute(&target_order, &adapter, &roots, &cross);
+        let names: Vec<String> = result.iter().map(|(p, _)| p.cpn().to_string()).collect();
+        let pos = |n: &str| names.iter().position(|x| x == n).unwrap();
+        // `compute` never repositions `base` (an existing `target_order`
+        // entry) — it only inserts `tool` as early as its one known
+        // constraint (before `consumer`, the only relationship the solver
+        // itself is aware of) requires. `tool` ends up before `base` here,
+        // which does *not* actually satisfy tool's own BDEPEND on base — but
+        // no placement of `tool` alone can fix that; `base` would have to
+        // move too. `preflight::check` (run unconditionally before any real
+        // build, see `emerge.rs`) is what actually catches this, not this
+        // module.
         assert!(
-            copies.is_empty(),
-            "must not re-derive a CPN the solver already scheduled @host: {copies:?}"
+            pos("dev-libs/tool") < pos("sys-apps/consumer"),
+            "tool's copy must still land before consumer, its one solver-known consumer: {names:?}"
+        );
+    }
+
+    /// Regression test for a second forward-reference variant found in
+    /// review: two *different* Target entries share a host build-copy
+    /// dependency chain (`t2 -> libb -> liba`, `t1 -> liba` directly). `liba`
+    /// is resolved once (while visiting `t1`) and must not be re-derived for
+    /// `t2` — but `libb` (discovered later, under `t2`) still depends on it,
+    /// and must land after it despite `liba` no longer being "unsatisfied"
+    /// (it's already recorded as available) by the time `libb` is visited.
+    #[test]
+    fn a_later_consumers_copy_still_lands_after_an_earlier_consumers_shared_dep() {
+        let data = repo_from(&[
+            (
+                "sys-apps/t1-1.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nBDEPEND=dev-libs/liba\n",
+            ),
+            (
+                "sys-apps/t2-1.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nBDEPEND=dev-libs/libb\n",
+            ),
+            (
+                "dev-libs/liba-1.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+            ),
+            (
+                "dev-libs/libb-1.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nBDEPEND=dev-libs/liba\n",
+            ),
+        ]);
+
+        let t1 = (
+            PortagePackage::unslotted(Cpn::parse("sys-apps/t1").unwrap()),
+            Version::parse("1.0").unwrap(),
+        );
+        let t2 = (
+            PortagePackage::unslotted(Cpn::parse("sys-apps/t2").unwrap()),
+            Version::parse("1.0").unwrap(),
+        );
+        let target_order = vec![t1, t2];
+
+        let arch = gentoo_core::Arch::intern("amd64");
+        let accept_keywords = AcceptKeywords::from_global(&arch, &["amd64"]);
+        let use_config = UseConfig::new();
+        let force_mask = ForceMask::default();
+        let installed_cpvs = std::collections::HashSet::new();
+        let adapter = Adapter {
+            data: &data,
+            accept_keywords: &accept_keywords,
+            package_mask: &[],
+            package_unmask: &[],
+            accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
+            use_config: &use_config,
+            package_use: &[],
+            force_mask: &force_mask,
+            installed_cpvs: &installed_cpvs,
+            autosolve_use: false,
+        };
+
+        let host = tempfile::tempdir().unwrap();
+        let prefix = tempfile::tempdir().unwrap();
+        let roots = Roots::for_test_overlay(
+            host.path().to_str().unwrap(),
+            prefix.path().to_str().unwrap(),
+        );
+        let cross = native_offset_cross(&roots);
+
+        let result = compute(&target_order, &adapter, &roots, &cross);
+        let names: Vec<String> = result.iter().map(|(p, _)| p.cpn().to_string()).collect();
+        // liba must appear exactly once (never re-derived for t2).
+        assert_eq!(
+            names.iter().filter(|n| *n == "dev-libs/liba").count(),
+            1,
+            "liba must not be duplicated: {names:?}"
+        );
+        let pos = |n: &str| names.iter().position(|x| x == n).unwrap();
+        assert!(
+            pos("dev-libs/liba") < pos("sys-apps/t1"),
+            "liba before its first consumer t1: {names:?}"
+        );
+        assert!(
+            pos("dev-libs/liba") < pos("dev-libs/libb"),
+            "liba before libb, which depends on it, even though libb is \
+             discovered under a later consumer (t2): {names:?}"
+        );
+        assert!(
+            pos("dev-libs/libb") < pos("sys-apps/t2"),
+            "libb before its consumer t2: {names:?}"
         );
     }
 }

@@ -806,6 +806,11 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     // (emerge lists these `to /` alongside the ROOT runtime copy). Computed as a
     // post-solve walk over the finalized Target plan, not in the solver, to keep
     // the Target solve pristine (the dual-root aliasing balloons it otherwise).
+    // `compute` returns the whole reordered plan (a no-op passthrough of
+    // `order` for every non-native-offset case, including the common one
+    // where nothing needs a host copy at all) — see its own doc comment for
+    // why each copy is interleaved in front of its first consumer during the
+    // walk, rather than spliced in as a separate, position-blind step.
     let host_copies_adapter = repo::Adapter {
         data: &data,
         accept_keywords: &accept_keywords,
@@ -818,10 +823,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         installed_cpvs: solver_installed_cpvs,
         autosolve_use: false,
     };
-    let host_copies = host_copies::compute(&order, &host_copies_adapter, roots, &cross);
-    if !host_copies.is_empty() {
-        order.splice(0..0, host_copies);
-    }
+    order = host_copies::compute(&order, &host_copies_adapter, roots, &cross);
 
     let flag_reqs: HashMap<&PortagePackage, &UseFlagRequirement> = provider
         .use_flag_requirements()
