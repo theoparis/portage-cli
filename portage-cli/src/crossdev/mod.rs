@@ -1176,9 +1176,11 @@ fn host_arch_keyword_line(
     let installed = host_installed_versions(roots, real_cat, real_pkg);
 
     if let Some((version, slot)) = installed.first() {
-        let slot_suffix = (slot != "0")
-            .then(|| format!(":{slot}"))
-            .unwrap_or_default();
+        let slot_suffix = if slot != "0" {
+            format!(":{slot}")
+        } else {
+            String::new()
+        };
         if available.contains(version) {
             return format!("={category}/{pkg}-{version}{slot_suffix} **\n");
         }

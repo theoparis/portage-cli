@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use portage_atom::interner::{DefaultInterner, Interned};
-use portage_atom::{Cpn, Cpv, Version};
+use portage_atom::{Cpn, Cpv, DepList, Version};
 
 use crate::required_use::RequiredUse;
 use crate::use_config::UseConfig;
@@ -36,18 +36,50 @@ pub struct PackageVersions {
 }
 
 /// Structured dependency trees separated by PMS class.
-#[derive(Clone)]
+///
+/// Each class is a [`DepList`] (`Arc`-wrapped): a caller whose own
+/// dependency-tree source is already a `DepList` (e.g.
+/// `portage_metadata::EbuildMetadata`, once the ebuild cache is parsed) can
+/// hand these off as a cheap refcount bump instead of a deep clone. This
+/// matters because `PackageRepository::versions_for` gets called fresh for
+/// every package on every provider (re)build — including every USE-dep
+/// co-solve fixpoint iteration, up to ~8x per invocation — so a real
+/// package's hundreds of parsed atoms were being deep-cloned that many
+/// times over for data that never changes across those rebuilds.
+#[derive(Clone, Default)]
 pub struct PackageDeps {
     /// DEPEND — build-time dependencies.
-    pub depend: Vec<portage_atom::DepEntry>,
+    pub depend: DepList,
     /// RDEPEND — runtime dependencies.
-    pub rdepend: Vec<portage_atom::DepEntry>,
+    pub rdepend: DepList,
     /// BDEPEND — build-host dependencies (EAPI 7+).
-    pub bdepend: Vec<portage_atom::DepEntry>,
+    pub bdepend: DepList,
     /// PDEPEND — post-merge dependencies.
-    pub pdepend: Vec<portage_atom::DepEntry>,
+    pub pdepend: DepList,
     /// IDEPEND — install-time dependencies (EAPI 8+).
-    pub idepend: Vec<portage_atom::DepEntry>,
+    pub idepend: DepList,
+}
+
+impl PackageDeps {
+    /// Build from five dependency lists, converting each into a [`DepList`]
+    /// (accepts a plain `Vec<DepEntry>`, an existing `DepList`, or anything
+    /// else `Into<DepList>`) — the ergonomic equivalent of the struct
+    /// literal without repeating `.into()` on every field.
+    pub fn new(
+        depend: impl Into<DepList>,
+        rdepend: impl Into<DepList>,
+        bdepend: impl Into<DepList>,
+        pdepend: impl Into<DepList>,
+        idepend: impl Into<DepList>,
+    ) -> Self {
+        Self {
+            depend: depend.into(),
+            rdepend: rdepend.into(),
+            bdepend: bdepend.into(),
+            pdepend: pdepend.into(),
+            idepend: idepend.into(),
+        }
+    }
 }
 
 /// Trait for a package repository that the solver can query.
@@ -262,13 +294,7 @@ impl PackageRepository for InMemoryRepository {
                                 repo: meta.repo,
                                 iuse: meta.iuse.clone(),
                                 iuse_defaults: meta.iuse_defaults.clone(),
-                                deps: PackageDeps {
-                                    depend: meta.deps.depend.clone(),
-                                    rdepend: meta.deps.rdepend.clone(),
-                                    bdepend: meta.deps.bdepend.clone(),
-                                    pdepend: meta.deps.pdepend.clone(),
-                                    idepend: meta.deps.idepend.clone(),
-                                },
+                                deps: meta.deps.clone(),
                                 required_use: meta.required_use.clone(),
                             },
                         )
@@ -293,11 +319,11 @@ mod tests {
             Some(Interned::intern("0")),
             None,
             PackageDeps {
-                depend: vec![],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         assert_eq!(repo.all_packages().len(), 1);

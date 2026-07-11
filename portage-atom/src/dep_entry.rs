@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use gentoo_interner::{DefaultInterner, Interned};
 use winnow::ascii::{multispace0, multispace1};
@@ -43,6 +44,62 @@ pub enum DepEntry {
     ExactlyOneOf(Vec<DepEntry>),
     /// `?? ( a b c )` — at most one child must be matched.
     AtMostOneOf(Vec<DepEntry>),
+}
+
+/// A dependency-class tree (e.g. one package version's parsed `DEPEND`),
+/// `Arc`-wrapped so cloning it is a refcount bump rather than a deep copy.
+///
+/// Ebuild metadata gets re-converted into a solver's own representation on
+/// every rebuild — for the PubGrub-backed resolver, up to ~8x per
+/// invocation during the USE-dep co-solve fixpoint — and a real package can
+/// carry hundreds of parsed atoms per class, so a plain `Vec<DepEntry>`
+/// clone at every one of those rebuilds was a measured, real cost.
+///
+/// Derefs to `[DepEntry]`, so existing read-only call sites (iteration,
+/// `.is_empty()`, indexing, `evaluate_use(&list, ..)`) need no changes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DepList(Arc<Vec<DepEntry>>);
+
+impl DepList {
+    /// Wrap an owned dependency list.
+    pub fn new(entries: Vec<DepEntry>) -> Self {
+        Self(Arc::new(entries))
+    }
+
+    /// Mutable access to the underlying list, cloning it first if shared
+    /// with another `DepList` (copy-on-write via `Arc::make_mut`).
+    pub fn make_mut(&mut self) -> &mut Vec<DepEntry> {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+impl From<Vec<DepEntry>> for DepList {
+    fn from(entries: Vec<DepEntry>) -> Self {
+        Self::new(entries)
+    }
+}
+
+impl std::ops::Deref for DepList {
+    type Target = [DepEntry];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a> IntoIterator for &'a DepList {
+    type Item = &'a DepEntry;
+    type IntoIter = std::slice::Iter<'a, DepEntry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl FromIterator<DepEntry> for DepList {
+    fn from_iter<I: IntoIterator<Item = DepEntry>>(iter: I) -> Self {
+        Self::new(iter.into_iter().collect())
+    }
 }
 
 impl DepEntry {

@@ -15,21 +15,21 @@ use portage_atom_pubgrub::{
 
 fn empty_deps() -> PackageDeps {
     PackageDeps {
-        depend: vec![],
-        rdepend: vec![],
-        bdepend: vec![],
-        pdepend: vec![],
-        idepend: vec![],
+        depend: (vec![]).into(),
+        rdepend: (vec![]).into(),
+        bdepend: (vec![]).into(),
+        pdepend: (vec![]).into(),
+        idepend: (vec![]).into(),
     }
 }
 
 fn dep_entries(deps: Vec<DepEntry>) -> PackageDeps {
     PackageDeps {
-        depend: deps,
-        rdepend: vec![],
-        bdepend: vec![],
-        pdepend: vec![],
-        idepend: vec![],
+        depend: (deps).into(),
+        rdepend: (vec![]).into(),
+        bdepend: (vec![]).into(),
+        pdepend: (vec![]).into(),
+        idepend: (vec![]).into(),
     }
 }
 

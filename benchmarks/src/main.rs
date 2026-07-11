@@ -180,13 +180,13 @@ mod pubgrub_solver {
                                         })
                                     })
                                     .collect();
-                            let deps = PackageDeps {
-                                depend: meta.depend.clone(),
-                                rdepend: meta.rdepend.clone(),
-                                bdepend: meta.bdepend.clone(),
-                                pdepend: meta.pdepend.clone(),
-                                idepend: meta.idepend.clone(),
-                            };
+                            let deps = PackageDeps::new(
+                                meta.depend.clone(),
+                                meta.rdepend.clone(),
+                                meta.bdepend.clone(),
+                                meta.pdepend.clone(),
+                                meta.idepend.clone(),
+                            );
                             (
                                 cpv.clone(),
                                 PackageVersions {
@@ -438,11 +438,11 @@ mod resolvo_solver {
                                 use_flags,
                                 repo,
                                 dependencies: PackageDeps {
-                                    depend: meta.depend.clone(),
-                                    rdepend: meta.rdepend.clone(),
-                                    bdepend: meta.bdepend.clone(),
-                                    pdepend: meta.pdepend.clone(),
-                                    idepend: meta.idepend.clone(),
+                                    depend: meta.depend.to_vec(),
+                                    rdepend: meta.rdepend.to_vec(),
+                                    bdepend: meta.bdepend.to_vec(),
+                                    pdepend: meta.pdepend.to_vec(),
+                                    idepend: meta.idepend.to_vec(),
                                 },
                             }
                         })

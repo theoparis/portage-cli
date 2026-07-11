@@ -640,6 +640,24 @@ impl Adapter<'_> {
     }
 }
 
+/// `EbuildMetadata`'s five dependency classes, straight into `PackageDeps`.
+///
+/// Each field on both sides is a `DepList` (`Arc`-wrapped), so this is five
+/// refcount bumps, not a deep clone — cannot be a `From` impl on either
+/// side: `portage-atom-pubgrub` deliberately stays free of
+/// `portage-metadata` (see the `required_use` translation below), and
+/// `portage-cli` owns neither type, so an orphan-rule-legal trait impl
+/// isn't available here — a plain function is the direct route.
+fn package_deps_from_metadata(meta: &portage_metadata::EbuildMetadata) -> PackageDeps {
+    PackageDeps::new(
+        meta.depend.clone(),
+        meta.rdepend.clone(),
+        meta.bdepend.clone(),
+        meta.pdepend.clone(),
+        meta.idepend.clone(),
+    )
+}
+
 impl PackageRepository for Adapter<'_> {
     fn all_packages(&self) -> Vec<Cpn> {
         self.data.cpns.clone()
@@ -751,13 +769,7 @@ impl PackageRepository for Adapter<'_> {
                                 })
                             })
                             .collect();
-                        let deps = PackageDeps {
-                            depend: meta.depend.clone(),
-                            rdepend: meta.rdepend.clone(),
-                            bdepend: meta.bdepend.clone(),
-                            pdepend: meta.pdepend.clone(),
-                            idepend: meta.idepend.clone(),
-                        };
+                        let deps = package_deps_from_metadata(meta);
                         // Translate the parsed metadata grammar into the solver's
                         // interned-flag fact vocabulary (the crate stays free of
                         // portage-metadata). Dormant until Level-C consumes it.

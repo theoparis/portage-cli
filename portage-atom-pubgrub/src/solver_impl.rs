@@ -262,11 +262,11 @@ mod tests {
 
     fn deps(depend: &str, rdepend: &str) -> PackageDeps {
         PackageDeps {
-            depend: DepEntry::parse(depend).unwrap(),
-            rdepend: DepEntry::parse(rdepend).unwrap(),
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse(depend).unwrap()).into(),
+            rdepend: (DepEntry::parse(rdepend).unwrap()).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         }
     }
 

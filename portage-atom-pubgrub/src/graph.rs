@@ -396,11 +396,11 @@ mod tests {
     fn install_order_and_dependency_graph_work() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version(
@@ -408,11 +408,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("dev-libs/bottom-1.0").unwrap())],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![DepEntry::Atom(Dep::parse("dev-libs/bottom-1.0").unwrap())]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         repo.add_version(
@@ -462,11 +462,11 @@ mod tests {
     fn host_package_bdepend_on_another_host_package_orders_correctly() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
         // Names deliberately chosen so a broken (edge-less) tie-break gets the
         // order wrong: `dev-build/dep`'s sort key is *smaller* than
@@ -485,7 +485,7 @@ mod tests {
             Some(Interned::intern("0")),
             None,
             PackageDeps {
-                bdepend: vec![DepEntry::Atom(Dep::parse("dev-build/dep").unwrap())],
+                bdepend: (vec![DepEntry::Atom(Dep::parse("dev-build/dep").unwrap())]).into(),
                 ..empty()
             },
         );
@@ -494,7 +494,7 @@ mod tests {
             Some(Interned::intern("0")),
             None,
             PackageDeps {
-                bdepend: vec![DepEntry::Atom(Dep::parse("dev-build/user").unwrap())],
+                bdepend: (vec![DepEntry::Atom(Dep::parse("dev-build/user").unwrap())]).into(),
                 ..empty()
             },
         );
@@ -533,11 +533,11 @@ mod tests {
     fn dependency_graph_returns_labeled_edges() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version(
@@ -545,11 +545,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("dev-libs/lib-1.0").unwrap())],
-                rdepend: vec![DepEntry::Atom(Dep::parse("dev-libs/runtime-1.0").unwrap())],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![DepEntry::Atom(Dep::parse("dev-libs/lib-1.0").unwrap())]).into(),
+                rdepend: (vec![DepEntry::Atom(Dep::parse("dev-libs/runtime-1.0").unwrap())]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         repo.add_version(
@@ -595,14 +595,15 @@ mod tests {
 
     fn rdepend(atoms: &[&str]) -> PackageDeps {
         PackageDeps {
-            depend: vec![],
+            depend: (vec![]).into(),
             rdepend: atoms
                 .iter()
                 .map(|a| DepEntry::Atom(Dep::parse(a).unwrap()))
-                .collect(),
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+                .collect::<Vec<_>>()
+                .into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         }
     }
 

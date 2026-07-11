@@ -105,7 +105,7 @@ pub(super) fn find_rebuilds(
             triggers.sort_by_key(|c| c.to_string());
             rebuilds.push(SubslotRebuild {
                 cpn: entry.cpn,
-                slot: entry.slot.clone(),
+                slot: entry.slot,
                 version: entry.version.clone(),
                 triggers,
             });

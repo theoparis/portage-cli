@@ -1083,8 +1083,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                     let effective =
                         effective_use::effective_use(&use_config, &package_use, pkg, ver, cache);
                     (
-                        cache.metadata.depend.clone(),
-                        cache.metadata.bdepend.clone(),
+                        cache.metadata.depend.to_vec(),
+                        cache.metadata.bdepend.to_vec(),
                         effective.enabled_flags(),
                     )
                 } else {

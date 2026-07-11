@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::interner::{DefaultInterner, Interner};
-use portage_atom::{DepEntry, Slot};
+use portage_atom::{DepEntry, DepList, Slot};
 
 use crate::eapi::Eapi;
 use crate::iuse::IUse;
@@ -65,20 +65,28 @@ where
 
     /// Build-time dependencies (`DEPEND`).
     ///
+    /// A [`DepList`]: this metadata is re-converted into the solver's own
+    /// dependency-tree representation on every USE-dep co-solve fixpoint
+    /// iteration (up to ~8x per invocation, see
+    /// `portage_atom_pubgrub::repository::PackageDeps`), and cloning a
+    /// firefox-class package's hundreds of parsed atoms on every one of
+    /// those was a measured, real cost — `DepList`'s `Arc` clone is a
+    /// refcount bump instead of a deep copy.
+    ///
     /// See [PMS 8.1](https://projects.gentoo.org/pms/9/pms.html#dependency-classes).
-    pub depend: Vec<DepEntry>,
+    pub depend: DepList,
 
     /// Runtime dependencies (`RDEPEND`).
-    pub rdepend: Vec<DepEntry>,
+    pub rdepend: DepList,
 
     /// Build-host dependencies (`BDEPEND`, EAPI 7+).
-    pub bdepend: Vec<DepEntry>,
+    pub bdepend: DepList,
 
     /// Post-merge dependencies (`PDEPEND`).
-    pub pdepend: Vec<DepEntry>,
+    pub pdepend: DepList,
 
     /// Install-time dependencies (`IDEPEND`, EAPI 8).
-    pub idepend: Vec<DepEntry>,
+    pub idepend: DepList,
 
     /// Eclasses directly listed in the ebuild's `inherit` statement.
     ///
@@ -112,11 +120,11 @@ impl<I: Interner + Clone> EbuildMetadata<I> {
     /// deduplicates during its own regen; this method normalises to that form.
     pub fn dedup(&self) -> Self {
         let mut result = self.clone();
-        dedup_dep(&mut result.depend);
-        dedup_dep(&mut result.rdepend);
-        dedup_dep(&mut result.bdepend);
-        dedup_dep(&mut result.pdepend);
-        dedup_dep(&mut result.idepend);
+        dedup_dep(result.depend.make_mut());
+        dedup_dep(result.rdepend.make_mut());
+        dedup_dep(result.bdepend.make_mut());
+        dedup_dep(result.pdepend.make_mut());
+        dedup_dep(result.idepend.make_mut());
         if let Some(ref ru) = self.required_use {
             result.required_use = Some(ru.dedup());
         }

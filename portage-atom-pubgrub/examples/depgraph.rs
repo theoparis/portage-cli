@@ -17,21 +17,21 @@ use portage_atom_pubgrub::{
 
 fn empty_deps() -> PackageDeps {
     PackageDeps {
-        depend: vec![],
-        rdepend: vec![],
-        bdepend: vec![],
-        pdepend: vec![],
-        idepend: vec![],
+        depend: (vec![]).into(),
+        rdepend: (vec![]).into(),
+        bdepend: (vec![]).into(),
+        pdepend: (vec![]).into(),
+        idepend: (vec![]).into(),
     }
 }
 
 fn dep_entries(deps: Vec<DepEntry>) -> PackageDeps {
     PackageDeps {
-        depend: deps,
-        rdepend: vec![],
-        bdepend: vec![],
-        pdepend: vec![],
-        idepend: vec![],
+        depend: (deps).into(),
+        rdepend: (vec![]).into(),
+        bdepend: (vec![]).into(),
+        pdepend: (vec![]).into(),
+        idepend: (vec![]).into(),
     }
 }
 
@@ -72,11 +72,12 @@ fn main() {
         PackageDeps {
             depend: vec![DepEntry::Atom(
                 Dep::parse(">=dev-libs/openssl-3.0").unwrap(),
-            )],
-            rdepend: vec![DepEntry::Atom(Dep::parse("dev-libs/openssl").unwrap())],
-            bdepend: vec![DepEntry::Atom(Dep::parse(">=sys-libs/zlib-1.2").unwrap())],
-            pdepend: vec![],
-            idepend: vec![],
+            )]
+            .into(),
+            rdepend: (vec![DepEntry::Atom(Dep::parse("dev-libs/openssl").unwrap())]).into(),
+            bdepend: (vec![DepEntry::Atom(Dep::parse(">=sys-libs/zlib-1.2").unwrap())]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 

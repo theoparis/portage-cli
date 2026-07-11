@@ -6,11 +6,11 @@ use pubgrub::DependencyProvider as _; // for choose_version in tests
 
 fn empty_deps() -> PackageDeps {
     PackageDeps {
-        depend: vec![],
-        rdepend: vec![],
-        bdepend: vec![],
-        pdepend: vec![],
-        idepend: vec![],
+        depend: (vec![]).into(),
+        rdepend: (vec![]).into(),
+        bdepend: (vec![]).into(),
+        pdepend: (vec![]).into(),
+        idepend: (vec![]).into(),
     }
 }
 
@@ -34,11 +34,11 @@ fn make_simple_repo() -> InMemoryRepository {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            depend: DepEntry::parse(">=dev-libs/openssl-3.0.0").unwrap(),
-            rdepend: DepEntry::parse(">=dev-libs/openssl-3.0.0").unwrap(),
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse(">=dev-libs/openssl-3.0.0").unwrap()).into(),
+            rdepend: (DepEntry::parse(">=dev-libs/openssl-3.0.0").unwrap()).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -122,11 +122,12 @@ fn multi_slot_installs_both_when_required() {
             depend: vec![
                 DepEntry::Atom(Dep::parse("dev-lang/python:3.11").unwrap()),
                 DepEntry::Atom(Dep::parse("dev-lang/python:3.12").unwrap()),
-            ],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            ]
+            .into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -171,11 +172,11 @@ fn resolve_slot_operator_equal() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            depend: DepEntry::parse("dev-libs/openssl:=").unwrap(),
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse("dev-libs/openssl:=").unwrap()).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -210,11 +211,11 @@ fn resolve_slot_operator_star() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            depend: DepEntry::parse("dev-libs/openssl:*").unwrap(),
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse("dev-libs/openssl:*").unwrap()).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -246,11 +247,11 @@ fn installed_favored_picks_installed_version() {
         None,
         None,
         PackageDeps {
-            depend: DepEntry::parse(">=dev-libs/openssl-3.0.0").unwrap(),
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse(">=dev-libs/openssl-3.0.0").unwrap()).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -298,11 +299,11 @@ fn installed_favored_upgrades_when_required() {
         None,
         None,
         PackageDeps {
-            depend: DepEntry::parse(">=dev-libs/openssl-3.1.0").unwrap(),
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse(">=dev-libs/openssl-3.1.0").unwrap()).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -350,11 +351,11 @@ fn installed_locked_pins_version() {
         None,
         None,
         PackageDeps {
-            depend: DepEntry::parse(">=dev-libs/openssl-3.0.0").unwrap(),
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse(">=dev-libs/openssl-3.0.0").unwrap()).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -405,11 +406,12 @@ fn or_group_prefers_installed_alternative() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            depend: DepEntry::parse("|| ( dev-libs/not-installed dev-libs/installed )").unwrap(),
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse("|| ( dev-libs/not-installed dev-libs/installed )").unwrap())
+                .into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -481,7 +483,8 @@ fn dropped_or_branch_keeps_multislot_sibling() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            depend: DepEntry::parse("|| ( >=dev-libs/gcclike-1 dev-libs/llvmlike )").unwrap(),
+            depend: (DepEntry::parse("|| ( >=dev-libs/gcclike-1 dev-libs/llvmlike )").unwrap())
+                .into(),
             ..empty_deps()
         },
     );
@@ -523,11 +526,11 @@ fn or_group_no_preference_when_both_installed() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            depend: DepEntry::parse("|| ( dev-libs/a dev-libs/b )").unwrap(),
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse("|| ( dev-libs/a dev-libs/b )").unwrap()).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -591,11 +594,11 @@ fn rebuild_tree_slot_star_prefers_installed_newest_slot() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            depend: DepEntry::parse("sys-devel/gcc:*").unwrap(),
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse("sys-devel/gcc:*").unwrap()).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -675,11 +678,11 @@ fn or_group_prefers_installed_with_slot_nesting() {
         None,
         PackageDeps {
             // slot-star deps trigger push_unslotted_or_choice → slot_* nesting
-            depend: DepEntry::parse("|| ( dev-libs/a:* dev-libs/b:* )").unwrap(),
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (DepEntry::parse("|| ( dev-libs/a:* dev-libs/b:* )").unwrap()).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -770,11 +773,12 @@ fn or_group_prefers_branch_satisfying_use_deps() {
                    ( dev-lang/python:3.13 dev-python/docutils[python_targets_python3_13(-)] ) \
                  )",
             )
-            .unwrap(),
-            depend: vec![],
-            rdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            .unwrap()
+            .into(),
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -867,11 +871,11 @@ fn reinstall_deps_detected_for_direct_use_dep_violation() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            rdepend: DepEntry::parse("dev-python/b[flag]").unwrap(),
-            depend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            rdepend: (DepEntry::parse("dev-python/b[flag]").unwrap()).into(),
+            depend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -920,11 +924,11 @@ fn reinstall_deps_empty_when_use_dep_satisfied() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            rdepend: DepEntry::parse("dev-python/b[flag]").unwrap(),
-            depend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            rdepend: (DepEntry::parse("dev-python/b[flag]").unwrap()).into(),
+            depend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         },
     );
 
@@ -993,7 +997,7 @@ fn upgrade_to_resolves_new_versions_deps() {
         None,
         vec![Interned::intern("flag")],
         PackageDeps {
-            rdepend: DepEntry::parse("dev-libs/c").unwrap(),
+            rdepend: (DepEntry::parse("dev-libs/c").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -1002,7 +1006,7 @@ fn upgrade_to_resolves_new_versions_deps() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            rdepend: DepEntry::parse("dev-python/b[flag]").unwrap(),
+            rdepend: (DepEntry::parse("dev-python/b[flag]").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -1062,7 +1066,7 @@ fn required_use_of_fixed_flags_never_constrains_the_solve() {
     let build = |with_ru: bool| {
         let mut repo = InMemoryRepository::new();
         let deps = PackageDeps {
-            rdepend: DepEntry::parse("dev-libs/b").unwrap(),
+            rdepend: (DepEntry::parse("dev-libs/b").unwrap()).into(),
             ..empty_deps()
         };
         // ^^ ( x y ) with both flags off by default → Level-A violation.
@@ -1147,7 +1151,7 @@ fn ceded_flag_follows_preference() {
             None,
             vec![Interned::intern("flag")],
             PackageDeps {
-                rdepend: DepEntry::parse("flag? ( dev-libs/b )").unwrap(),
+                rdepend: (DepEntry::parse("flag? ( dev-libs/b )").unwrap()).into(),
                 ..empty_deps()
             },
         );
@@ -1204,7 +1208,8 @@ fn solve_required_use(
             rdepend: DepEntry::parse(
                 "w? ( dev-libs/pw ) x? ( dev-libs/px ) y? ( dev-libs/py ) z? ( dev-libs/pz )",
             )
-            .unwrap(),
+            .unwrap()
+            .into(),
             ..empty_deps()
         },
         ru,
@@ -1607,7 +1612,7 @@ fn use_flag_needed_when_flag_off() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            rdepend: DepEntry::parse("dev-libs/b[flag]").unwrap(),
+            rdepend: (DepEntry::parse("dev-libs/b[flag]").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -1648,7 +1653,7 @@ fn use_flag_not_needed_when_iuse_default_on() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            rdepend: DepEntry::parse("dev-libs/b[flag]").unwrap(),
+            rdepend: (DepEntry::parse("dev-libs/b[flag]").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -1683,7 +1688,7 @@ fn use_flag_not_needed_when_config_enables() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            rdepend: DepEntry::parse("dev-libs/b[flag]").unwrap(),
+            rdepend: (DepEntry::parse("dev-libs/b[flag]").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -1769,7 +1774,7 @@ fn use_dep_from_new_parent_on_installed_target_built_without_flag() {
         None,
         vec![Interned::intern("flag")],
         PackageDeps {
-            bdepend: DepEntry::parse("dev-libs/b[flag(-)?]").unwrap(),
+            bdepend: (DepEntry::parse("dev-libs/b[flag(-)?]").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -1879,7 +1884,7 @@ fn installed_version_removed_from_repo_kept_when_satisfying() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            rdepend: DepEntry::parse("dev-python/b").unwrap(),
+            rdepend: (DepEntry::parse("dev-python/b").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -1946,7 +1951,7 @@ fn host_installed_satisfies_bdepend() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            bdepend: DepEntry::parse("dev-build/b").unwrap(),
+            bdepend: (DepEntry::parse("dev-build/b").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2002,7 +2007,7 @@ fn bdepend_filtering_is_per_edge_not_per_package() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            bdepend: DepEntry::parse("dev-build/b").unwrap(),
+            bdepend: (DepEntry::parse("dev-build/b").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2011,7 +2016,7 @@ fn bdepend_filtering_is_per_edge_not_per_package() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            rdepend: DepEntry::parse("dev-build/b").unwrap(),
+            rdepend: (DepEntry::parse("dev-build/b").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2061,7 +2066,7 @@ fn host_installed_satisfies_native_idepend() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            idepend: DepEntry::parse("sys-apps/locale-gen").unwrap(),
+            idepend: (DepEntry::parse("sys-apps/locale-gen").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2109,7 +2114,7 @@ fn host_installed_satisfies_cross_idepend() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            idepend: DepEntry::parse("sys-apps/locale-gen").unwrap(),
+            idepend: (DepEntry::parse("sys-apps/locale-gen").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2175,8 +2180,8 @@ fn root_deps_rdeps_drops_target_depend() {
         Some(slot0),
         None,
         PackageDeps {
-            depend: DepEntry::parse("dev-build/buildtool").unwrap(),
-            rdepend: DepEntry::parse("sys-libs/runlib").unwrap(),
+            depend: (DepEntry::parse("dev-build/buildtool").unwrap()).into(),
+            rdepend: (DepEntry::parse("sys-libs/runlib").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2240,7 +2245,7 @@ fn host_installed_bdepend_with_unmet_use_dep_is_rebuilt() {
         None,
         vec![text],
         PackageDeps {
-            rdepend: DepEntry::parse("text? ( dev-build/c )").unwrap(),
+            rdepend: (DepEntry::parse("text? ( dev-build/c )").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2256,7 +2261,7 @@ fn host_installed_bdepend_with_unmet_use_dep_is_rebuilt() {
         Some(slot0),
         None,
         PackageDeps {
-            bdepend: DepEntry::parse("dev-build/b[text(+)]").unwrap(),
+            bdepend: (DepEntry::parse("dev-build/b[text(+)]").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2320,7 +2325,7 @@ fn host_installed_bdepend_with_met_use_dep_is_pruned() {
         Some(slot0),
         None,
         PackageDeps {
-            bdepend: DepEntry::parse("dev-build/b[text(+)]").unwrap(),
+            bdepend: (DepEntry::parse("dev-build/b[text(+)]").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2370,7 +2375,7 @@ fn host_installed_satisfies_cross_bdepend_with_bdeps() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            bdepend: DepEntry::parse("dev-build/b").unwrap(),
+            bdepend: (DepEntry::parse("dev-build/b").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2431,7 +2436,7 @@ fn cross_target_build_pulls_unsatisfied_bdepend() {
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            bdepend: DepEntry::parse("dev-build/b").unwrap(),
+            bdepend: (DepEntry::parse("dev-build/b").unwrap()).into(),
             ..empty_deps()
         },
     );
@@ -2488,7 +2493,7 @@ fn cross_target_build_pulls_unsatisfied_bdepend_even_if_target_already_has_it() 
         Some(Interned::intern("0")),
         None,
         PackageDeps {
-            bdepend: DepEntry::parse("dev-build/b").unwrap(),
+            bdepend: (DepEntry::parse("dev-build/b").unwrap()).into(),
             ..empty_deps()
         },
     );

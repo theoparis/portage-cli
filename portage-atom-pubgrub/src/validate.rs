@@ -471,11 +471,11 @@ mod tests {
 
     fn empty_deps() -> PackageDeps {
         PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         }
     }
 
@@ -489,11 +489,11 @@ mod tests {
             Some(slot_0),
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("dev-libs/lib:=").unwrap())],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![DepEntry::Atom(Dep::parse("dev-libs/lib:=").unwrap())]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         repo.add_version(
@@ -525,11 +525,11 @@ mod tests {
             Some(slot_0),
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("dev-libs/lib:0=").unwrap())],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![DepEntry::Atom(Dep::parse("dev-libs/lib:0=").unwrap())]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         repo.add_version(
@@ -553,11 +553,11 @@ mod tests {
     fn check_blockers_detects_conflict() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version(
@@ -565,11 +565,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("!dev-libs/libressl").unwrap())],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![DepEntry::Atom(Dep::parse("!dev-libs/libressl").unwrap())]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         repo.add_version(
@@ -611,11 +611,11 @@ mod tests {
     fn check_blockers_fires_from_a_host_routed_packages_own_blocker() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version(
@@ -623,7 +623,7 @@ mod tests {
             Some(Interned::intern("0")),
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("!dev-build/blocked").unwrap())],
+                depend: (vec![DepEntry::Atom(Dep::parse("!dev-build/blocked").unwrap())]).into(),
                 ..empty()
             },
         );
@@ -638,8 +638,8 @@ mod tests {
             Some(Interned::intern("0")),
             None,
             PackageDeps {
-                bdepend: vec![DepEntry::Atom(Dep::parse("dev-build/user").unwrap())],
-                rdepend: vec![DepEntry::Atom(Dep::parse("dev-build/blocked").unwrap())],
+                bdepend: (vec![DepEntry::Atom(Dep::parse("dev-build/user").unwrap())]).into(),
+                rdepend: (vec![DepEntry::Atom(Dep::parse("dev-build/blocked").unwrap())]).into(),
                 ..empty()
             },
         );
@@ -670,11 +670,11 @@ mod tests {
         // off, the blocker must not fire (mirrors firefox's `!glibc[crypt(-)]`).
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
         repo.add_version(
             portage_atom::Cpv::parse("dev-libs/openssl-3.0.0").unwrap(),
@@ -683,7 +683,8 @@ mod tests {
             PackageDeps {
                 depend: vec![DepEntry::Atom(
                     Dep::parse("!dev-libs/libressl[foo]").unwrap(),
-                )],
+                )]
+                .into(),
                 ..empty()
             },
         );
@@ -722,18 +723,18 @@ mod tests {
     fn check_blockers_fires_against_retained_installed() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
         repo.add_version(
             portage_atom::Cpv::parse("sys-apps/systemd-260.2").unwrap(),
             None,
             None,
             PackageDeps {
-                rdepend: vec![DepEntry::Atom(Dep::parse("!net-dns/openresolv").unwrap())],
+                rdepend: (vec![DepEntry::Atom(Dep::parse("!net-dns/openresolv").unwrap())]).into(),
                 ..empty()
             },
         );
@@ -781,11 +782,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: vec![],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
 
@@ -817,11 +818,11 @@ mod tests {
     fn check_blockers_no_conflict_when_clean() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version(
@@ -829,11 +830,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("!dev-libs/libressl").unwrap())],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![DepEntry::Atom(Dep::parse("!dev-libs/libressl").unwrap())]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         repo.add_version(
@@ -863,11 +864,11 @@ mod tests {
     fn check_use_deps_enabled_satisfied() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version_with_iuse(
@@ -882,11 +883,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: DepEntry::parse("dev-libs/openssl[ssl]").unwrap(),
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (DepEntry::parse("dev-libs/openssl[ssl]").unwrap()).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
 
@@ -909,11 +910,11 @@ mod tests {
     fn check_use_deps_enabled_violated() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version(
@@ -927,11 +928,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: DepEntry::parse("dev-libs/openssl[ssl]").unwrap(),
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (DepEntry::parse("dev-libs/openssl[ssl]").unwrap()).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
 
@@ -956,11 +957,11 @@ mod tests {
     fn check_use_deps_conditional_with_parent_on() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version(
@@ -974,11 +975,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: DepEntry::parse("dev-libs/openssl[ssl?]").unwrap(),
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (DepEntry::parse("dev-libs/openssl[ssl?]").unwrap()).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
 
@@ -1004,11 +1005,11 @@ mod tests {
     fn check_use_deps_conditional_with_parent_off() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version(
@@ -1022,11 +1023,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: DepEntry::parse("dev-libs/openssl[ssl?]").unwrap(),
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (DepEntry::parse("dev-libs/openssl[ssl?]").unwrap()).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
 
@@ -1051,11 +1052,11 @@ mod tests {
     fn check_use_deps_equal_matches() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version(
@@ -1069,11 +1070,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: DepEntry::parse("dev-libs/openssl[ssl=]").unwrap(),
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (DepEntry::parse("dev-libs/openssl[ssl=]").unwrap()).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
 
@@ -1098,11 +1099,11 @@ mod tests {
     fn check_repo_constraint_satisfied() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
         let gentoo = Interned::intern("gentoo");
 
@@ -1119,11 +1120,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: DepEntry::parse("dev-libs/openssl::gentoo").unwrap(),
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (DepEntry::parse("dev-libs/openssl::gentoo").unwrap()).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
 
@@ -1143,11 +1144,11 @@ mod tests {
     fn check_repo_constraint_violated() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version_full(
@@ -1163,11 +1164,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: DepEntry::parse("dev-libs/openssl::gentoo").unwrap(),
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (DepEntry::parse("dev-libs/openssl::gentoo").unwrap()).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
 
@@ -1187,11 +1188,11 @@ mod tests {
     fn check_blockers_respects_slot() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         let slot_0 = Interned::<DefaultInterner>::intern("0");
@@ -1202,11 +1203,11 @@ mod tests {
             Some(slot_0),
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("!app-misc/target:0").unwrap())],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![DepEntry::Atom(Dep::parse("!app-misc/target:0").unwrap())]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         repo.add_version(
@@ -1247,11 +1248,11 @@ mod tests {
             Some(slot_0),
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("!app-misc/target:0").unwrap())],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![DepEntry::Atom(Dep::parse("!app-misc/target:0").unwrap())]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         repo2.add_version(
@@ -1280,11 +1281,11 @@ mod tests {
     fn check_blockers_approximate_operator() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         // app-misc/app blocks ~dev-libs/lib-1.0 (all revisions of 1.0)
@@ -1293,11 +1294,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("!~dev-libs/lib-1.0").unwrap())],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![DepEntry::Atom(Dep::parse("!~dev-libs/lib-1.0").unwrap())]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         repo.add_version(
@@ -1363,11 +1364,11 @@ mod tests {
     fn check_blockers_version_matched() {
         let mut repo = InMemoryRepository::new();
         let empty = || PackageDeps {
-            depend: vec![],
-            rdepend: vec![],
-            bdepend: vec![],
-            pdepend: vec![],
-            idepend: vec![],
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
         };
 
         repo.add_version(
@@ -1375,11 +1376,11 @@ mod tests {
             None,
             None,
             PackageDeps {
-                depend: vec![DepEntry::Atom(Dep::parse("!>=dev-libs/lib-2.0").unwrap())],
-                rdepend: vec![],
-                bdepend: vec![],
-                pdepend: vec![],
-                idepend: vec![],
+                depend: (vec![DepEntry::Atom(Dep::parse("!>=dev-libs/lib-2.0").unwrap())]).into(),
+                rdepend: (vec![]).into(),
+                bdepend: (vec![]).into(),
+                pdepend: (vec![]).into(),
+                idepend: (vec![]).into(),
             },
         );
         repo.add_version(
