@@ -221,8 +221,23 @@ pub struct PortageDependencyProvider {
     /// `DEPEND` edges for target-root instances when [`cross_active`](Self::cross_active).
     pub(crate) sysroot_installed: HashMap<PortagePackage, Version>,
     /// Dual-root solver mode: stamp dependency targets with [`MergeRoot`] and
-    /// register host-side package instances.
+    /// register host-side package instances. Set for both a genuine foreign-
+    /// arch cross build *and* a same-arch offset build (`--root <dir>`) — see
+    /// [`is_cross_arch`](Self::is_cross_arch) for the distinction the two
+    /// need at the `DEPEND`-filtering branch in `solve.rs`.
     pub(crate) cross_active: bool,
+    /// Whether this is a genuine foreign-arch build (`CHOST != CBUILD`), not
+    /// just a same-arch offset (`--root <dir>`, `cross_active` alone doesn't
+    /// distinguish them). Only a genuine cross build keeps `DEPEND` pinned to
+    /// the target sysroot unconditionally (`cross_target_runtime_deps`) — a
+    /// same-arch offset build's `DEPEND` is satisfied by whatever machine does
+    /// the actual compiling, same as `BDEPEND` (`broot_filtered`). Found
+    /// 2026-07-11: `CrossContext::is_cross_arch()`'s CHOST/CBUILD-unreadable
+    /// fallback used to treat *any* non-host sysroot as foreign-arch, so a
+    /// same-arch `--root` build always took the cross branch and never
+    /// dropped host-satisfied `DEPEND` at all. See
+    /// `todo/root-topology-refactor.md`.
+    pub(crate) is_cross_arch: bool,
     /// Host `@host` instances alias target package data (no duplicate ingest).
     pub(crate) host_aliases: HashMap<PortagePackage, PortagePackage>,
     pub(crate) dropped_deps: Vec<DroppedDep>,
@@ -630,6 +645,7 @@ impl PortageDependencyProvider {
             host_installed: HashMap::new(),
             sysroot_installed: HashMap::new(),
             cross_active: false,
+            is_cross_arch: false,
             host_aliases: HashMap::new(),
             dropped_deps,
             use_flag_requirements: Vec::new(),
@@ -772,6 +788,14 @@ impl PortageDependencyProvider {
         if active {
             self.ensure_host_instances();
         }
+    }
+
+    /// Mark this as a genuine foreign-arch build (`CHOST != CBUILD`), not
+    /// just a same-arch offset (`--root <dir>`) — see
+    /// [`is_cross_arch`](Self::is_cross_arch) field doc for why `solve.rs`
+    /// needs this distinct from [`cross_active`](Self::set_cross_active).
+    pub fn set_is_cross_arch(&mut self, is_cross_arch: bool) {
+        self.is_cross_arch = is_cross_arch;
     }
 
     /// `--emptytree`: rebuild the full deep closure; skip installed-branch

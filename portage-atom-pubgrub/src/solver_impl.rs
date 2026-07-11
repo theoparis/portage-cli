@@ -348,6 +348,7 @@ mod tests {
         );
         let mut provider = PortageDependencyProvider::new(repo);
         Solver::set_cross_active(&mut provider, true);
+        provider.set_is_cross_arch(true);
         Solver::set_root_deps_rdeps(&mut provider, true);
 
         let target = TargetSpec::any_in(Cpn::parse("app-misc/leaf").unwrap(), None);

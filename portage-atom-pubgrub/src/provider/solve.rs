@@ -2,7 +2,7 @@
 //! version choice (installed-preference heuristics), and dependency lookup.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use portage_atom::{UseDefault, Version};
 use pubgrub::{
@@ -311,8 +311,8 @@ impl PortageDependencyProvider {
                 // for this case — only RDEPEND/PDEPEND/IDEPEND matter once a
                 // package is already built and staying that way.
                 return Ok(Dependencies::Available(cross_target_runtime_deps(
+                    self,
                     vd,
-                    &self.host_installed,
                     &self.sysroot_installed,
                     target_drops_depend(self.root_deps_rdeps, package),
                     false,
@@ -338,7 +338,20 @@ impl PortageDependencyProvider {
         }
 
         // A package being *built* (not at its installed version):
-        if self.cross_active && package.merge_root() == MergeRoot::Target {
+        //
+        // `self.is_cross_arch`, not just `cross_active`: `cross_active` is
+        // also on for a same-arch offset build (`--root <dir>`), which needs
+        // the dual-root `(package, merge_root)` bookkeeping but NOT this
+        // branch's "keep DEPEND unconditionally" treatment (that's only
+        // correct when DEPEND genuinely means "the *target* sysroot's own
+        // headers/libs", i.e. real cross-compilation). A same-arch offset
+        // build falls through to `broot_filtered` below instead, which drops
+        // host-satisfied DEPEND the same way BDEPEND/IDEPEND already are.
+        // Found 2026-07-11: without this, `em --root <dir> sys-devel/gcc`
+        // pulled 127 packages (perl, portage, gnupg, eselect, rsync, ...)
+        // where real `ROOT=<dir> emerge sys-devel/gcc` pulls 16 — see
+        // `todo/root-topology-refactor.md`.
+        if self.cross_active && self.is_cross_arch && package.merge_root() == MergeRoot::Target {
             // A built package's BDEPEND is strictly required to build it, so
             // (mirroring `broot_filtered`'s native equivalent) `--with-bdeps`
             // does not gate it here — only the *installed-and-kept* branch
@@ -346,18 +359,15 @@ impl PortageDependencyProvider {
             // edge always stamps a Host-root node, never merges into the
             // target sysroot); unsatisfied BDEPEND schedules there instead.
             return Ok(Dependencies::Available(cross_target_runtime_deps(
+                self,
                 vd,
-                &self.host_installed,
                 &self.sysroot_installed,
                 target_drops_depend(self.root_deps_rdeps, package),
                 true,
             )));
         }
         if self.cross_active && package.merge_root() == MergeRoot::Host && self.with_bdeps {
-            return Ok(Dependencies::Available(host_native_deps(
-                vd,
-                &self.host_installed,
-            )));
+            return Ok(Dependencies::Available(host_native_deps(self, vd)));
         }
 
         // A package being *built* always pulls its BDEPEND/IDEPEND, minus the
@@ -369,11 +379,18 @@ impl PortageDependencyProvider {
         // Host-satisfied edges are dropped so an offset build (`--root <empty>`)
         // does not re-pull host-provided build/install tools. DEPEND/RDEPEND are
         // unaffected.
-        if !self.host_installed.is_empty() {
-            return Ok(Dependencies::Available(broot_filtered(
-                vd,
-                &self.host_installed,
-            )));
+        // `!package.is_virtual()`: the synthetic solver root also flows
+        // through here (nothing else catches it once cross/emptytree/
+        // installed-and-kept are ruled out) and carries the user's requested
+        // target atoms in its own "DEPEND" slot (see `target_drops_depend`'s
+        // doc comment on the same footgun for the cross path). Applying
+        // host-satisfaction filtering there would drop a requested atom
+        // outright whenever the *host* happens to already have it installed
+        // (e.g. `em --root <dir> sys-devel/gcc` on a host that already has
+        // gcc) — collapsing the plan to 0 packages instead of adding gcc to
+        // the target. Found 2026-07-11, see `todo/root-topology-refactor.md`.
+        if !package.is_virtual() && !self.host_installed.is_empty() {
+            return Ok(Dependencies::Available(broot_filtered(self, vd)));
         }
         Ok(vd.merged.clone())
     }
@@ -400,8 +417,8 @@ fn target_drops_depend(rdeps: bool, package: &PortagePackage) -> bool {
 }
 
 fn cross_target_runtime_deps(
+    provider: &PortageDependencyProvider,
     vd: &VersionData,
-    host_installed: &HashMap<PortagePackage, HostEntry>,
     _sysroot_installed: &HashMap<PortagePackage, Version>,
     root_deps_rdeps: bool,
     include_bdepend: bool,
@@ -427,16 +444,16 @@ fn cross_target_runtime_deps(
     // rebuild; the package's own configure/build then failed instead. See
     // todo/stage-build-shakeout.md.
     if include_bdepend {
-        append_unsatisfied_broot(&mut out, vd.bdepend(), host_installed, vd, MergeRoot::Host);
+        append_unsatisfied_broot(&mut out, vd.bdepend(), provider, vd, MergeRoot::Host);
     }
-    append_unsatisfied_broot(&mut out, vd.idepend(), host_installed, vd, MergeRoot::Host);
+    append_unsatisfied_broot(&mut out, vd.idepend(), provider, vd, MergeRoot::Host);
     out.into_iter().collect()
 }
 
 /// Host-root native build (BDEPEND front-matter): all deps target the host instance.
 fn host_native_deps(
+    provider: &PortageDependencyProvider,
     vd: &VersionData,
-    host_installed: &HashMap<PortagePackage, HostEntry>,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
     let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd
         .depend()
@@ -445,55 +462,97 @@ fn host_native_deps(
         .chain(vd.pdepend())
         .map(|(p, vs, _)| (stamp_root(p, MergeRoot::Host), vs.clone()))
         .collect();
-    append_unsatisfied_broot(&mut out, vd.bdepend(), host_installed, vd, MergeRoot::Host);
-    append_unsatisfied_broot(&mut out, vd.idepend(), host_installed, vd, MergeRoot::Host);
+    append_unsatisfied_broot(&mut out, vd.bdepend(), provider, vd, MergeRoot::Host);
+    append_unsatisfied_broot(&mut out, vd.idepend(), provider, vd, MergeRoot::Host);
     out.into_iter().collect()
 }
 
-/// Native build: keep DEPEND/RDEPEND/PDEPEND; drop host-satisfied
-/// BDEPEND and IDEPEND (both resolve on BROOT per PMS table 8.2).
+/// Native build: keep RDEPEND/PDEPEND; drop host-satisfied DEPEND, BDEPEND,
+/// and IDEPEND.
+///
+/// DEPEND joined BDEPEND/IDEPEND's host-satisfied filtering 2026-07-11: for a
+/// native (same-arch) build there's no separate build sysroot distinct from
+/// the host when `CBUILD==CHOST` — DEPEND is satisfied by whatever machine
+/// does the actual compiling, same as BDEPEND. Confirmed empirically against
+/// real portage: `ROOT=X emerge sys-devel/gcc` against a genuinely empty `X`
+/// does not need `os-headers`/`perl`/`sys-apps/portage`/etc. built fresh into
+/// `X` — glibc's and gcc's own DEPEND is satisfied by the host. Before this
+/// fix, DEPEND was included unconditionally with no host check at all, so a
+/// self-contained `--root` build of a single package (e.g. `sys-devel/gcc`)
+/// pulled in perl's own `!minimal?` PDEPEND tail (`perl-cleaner`,
+/// `sys-apps/portage`, `app-crypt/gnupg`, `app-admin/eselect`,
+/// `net-misc/rsync`) transitively via `virtual/os-headers` →
+/// `sys-kernel/linux-headers` → `dev-lang/perl` — a 127-package plan for a
+/// real `emerge`'s 16. See `todo/root-topology-refactor.md`.
 fn broot_filtered(
+    provider: &PortageDependencyProvider,
     vd: &VersionData,
-    host_installed: &HashMap<PortagePackage, HostEntry>,
 ) -> DependencyConstraints<PortagePackage, PortageVersionSet> {
     let mut out: Vec<(PortagePackage, PortageVersionSet)> = vd
-        .depend()
+        .rdepend()
         .iter()
-        .chain(vd.rdepend())
         .chain(vd.pdepend())
         .map(|(p, vs, _)| (p.clone(), vs.clone()))
         .collect();
-    append_unsatisfied_broot(
-        &mut out,
-        vd.bdepend(),
-        host_installed,
-        vd,
-        MergeRoot::Target,
-    );
-    append_unsatisfied_broot(
-        &mut out,
-        vd.idepend(),
-        host_installed,
-        vd,
-        MergeRoot::Target,
-    );
+    append_unsatisfied_broot(&mut out, vd.depend(), provider, vd, MergeRoot::Target);
+    append_unsatisfied_broot(&mut out, vd.bdepend(), provider, vd, MergeRoot::Target);
+    append_unsatisfied_broot(&mut out, vd.idepend(), provider, vd, MergeRoot::Target);
     out.into_iter().collect()
 }
 
-/// Whether the host (BROOT) satisfies a `BDEPEND`/`IDEPEND` edge `(p, vs)`: the
-/// host instance must accept the version **and** its current USE must satisfy
+/// Whether the host (BROOT) satisfies a dependency edge `(p, vs)`: the host
+/// instance must accept the version **and** its current USE must satisfy
 /// every atom USE-dependency on that edge. A `[flag]` the host lacks is not
 /// satisfied — portage rebuilds the package with the new USE, pulling its
 /// re-evaluated USE-conditional closure (PMS §8.3 atom USE-deps). The parent
 /// (`vd`) supplies the parent-flag state for `[flag?]`/`[flag=]` kinds.
+///
+/// `p` a `Choice`/`SlotChoice` virtual node (an `||`/`^^`/`??` OR-group or a
+/// `:*` slot-star group) delegates to [`virtual_satisfied_on_broot`]: the
+/// edge is satisfied when *any* branch is. Before this, a virtual target was
+/// never a `host_installed` key, so this always returned `false` — every
+/// DEPEND/BDEPEND/IDEPEND edge routed through an OR-group or a plain
+/// unslotted dep on a multi-slot package (gcc, python, ...) became an
+/// unconditional constraint, bypassing host-satisfaction entirely. Found
+/// 2026-07-11 live-tracing why `em --root <dir> sys-devel/gcc` still pulled
+/// ~123 packages after `broot_filtered` started filtering DEPEND: every
+/// exploding package (`perl`, `os-headers`, `linux-headers`, `elt-patches`,
+/// ...) checked `satisfied=true` on its *direct* edge, yet still ended up in
+/// the plan — reached only through a Choice/SlotChoice node whose own edge
+/// was never checked at all. `Root`/`UseDecision` are excluded (never
+/// virtual-satisfiable): they aren't a real installable alternative, and
+/// REQUIRED_USE/ceding machinery must keep deciding them, not have them
+/// silently treated as "the host already has it". See
+/// `todo/root-topology-refactor.md`.
 fn host_satisfied_on_broot(
-    host_installed: &HashMap<PortagePackage, HostEntry>,
+    provider: &PortageDependencyProvider,
     vd: &VersionData,
     p: &PortagePackage,
     vs: &PortageVersionSet,
 ) -> bool {
+    let mut seen = HashSet::new();
+    host_satisfied_on_broot_inner(provider, vd, p, vs, &mut seen)
+}
+
+fn host_satisfied_on_broot_inner(
+    provider: &PortageDependencyProvider,
+    vd: &VersionData,
+    p: &PortagePackage,
+    vs: &PortageVersionSet,
+    seen: &mut HashSet<PortagePackage>,
+) -> bool {
+    if matches!(
+        p,
+        PortagePackage::Choice { .. } | PortagePackage::SlotChoice { .. }
+    ) {
+        return virtual_satisfied_on_broot(provider, p, seen);
+    }
+    if p.is_virtual() {
+        // Root/UseDecision.
+        return false;
+    }
     let hp = stamp_root(p, MergeRoot::Host);
-    let Some(entry) = host_installed.get(&hp) else {
+    let Some(entry) = provider.host_installed.get(&hp) else {
         return false;
     };
     if !vs.contains(&entry.version) {
@@ -504,6 +563,33 @@ fn host_satisfied_on_broot(
         .filter(|c| c.target.0 == *p)
         .flat_map(|c| c.use_deps.iter())
         .all(|ud| host_use_dep_satisfied(vd, entry, ud))
+}
+
+/// Whether *some* branch of a `Choice`/`SlotChoice` virtual node is fully
+/// host-satisfied: every one of that branch's own dependency edges (all
+/// classes collapse into a single list for a synthetic choice branch — see
+/// `register_virtual_choices`) is itself `host_satisfied_on_broot_inner`,
+/// recursing for a nested Choice/SlotChoice (e.g. an `||` group with a `:*`
+/// member). `seen` guards against a pathological self-referential choice
+/// graph; a revisited node is conservatively treated as unsatisfied rather
+/// than looping.
+fn virtual_satisfied_on_broot(
+    provider: &PortageDependencyProvider,
+    choice: &PortagePackage,
+    seen: &mut HashSet<PortagePackage>,
+) -> bool {
+    if !seen.insert(choice.clone()) {
+        return false;
+    }
+    let satisfied = provider.package_data(choice).is_some_and(|data| {
+        data.versions.values().any(|branch_vd| {
+            branch_vd.depend().iter().all(|(bp, bvs, _)| {
+                host_satisfied_on_broot_inner(provider, branch_vd, bp, bvs, seen)
+            })
+        })
+    });
+    seen.remove(choice);
+    satisfied
 }
 
 /// Whether a single atom USE-dep is satisfied by the host instance's current
@@ -526,12 +612,12 @@ fn host_use_dep_satisfied(vd: &VersionData, entry: &HostEntry, ud: &portage_atom
 fn append_unsatisfied_broot(
     out: &mut Vec<(PortagePackage, PortageVersionSet)>,
     edges: &[crate::convert::Req],
-    host_installed: &HashMap<PortagePackage, HostEntry>,
+    provider: &PortageDependencyProvider,
     vd: &VersionData,
     unsatisfied_root: MergeRoot,
 ) {
     for (p, vs, _) in edges {
-        if !host_satisfied_on_broot(host_installed, vd, p, vs) {
+        if !host_satisfied_on_broot(provider, vd, p, vs) {
             out.push((stamp_root(p, unsatisfied_root), vs.clone()));
         }
     }

@@ -263,8 +263,17 @@ impl Roots {
     /// independent of any `--target` sysroot substitution); `IDEPEND` is
     /// `broot` for a cross build, else the same as `RDEPEND`/`PDEPEND`;
     /// `DEPEND` resolves against `base` when it genuinely differs from the
-    /// target (an overlay, e.g. `--prefix`) else the target itself;
-    /// `RDEPEND`/`PDEPEND` always resolve against the target (`merge_root()`).
+    /// target (an overlay, e.g. `--prefix`); otherwise, for a native
+    /// (same-arch) build, `broot` — there's no separate build sysroot
+    /// distinct from the host when `CBUILD==CHOST`, confirmed empirically
+    /// against real portage (`ROOT=X emerge sys-devel/gcc` against an empty
+    /// `X` doesn't need `os-headers`/`perl`/etc. built fresh into `X`; glibc
+    /// and gcc's own DEPEND is satisfied by the host, 2026-07-11, see
+    /// `todo/root-topology-refactor.md`) — only a genuine cross build
+    /// (`--target`, foreign-arch) keeps DEPEND pinned to the target sysroot,
+    /// since the host's own-arch VDB can't satisfy a foreign-arch DEPEND at
+    /// all; `RDEPEND`/`PDEPEND` always resolve against the target
+    /// (`merge_root()`).
     ///
     /// This replaces threading a second `host_roots: &Roots` alongside
     /// `roots` everywhere just to answer the `BDEPEND` question — `broot`
@@ -277,8 +286,10 @@ impl Roots {
             DepClass::Depend => {
                 if self.base.as_deref().is_some_and(|b| b != self.merge_root()) {
                     self.base.as_deref().unwrap()
-                } else {
+                } else if self.is_cross_arch {
                     self.merge_root()
+                } else {
+                    self.satisfaction_root(DepClass::Bdepend)
                 }
             }
         }
@@ -311,6 +322,23 @@ impl Roots {
             base: Some(path.clone()),
             target: Some(path.clone()),
             broot: Some(path),
+            ..Default::default()
+        }
+    }
+
+    /// Test-only: a bare `--root DIR` shaped `Roots` with BROOT a genuinely
+    /// separate directory from the offset (`base`/`target`) — matching real
+    /// `Dual { broot: host, target: offset }`, `eprefix: None`,
+    /// `is_cross_arch: false`. `for_test` collapses all three roles to one
+    /// path, which can't exercise `initial_depend`'s host-vs-target weave
+    /// (they're the same directory there); this can.
+    #[cfg(test)]
+    pub(crate) fn for_test_root_with_broot(target: &str, broot: &str) -> Self {
+        let path = camino::Utf8PathBuf::from(target);
+        Roots {
+            base: Some(path.clone()),
+            target: Some(path),
+            broot: Some(camino::Utf8PathBuf::from(broot)),
             ..Default::default()
         }
     }
@@ -570,18 +598,15 @@ impl Cli {
             };
         }
         Roots {
-            // config: --config-root, else --root; host otherwise. This is
-            // `em`'s own deliberate self-contained-bootstrap default (own
-            // config, own everything — setup.rs's "self-contained offset"
-            // mode) — NOT a portage `ROOT=` parity gap: `em select`'s config
-            // resolution intentionally does NOT follow this fallback
-            // (`Roots::config_root_explicit`, matching real eselect's actual
-            // behavior — see its `profile.eselect` module, which only ever
-            // honours an explicit `PORTAGE_CONFIGROOT`/`EROOT`, never derives
-            // from `ROOT` alone), and `--config-root /` already gives literal
-            // `ROOT=`-sharing parity for anything else that wants it.
-            // Decided 2026-07-09 — see todo/root-topology-refactor.md.
-            config: path(&self.config_root).or_else(|| path(&self.root)),
+            // config: --config-root, else host `/` — true portage `ROOT=`
+            // parity (`PORTAGE_CONFIGROOT` defaults to `/` regardless of
+            // `ROOT`). The 2026-07-09 "own everything" self-contained default
+            // (config following `--root` itself) was reverted 2026-07-11: it
+            // diverged from real `ROOT=` semantics for no benefit `--root
+            // --config-root <same dir>` didn't already give explicitly, and
+            // made a bare `--root DIR` behave unlike anything a real emerge
+            // user would expect — see todo/root-topology-refactor.md.
+            config: path(&self.config_root),
             // base: --root; host otherwise.
             base: path(&self.root),
             // target: --root (install destination). This is "the outer EROOT"

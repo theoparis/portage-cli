@@ -450,6 +450,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             &slot_map,
         );
         provider.set_cross_active(cross.active);
+        provider.set_is_cross_arch(cross.is_cross_arch());
         // crossdev `--root-deps=rdeps`: caller-supplied (see `DepgraphOpts::
         // root_deps_rdeps`) — a property of which operation is running, not of
         // the sysroot's CHOST/CBUILD.

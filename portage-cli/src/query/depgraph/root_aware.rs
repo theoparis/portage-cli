@@ -45,11 +45,22 @@ pub struct CrossContext {
 }
 
 impl CrossContext {
-    /// `true` when the target profile declares a different machine than the host.
+    /// `true` when the target profile declares a different machine than the
+    /// host. When CHOST/CBUILD can't be read (no sysroot config yet, or a
+    /// same-arch offset that never declares them), default to same-arch —
+    /// NOT `sysroot != "/"`, which used to treat *any* non-host sysroot
+    /// (including a plain same-arch `--root <dir>`) as foreign-arch. Mirrors
+    /// `detect()`'s own `cross_arch` local (which already used `_ => false`),
+    /// an inconsistency this method used to diverge from. Found 2026-07-11:
+    /// that false positive made a same-arch offset build's `DEPEND` stay
+    /// unconditionally pinned to the target sysroot in `solve.rs` instead of
+    /// dropping host-satisfied edges — `em --root <dir> sys-devel/gcc`
+    /// pulled 127 packages where real `ROOT=<dir> emerge` pulls 16. See
+    /// `todo/root-topology-refactor.md`.
     pub fn is_cross_arch(&self) -> bool {
         match (self.chost.as_deref(), self.cbuild.as_deref()) {
             (Some(c), Some(b)) => c != b,
-            _ => self.sysroot.as_str() != "/",
+            _ => false,
         }
     }
 

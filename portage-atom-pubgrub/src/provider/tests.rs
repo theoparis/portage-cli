@@ -2125,6 +2125,7 @@ fn host_installed_satisfies_cross_idepend() {
         PortageDependencyProvider::new(repo)
     };
     provider.set_cross_active(true);
+    provider.set_is_cross_arch(true);
     provider.add_host_installed(
         PortagePackage::unslotted(Cpn::parse("sys-apps/locale-gen").unwrap()),
         Version::parse("1.0").unwrap(),
@@ -2192,6 +2193,7 @@ fn root_deps_rdeps_drops_target_depend() {
         repo.set_use_config(UseConfig::new());
         let mut provider = PortageDependencyProvider::new(repo);
         provider.set_cross_active(true);
+        provider.set_is_cross_arch(true);
         provider.set_root_deps_rdeps(rdeps);
         let leaf = PortagePackage::slotted(Cpn::parse("app-misc/leaf").unwrap(), slot0);
         provider
@@ -2385,6 +2387,7 @@ fn host_installed_satisfies_cross_bdepend_with_bdeps() {
         repo.set_use_config(config);
         let mut p = PortageDependencyProvider::new(repo);
         p.set_cross_active(true);
+        p.set_is_cross_arch(true);
         p.set_with_bdeps(true);
         p
     };
@@ -2446,6 +2449,7 @@ fn cross_target_build_pulls_unsatisfied_bdepend() {
         repo.set_use_config(config);
         let mut p = PortageDependencyProvider::new(repo);
         p.set_cross_active(true);
+        p.set_is_cross_arch(true);
         p.set_with_bdeps(true);
         p
     };
@@ -2503,6 +2507,7 @@ fn cross_target_build_pulls_unsatisfied_bdepend_even_if_target_already_has_it() 
         repo.set_use_config(config);
         let mut p = PortageDependencyProvider::new(repo);
         p.set_cross_active(true);
+        p.set_is_cross_arch(true);
         p.set_with_bdeps(true);
         p
     };
