@@ -20,7 +20,7 @@ type TargetAcc = (
     Version,
     BTreeSet<Interned<DefaultInterner>>,
     BTreeSet<Interned<DefaultInterner>>,
-    BTreeSet<String>,
+    BTreeSet<Interned<DefaultInterner>>,
 );
 
 pub(crate) fn eval_violated_use_dep(
@@ -172,7 +172,7 @@ impl PortageDependencyProvider {
                         entry.2.insert(ud.flag);
                     }
                     if !parent.is_virtual() {
-                        entry.3.insert(constraint.parent_cpn_str.clone());
+                        entry.3.insert(constraint.parent_cpn_str);
                     }
                 }
             }
@@ -279,7 +279,7 @@ impl PortageDependencyProvider {
                     upgrade_to: upgrade_to.remove(&pkg),
                     required_enabled: enable.into_iter().collect(),
                     required_disabled: disable.into_iter().collect(),
-                    required_by: requirers.into_iter().collect(),
+                    required_by: requirers.into_iter().map(|s| s.to_string()).collect(),
                 },
             )
             .collect();

@@ -99,7 +99,10 @@ pub(crate) struct UseDepConstraint {
     pub use_deps: Vec<UseDep>,
     /// The parent package's CPN string (e.g. "dev-libs/openssl"),
     /// used to look up solver-decided USE virtuals for `[flag?]`/`[flag=]`.
-    pub parent_cpn_str: String,
+    /// Interned: this is allocated once per USE-dep atom per provider
+    /// rebuild (up to ~8x per invocation during the USE-dep co-solve
+    /// fixpoint), then carried through a `BTreeSet` in `post_solve.rs`.
+    pub parent_cpn_str: Interned<DefaultInterner>,
 }
 
 /// Slot info for a CPN: pre-computed `(slot_interned, slotted_package)` pairs.
@@ -331,7 +334,7 @@ impl ConvertCtx<'_> {
             self.use_deps.push(UseDepConstraint {
                 target: (pkg.clone(), vs.clone()),
                 use_deps: use_deps.clone(),
-                parent_cpn_str: self.cpn_str.to_string(),
+                parent_cpn_str: Interned::intern(self.cpn_str),
             });
         }
         if let Some(repo) = dep.repo {

@@ -431,6 +431,10 @@ impl PortageDependencyProvider {
         let mut seen: HashSet<Cpn> = queue.iter().copied().collect();
         while let Some(cpn) = queue.pop_front() {
             let versions_data = repo.versions_for(&cpn);
+            // Loop-invariant per CPN (not per version) — hoisted out of the
+            // version loop below, which previously re-formatted the same
+            // string for every accepted version of this package.
+            let cpn_str = format!("{}/{}", cpn.category, cpn.package);
 
             for (cpv, meta) in versions_data {
                 let pkg = match &meta.slot {
@@ -443,8 +447,6 @@ impl PortageDependencyProvider {
                         }
                     }
                 };
-
-                let cpn_str = format!("{}/{}", cpn.category, cpn.package);
 
                 let dep_classes: [&[portage_atom::DepEntry]; 5] = [
                     &meta.deps.depend,
