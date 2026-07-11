@@ -367,7 +367,9 @@ fn format_flags(
         let mut enabled = match use_config.get_opt(interned) {
             Some(UseFlagState::Enabled) => true,
             Some(_) => false,
-            None => iuse_default_enabled,
+            // A `-*` clear-all suppresses a `+` IUSE default (the flag was
+            // explicitly reset, not merely unmentioned).
+            None => iuse_default_enabled && !use_config.wildcard_reset(),
         };
 
         // In diff mode (upgrade/downgrade), skip flags that haven't changed

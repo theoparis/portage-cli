@@ -53,6 +53,7 @@ pub(super) fn compute(
             match effective.get_opt(interned) {
                 Some(UseFlagState::Enabled) => true,
                 Some(_) => false,
+                None if effective.wildcard_reset() => false,
                 None => cache
                     .metadata
                     .iuse

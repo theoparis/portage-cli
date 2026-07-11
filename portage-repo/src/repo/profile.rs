@@ -739,18 +739,29 @@ pub(crate) fn merge_flag_lists<'a>(iter: impl Iterator<Item = &'a str>) -> Vec<S
 /// `+foo` IUSE default — portage's USE-over-IUSE-default precedence. The output
 /// round-trips (a `-flag` in a later input is read back as "disabled"), so it
 /// chains across profile/`make.conf`/env layers. Used only for the `USE` var.
+///
+/// `-*` (the incremental clear-all, make.conf(5)) is preserved as a *leading*
+/// literal token in the output rather than consumed. Portage's USE accumulator
+/// sits the ebuild's own `+`/`-` IUSE defaults (`pkginternal`) *below* the
+/// profile/`make.conf`/env layers, so a `-*` in any of those layers clears them;
+/// `em` folds IUSE defaults in a later per-package step, so it must remember
+/// that a clear-all happened to avoid resurrecting a `+`-defaulted flag the
+/// user asked to clear (e.g. curl's `+quic` under `USE="-* build"`). Keeping
+/// the token round-trips correctly: feeding this output back as `prev` re-fires
+/// the same clear (a no-op on the already-reduced list) and keeps propagating
+/// the signal forward through every subsequent layer. The top-level consumer
+/// (`build::profile::collect_use_flags`) strips it.
 pub(crate) fn merge_flag_lists_signed<'a>(iter: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut order: Vec<String> = Vec::new();
     let mut state: HashMap<String, bool> = HashMap::new();
+    let mut saw_wildcard = false;
     for val in iter {
         for token in val.split_whitespace() {
-            // `-*` is the incremental clear-all (make.conf(5)): discard every
-            // flag accumulated so far across the profile→globals→conf→env
-            // layers, then let later tokens rebuild from empty. It is consumed
-            // here and never emitted, so it does not leak into the next layer.
+            // `-*` clear-all: discard everything accumulated so far.
             if token == "-*" {
                 order.clear();
                 state.clear();
+                saw_wildcard = true;
                 continue;
             }
             let (name, enabled) = match token.strip_prefix('-') {
@@ -763,10 +774,14 @@ pub(crate) fn merge_flag_lists_signed<'a>(iter: impl Iterator<Item = &'a str>) -
             state.insert(name, enabled);
         }
     }
-    order
+    let mut out: Vec<String> = order
         .into_iter()
         .map(|n| if state[&n] { n } else { format!("-{n}") })
-        .collect()
+        .collect();
+    if saw_wildcard {
+        out.insert(0, "-*".to_string());
+    }
+    out
 }
 
 /// Recursively collect profiles depth-first, ancestors before self.
@@ -962,22 +977,31 @@ mod tests {
     }
 
     #[test]
-    fn merge_flag_lists_signed_dash_star_clears_and_is_consumed() {
-        // The signed USE merge must clear accumulated state on `-*` and NOT
-        // emit the token (it must not leak into the next layer on re-merge).
+    fn merge_flag_lists_signed_dash_star_preserved_as_leading_marker() {
+        // The signed USE merge clears accumulated state on `-*` and keeps the
+        // token as a leading marker so downstream knows a clear-all happened
+        // (to suppress a `+`-defaulted IUSE flag the user cleared).
         let out = merge_flag_lists_signed(["foo -bar", "-* build"].into_iter());
-        assert_eq!(out, vec!["build".to_string()]);
-        assert!(
-            !out.iter().any(|t| t == "-*" || t == "*"),
-            "-* must be consumed, not emitted"
-        );
+        assert_eq!(out, vec!["-*".to_string(), "build".to_string()]);
     }
 
     #[test]
     fn merge_flag_lists_signed_dash_star_then_disable_survives() {
         // After a clear-all, a subsequent disable is a fresh explicit disable.
         let out = merge_flag_lists_signed(["a", "-* -debug"].into_iter());
-        assert_eq!(out, vec!["-debug".to_string()]);
+        assert_eq!(out, vec!["-*".to_string(), "-debug".to_string()]);
+    }
+
+    #[test]
+    fn merge_flag_lists_signed_dash_star_round_trips() {
+        // Feeding the output back as `prev` re-fires the clear (a no-op on the
+        // already-reduced list) and keeps the marker, so it chains across layers.
+        let first = merge_flag_lists_signed(["foo", "-* build"].into_iter());
+        let second = merge_flag_lists_signed([first.join(" ").as_str(), "ssl"].into_iter());
+        assert_eq!(
+            second,
+            vec!["-*".to_string(), "build".to_string(), "ssl".to_string()]
+        );
     }
 
     // --- ProfileStack tests ---

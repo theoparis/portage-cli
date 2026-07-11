@@ -178,16 +178,21 @@ async fn compute_use_env(
     // disables as `Disabled` (not merely absent) is what lets a configured
     // `-flag` override a package's `+flag` IUSE default in `fold_iuse_defaults`
     // — matching portage's USE-over-IUSE-default precedence.
-    // Enabled flags first, then explicit `USE=-flag` disables. Recording the
-    // disables as `Disabled` (not merely absent) is what lets a configured
-    // `-flag` override a package's `+flag` IUSE default in `fold_iuse_defaults`
-    // — matching portage's USE-over-IUSE-default precedence.
     let mut config = UseConfig::new();
     for flag in resolved.enabled {
         config.set(flag, UseFlagState::Enabled);
     }
     for flag in resolved.disabled {
         config.set(flag, UseFlagState::Disabled);
+    }
+    // A `-*` clear-all (make.conf(5)) disables even a package's own
+    // `+`-defaulted IUSE flags, not just the accumulated profile/config USE —
+    // portage seats IUSE defaults below the env layer so `-*` wipes them, but
+    // `em` folds defaults in a later per-package step, so the bit tells that
+    // fold to treat an unset flag as definitively off. e.g. curl's `+quic`
+    // stays off under `USE="-* build"`.
+    if resolved.wildcard_reset {
+        config.set_wildcard_reset();
     }
 
     // Per-package USE from the profile, then `/etc/portage`, then the config

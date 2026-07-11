@@ -215,9 +215,18 @@ pub async fn configure_shell(
 /// per-package step can record them as explicit `Disabled` and override a
 /// `+flag` IUSE default — portage gives a configured `USE=-flag` precedence over
 /// the ebuild's default. `enabled`/`disabled` are disjoint.
+///
+/// `wildcard_reset` is set when a `-*` clear-all appeared anywhere in the
+/// accumulated USE (profile `make.defaults`, `make.conf`, or the `USE` env
+/// var). Portage seats the ebuild's own `+`/`-` IUSE defaults (`pkginternal`)
+/// *below* those layers, so a `-*` wipes them; `em` folds IUSE defaults in a
+/// later per-package step, so it carries this bit out so the fold can suppress
+/// a `+`-defaulted flag the user cleared (e.g. curl's `+quic` under
+/// `USE="-* build"`) instead of resurrecting it.
 pub struct ResolvedUse {
     pub enabled: UseFlags,
     pub disabled: Vec<Interned<DefaultInterner>>,
+    pub wildcard_reset: bool,
 }
 
 /// Resolve the effective USE flags for a profile stack without setting the
@@ -258,6 +267,7 @@ async fn resolve_use_flags(
     let CollectedUse {
         mut enabled,
         mut disabled,
+        wildcard_reset,
     } = collect_use_flags(shell);
 
     let flag_set: HashSet<String> = enabled.iter().cloned().collect();
@@ -282,6 +292,7 @@ async fn resolve_use_flags(
             .iter()
             .map(|f| Interned::<DefaultInterner>::intern(f.as_str()))
             .collect(),
+        wildcard_reset,
     })
 }
 
@@ -407,23 +418,34 @@ fn shell_quote(s: &str) -> String {
 ///
 /// `disabled` carries flags a `-flag` token turned off (from the signed `USE`
 /// merge), kept so the per-package step can override a `+flag` IUSE default.
+///
+/// `wildcard_reset` records that a `-*` clear-all appeared in the accumulated
+/// `USE` (surfaced as a leading `-*` marker by `merge_flag_lists_signed`, which
+/// preserves it so this parser can see it after the shell has assembled the
+/// final value). See [`ResolvedUse::wildcard_reset`] for why it matters.
 struct CollectedUse {
     enabled: Vec<String>,
     disabled: Vec<String>,
+    wildcard_reset: bool,
 }
 
 fn collect_use_flags(shell: &EbuildShell) -> CollectedUse {
     let use_str = shell.get_var("USE").unwrap_or_default();
     let mut flags: Vec<String> = Vec::new();
     let mut disabled: Vec<String> = Vec::new();
+    let mut wildcard_reset = false;
 
     for token in use_str.split_whitespace() {
-        // `-*` clear-all (make.conf(5)): discard everything gathered so far.
-        // The merge step normally resolves it before this string is built, but
-        // honour it here too so a raw `-*` in the USE value is handled.
+        // `-*` clear-all (make.conf(5)): discard everything gathered so far and
+        // remember it happened, so a later IUSE-default fold treats an absent
+        // flag as definitively off rather than falling back to the ebuild's
+        // own `+` default. `merge_flag_lists_signed` preserves the token as a
+        // leading marker so it reaches this parser; the plain `merge_flag_lists`
+        // path consumes it, hence the fallback comment below.
         if token == "-*" {
             flags.clear();
             disabled.clear();
+            wildcard_reset = true;
             continue;
         }
         if let Some(name) = token.strip_prefix('-') {
@@ -464,6 +486,7 @@ fn collect_use_flags(shell: &EbuildShell) -> CollectedUse {
     CollectedUse {
         enabled: flags,
         disabled,
+        wildcard_reset,
     }
 }
 

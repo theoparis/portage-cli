@@ -41,12 +41,25 @@ pub enum UseFlagState {
 
 /// Configuration for USE flag evaluation during dependency conversion.
 ///
-/// Unset flags default to [`UseFlagState::Disabled`].
+/// Unset flags default to [`UseFlagState::Disabled`] (falling back to the
+/// ebuild's own `+`/`-` IUSE default where the caller knows it — see
+/// [`get_with_iuse_default`] and [`fold_iuse_defaults`]).
 ///
 /// See [PMS 8.2](https://projects.gentoo.org/pms/9/pms.html#use-flag-dependent-dependencies).
+///
+/// `wildcard_reset` records that a `-*` clear-all was in effect when this
+/// config was built. Portage seats the ebuild's own IUSE defaults *below* the
+/// profile/`make.conf`/env layers, so a `-*` there wipes them; `em` folds IUSE
+/// defaults in a later per-package step, so when this bit is set an unset flag
+/// is treated as definitively `Disabled` rather than taking its `+` default —
+/// e.g. curl's `+quic` stays off under `USE="-* build"`.
+///
+/// [`get_with_iuse_default`]: UseConfig::get_with_iuse_default
+/// [`fold_iuse_defaults`]: UseConfig::fold_iuse_defaults
 #[derive(Debug, Clone, Default)]
 pub struct UseConfig {
     flags: HashMap<Interned<DefaultInterner>, UseFlagState>,
+    wildcard_reset: bool,
 }
 
 impl UseConfig {
@@ -89,12 +102,25 @@ impl UseConfig {
         self.flags.get(&flag).copied()
     }
 
+    /// Record that a `-*` clear-all was in effect (see [`UseConfig`] docs).
+    pub fn set_wildcard_reset(&mut self) {
+        self.wildcard_reset = true;
+    }
+
+    /// Whether a `-*` clear-all was in effect when this config was built.
+    pub fn wildcard_reset(&self) -> bool {
+        self.wildcard_reset
+    }
+
     /// Get the state of a flag, falling back to an IUSE default if the flag
     /// is not explicitly configured.
     ///
-    /// If the flag is set in the config, returns its state. Otherwise, if the
-    /// IUSE default is `Enabled` (the `+` prefix), returns `Enabled`.
-    /// Otherwise returns `Disabled`.
+    /// If the flag is set in the config, returns its state. Otherwise, if
+    /// [`wildcard_reset`](Self::wildcard_reset) is set (a `-*` clear-all was in
+    /// effect), returns `Disabled` unconditionally — `-*` means this flag was
+    /// explicitly reset, not merely unmentioned, so the package's own `+`
+    /// default must not resurrect it. Otherwise, if the IUSE default is
+    /// `Enabled` (the `+` prefix), returns `Enabled`; else `Disabled`.
     pub fn get_with_iuse_default(
         &self,
         flag: Interned<DefaultInterner>,
@@ -102,6 +128,7 @@ impl UseConfig {
     ) -> UseFlagState {
         match self.flags.get(&flag) {
             Some(&state) => state,
+            None if self.wildcard_reset => UseFlagState::Disabled,
             None => match iuse_default {
                 Some(IUseDefault::Enabled) => UseFlagState::Enabled,
                 _ => UseFlagState::Disabled,
@@ -110,8 +137,11 @@ impl UseConfig {
     }
 
     /// Fold a version's IUSE defaults into this config: for every flag not
-    /// already set explicitly, apply its `+`/`-` default. After this, the
-    /// config is an authoritative "desired" set — a plain `get()` gives the
+    /// already set explicitly, apply its `+`/`-` default — unless
+    /// [`wildcard_reset`](Self::wildcard_reset) is set, in which case an unset
+    /// flag is recorded as `Disabled` instead (a `-*` clear-all explicitly
+    /// reset it; the package's own default must not resurrect it). After this,
+    /// the config is an authoritative "desired" set — a plain `get()` gives the
     /// flag's effective state with no separate default lookup needed.
     pub fn fold_iuse_defaults(
         &mut self,
@@ -119,13 +149,15 @@ impl UseConfig {
     ) {
         for (flag, def) in defaults {
             if !self.flags.contains_key(flag) {
-                self.flags.insert(
-                    *flag,
+                let state = if self.wildcard_reset {
+                    UseFlagState::Disabled
+                } else {
                     match def {
                         IUseDefault::Enabled => UseFlagState::Enabled,
                         IUseDefault::Disabled => UseFlagState::Disabled,
-                    },
-                );
+                    }
+                };
+                self.flags.insert(*flag, state);
             }
         }
     }
@@ -339,6 +371,43 @@ mod tests {
         // 'a' stays disabled (explicit), 'b' picks up its enabled default.
         assert_eq!(config.get(flag("a")), UseFlagState::Disabled);
         assert_eq!(config.get(flag("b")), UseFlagState::Enabled);
+    }
+
+    #[test]
+    fn wildcard_reset_suppresses_iuse_default() {
+        // USE="-*" means a `+`-defaulted IUSE flag stays off (portage seats
+        // IUSE defaults below the env layer, so the clear-all wipes them).
+        let mut config = UseConfig::new();
+        config.set_wildcard_reset();
+        assert_eq!(
+            config.get_with_iuse_default(flag("quic"), Some(IUseDefault::Enabled)),
+            UseFlagState::Disabled
+        );
+        // An explicitly-enabled flag is unaffected.
+        config.enable(flag("build"));
+        assert_eq!(
+            config.get_with_iuse_default(flag("build"), None),
+            UseFlagState::Enabled
+        );
+    }
+
+    #[test]
+    fn wildcard_reset_fold_marks_absent_disabled() {
+        let mut config = UseConfig::new();
+        config.set_wildcard_reset();
+        let mut defaults = HashMap::new();
+        defaults.insert(flag("quic"), IUseDefault::Enabled);
+        config.fold_iuse_defaults(&defaults);
+        assert_eq!(config.get(flag("quic")), UseFlagState::Disabled);
+    }
+
+    #[test]
+    fn wildcard_reset_propagates_through_clone() {
+        // apply_package_use clones the base config; the bit must survive.
+        let mut config = UseConfig::new();
+        config.set_wildcard_reset();
+        let cloned = config.clone();
+        assert!(cloned.wildcard_reset());
     }
 
     #[test]

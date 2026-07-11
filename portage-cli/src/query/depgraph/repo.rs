@@ -504,7 +504,10 @@ pub(super) struct Adapter<'a> {
 }
 
 /// Apply the ebuild's IUSE defaults: every IUSE flag not already set by the
-/// resolved config takes its `+`/`-` default.
+/// resolved config takes its `+`/`-` default — unless a `-*` clear-all was in
+/// effect (`cfg.wildcard_reset()`), in which case an unset flag stays
+/// `Disabled`, matching real portage (a `+`-default like curl's `+quic` is
+/// suppressed under `USE="-* build"`).
 fn apply_iuse_defaults(
     cfg: &mut portage_atom_pubgrub::UseConfig,
     m: &portage_metadata::EbuildMetadata,
@@ -512,16 +515,18 @@ fn apply_iuse_defaults(
     use portage_atom_pubgrub::UseFlagState;
     for iu in &m.iuse {
         let flag = Interned::from(iu);
-        if cfg.get_opt(flag).is_none()
-            && let Some(def) = iu.default
-        {
-            cfg.set(
-                flag,
-                match def {
-                    portage_metadata::IUseDefault::Enabled => UseFlagState::Enabled,
-                    portage_metadata::IUseDefault::Disabled => UseFlagState::Disabled,
-                },
-            );
+        if cfg.get_opt(flag).is_none() {
+            if cfg.wildcard_reset() {
+                cfg.set(flag, UseFlagState::Disabled);
+            } else if let Some(def) = iu.default {
+                cfg.set(
+                    flag,
+                    match def {
+                        portage_metadata::IUseDefault::Enabled => UseFlagState::Enabled,
+                        portage_metadata::IUseDefault::Disabled => UseFlagState::Disabled,
+                    },
+                );
+            }
         }
     }
 }

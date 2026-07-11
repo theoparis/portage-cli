@@ -45,12 +45,14 @@ pub(super) fn find_violations(
         let effective = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
 
         // Mirror format_flags: a flag's effective state is the configured value
-        // if set, otherwise its IUSE default (`+flag`).
+        // if set, otherwise its IUSE default (`+flag`) — unless a `-*`
+        // clear-all suppressed the default.
         let enabled = |flag: &str| -> bool {
             let interned = Interned::intern(flag);
             match effective.get_opt(interned) {
                 Some(UseFlagState::Enabled) => true,
                 Some(_) => false,
+                None if effective.wildcard_reset() => false,
                 None => cache
                     .metadata
                     .iuse
