@@ -59,13 +59,21 @@ pub enum PortagePackage {
     },
     /// OR-group choice node.  Each version is one alternative.
     Choice {
-        /// Interned identifier of the synthetic choice group.
-        name: Interned<DefaultInterner>,
+        /// Unique id of the synthetic choice group (from a process-global
+        /// counter — never repeats, so it's never interned: unlike
+        /// `UseDecision`'s name, which recurs identically across every
+        /// USE-dep co-solve fixpoint iteration for the same (cpn, flag) and
+        /// so benefits from interning, a `Choice` id is minted once and
+        /// never looked up again — interning it would only leak process
+        /// memory and bloat the shared interner table for every other
+        /// lookup, for zero reuse benefit.
+        id: u64,
     },
     /// Slot-choice node.  Each version selects one slot candidate.
     SlotChoice {
-        /// Interned identifier of the synthetic slot-choice group.
-        name: Interned<DefaultInterner>,
+        /// Unique id of the synthetic slot-choice group. Same rationale as
+        /// [`Choice::id`](Self::Choice) for not interning it.
+        id: u64,
     },
 }
 
@@ -138,13 +146,13 @@ impl PortagePackage {
     }
 
     /// Create an OR-group choice node.
-    pub(crate) fn choice(name: Interned<DefaultInterner>) -> Self {
-        Self::Choice { name }
+    pub(crate) fn choice(id: u64) -> Self {
+        Self::Choice { id }
     }
 
     /// Create a slot-choice node.
-    pub(crate) fn slot_choice(name: Interned<DefaultInterner>) -> Self {
-        Self::SlotChoice { name }
+    pub(crate) fn slot_choice(id: u64) -> Self {
+        Self::SlotChoice { id }
     }
 
     /// Returns `true` for solver-internal virtual variants.
@@ -225,14 +233,14 @@ impl Ord for PortagePackage {
                 .then(a_root.cmp(b_root)),
             (Self::Real { .. }, _) => Ordering::Less,
             (_, Self::Real { .. }) => Ordering::Greater,
-            // Internal variants: order by discriminant, then by the interned
-            // name within a variant so `Ord` stays consistent with `Eq`/`Hash`
+            // Internal variants: order by discriminant, then by the node's
+            // own identifier so `Ord` stays consistent with `Eq`/`Hash`
             // (otherwise distinct nodes collapse in a `BTreeSet`/`BTreeMap`).
-            (Self::UseDecision { name: a }, Self::UseDecision { name: b })
-            | (Self::Choice { name: a }, Self::Choice { name: b })
-            | (Self::SlotChoice { name: a }, Self::SlotChoice { name: b }) => {
+            (Self::UseDecision { name: a }, Self::UseDecision { name: b }) => {
                 a.as_str().cmp(b.as_str())
             }
+            (Self::Choice { id: a }, Self::Choice { id: b })
+            | (Self::SlotChoice { id: a }, Self::SlotChoice { id: b }) => a.cmp(b),
             _ => self.discriminant_ord().cmp(&other.discriminant_ord()),
         }
     }
@@ -281,8 +289,8 @@ impl fmt::Display for PortagePackage {
             } => write!(f, "{}@host", cpn),
             Self::Root => write!(f, "__internal__/root"),
             Self::UseDecision { name } => write!(f, "__internal__/{}", name),
-            Self::Choice { name } => write!(f, "__internal__/{}", name),
-            Self::SlotChoice { name } => write!(f, "__internal__/{}", name),
+            Self::Choice { id } => write!(f, "__internal__/choice_{id}"),
+            Self::SlotChoice { id } => write!(f, "__internal__/slot_{id}"),
         }
     }
 }
@@ -373,12 +381,12 @@ mod tests {
         }
         assert_eq!(set.len(), 3, "BTreeSet dropped distinct UseDecision nodes");
 
-        // Same for the other interned-name variants.
-        let c1 = PortagePackage::choice(Interned::intern("c1"));
-        let c2 = PortagePackage::choice(Interned::intern("c2"));
+        // Same for the other id-bearing variants.
+        let c1 = PortagePackage::choice(1);
+        let c2 = PortagePackage::choice(2);
         assert_ne!(c1.cmp(&c2), Ordering::Equal);
-        let s1 = PortagePackage::slot_choice(Interned::intern("s1"));
-        let s2 = PortagePackage::slot_choice(Interned::intern("s2"));
+        let s1 = PortagePackage::slot_choice(1);
+        let s2 = PortagePackage::slot_choice(2);
         assert_ne!(s1.cmp(&s2), Ordering::Equal);
     }
 }

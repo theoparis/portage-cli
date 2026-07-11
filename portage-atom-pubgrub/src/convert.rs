@@ -413,7 +413,7 @@ impl ConvertCtx<'_> {
             Some(slots) => {
                 let id = next_choice_id();
                 let choice_pkg =
-                    PortagePackage::slot_choice(Interned::intern(&format!("slot_{id}")));
+                    PortagePackage::slot_choice(id);
                 let gf = self.gating_flag;
                 // Unlike `||` Choice nodes (first-listed wins via n-i numbering),
                 // slot-star deps have no listed preference: number slots so the
@@ -442,7 +442,7 @@ impl ConvertCtx<'_> {
 
     fn convert_choice_group(&mut self, children: &[DepEntry], allow_none: bool) {
         let id = next_choice_id();
-        let pkg = PortagePackage::choice(Interned::intern(&format!("choice_{id}")));
+        let pkg = PortagePackage::choice(id);
 
         let n = children.len();
         let mut versions = Vec::new();
@@ -646,7 +646,7 @@ impl RuBuilder<'_> {
     fn at_least_one(&mut self, free: &[FreeLit]) {
         let ordered = Self::order_by_preference(free);
         let id = next_choice_id();
-        let pkg = PortagePackage::choice(Interned::intern(&format!("ru_choice_{id}")));
+        let pkg = PortagePackage::choice(id);
         let n = ordered.len();
         let mut versions = Vec::with_capacity(n);
         for (i, (node, sat_ver)) in ordered.iter().enumerate() {
@@ -943,7 +943,7 @@ impl RuBuilder<'_> {
     fn imply_choice(&mut self, guard: &PortagePackage, gv: u64, ops: &[FreeLit]) {
         let ordered = Self::order_by_preference(ops);
         let id = next_choice_id();
-        let pkg = PortagePackage::choice(Interned::intern(&format!("ru_gchoice_{id}")));
+        let pkg = PortagePackage::choice(id);
         let n = ordered.len();
         let mut versions = Vec::with_capacity(n);
         for (i, (node, sat_ver)) in ordered.iter().enumerate() {
