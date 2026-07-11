@@ -101,6 +101,41 @@ Parity excellent on most; documented small diffs on texlive-core + multi (emerge
 
 This data + historical from mneme will be used for blogpost tables. Repro via the scripts in crates (as noted in thalia.md).
 
+## Update 2026-07-11: performance regression found and fixed on thalia (commit `9cff6ff`)
+
+A user-flagged regression ("the speed regression is severe") turned out to be real: `em -p www-client/firefox`
+had drifted from the `~0.9s` / `~4×` baseline above to **~2.1s (~1.7×)**. Root-caused via automated `git bisect run`
+across ~212 commits to `762e6456` (2026-07-05, "check USE-dep brackets against installed VDB packages"), which made
+`bdepend_avail.rs` eagerly read USE/IUSE for every installed package (712 on the dev host) at `Avail` construction —
+almost all of it never actually checked against a USE-dep atom. Fixed, then kept digging: a follow-up allocation/
+interning audit and a `dhat`-heap profiling pass (new `dhat-heap` cargo feature, off by default) found several more
+real costs, culminating in the actual headline fix — `bdepend_trim::avail_for_consumer` was rebuilding the entire
+BROOT/prefix VDB scan from scratch for every `(candidate, consumer)` pair in the post-solve BDEPEND trim, an O(n²)
+cost that dhat measured as **110MB across just 322 calls**, dwarfing every other allocation site in the profile.
+Hoisting that scan to run once per trim pass (nothing mutates the VDB mid-trim, so it's safe to reuse) closed the
+remaining gap.
+
+Net result: not just recovered, but faster than the original baseline — multi-target plans roughly **halved**
+versus this session's starting point, since `bdepend_trim`'s O(n²) cost scales with plan size.
+
+| Target | Before this session | After (now) | em's own speedup | em vs. emerge (now) |
+|---|---|---|---|---|
+| firefox `-p` | 2.1s | **0.76s** | 2.76× | **4.85×** |
+| libreoffice `-p` | — | **0.94s** | — | **4.21×** |
+| multi (5 pkgs) `-p` | ~2.0s | **0.98s** | 2.04× | **4.75×** |
+| gcc `-s` | — | **0.16s** | — | **14.7×** |
+
+Repro: `cargo build --release -p portage-cli && ./benchmarks/bench-em-vs-emerge.sh`. For allocation profiling:
+`cargo build --release -p portage-cli --features dhat-heap`, run against a target that resolves cleanly (exit 0 —
+`process::exit` on the "config changes needed" path skips the profiler's `Drop`, so a target needing USE changes
+never writes `dhat-heap.json`), then load the file at
+[dh_view.html](https://nnethercote.github.io/dh_view/dh_view.html).
+
+Fourteen commits total, each independently verified (full test suite via `cargo nextest run`, clippy, fmt, live
+parity + timing) — see `git log` from `12ed0bf` through `9cff6ff` for the complete, individually-described chain
+(crossdev preflight fix, `host_copies` interleave correctness fix, the two-part regression root cause, five
+allocation/interning fixes, the `dhat-heap` tooling addition, and the `bdepend_trim` O(n²)→O(n) fix).
+
 ## Locations of Benchmarks
 
 ### Central harness & scripts
