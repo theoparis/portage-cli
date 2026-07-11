@@ -218,7 +218,7 @@ mod tests {
         );
         let cpv1 = cpv1.unwrap();
         assert_eq!(cpv1.cpn.package, "pkg-");
-        assert_eq!(cpv1.version.numbers, vec![1, 2]);
+        assert_eq!(cpv1.version.numbers.as_slice(), vec![1, 2].as_slice());
     }
 
     #[test]

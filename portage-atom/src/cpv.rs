@@ -198,7 +198,7 @@ mod tests {
         let cpv = Cpv::builder().cpn(cpn).version(version).build();
         assert_eq!(cpv.cpn.category, "dev-lang");
         assert_eq!(cpv.cpn.package, "rust");
-        assert_eq!(cpv.version.numbers, vec![1, 75, 0]);
+        assert_eq!(cpv.version.numbers.as_slice(), vec![1, 75, 0].as_slice());
         assert_eq!(cpv.to_string(), "dev-lang/rust-1.75.0");
     }
 }

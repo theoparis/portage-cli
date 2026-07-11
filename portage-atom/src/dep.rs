@@ -505,7 +505,10 @@ mod tests {
     fn test_approximate_operator() {
         let dep = Dep::parse("~dev-lang/rust-1.75.0").unwrap();
         assert_eq!(dep.op, Some(Operator::Approximate));
-        assert_eq!(dep.version.as_ref().unwrap().numbers, vec![1, 75, 0]);
+        assert_eq!(
+            dep.version.as_ref().unwrap().numbers.as_slice(),
+            vec![1, 75, 0].as_slice()
+        );
     }
 
     #[test]

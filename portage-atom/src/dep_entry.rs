@@ -913,7 +913,7 @@ mod tests {
     fn test_glob_version_matching() {
         // PMS: =1.2* should match 1.2.3, 1.2.4, etc.
         let v1_2_star = Version {
-            numbers: vec![1, 2],
+            numbers: vec![1, 2].into(),
             letter: None,
             suffixes: vec![],
             revision: Revision(0),
@@ -921,7 +921,7 @@ mod tests {
         };
 
         let v1_2_3 = Version {
-            numbers: vec![1, 2, 3],
+            numbers: vec![1, 2, 3].into(),
             letter: None,
             suffixes: vec![],
             revision: Revision(0),
@@ -929,7 +929,7 @@ mod tests {
         };
 
         let v1_2_4 = Version {
-            numbers: vec![1, 2, 4],
+            numbers: vec![1, 2, 4].into(),
             letter: None,
             suffixes: vec![],
             revision: Revision(0),
@@ -937,7 +937,7 @@ mod tests {
         };
 
         let v1_3 = Version {
-            numbers: vec![1, 3],
+            numbers: vec![1, 3].into(),
             letter: None,
             suffixes: vec![],
             revision: Revision(0),

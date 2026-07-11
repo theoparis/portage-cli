@@ -3,6 +3,8 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
+use gentoo_interner::{DefaultInterner, Interned};
+use smallvec::SmallVec;
 use winnow::Parser;
 use winnow::ascii::digit1;
 use winnow::combinator::{alt, cut_err, opt, preceded, repeat, separated};
@@ -199,6 +201,13 @@ impl fmt::Display for Operator {
     }
 }
 
+/// Dot-separated numeric components. `SmallVec`-backed: real-world versions
+/// almost always have 4 or fewer components, so this avoids a heap
+/// allocation for the common case — `Version` is cloned constantly during
+/// dependency resolution (per solver decision, per dependency edge, inside
+/// the range-algebra of the version-set crate it's compared through).
+pub type Numbers = SmallVec<[u64; 4]>;
+
 /// Package version according to PMS
 ///
 /// Represents a version string such as `1.2.3a_alpha4_beta5_pre6_rc7_p8-r9`.
@@ -228,7 +237,7 @@ impl fmt::Display for Operator {
 pub struct Version {
     /// Dot-separated numeric components (e.g. `[1, 2, 3]` for `1.2.3`).
     #[cfg_attr(feature = "builder", builder(start_fn))]
-    pub numbers: Vec<u64>,
+    pub numbers: Numbers,
     /// Optional single lowercase letter after the numeric components.
     pub letter: Option<char>,
     /// Zero or more version suffixes (`_alpha`, `_beta`, `_pre`, `_rc`, `_p`).
@@ -238,11 +247,13 @@ pub struct Version {
     #[cfg_attr(feature = "builder", builder(default))]
     pub revision: Revision,
     /// The version string exactly as parsed, preserving leading zeros
-    /// (e.g. `"26.04.0"` instead of the reconstructed `"26.4.0"`).
+    /// (e.g. `"26.04.0"` instead of the reconstructed `"26.4.0"`). Interned
+    /// (`Copy`) rather than `String`, for the same cloning-cost reason as
+    /// `numbers` above.
     ///
     /// `None` when constructed programmatically via [`Version::new`] or the builder.
     #[cfg_attr(feature = "builder", builder(skip))]
-    pub raw: Option<String>,
+    pub raw: Option<Interned<DefaultInterner>>,
 }
 
 impl Version {
@@ -299,7 +310,7 @@ impl Version {
             "Version must have at least one numeric component per PMS 3.2"
         );
         Version {
-            numbers: numbers.to_vec(),
+            numbers: Numbers::from_slice(numbers),
             letter: None,
             suffixes: Vec::new(),
             revision: Revision::default(),
@@ -495,13 +506,15 @@ pub(crate) fn parse_version(input: &mut &str) -> ModalResult<Version> {
         opt(parse_revision),
     )
         .with_taken()
-        .map(|((numbers, letter, suffixes, revision), raw)| Version {
-            numbers,
-            letter,
-            suffixes,
-            revision: revision.unwrap_or_default(),
-            raw: Some(raw.to_string()),
-        })
+        .map(
+            |((numbers, letter, suffixes, revision), raw): ((Vec<u64>, _, _, _), _)| Version {
+                numbers: numbers.into(),
+                letter,
+                suffixes,
+                revision: revision.unwrap_or_default(),
+                raw: Some(Interned::intern(raw)),
+            },
+        )
         .context(StrContext::Label("version"))
         .parse_next(input)
 }
@@ -514,18 +527,20 @@ pub(crate) fn parse_version_no_raw(input: &mut &str) -> ModalResult<(Version, bo
         opt(parse_revision),
         opt('*'),
     )
-        .map(|(numbers, letter, suffixes, revision, has_glob)| {
-            (
-                Version {
-                    numbers,
-                    letter,
-                    suffixes,
-                    revision: revision.unwrap_or_default(),
-                    raw: None,
-                },
-                has_glob.is_some(),
-            )
-        })
+        .map(
+            |(numbers, letter, suffixes, revision, has_glob): (Vec<u64>, _, _, _, _)| {
+                (
+                    Version {
+                        numbers: numbers.into(),
+                        letter,
+                        suffixes,
+                        revision: revision.unwrap_or_default(),
+                        raw: None,
+                    },
+                    has_glob.is_some(),
+                )
+            },
+        )
         .context(StrContext::Label("version"))
         .parse_next(input)
 }
@@ -624,7 +639,7 @@ mod tests {
     #[test]
     fn test_version_new_simple() {
         let v = Version::new(&[1, 75, 0]);
-        assert_eq!(v.numbers, vec![1, 75, 0]);
+        assert_eq!(v.numbers.as_slice(), vec![1, 75, 0].as_slice());
         assert_eq!(v.letter, None);
         assert!(v.suffixes.is_empty());
         assert_eq!(v.revision.0, 0);
@@ -634,7 +649,7 @@ mod tests {
     #[test]
     #[cfg(feature = "builder")]
     fn test_version_builder_full() {
-        let v = Version::builder(vec![1, 75, 0])
+        let v = Version::builder(vec![1, 75, 0].into())
             .letter('a')
             .suffixes(vec![
                 Suffix {
@@ -648,7 +663,7 @@ mod tests {
             ])
             .revision(Revision(3))
             .build();
-        assert_eq!(v.numbers, vec![1, 75, 0]);
+        assert_eq!(v.numbers.as_slice(), vec![1, 75, 0].as_slice());
         assert_eq!(v.letter, Some('a'));
         assert_eq!(v.suffixes.len(), 2);
         assert_eq!(v.revision.0, 3);
@@ -659,7 +674,7 @@ mod tests {
     #[cfg(feature = "builder")]
     fn test_version_builder_roundtrip() {
         let original = Version::parse("1.2.3a_rc1_p2-r5").unwrap();
-        let built = Version::builder(vec![1, 2, 3])
+        let built = Version::builder(vec![1, 2, 3].into())
             .letter('a')
             .suffixes(vec![
                 Suffix {
@@ -679,7 +694,7 @@ mod tests {
     #[test]
     fn test_raw_preserves_leading_zeros() {
         let v = Version::parse("26.04.0").unwrap();
-        assert_eq!(v.numbers, vec![26, 4, 0]);
+        assert_eq!(v.numbers.as_slice(), vec![26, 4, 0].as_slice());
         assert_eq!(v.raw.as_deref(), Some("26.04.0"));
         assert_eq!(v.to_string(), "26.04.0");
     }
@@ -728,7 +743,7 @@ mod tests {
     fn test_version_single_component() {
         // PMS 3.2: "an unsigned integer, followed by zero or more dot-prefixed unsigned integers"
         let v = Version::parse("1").unwrap();
-        assert_eq!(v.numbers, vec![1]);
+        assert_eq!(v.numbers.as_slice(), vec![1].as_slice());
         assert_eq!(v.to_string(), "1");
     }
 
