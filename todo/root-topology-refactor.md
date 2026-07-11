@@ -1475,9 +1475,67 @@ stage3, no host contamination):
     ebuild not found" warnings and zero errors of any kind, across every
     single merge — cross-category replaces use the real ebuild file
     directly, same as any other package, exactly as intended.
-- 🔴 **Re-derive "stage1 complete" — accepted 2026-07-09, next up.** From a
-  clean `--jobs 1` run of the 4 stragglers (bzip2, xz-utils, gettext×2), not
-  the VDB spot check (`session-status-2026-07-05-needs-review.md`).
+- 🟡 **Re-derive "stage1 complete" — attempted 2026-07-11, found a real,
+  deeper gap; the original `-j1`/`-j40` race question is still unanswered.**
+  The riscv64 sysroot this claim was based on was wiped, so re-deriving it
+  meant bootstrapping a genuinely empty `--root` from absolute zero for the
+  first time ever (every prior "stage1 complete" run had reused a sysroot
+  that already had `perl`/`portage`/etc. installed from earlier, unrelated
+  work — masking this). That surfaced two real, fixed-or-documented bugs
+  before ever reaching the original bzip2/xz-utils/gettext race question:
+  1. **Fixed, `portage-cli/src/crossdev/stages.rs`**: native
+     `toolchain_plan`'s "libc" step lacked `--nodeps`, unlike cross's
+     analogous break-the-cycle step — a real, unbreakable-by-ordering
+     `glibc ↔ gcc ↔ libxcrypt` circular DEPEND in a from-scratch native
+     bootstrap (cross avoids it because `gcc-stage1` is a real prior step,
+     already installed by the time the full "libc" step runs; native's "no
+     two-stage split" design never had that safety net). Confirmed twice
+     live — once under a wrong invocation, once under the correct one — same
+     result both times, so it's real. `native_plan_is_seed_built_single_stage_gcc`
+     test updated accordingly.
+  2. **Found, not yet fixed — see `docs/root-topology.md`'s "Plain
+     unprivileged toolchain" section for the full writeup.** Past that fix,
+     `sys-devel/gcc`'s own resolution still explodes into a huge, real
+     dependency closure (`perl` → `perl-cleaner`/CPAN → `sys-apps/portage` →
+     `gnupg`/`eselect`/`rsync`, plus `util-linux`/`libarchive` wanting
+     `acct-group/root`/`e2fsprogs`) — every single one of those packages
+     confirmed already installed on the host doing the test. Root cause:
+     the self-contained bootstrap checks these build-tool-shaped DEPEND/
+     RDEPEND requirements against the still-empty target ROOT instead of
+     BROOT (the host actually doing the compiling), unlike BDEPEND, which
+     already correctly checks BROOT. Forcing minimal USE (`-*`) does not fix
+     it (`perl`'s `minimal` IUSE defaults off, `-*` only disables). Real fix
+     needs the existing BDEPEND-satisfied-at-BROOT machinery
+     (`provider/solve.rs`) extended to cover this case — not yet
+     implemented, no small patch.
+  Also found and documented (not a code bug, a usage footgun): adding
+  `--config-root` to a self-contained `--root`/`toolchain --setup`
+  invocation defeats the self-bootstrap `ensure_self_contained_prefix` does
+  — `Roots::config()` already defaults to following `--root`, no
+  `--config-root` needed or wanted here.
+  A second, broader gap found chasing why `--local` behaves worse than bare
+  `--root` (corrected after an initial wrong diagnosis — the `is_local`
+  symlink inversion this was first blamed on is **already fixed** in
+  `setup.rs`, don't re-diagnose it): `--config-root` resolution is
+  inconsistent across three commands. `em --local DIR setup` writes no
+  `make.profile` (deliberate — `--local` must also work on a non-Gentoo
+  host). The follow-up step, `em select profile set <profile>`, never
+  infers a config root from `--local`/`--prefix`/`--root` at all — it needs
+  an explicit `--config-root DIR`, and running it as `em --local DIR select
+  ...` silently tries to modify the *host's* `/etc/portage/make.profile`
+  instead (permission-denied, no hint the flag was wrong). Skip that step
+  and `em --local DIR toolchain --setup` doesn't error either — it silently
+  falls back to the host's real profile/config, producing a much bigger,
+  more chaotic dependency explosion than the BROOT-satisfaction gap above.
+  Full writeup in `docs/root-topology.md`'s "Plain unprivileged toolchain"
+  and "`--local` and `--prefix` setup" sections. Use bare `--root` for a
+  self-contained native toolchain bootstrap; if using `--local`, the
+  lifecycle needs an explicit `em --config-root DIR select profile set
+  <profile>` step between `setup` and `toolchain --setup` that nothing
+  currently prompts for.
+  **Original task still open**: once the BROOT-satisfaction gap is fixed,
+  redo the clean `-j1`/`-j40` rebuild of the 4 stragglers to actually answer
+  the race question this was supposed to settle.
 - 🔴 **Re-merge `app-alternatives/gpg-1-r3` — accepted 2026-07-09, next up.**
   With current `em`, expect `IUSE=nls ssl +reference freepg sequoia` in the
   VDB. If so, close #36 as "already fixed; stale entry" — verified via

@@ -398,6 +398,88 @@ self-sufficient: a fresh empty `--root` becomes a buildable toolchain in one
 command. Requires `--root <dir>`; a toolchain into `/` is meaningless (use the
 host's own).
 
+**Footgun — do not add `--config-root` to this invocation.** `Roots::config()`
+already defaults to `config_root.or(root)`, so a bare `--root DIR` reads
+config from `DIR` itself once `ensure_self_contained_prefix` has bootstrapped
+it — that's the whole point of the self-contained model. Bolting on an
+explicit `--config-root` (e.g. to work around a `-p` dry run on a
+not-yet-bootstrapped root failing with `cannot resolve make.profile` — itself
+expected, not a bug: `ensure_self_contained_prefix` only runs on a real,
+non-pretend invocation) overrides that default and forces every subsequent
+command to keep reading the *host's* config instead, silently fighting the
+self-bootstrap it just did. Found live 2026-07-11 chasing a dependency-cycle
+bug that turned out to be real regardless of this mistake, but the mistake
+itself cost significant detour time — just run the plain command twice
+(`-p` will fail cleanly the first time on a fresh root; the real, non-`-p`
+run is what matters and self-bootstraps correctly).
+
+**Known gap — a truly from-scratch bootstrap needs build-tool DEPEND/RDEPEND
+satisfied at BROOT, not just BDEPEND.** Confirmed live 2026-07-11: a clean
+`--root` with nothing installed hits a real dependency explosion once the
+"libc"/"gcc" steps resolve past the toolchain itself — `sys-libs/glibc`'s
+`COMMON_DEPEND` (shared by DEPEND *and* RDEPEND) reaches `sys-devel/gcc`,
+and `virtual/os-headers → linux-headers → dev-lang/perl` pulls in perl's
+`!minimal?` `PDEPEND` tail (`perl-cleaner`, `virtual/perl-CPAN`, ...), which
+in turn reaches `sys-apps/portage` (`rsync-verify` → `gnupg`), `eselect`,
+`net-misc/rsync`, and from there `sys-apps/util-linux`/`app-arch/libarchive`
+want `acct-group/root`/`sys-fs/e2fsprogs`. None of this is a real bug in the
+sense of a wrong edge — every one of these packages was confirmed already
+installed on the host doing the test (`/var/db/pkg/...`) — it's that the
+self-contained bootstrap checks these build-tool-shaped requirements against
+the still-empty target ROOT instead of BROOT (the host actually doing the
+compiling), unlike BDEPEND, which already correctly checks BROOT. Forcing
+minimal USE (`-*`) does **not** fix this — `perl`'s `minimal` IUSE flag
+defaults off and nothing forces it on, `-*` only disables, it doesn't
+enable. `--root-deps=rdeps` (forced on for this path, mirroring
+`crossdev --setup`) only relaxes the DEPEND-only half of edges like glibc's,
+not the RDEPEND half sharing the same `COMMON_DEPEND`. The real fix would
+extend the existing BDEPEND-satisfied-at-BROOT machinery
+(`provider/solve.rs`) to cover this self-contained-bootstrap case too — not
+yet implemented; tracked in `todo/root-topology-refactor.md`. Historical
+"stage1 complete" claims (`todo/session-status-2026-07-05-needs-review.md`,
+`todo/PENDING.md`) never actually hit this because every prior run reused a
+sysroot that had already accumulated `perl`/`portage`/etc. from earlier,
+unrelated work in the same sysroot across many sessions — nobody had
+bootstrapped a genuinely empty `--root` from absolute zero before.
+
+**Known gap — `--config-root` resolution is not uniform across commands, and
+the `--local` lifecycle silently depends on this.** Confirmed live
+2026-07-11, in order:
+- `setup.rs`'s `is_local`/overlay symlink split is *not* the bug
+  `root-topology.md` used to claim here — that was fixed already (see
+  `setup.rs`'s own "Previously gated on `is_local` — exactly backwards"
+  comment). Don't re-diagnose it.
+- `em --local DIR setup` writes the layout correctly (own `bashrc`,
+  `make.conf` — commentary-only, no `MAKEOPTS`, matching `--prefix`), but
+  writes **no `make.profile`** — unlike bare `--root`, which gets one
+  auto-symlinked to the host's resolved profile as part of
+  `ensure_self_contained_prefix`. This is deliberate for `--local` (it must
+  also work on a non-Gentoo host, where auto-symlinking a Gentoo profile
+  tree isn't possible) — the documented lifecycle just never says so
+  explicitly, nor what to do about it.
+- The actual next step, `em select profile set <profile>`, does **not**
+  accept `--local`/`--prefix`/`--root` as its config target at all — `em
+  select` deliberately only ever honours an explicit `--config-root`
+  (`Roots::config_root_explicit()`, matching real `eselect`'s
+  `profile.eselect`, landed 2026-07-09, see this doc's Status section).
+  Running `em --local DIR select profile set ...` doesn't error usefully —
+  it tries to modify the **host's** `/etc/portage/make.profile` and fails
+  with a permission error that gives no hint the flag was wrong. The
+  correct invocation is `em --config-root DIR select profile set ...`.
+- Only *after* that does `em --local DIR toolchain --setup` read the
+  prefix's own profile; skip the `select profile set` step and it silently
+  falls back to resolving against the host's real `/etc/portage` instead,
+  which is what produced the much larger, more chaotic unresolved-dependency
+  list observed when this was tried without it.
+
+None of this is one bug — it's three different commands (`setup`, `select`,
+`toolchain`/`stages`) each resolving `--local`'s config root a different way,
+with the lifecycle recipe in this doc (and `setup.rs`'s own doc comment)
+silently depending on the reader doing the right undocumented thing between
+steps. Worth a real fix (making config-root resolution consistent, or at
+least making the lifecycle recipe below explicit about the `select profile
+set` step for `--local`) — not attempted yet.
+
 ### `--local` and `--prefix` setup
 
 These don't run `toolchain --setup` themselves — they assume the host (or, for
@@ -409,22 +491,31 @@ em --prefix /opt/prefix setup          # layout + overlay config + host-python s
 em --prefix /opt/prefix <pkg>          # host compiler builds into P
 
 # --local (standalone): bootstrap the prefix's own toolchain first
-em --local setup                       # layout + self-contained config (own python later)
-em --local toolchain --setup           # build native toolchain INTO ~/.gentoo
-em --local stages --stage1             # packages.build using the prefix's own gcc
-em --local <pkg>                       # now self-hosting
+em --local setup                             # layout + own config, no python symlinks
+em --config-root ~/.gentoo select profile set <profile>  # required — see below
+em --local toolchain --setup                 # build native toolchain INTO ~/.gentoo
+em --local stages --stage1                   # packages.build using the prefix's own gcc
+em --local <pkg>                             # now self-hosting
 ```
 
-The `--local` case is where the standalone-vs-overlay decision bites: under the
-current (overlay) code, `em --local toolchain --setup` reads base from `/`,
-works only on a Gentoo host, and (wrongly) symlinks host python into the prefix
-— `setup.rs` gates `link_host_pythons`/`link_host_base_tools` on `is_local`,
-exactly backwards. Under the proposed model the symlinks move to `--prefix`
-(the overlay that borrows host tools), and `--local` builds its own python so
-base is `~/.gentoo` from the start — the toolchain bootstrap lands in the
-prefix and works on a foreign host too, at the cost of needing the host's seed
-compiler on `PATH` for the very first build (the same chicken-and-egg every
-Gentoo-Prefix bootstrap faces).
+The `link_host_pythons`/`link_host_base_tools` `is_local` inversion this
+section used to describe is **already fixed** in `setup.rs` (see its own
+"Previously gated on `is_local` — exactly backwards" comment) — `--local`
+correctly gets no host-python symlinks, `--prefix` correctly does. Don't
+re-diagnose that; it's done.
+
+What's still real: `em --local setup` writes layout + config but **no
+`make.profile`** — deliberate, since `--local` must also work on a
+non-Gentoo host where auto-symlinking a Gentoo profile isn't possible. The
+`select profile set <profile>` step above is required to give it one, and it
+must be invoked with an explicit `--config-root <dir>` — `em select` never
+infers a config root from `--local`/`--prefix`/`--root` (matching real
+`eselect`). Skipping it doesn't error at the `toolchain --setup` step
+either: it silently falls back to resolving against the host's real
+`/etc/portage`, producing a much larger, more chaotic dependency set than
+intended (confirmed live 2026-07-11 — see "Plain unprivileged toolchain"
+above for the full writeup). This three-command inconsistency
+(`setup`/`select`/`toolchain`) is the real gap, not the symlink logic.
 
 ### Cross setup (`em crossdev`)
 
