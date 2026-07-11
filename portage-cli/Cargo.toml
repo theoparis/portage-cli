@@ -24,6 +24,9 @@ path = "src/main.rs"
 [features]
 default = ["mimalloc", "fakeroost", "pseudoroot", "hakoniwa"]
 mimalloc = ["dep:mimalloc"]
+# Off by default, investigation-only: swaps in dhat's counting allocator and
+# writes dhat-heap.json on exit (view at https://nnethercote.github.io/dh_view/dh_view.html).
+dhat-heap = ["dep:dhat"]
 fakeroost = ["dep:fakeroost"]
 pseudoroot = ["dep:pseudoroot"]
 hakoniwa = ["dep:hakoniwa"]
@@ -60,6 +63,7 @@ tokio = { workspace = true, features = ["sync"] }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
 mimalloc = { workspace = true, optional = true }
+dhat = { workspace = true, optional = true }
 md5 = { workspace = true }
 sha1 = { workspace = true }
 hex = { workspace = true }

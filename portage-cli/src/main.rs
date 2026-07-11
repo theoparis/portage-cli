@@ -1,11 +1,20 @@
-#[cfg(feature = "mimalloc")]
+#[cfg(all(feature = "mimalloc", not(feature = "dhat-heap")))]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
 use clap::Parser;
 use portage_cli::cli;
 
 fn main() {
+    // Investigation-only: `cargo build --release --features dhat-heap` writes
+    // dhat-heap.json on exit (see the Cargo.toml feature doc comment).
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     // Must be the first thing in main: on a fakeroost/pseudoroot supervisor
     // re-exec these run the session and exit; on a normal launch they are
     // no-ops. Kept ahead of the tokio runtime so the supervisor never spins
