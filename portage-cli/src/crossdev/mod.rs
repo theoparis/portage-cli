@@ -451,11 +451,21 @@ pub(crate) async fn toolchain(args: &crate::cli::ToolchainArgs, globals: &Cli) -
         plan.steps.len()
     )
     .ok();
+    // `--root-deps=rdeps` unconditionally, same reasoning as `crossdev --setup`
+    // above: this always bootstraps into a self-contained, still-empty ROOT
+    // (`toolchain_plan(..., true)`), where plain DEPEND can't be satisfied yet
+    // either. Without it, `sys-libs/glibc`'s own DEPEND closure
+    // (`virtual/os-headers` → `linux-headers` → `perl` → `virtual/libcrypt` →
+    // `libxcrypt` → `glibc`) is a real tree cycle that pre-flight can never
+    // clear — confirmed live: it fails identically in a real (non-pretend)
+    // run even after steps 1-3 have genuinely merged, not just in isolated `-p`.
+    let mut merge_flags = merge_merge_flags(globals, &args.merge_flags);
+    merge_flags.root_deps = true;
     run_staged(
         &plan,
         globals,
         merge_depgraph_flags(globals, &args.depgraph_flags),
-        merge_merge_flags(globals, &args.merge_flags),
+        merge_flags,
         false,
         |_| Ok(()),
     )

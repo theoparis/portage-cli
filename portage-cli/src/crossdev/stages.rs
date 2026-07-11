@@ -256,6 +256,22 @@ pub fn toolchain_plan(kind: &BootstrapKind, self_contained: bool) -> StagePlan {
     // which builds full glibc directly; a single full gcc links against it. No
     // two-stage split — `toolchain.eclass` gates that on `is_crosscompile`, so a
     // native gcc is always `--enable-shared` and needs a full in-ROOT libc.
+    //
+    // Unlike cross (which has a real `gcc-stage1` merged into the sysroot
+    // *before* its own full "libc" step, trivially satisfying glibc's
+    // `>=sys-devel/gcc-6.2` COMMON_DEPEND — see glibc.ebuild — from the
+    // already-installed ROOT view), native never installs a ROOT-resident gcc
+    // ahead of libc at all: the seed compiler that actually does the
+    // compiling lives at BROOT, not ROOT. A normal-resolution "libc" step
+    // therefore sees glibc's own DEPEND as unsatisfiable in ROOT and tries to
+    // plan a fresh in-ROOT gcc/libxcrypt build to satisfy it — which in turn
+    // DEPENDs back on glibc, a real, unbreakable-by-ordering cycle confirmed
+    // live (2026-07-11: a real, non-pretend run still hit this after
+    // baselayout/binutils/kernel-headers had genuinely merged). `--nodeps`
+    // here, mirroring cross's analogous "libc headers first (--nodeps)"
+    // break, sidesteps it the same way cross does: rely on what's already
+    // merged (baselayout/binutils/kernel-headers) plus the host's seed
+    // compiler at BROOT, not a fresh in-ROOT one.
     if let BootstrapKind::Native = kind {
         if kind.has_kernel() {
             steps.push(StageStep {
@@ -269,7 +285,7 @@ pub fn toolchain_plan(kind: &BootstrapKind, self_contained: bool) -> StagePlan {
             label: "libc".into(),
             atoms: vec![atom("sys-libs", kind.libc_pkg())],
             use_override: vec![],
-            nodeps: false,
+            nodeps: true,
         });
         steps.push(StageStep {
             label: "gcc".into(),
@@ -689,8 +705,11 @@ mod tests {
         assert_eq!(atoms[3], "sys-libs/glibc");
         assert_eq!(atoms[4], "sys-devel/gcc");
         assert!(atoms.iter().all(|a| !a.starts_with("cross-")));
-        // The full libc step is a real build — not headers-only, not --nodeps.
-        assert!(!plan.steps[3].nodeps);
+        // The full libc step is a real (non-headers-only) build, but --nodeps:
+        // glibc's own COMMON_DEPEND (`>=sys-devel/gcc-6.2`) can't be satisfied
+        // from ROOT here (no gcc-stage1 landed first, unlike cross) — the seed
+        // compiler at BROOT does the actual compiling instead.
+        assert!(plan.steps[3].nodeps);
         assert!(plan.steps[3].use_override.is_empty());
         // The single gcc is full (keeps cxx — only GCC_DISABLE applies, no STAGE1).
         assert!(!plan.steps[4].use_override.contains(&"-cxx".to_string()));
