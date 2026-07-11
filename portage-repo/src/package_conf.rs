@@ -52,8 +52,10 @@ enum Entry {
         span: Range<usize>,
         /// Byte span of the atom token within `src`.
         atom_span: Range<usize>,
-        /// Parsed atom.
-        atom: Dep,
+        /// Parsed atom. Boxed: `Dep` carries a `Version` (grown by the
+        /// `SmallVec`/`SmolStr` perf changes), which otherwise made this
+        /// variant far larger than `Opaque` (clippy's `large_enum_variant`).
+        atom: Box<Dep>,
         /// Each value token (byte span + text).
         values: Vec<Token>,
     },
@@ -276,7 +278,7 @@ fn parse_entries(src: &str) -> Vec<Entry> {
             entries.push(Entry::Data {
                 span: cursor..cursor + consumed,
                 atom_span: cursor + entry.atom_span.start..cursor + entry.atom_span.end,
-                atom: entry.atom,
+                atom: Box::new(entry.atom),
                 values: entry
                     .values
                     .into_iter()

@@ -23,6 +23,7 @@ winnow = { workspace = true }
 thiserror = { workspace = true }
 bon = { workspace = true, optional = true }
 smallvec = { workspace = true }
+smol_str = { workspace = true }
 
 [[example]]
 name = "parse_atoms"

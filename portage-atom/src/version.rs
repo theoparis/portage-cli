@@ -3,8 +3,8 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
-use gentoo_interner::{DefaultInterner, Interned};
 use smallvec::SmallVec;
+use smol_str::SmolStr;
 use winnow::Parser;
 use winnow::ascii::digit1;
 use winnow::combinator::{alt, cut_err, opt, preceded, repeat, separated};
@@ -247,13 +247,20 @@ pub struct Version {
     #[cfg_attr(feature = "builder", builder(default))]
     pub revision: Revision,
     /// The version string exactly as parsed, preserving leading zeros
-    /// (e.g. `"26.04.0"` instead of the reconstructed `"26.4.0"`). Interned
-    /// (`Copy`) rather than `String`, for the same cloning-cost reason as
-    /// `numbers` above.
+    /// (e.g. `"26.04.0"` instead of the reconstructed `"26.4.0"`).
+    ///
+    /// `SmolStr` rather than `String`: cheap to clone (inline for the
+    /// common short version string, `Arc<str>` refcount bump otherwise)
+    /// without touching the process-global string interner. That interner
+    /// is meant for a small, heavily-reused vocabulary (package names, USE
+    /// flags, slots) — version strings are the opposite (tens of thousands
+    /// of distinct one-shot values per repo scan, each of which the
+    /// interner's default backend never frees), so interning them would
+    /// bloat the shared table for every other lookup instead of helping.
     ///
     /// `None` when constructed programmatically via [`Version::new`] or the builder.
     #[cfg_attr(feature = "builder", builder(skip))]
-    pub raw: Option<Interned<DefaultInterner>>,
+    pub raw: Option<SmolStr>,
 }
 
 impl Version {
@@ -512,7 +519,7 @@ pub(crate) fn parse_version(input: &mut &str) -> ModalResult<Version> {
                 letter,
                 suffixes,
                 revision: revision.unwrap_or_default(),
-                raw: Some(Interned::intern(raw)),
+                raw: Some(SmolStr::new(raw)),
             },
         )
         .context(StrContext::Label("version"))
