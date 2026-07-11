@@ -29,6 +29,7 @@ use portage_atom::{Cpn, Cpv, Dep, Operator, Version};
 use portage_atom_pubgrub::{
     DepClass, InstalledPackage as SolverInstalledPackage, InstalledPolicy,
     PortageDependencyProvider, PortagePackage, PortageVersionSet, UseFlagRequirement, UseOverride,
+    build_slot_map,
 };
 use portage_repo::Repository;
 
@@ -327,9 +328,9 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         InstalledPolicy::Favor
     };
 
-    let mut installed: HashMap<Cpn, HashMap<String, Version>> = HashMap::new();
+    let mut installed: HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>> = HashMap::new();
     for e in &target_installed {
-        let slot_key = e.slot.clone().unwrap_or_default();
+        let slot_key = e.slot.unwrap_or_else(|| Interned::intern(""));
         installed
             .entry(e.cpn)
             .or_default()
@@ -369,6 +370,51 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         root_deps.push((pkg, vs));
     }
 
+    // The whole-repository slot map (unslotted-dep resolution against
+    // multi-slot packages) computed once, up front, and reused by every
+    // co-solve fixpoint iteration below instead of being recomputed on each
+    // provider rebuild — see `build_slot_map`'s doc comment for why that
+    // recomputation is the single largest redundant cost in a per-iteration
+    // rebuild (~20k CPNs' worth of keyword/mask/license filtering, up to ~8x
+    // per invocation). Uses the pristine (pre-cosolve) `package_use`: license
+    // acceptance can in principle depend on `package_use` through a
+    // USE-conditional LICENSE expression, which *does* vary across
+    // iterations, so a package whose license acceptance flips because of a
+    // flag the fixpoint later cedes would see a stale slot entry here. That
+    // is PMS-legal but vanishingly rare in the real tree, and not worth
+    // recomputing the whole map every iteration to cover.
+    let slot_map = build_slot_map(&repo::Adapter {
+        data: &data,
+        accept_keywords: &accept_keywords,
+        package_mask: &package_mask,
+        package_unmask: &package_unmask,
+        accept_licenses: &accept_licenses,
+        use_config: &use_config,
+        package_use: &package_use,
+        force_mask: &force_mask,
+        installed_cpvs: solver_installed_cpvs,
+        autosolve_use: false,
+    });
+
+    // Sysroot VDB entries for `DEPEND` satisfaction under a cross build:
+    // static for the whole invocation (doesn't depend on `pkg_use`), so
+    // reading it from disk on every fixpoint iteration — as `build_and_solve`
+    // used to, inline — was pure waste. Computed once here instead.
+    let sysroot_installed: Vec<(PortagePackage, Version)> = if cross.active {
+        installed::load_sysroot_entries(cross.sysroot.as_path())
+            .into_iter()
+            .map(|e| {
+                let pkg = match e.slot.filter(|s| !s.is_empty()) {
+                    Some(s) => PortagePackage::slotted(e.cpn, s),
+                    None => PortagePackage::unslotted(e.cpn),
+                };
+                (pkg, e.version)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // Build a provider (with the given cede policy) and run the solve. Factored
     // so a failed --autosolve-use attempt can fall back to a fixed-USE (Level A)
     // solve instead of erroring — matching the doc invariant.
@@ -397,8 +443,12 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         if !emptytree_native {
             seeds.extend(target_installed.iter().map(|e| e.cpn));
         }
-        let mut provider =
-            PortageDependencyProvider::new_for_targets_with_bdeps(adapter, seeds, solve_with_bdeps);
+        let mut provider = PortageDependencyProvider::new_for_targets_with_bdeps_and_slot_map(
+            adapter,
+            seeds,
+            solve_with_bdeps,
+            &slot_map,
+        );
         provider.set_cross_active(cross.active);
         // crossdev `--root-deps=rdeps`: caller-supplied (see `DepgraphOpts::
         // root_deps_rdeps`) — a property of which operation is running, not of
@@ -408,18 +458,12 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         provider.set_rebuild_tree(emptytree_native);
         // `--deep` and native emptytree bump `:*` deps to the newest slot.
         provider.set_prefer_newest_slot(deep || emptytree_native);
-        if cross.active {
-            for e in installed::load_sysroot_entries(cross.sysroot.as_path()) {
-                let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
-                    Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
-                    None => PortagePackage::unslotted(e.cpn),
-                };
-                provider.add_sysroot_installed(pkg, e.version.clone());
-            }
+        for (pkg, version) in &sysroot_installed {
+            provider.add_sysroot_installed(pkg.clone(), version.clone());
         }
         for (e, blockers) in target_installed.iter().zip(&installed_blockers) {
-            let pkg = match e.slot.as_deref().filter(|s| !s.is_empty()) {
-                Some(s) => PortagePackage::slotted(e.cpn, Interned::intern(s)),
+            let pkg = match e.slot.filter(|s| !s.is_empty()) {
+                Some(s) => PortagePackage::slotted(e.cpn, s),
                 None => PortagePackage::unslotted(e.cpn),
             };
             provider.add_installed_blockers(&pkg, blockers);

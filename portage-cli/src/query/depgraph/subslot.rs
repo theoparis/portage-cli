@@ -20,7 +20,7 @@ use super::installed::VdbEntry;
 /// subslot no longer matches the `:slot/subslot=` binding recorded in the VDB.
 pub(super) struct SubslotRebuild {
     pub cpn: Cpn,
-    pub slot: Option<String>,
+    pub slot: Option<Interned<DefaultInterner>>,
     pub version: Version,
     /// The planned packages whose subslot change triggers the rebuild.
     pub triggers: Vec<Cpn>,
@@ -123,7 +123,7 @@ mod tests {
     fn vdb(cpn: &str, ver: &str, deps: &str) -> VdbEntry {
         VdbEntry {
             cpn: Cpn::parse(cpn).unwrap(),
-            slot: Some("0".to_string()),
+            slot: Some(Interned::intern("0")),
             version: Version::parse(ver).unwrap(),
             active_use: Vec::new(),
             iuse: Vec::new(),

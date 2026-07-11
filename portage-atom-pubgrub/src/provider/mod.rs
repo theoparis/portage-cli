@@ -320,6 +320,41 @@ pub(crate) struct HostEntry {
     pub iuse: Vec<Interned<DefaultInterner>>,
 }
 
+/// Build the whole-repository slot map used by `convert_deps` to resolve
+/// unslotted deps against multi-slot packages, from the cheap `slots_for`
+/// projection (no dependency conversion) covering every CPN in the
+/// repository — not just the resolve's seeded closure — so an unslotted dep
+/// on a multi-slot package resolves correctly no matter which package
+/// references it.
+///
+/// Expensive to redo per solve: for a real Gentoo tree this filters
+/// `slots_for`'s ~32k cached versions through keyword/mask/license
+/// acceptance. Callers that rebuild the provider repeatedly against the
+/// same repository view (the USE-dep co-solve fixpoint) should call this
+/// once and reuse the result via
+/// [`PortageDependencyProvider::new_for_targets_with_bdeps_and_slot_map`],
+/// rather than `new`/`new_for_targets*` (which call this internally, once
+/// per construction).
+pub fn build_slot_map<R: PackageRepository>(repo: &R) -> convert::SlotMap {
+    let mut cpn_slots: HashMap<Cpn, Vec<Interned<DefaultInterner>>> = HashMap::new();
+    for cpn in repo.all_packages() {
+        let slots = repo.slots_for(&cpn);
+        if !slots.is_empty() {
+            cpn_slots.insert(cpn, slots);
+        }
+    }
+    cpn_slots
+        .iter()
+        .map(|(&cpn, slots)| {
+            let slot_packages = slots
+                .iter()
+                .map(|&s| (s, PortagePackage::slotted(cpn, s)))
+                .collect();
+            (cpn, slot_packages)
+        })
+        .collect()
+}
+
 impl PortageDependencyProvider {
     /// Build the provider from a repository.
     ///
@@ -329,7 +364,8 @@ impl PortageDependencyProvider {
     /// resolves policy itself.  See `docs/use-and-solver-boundary.md`.
     pub fn new<R: PackageRepository>(repo: R) -> Self {
         let seeds = repo.all_packages();
-        Self::new_with_seeds(repo, seeds, false)
+        let slot_map = build_slot_map(&repo);
+        Self::new_with_seeds(repo, seeds, false, &slot_map)
     }
 
     /// Like [`new`](Self::new), but converts only the packages *reachable*
@@ -340,7 +376,8 @@ impl PortageDependencyProvider {
     /// targeted resolve this converts a few hundred packages instead of the
     /// whole tree.
     pub fn new_for_targets<R: PackageRepository>(repo: R, seeds: Vec<Cpn>) -> Self {
-        Self::new_with_seeds(repo, seeds, false)
+        let slot_map = build_slot_map(&repo);
+        Self::new_with_seeds(repo, seeds, false, &slot_map)
     }
 
     /// Like [`new_for_targets`](Self::new_for_targets), but with explicit
@@ -350,40 +387,42 @@ impl PortageDependencyProvider {
         seeds: Vec<Cpn>,
         with_bdeps: bool,
     ) -> Self {
-        Self::new_with_seeds(repo, seeds, with_bdeps)
+        let slot_map = build_slot_map(&repo);
+        Self::new_with_seeds(repo, seeds, with_bdeps, &slot_map)
     }
 
-    fn new_with_seeds<R: PackageRepository>(repo: R, seeds: Vec<Cpn>, with_bdeps: bool) -> Self {
+    /// Like [`new_for_targets_with_bdeps`](Self::new_for_targets_with_bdeps),
+    /// but takes an already-computed slot map (see [`build_slot_map`])
+    /// instead of recomputing it internally.
+    ///
+    /// For callers that rebuild the provider repeatedly against the same
+    /// repository view — e.g. the USE-dep co-solve fixpoint, which reruns the
+    /// whole solve up to ~8× per invocation — recomputing `slots_for` for
+    /// every CPN in the repository on every rebuild is the single largest
+    /// redundant cost in a per-iteration rebuild (a real Gentoo tree has
+    /// ~20k CPNs / ~32k cached versions, each checked against
+    /// keyword/mask/license acceptance). Building the slot map once and
+    /// reusing it here removes that cost from every iteration after the
+    /// first.
+    pub fn new_for_targets_with_bdeps_and_slot_map<R: PackageRepository>(
+        repo: R,
+        seeds: Vec<Cpn>,
+        with_bdeps: bool,
+        slot_map: &convert::SlotMap,
+    ) -> Self {
+        Self::new_with_seeds(repo, seeds, with_bdeps, slot_map)
+    }
+
+    fn new_with_seeds<R: PackageRepository>(
+        repo: R,
+        seeds: Vec<Cpn>,
+        with_bdeps: bool,
+        slot_map: &convert::SlotMap,
+    ) -> Self {
         let mut packages = HashMap::new();
         let mut use_decision_prefer: HashMap<PortagePackage, Version> = HashMap::new();
         let mut use_decision_meta: HashMap<PortagePackage, (Cpn, Interned<DefaultInterner>)> =
             HashMap::new();
-        let mut cpn_slots: HashMap<portage_atom::Cpn, Vec<Interned<DefaultInterner>>> =
-            HashMap::new();
-
-        // First pass: collect slots per CPN via the cheap `slots_for`
-        // projection (same version filters as `versions_for`, no dep
-        // conversion). The slot map must cover the whole repository so
-        // unslotted deps on multi-slot packages resolve no matter which
-        // package references them.
-        for cpn in repo.all_packages() {
-            let slots = repo.slots_for(&cpn);
-            if !slots.is_empty() {
-                cpn_slots.insert(cpn, slots);
-            }
-        }
-
-        // Build the slot map for convert_deps.
-        let slot_map: convert::SlotMap = cpn_slots
-            .iter()
-            .map(|(&cpn, slots)| {
-                let slot_packages = slots
-                    .iter()
-                    .map(|&s| (s, PortagePackage::slotted(cpn, s)))
-                    .collect();
-                (cpn, slot_packages)
-            })
-            .collect();
 
         // Second pass: register versions and convert deps for the closure of
         // `seeds` — every package referenced by a converted dependency (or a
@@ -433,7 +472,7 @@ impl PortageDependencyProvider {
                 }
 
                 let class_results: [convert::ConversionResult; 5] = dep_classes.map(|entries| {
-                    convert::convert_deps(entries, &cpn_str, &cpv_use_cfg, &slot_map)
+                    convert::convert_deps(entries, &cpn_str, &cpv_use_cfg, slot_map)
                 });
 
                 let mut all_blockers = Vec::new();

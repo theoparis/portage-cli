@@ -8,7 +8,11 @@ use portage_vdb::Vdb;
 
 pub(super) struct VdbEntry {
     pub(super) cpn: Cpn,
-    pub(super) slot: Option<String>,
+    /// Interned at load time — this entry is re-registered with the solver
+    /// on every USE-dep co-solve fixpoint iteration (`mod.rs`'s
+    /// `build_and_solve`), so this avoids re-interning the same slot string
+    /// on every one of those calls.
+    pub(super) slot: Option<Interned<DefaultInterner>>,
     pub(super) version: Version,
     pub(super) active_use: Vec<Interned<DefaultInterner>>,
     pub(super) iuse: Vec<Interned<DefaultInterner>>,
@@ -148,7 +152,7 @@ fn load_one(root: Option<&camino::Utf8Path>) -> Vec<VdbEntry> {
             }
             VdbEntry {
                 cpn: *pkg.cpn(),
-                slot: pkg.slot_main().ok(),
+                slot: pkg.slot_main().ok().map(|s| Interned::intern(&s)),
                 version: pkg.cpv().version.clone(),
                 active_use,
                 iuse,
@@ -169,15 +173,12 @@ fn load_one(root: Option<&camino::Utf8Path>) -> Vec<VdbEntry> {
 pub(super) fn action_tag<'a>(
     pkg: &PortagePackage,
     ver: &Version,
-    installed: &'a HashMap<Cpn, HashMap<String, Version>>,
+    installed: &'a HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
 ) -> (&'static str, Option<&'a Version>) {
     let Some(by_slot) = installed.get(pkg.cpn()) else {
         return ("N", None);
     };
-    let slot_key = pkg
-        .slot()
-        .map(|s| s.as_str().to_string())
-        .unwrap_or_default();
+    let slot_key = pkg.slot().unwrap_or_else(|| Interned::intern(""));
     match by_slot.get(&slot_key) {
         None => ("NS", None),
         Some(inst) => {

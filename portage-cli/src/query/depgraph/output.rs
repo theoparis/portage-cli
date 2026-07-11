@@ -481,7 +481,7 @@ fn slot_repo_suffix(cache: &CacheEntry, repo_name: &str) -> String {
 /// `Total: 26 packages (20 new, 1 upgrade, 5 reinstalls)`.
 fn total_line(
     order: &[(PortagePackage, Version)],
-    installed: &HashMap<Cpn, HashMap<String, Version>>,
+    installed: &HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
     sizes: &HashMap<Cpv, u64>,
 ) -> String {
     let (mut new, mut new_slot, mut up, mut down, mut re) = (0, 0, 0, 0, 0);
@@ -599,7 +599,7 @@ fn format_kib(bytes: u64) -> String {
 /// per-entry printers don't thread a dozen positional args each.
 pub(super) struct PrettyCtx<'a> {
     pub data: &'a RepoData,
-    pub installed: &'a HashMap<Cpn, HashMap<String, Version>>,
+    pub installed: &'a HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
     pub installed_entries: &'a [super::installed::VdbEntry],
     pub use_config: &'a UseConfig,
     pub package_use: &'a [(Dep, Vec<UseOverride>)],
@@ -757,7 +757,7 @@ pub(super) fn print_json(
     data: &RepoData,
     order: &[(PortagePackage, Version)],
     edges: &[portage_atom_pubgrub::DepEdge],
-    installed: &HashMap<Cpn, HashMap<String, Version>>,
+    installed: &HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
     flag_reqs: &HashMap<&PortagePackage, &UseFlagRequirement>,
 ) -> anyhow::Result<()> {
     let packages: Vec<serde_json::Value> = order

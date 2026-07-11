@@ -53,13 +53,14 @@ mod use_config;
 mod validate;
 mod version_set;
 
+pub use convert::SlotMap;
 pub use error::{Error, Result};
 pub use graph::{DepClass, DepEdge};
 pub use package::{MergeRoot, PortagePackage};
 pub use portage_atom::interner::{DefaultInterner, Interned};
 pub use provider::{
     CededFlag, DroppedDep, InstalledPackage, InstalledPolicy, PortageDependencyProvider,
-    UseFlagRequirement,
+    UseFlagRequirement, build_slot_map,
 };
 pub use repository::{
     IUseDefault, InMemoryRepository, PackageDeps, PackageRepository, PackageVersions,
