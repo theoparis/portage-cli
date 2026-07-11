@@ -4,9 +4,14 @@
 //! entry's build-time dependencies are present in the set that will be visible
 //! when it builds:
 //!
-//! - a **Target**-routed entry's `DEPEND` is resolved against the **base
-//!   system** view `VDB(base) ∪ VDB(target)` (what `SYSROOT`/`ESYSROOT`
-//!   point at);
+//! - a **Target**-routed entry's `DEPEND` is resolved against
+//!   `roots.satisfaction_root(DepClass::Depend)` (BROOT for a native/
+//!   same-arch build — there's no separate build sysroot when
+//!   `CBUILD==CHOST` — or the target sysroot for a genuine cross build),
+//!   plus the target's own VDB whenever it differs from that satisfaction
+//!   root (`Avail::initial_depend`, so a package already built into a
+//!   partially populated `--root`/`--prefix` from an earlier run still
+//!   counts, even though the host lacks it);
 //! - a **Host**-routed entry's `DEPEND` — it's built *at* `BROOT`, so its
 //!   own build-time deps live there too — and every entry's `BDEPEND` are
 //!   both resolved against the build host's own `BROOT` (`roots.satisfaction_root(DepClass::BDepend)`),

@@ -88,11 +88,31 @@ impl Avail {
         Self(avail_entries_from(broot_vdb_packages(roots)))
     }
 
-    /// `DEPEND` availability at the start of a run: `VDB(base) ∪ VDB(target)`.
+    /// `DEPEND` availability at the start of a run:
+    /// `roots.satisfaction_root(DepClass::Depend)`'s VDB, plus the target's
+    /// own VDB whenever it differs from that satisfaction root. This used to
+    /// hardcode `VDB(base) ∪ VDB(target)` directly, bypassing
+    /// `satisfaction_root` entirely — never migrated when that centralized
+    /// the satisfaction-root logic (2026-07-09). For a bare `--root`, `base`
+    /// and `target` used to both be the (possibly empty) offset, so that old
+    /// logic never consulted the host at all: found 2026-07-11 comparing `em
+    /// --root` against real `ROOT=X emerge`'s own (much smaller) plan for
+    /// `sys-devel/gcc` — see `todo/root-topology-refactor.md`.
+    ///
+    /// Checking `merge_root() != satisfaction_root(Depend)` (not
+    /// `roots.is_overlay()`) is deliberate: a bare `--root` now resolves
+    /// DEPEND against BROOT (the host) for a native build, which differs
+    /// from the target offset just as much as `--prefix`'s overlay does — a
+    /// package already built into a *partially populated* `--root` from an
+    /// earlier run must still count as DEPEND-satisfied even though the host
+    /// lacks it, or a resumed stage build hits a false preflight failure
+    /// (found independently reviewing this same day's fix, before it ever
+    /// shipped — see `todo/root-topology-refactor.md`).
     pub fn initial_depend(roots: &Roots) -> Self {
-        let mut out = vdb_avail_entries(roots.base());
-        if roots.target() != roots.base() {
-            out.extend(vdb_avail_entries(roots.target()));
+        let depend_root = roots.satisfaction_root(DepClass::Depend);
+        let mut out = vdb_avail_entries(Some(depend_root));
+        if roots.merge_root() != depend_root {
+            out.extend(vdb_avail_entries(Some(roots.merge_root())));
         }
         Self(out)
     }
@@ -655,6 +675,62 @@ mod tests {
         assert!(
             avail.atom_satisfied(dep),
             "a BDEPEND present only in the prefix's own VDB must count as satisfied"
+        );
+    }
+
+    /// Regression test: `initial_depend` must weave in the *target's* own
+    /// VDB for a bare `--root`, not just BROOT — a DEPEND provider already
+    /// built into a partially populated `--root` from an earlier run must
+    /// still count as satisfied even though the (real) host lacks it, or a
+    /// resumed stage build hits a false preflight failure. Found reviewing
+    /// the 2026-07-11 fix that made DEPEND resolve against BROOT for a
+    /// native build (`satisfaction_root(DepClass::Depend)`) — that fix
+    /// alone regressed this case by dropping the old `VDB(base) ∪
+    /// VDB(target)` weave entirely. See `todo/root-topology-refactor.md`.
+    #[test]
+    fn initial_depend_weaves_in_the_target_vdb_for_a_bare_root() {
+        let broot = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        write_fake_vdb_entry(target.path(), "dev-python/jinja2-3.1.6");
+
+        let roots = Roots::for_test_root_with_broot(
+            target.path().to_str().unwrap(),
+            broot.path().to_str().unwrap(),
+        );
+        let avail = Avail::initial_depend(&roots);
+
+        let dep = parse("dev-python/jinja2");
+        let DepEntry::Atom(dep) = &dep[0] else {
+            unreachable!()
+        };
+        assert!(
+            avail.atom_satisfied(dep),
+            "a DEPEND present only in the target's own VDB (built by an \
+             earlier partial run) must still count as satisfied"
+        );
+    }
+
+    /// The same weave also still finds a BROOT-only entry — the target weave
+    /// adds the offset's VDB, it doesn't replace BROOT's.
+    #[test]
+    fn initial_depend_still_finds_broot_only_entry_for_a_bare_root() {
+        let broot = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        write_fake_vdb_entry(broot.path(), "dev-python/jinja2-3.1.6");
+
+        let roots = Roots::for_test_root_with_broot(
+            target.path().to_str().unwrap(),
+            broot.path().to_str().unwrap(),
+        );
+        let avail = Avail::initial_depend(&roots);
+
+        let dep = parse("dev-python/jinja2");
+        let DepEntry::Atom(dep) = &dep[0] else {
+            unreachable!()
+        };
+        assert!(
+            avail.atom_satisfied(dep),
+            "a DEPEND present only on BROOT (the host) must still count as satisfied"
         );
     }
 
