@@ -49,6 +49,17 @@ pub fn trim_within_run_bdepend(
     }
 
     let runtime_required = runtime_required_cpns(full_solution_order, ctx);
+    // Computed once: the BROOT/prefix VDB scan this pass checks BDEPEND
+    // satisfaction against never changes across the whole trim (no merges
+    // happen here, just filtering decisions) — `avail_for_consumer` used to
+    // rebuild this from scratch (a fresh VDB directory scan) for every
+    // (candidate, consumer) pair it examined, up to O(n²) scans for an
+    // n-package plan. Measured as the single largest allocation source in
+    // this codebase (dhat: 110MB across 322 calls on a real firefox
+    // resolve). Cloning this cheap, lazy (`AvailEntry::installed` isn't
+    // eagerly read) base is far cheaper than re-scanning the VDB directory
+    // each time.
+    let base_avail = Avail::initial_bdepend(ctx.roots);
     let mut kept: Vec<(PortagePackage, Version)> = Vec::with_capacity(order.len());
     let mut kept_indices: Vec<usize> = Vec::with_capacity(order.len());
 
@@ -61,6 +72,7 @@ pub fn trim_within_run_bdepend(
             kept_indices: &kept_indices,
             ctx,
             runtime_required: &runtime_required,
+            base_avail: &base_avail,
         };
         if should_keep(&cand) {
             kept.push((pkg.clone(), ver.clone()));
@@ -114,6 +126,7 @@ struct TrimCandidate<'a, 'b> {
     kept_indices: &'a [usize],
     ctx: &'a TrimCtx<'b>,
     runtime_required: &'a HashSet<Cpn>,
+    base_avail: &'a Avail,
 }
 
 fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
@@ -126,7 +139,7 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
     }
 
     for (j, (consumer, consumer_ver)) in cand.order.iter().enumerate().skip(cand.index + 1) {
-        let avail = avail_for_consumer(j, cand.kept, cand.kept_indices, cand.ctx.roots);
+        let avail = avail_for_consumer(j, cand.kept, cand.kept_indices, cand.base_avail);
         let Some(deps) = effective_use::evaluated_deps(
             cand.ctx.data,
             cand.ctx.use_config,
@@ -148,9 +161,9 @@ fn avail_for_consumer(
     consumer_index: usize,
     kept: &[(PortagePackage, Version)],
     kept_indices: &[usize],
-    roots: &Roots,
+    base_avail: &Avail,
 ) -> Avail {
-    let mut avail = Avail::initial_bdepend(roots);
+    let mut avail = base_avail.clone();
     for (k, (pkg, ver)) in kept.iter().enumerate() {
         if kept_indices[k] < consumer_index {
             let cpv = Cpv::new(*pkg.cpn(), ver.clone());
