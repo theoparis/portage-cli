@@ -852,7 +852,7 @@ clap fix (e.g. requiring `=` for `--local`'s optional value) so this
 doesn't cost someone else the same confusion — not investigated further
 this session.
 
-## `--local` bootstrap failures: narrowed to two distinct bugs, both open
+## `--local` bootstrap failures: two distinct bugs found, one fixed, one open
 
 Follow-up on the `--local` preflight-explosion finding above. Confirmed
 `em setup --local` itself works cleanly in isolation (fresh sandbox: exit
@@ -887,26 +887,42 @@ already has an equivalent" vs. "must be built fresh into this plan" —
 references), so whatever's inflating the closure happens upstream of
 preflight, during solving.
 
-**Bug 2 — separate, earlier failure for a real foreign-arch target under
-`--local`.** `em crossdev -T riscv64-unknown-linux-gnu --local --setup`
-fails *before* reaching preflight at all: `error: no ebuilds found for
-'cross-riscv64-unknown-linux-gnu/binutils' (searched ::gentoo and
-overlays)` — right after printing `>>> cross target riscv64-unknown-linux-gnu
-ready` (sysroot `/root/.gentoo/usr/riscv64-unknown-linux-gnu`) as if the
-overlay/alias setup had succeeded. Contrast with the same-arch aarch64
-case, whose overlay *does* resolve correctly (`cross-aarch64-unknown-linux-gnu/binutils-9999`
-found fine) before hitting Bug 1 instead. So `--local`'s cross-overlay
-alias entry (`alias_repo_conf_entry`, written via `setup_root(globals) =
-globals.outer_roots().merge_root()` — `crossdev/mod.rs` lines ~701-895)
-gets created somewhere, but doesn't correctly resolve back to the real
-`::gentoo` tree from inside `--local`'s own repo/config view for a genuine
-foreign-arch tuple. Not yet traced past that pointer — worth checking
-whether `--local`'s own `repos.conf` (unlike `--root`/`--prefix`, which
-this session confirmed working for the identical riscv64 target) actually
-has a valid `gentoo` entry to alias *from* at all, per `ensure_repos_conf`'s
-own doc note about a fresh self-contained target starting with no
-`repos.conf` of its own.
+**Bug 2 — RESOLVED, was a test-methodology artifact, not a `--local` bug.**
+Originally recorded as: `em crossdev -T riscv64-unknown-linux-gnu --local
+--setup` fails *before* reaching preflight at all, `error: no ebuilds found
+for 'cross-riscv64-unknown-linux-gnu/binutils' (searched ::gentoo and
+overlays)`, right after printing `>>> cross target riscv64-unknown-linux-gnu
+ready` as if the overlay/alias setup had succeeded — contrasted with the
+same-arch aarch64 case, whose overlay resolved fine.
 
-Both bugs are real, both are open, neither investigated to a root cause
-yet — flagging clearly rather than guessing further, per this session's
-own retrospective above.
+Traced to the real cause: the riscv64 run above reused the *same* `--local`
+prefix the aarch64 run had already `--setup` on. `em crossdev`'s alias
+repos.conf entry used one fixed name (`crossdev.conf`, section
+`[crossdev]`) regardless of target, and `--setup` refreshes config via
+`RefreshPolicy::FillGapsOnly` (presence-only — "the file exists" is enough,
+by design, so hand edits made between an `--init-target` and a `--setup`
+survive). So the aarch64 alias file was already present, `--setup` saw
+"already there" and left it untouched, and the riscv64 target silently got
+no alias at all. Confirmed by re-running with `--init-target`
+(`RefreshPolicy::Sync`, content-compared) instead of `--setup` on the same
+prefix: the alias refreshed correctly and the riscv64 overlay resolved.
+Nothing about `--local`'s repo/config view was actually broken — `--root`/
+`--prefix` "worked" for riscv64 in this session's earlier pass only because
+those runs happened to use a fresh prefix per target, never hitting the
+same collision.
+
+**Fixed** (commit `89a151a`): each cross target now gets its own alias
+file/section, `crossdev.<tuple>.conf` / `[crossdev.<tuple>]`, via a new
+`overlay_name(target)` helper (`crossdev/mod.rs`) threaded through
+`ConfigEntry::Alias`'s new `name` field (`config_plan.rs`). Multiple
+targets now coexist on one prefix regardless of `--setup` vs
+`--init-target`, closing off this failure mode structurally rather than
+just documenting the collision. Live-reverified: `crossdev.aarch64-unknown-linux-gnu.conf`
+and `crossdev.riscv64-unknown-linux-gnu.conf` both present after
+`--init-target`ing each in turn on one `--local` prefix, both
+`cross-*-unknown-linux-gnu/binutils` atoms resolve with zero "no ebuilds
+found" (both still go on to hit Bug 1 below, which is unrelated and
+expected).
+
+Both targets, once alias resolution is out of the way, hit Bug 1 (below)
+identically — that one's still open.
