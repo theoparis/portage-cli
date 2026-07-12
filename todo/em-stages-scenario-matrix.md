@@ -782,3 +782,72 @@ honestly rather than polished into a clean bug report:**
   worth treating "which of these near-identical concepts actually applies
   here" as a question to answer explicitly before acting, not after being
   corrected.
+
+## `em crossdev --setup` across all three root-mode variants (2026-07-12, after the USE_EXPAND fix)
+
+Retested `em crossdev --setup` (cross target `riscv64-unknown-linux-gnu`)
+across the three root-mode combinations, on a fresh `em-crossdev-test`
+sandbox (`sandbox setup` + `sandbox prepare --bare`), after landing the
+USE_EXPAND fix (commit `d602de1`) — this is what originally motivated that
+fix: the plain `--target` case regressed to a `dev-libs/libiconv`/glibc
+file collision before the fix, now confirmed clean.
+
+- **Plain `--target riscv64-unknown-linux-gnu` (native, no EPREFIX):
+  full success**, matching the pre-regression baseline exactly (51
+  packages, byte-identical `-pv` plan to a binary built from `d9f1f90`).
+  `>>> cross toolchain riscv64-unknown-linux-gnu ready in //usr/riscv64-unknown-linux-gnu`.
+- **`--prefix /var/tmp/px` (overlay, BROOT = host): full success.**
+  `em crossdev --target riscv64-unknown-linux-gnu --prefix /var/tmp/px --setup`
+  completed end-to-end: `>>> cross toolchain riscv64-unknown-linux-gnu
+  ready in /var/tmp/px/usr/riscv64-unknown-linux-gnu`. Needed `em setup
+  --prefix /var/tmp/px` run first (just the directory/config skeleton;
+  `--prefix` borrows the host's own toolchain, so nothing further is
+  needed before `crossdev --setup`).
+- **`--local` (standalone Gentoo-Prefix, own BROOT): fails at preflight,
+  before merging anything — real gap, not yet root-caused.** Needed `em
+  setup --local` (skeleton) *and*, per the `local-eprefix-mode` convention,
+  `em toolchain --setup --local` (build the prefix's own native base
+  toolchain — the prefix has no host-shared BROOT to borrow from). The
+  toolchain bootstrap itself fails immediately:
+  ```
+  error: pre-flight dependency check failed — ...
+    sys-devel/gcc-16.1.1_p20260613 needs: >=dev-libs/gmp-4.3.2:0=, sys-devel/gettext, sys-libs/glibc[cet(-)?]
+    sys-libs/glibc-2.43-r2 needs: || ( dev-lang/python:3.14 dev-lang/python:3.13 dev-lang/python:3.12 )
+    ... (a dozen more DEPEND-class entries: gettext, meson, gmp, python, m4, ...)
+  ```
+  **Initially misdiagnosed** (corrected mid-session after a direct
+  challenge) as the already-documented `--local` preflight-vs-PATH-tools
+  gap from earlier findings in this file — that was wrong, reached by
+  pattern-matching the *words* "pre-flight dependency check failed"
+  without checking whether the *content* matched. The earlier documented
+  gap is specifically about real host tools (`xz-utils`, `meson`) being on
+  `PATH` but invisible to a VDB-only check; this list is dominated by
+  plain `DEPEND`-class items (`gettext`, `gmp`, `python`) that `--root-deps=rdeps`
+  is supposed to exempt from this exact preflight check entirely —
+  `toolchain()` (`crossdev/mod.rs`) forces `root_deps = true`
+  unconditionally for `toolchain --setup`, same as bare `--root` gets.
+  **The open question**: `Roots::root_set()`/`broot()` configure `--local`
+  and bare `--root` *identically* (both set `broot` to their own offset —
+  "own BROOT", self-contained model) — yet bare `--root`'s `toolchain
+  --setup` got 30+ packages successfully merged before hitting an
+  unrelated failure (see the earlier `virtual/os-headers`/kernel-headers
+  finding, out of scope per that finding's own note), while `--local`'s
+  fails at preflight before merging *anything*. Why the same `broot`
+  configuration produces such different outcomes — whether
+  `--root-deps=rdeps`'s exemption isn't actually reaching the `--local`
+  preflight check the same way it does for `--root`, or something else
+  entirely — is not yet traced. Needs its own investigation, ideally
+  starting from `preflight.rs`'s actual `DepClass::Depend` check alongside
+  `merge_flags.root_deps`'s consumption, comparing the two modes directly
+  rather than assuming they're equivalent because their `Roots` values
+  look the same on paper.
+
+**Also found, CLI usability**: `em --target T --local crossdev --setup`
+(global flags before the subcommand) mis-parses — clap's optional-value
+`--local [<DIR>]` greedily consumes `crossdev` as its directory argument,
+producing a confusing `unexpected argument '--setup'` error nowhere near
+the real cause. Putting the subcommand first works correctly: `em
+crossdev --target T --local --setup`. Worth a small usage-doc note or a
+clap fix (e.g. requiring `=` for `--local`'s optional value) so this
+doesn't cost someone else the same confusion — not investigated further
+this session.
