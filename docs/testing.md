@@ -1,0 +1,174 @@
+# Testing strategy
+
+How correctness is actually established in this workspace: what runs in CI,
+what has to be run by hand, and — the recurring lesson of this project —
+why unit tests alone have repeatedly missed real bugs that a direct
+comparison against real `emerge` caught immediately.
+
+## The layers
+
+### 1. Unit tests (`#[cfg(test)] mod tests`, in-module)
+
+The bulk of the suite (~1200 tests workspace-wide). Per `AGENTS.md`, tests
+live next to the code they cover, not in a separate file. Rough weight by
+crate (test-function count, not a quality signal, just where the mass is):
+`portage-repo` (197), `portage-cli` (193), `portage-metadata` (161),
+`portage-atom` (146), `portage-atom-pubgrub` (141), `portage-atom-resolvo`
+(82). This is where the USE-flag/solver-boundary logic
+(`docs/architecture.md`'s "USE/solver boundary" section), atom parsing, and
+CLI plumbing get their fast, deterministic coverage.
+
+Run: `cargo test --workspace --exclude portage-bench` (matches CI exactly —
+see below).
+
+### 2. Crate-level integration tests (`tests/*.rs`)
+
+- `portage-repo/tests/ver_functions.rs` + `ver_functions.sh` — ported
+  directly from Gentoo's own `eclass/tests/version-funcs.sh`, exercised
+  against the real `EbuildShell` (brush-backed). A golden-file test: the
+  fixture *is* upstream's own test data, not something invented here.
+- `portage-repo/tests/brush_compat.rs` — bash constructs commonly found in
+  real Gentoo eclasses (not synthetic snippets), because `brush`
+  compatibility gaps only show up on real eclass code, not on
+  what you'd guess to write by hand.
+- `portage-binpkg/tests/write.rs` — GPKG binary package round-trip.
+- `portage-cli/tests/comparison.rs` — `em query` vs `qfile`/`qlist`/`qsize`/
+  `equery` on a **live Gentoo host**. All five tests are `#[ignore]` by
+  default (no such host in CI); run explicitly with
+  `cargo test -p portage-cli -- --ignored` when you have one.
+
+### 3. `cargo nextest` — use it locally, even though CI doesn't
+
+CI (`.github/workflows/ci.yml`) runs plain `cargo test --workspace --exclude
+portage-bench`. Locally, **prefer `cargo nextest run --workspace --exclude
+portage-bench`** — `portage-repo`'s shell/profile tests call
+`std::env::set_current_dir` (process-global) and race under `cargo test`'s
+default parallel-thread execution, producing sporadic unrelated failures
+(documented in `todo/stage-build-shakeout.md`'s finding #35 triage: of 28
+failures in one run, 24 were an unrelated `--jobs` race, 1 a real bug, 3
+pre-existing flakes from this same root cause). nextest's process-per-test
+isolation sidesteps it. **If a plain `cargo test` run shows scattered
+failures in `build::shell`/`build::profile` tests that don't relate to your
+change, re-run under nextest before concluding you have a regression** —
+this has cost real debugging time more than once this project.
+
+This flakiness has never been root-fixed (the `set_current_dir` call would
+need to move off a process-global path, or tests needing it would need
+`#[serial]`-style exclusion — neither is done). It's a known gap, not a
+mystery to re-investigate each time.
+
+### 4. Live parity against real `emerge` — the strongest oracle this project has
+
+`benchmarks/bench-em-vs-emerge.sh` (see `docs/benchmarks.md`) resolves a
+fixed basket of real-world targets (qtbase, texlive-core, firefox,
+qtwebengine, thunderbird, libreoffice, qemu, a crossdev target) with both
+`em -p` and real `emerge -p` and diffs the package sets. `SKIP_TIMING=1`
+runs the parity check alone in seconds.
+
+This is not a "nice to have" — it is how most of the real, non-obvious bugs
+in this project have actually been found, because they were invisible to
+unit tests that only exercise what the author already thought to test:
+
+- The `--root` config-root parity bug, the `is_cross_arch` false-positive,
+  Choice/SlotChoice host-satisfaction gap, and the `initial_depend`
+  target-VDB-weave regression (all found and fixed 2026-07-12) were caught
+  by noticing `em --root <dir> gcc -vp` didn't match `ROOT=<dir> emerge -vp
+  gcc` package-for-package — not by any failing unit test.
+- The `USE=-*` wildcard-reset bug (same day) was found because a *user*
+  ran `USE="-* build" ROOT=X emerge -vp curl` and it showed `-quic` where
+  `em` showed `quic` enabled — disproving an earlier, plausible-sounding
+  but wrong internal explanation.
+- The `ForceMask`/`UseConfig` perf fix incidentally uncovered a phantom-package
+  bug (`virtual/libintl`/`virtual/libiconv` appearing in `em`'s
+  `sys-devel/gcc` plan when real emerge's didn't) purely because the parity
+  diff was re-run as part of verifying the perf change, not because
+  anything was looking for it.
+
+**Practical rule** (see the `live-verify-full-pretend-output` lesson):
+when live-verifying a fix, read the **entire** `-p`/`-v` output, not just
+the target atom or the lines you expect to have changed — display
+formatting and merge-destination routing are separate code paths from the
+resolve logic, and a fix in one has repeatedly left the other silently
+wrong (`output.rs`'s `format_flags`, `required_use.rs`, `download_size.rs`
+each needed their own copy of a fallback fix the solver-level code already
+had, discovered only by reading full `-vp` output line by line).
+
+### 5. Manual / privileged live testing (not automatable in CI)
+
+Some of this project's surface can only be verified by actually building
+real packages under real privilege boundaries — no unit test substitutes
+for it:
+
+- **Chroot testing**: copy the release `em` binary into a real stage3
+  chroot and `sudo chroot` in, rather than driving a host `em` against
+  `--root <chroot>` — the latter doesn't exercise the same privilege/
+  environment boundaries a real build needs.
+- **`crossdev-stages` sandbox** (`../crossdev-stages`, `cargo run --
+  sandbox enter/run/setup`): a clean, disposable stage3 for repeatable
+  from-scratch bootstrap testing (native and cross toolchains), backed by
+  `hakoniwa`/`fakeroost` forks.
+- **`--local`/`--prefix` wall-testing**: building a real, complete
+  dependency closure (e.g. the full native+cross toolchain bootstrap, or
+  the firefox closure) end-to-end in a throwaway root is how privilege
+  scoping, VDB write correctness, and environment-handoff bugs
+  (`__worker` scoping, `mark_phase_sourced`, EPREFIX propagation) actually
+  got found — these are integration failures that only manifest under a
+  full real build, not a resolve-only `-p`.
+
+These aren't scripted or repeatable in the way `bench-em-vs-emerge.sh` is;
+treat them as exploratory/regression sweeps to run before/after a change
+that touches build execution, privilege handling, or root/prefix mapping,
+not as a gate that runs every time.
+
+## What's *not* here (known gaps)
+
+- **No property-based/fuzz testing** (no `proptest`/`quickcheck` dependency
+  anywhere in the workspace, no fuzz targets). The one exception was an
+  ad hoc 200k-case Python fuzz comparison written to prove the
+  `wildcard_reset` USE-flag representation equivalent to portage's real
+  accumulator semantics (2026-07-11 session) — it was never committed, so
+  it can't be re-run today. If USE-flag/incremental-variable semantics
+  change again, consider writing a similar check as a committed
+  `#[test]` (even a small one, comparing against a hand-derived oracle)
+  rather than an ephemeral script, so the proof survives past one session.
+- **No mutation testing** or coverage-gated merges — `cargo llvm-cov` runs
+  in CI (uploads to Codecov) but isn't a required check.
+
+## CI gates (`.github/workflows/ci.yml`)
+
+All run on `stable` and the declared MSRV (currently 1.95):
+
+| Job | Command |
+|---|---|
+| `test` | `cargo test --workspace --exclude portage-bench` |
+| `msrv` | `cargo msrv verify --rust-version 1.95 --path portage-cli` |
+| `clippy` | `cargo clippy --workspace --exclude portage-bench -- -D warnings` |
+| `fmt` | `cargo fmt --all -- --check` |
+| `bench-smoke` | `cargo check -p portage-bench --benches` (compiles benches, doesn't run them) |
+| `coverage` | `cargo llvm-cov --workspace --exclude portage-bench --all-features --lcov` → Codecov |
+| `doc` | `cargo doc --workspace --exclude portage-bench --no-deps` (`RUSTDOCFLAGS=-D warnings`) |
+
+`portage-bench` is excluded from `test`/`clippy`/`coverage`/`doc` everywhere
+(it's a dev-only harness with a pinned `pkgcraft` git dependency that CI
+can't always resolve the same way local sibling-worktree overrides do) but
+still gets a compile-only smoke check so its benches don't silently rot.
+
+## Before opening a PR / finishing a session
+
+The sequence this project actually follows (see `AGENTS.md` for the
+individual commands):
+
+1. `cargo build` (or `--release` if timing/behaviour matters — debug
+   builds of anything touching `brush` are too slow to trust for feel).
+2. `cargo nextest run --workspace --exclude portage-bench` (not plain
+   `cargo test` — see above).
+3. `cargo clippy --workspace --exclude portage-bench -- -D warnings`.
+4. `cargo fmt --all -- --check` (CI enforces this; `clippy` passing is not
+   sufficient on its own).
+5. For anything touching resolution/USE/root handling: `SKIP_TIMING=1
+   ./benchmarks/bench-em-vs-emerge.sh` at minimum; a targeted live
+   `-vp`/`-p` comparison against real `emerge` for the specific case the
+   change targets, reading the *entire* output.
+6. For anything touching performance-sensitive code: the two-binary
+   `hyperfine` recipe in `docs/benchmarks.md`, on a target big enough for
+   the effect to clear the noise floor.

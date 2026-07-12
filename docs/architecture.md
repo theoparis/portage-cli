@@ -7,6 +7,9 @@ validation, and known divergences from emerge.
 > **Slop warning.** This codebase is largely AI-generated. Verify a claim
 > against the code before relying on it; update this file when it drifts.
 
+Related: [`docs/testing.md`](testing.md) (how correctness is established),
+[`docs/benchmarks.md`](benchmarks.md) (how performance is measured).
+
 ## Crate layering
 
 Lower crates know nothing of higher ones. The edges below are the real

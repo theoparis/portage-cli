@@ -93,6 +93,13 @@ floor follows whatever latest deps require.
 When a dependency bump needs a newer compiler, raise `rust-version` in
 `[workspace.package]` and the CI matrix entry, then `cargo msrv verify`.
 
+## Testing strategy
+
+See [`docs/testing.md`](./docs/testing.md) for the full picture: why
+`cargo nextest` is preferred locally over plain `cargo test` (known
+`portage-repo` flakiness), the live-parity-against-real-`emerge` workflow
+that has caught most of this project's real bugs, and the pre-PR checklist.
+
 ## Gentoo host tests
 
 Five integration tests in `portage-cli/tests/comparison.rs` compare `em query`
