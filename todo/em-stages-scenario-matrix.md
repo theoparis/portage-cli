@@ -692,3 +692,93 @@ From `todo/stage-build-shakeout.md`:
   here (or in `todo/stage-build-shakeout.md`, following its existing
   numbered-finding convention) and triaged afterward, not fixed inline
   mid-sweep unless trivial.
+
+## 2026-07-12 session retrospective — a real finding, reached badly
+
+**The actual finding, confirmed and worth fixing:** a native (self-hosting,
+`CHOST==CBUILD`) `--root` stage1 build can find and *execute* a binary that
+was just merged into the still-being-bootstrapped target root, when it
+should only ever use the host/seed's own tools for anything build-time
+(BDEPEND-class). Reproduced live: `dev-util/pkgconf`/`virtual/pkgconfig`
+merge correctly into `/root/stage1` (a real RDEPEND, correctly satisfied
+there — stage2/3 building *inside* this root later will need it present).
+Later in the *same* stage1 batch, `app-portage/portage-utils`'s `configure`
+resolves `pkg-config` to `/root/stage1/usr/bin/aarch64-unknown-linux-gnu-pkg-config`
+and executes it — it's the right architecture (native, not cross), so it
+doesn't fail-fast with "exec format error" the way a real cross build's
+foreign-arch mismatch would; it runs, and only then dies unable to load its
+own `libpkgconf.so.8`, because nothing ever chroots or sets
+`LD_LIBRARY_PATH` to make that root's libraries visible to a process that
+was never actually rooted there.
+
+Root cause, traced to a specific line of reasoning, not a guess:
+`docs/root-model.md`'s own rule sets `SYSROOT = ROOT` for a plain `--root`
+(correct — DEPEND headers/libraries for a native self-hosted build
+genuinely live in ROOT, `portage-repo/src/build/shell.rs:1628-1640`).
+Autoconf's own cross-aware tool search (`AC_PATH_TOOL`/`PKG_PROG_PKG_CONFIG`)
+independently uses that *same* `SYSROOT` value as an anchor for finding
+`${host_alias}-pkg-config`, treating it as "where do cross tools for this
+target live" — a second, different job the variable was never meant to do.
+For a genuine cross build (foreign arch) that heuristic is harmless: the
+binary it finds can't execute at all, so configure falls through to the
+working plain `pkg-config` cleanly. Native bootstrap is the one case where
+`CHOST` names the *same* architecture the build is already running on, so
+the wrong binary is capable of starting — and fails much later, in a
+confusing, unrelated-looking way. Two legitimately different concerns
+(DEPEND anchor vs. an accidental tool-search anchor) sharing one variable,
+and only native self-hosting stage1 exposes the conflict. Not fixed this
+session — needs a real design pass on whether `SYSROOT` should differ from
+`ROOT` specifically during stage1/toolchain bootstrap, or whether target-root
+binaries need to be kept off any tool-search path outright regardless of
+`SYSROOT`, before landing a change this central.
+
+**How today actually got there, since the user asked this be recorded
+honestly rather than polished into a clean bug report:**
+
+- Landed two real, correct, independently-verified fixes first
+  (`BOOTSTRAP_USE` re-add after stage1's `-*`, commit `9c63a2e`; per-package
+  `ld.so.cache` refresh, commit `476491b`) — both are solid, both are
+  committed, neither is in question.
+- Then spent a long stretch chasing the `portage-utils`/`pkg-config`
+  failure through **three wrong hypotheses in a row**, each stated with
+  more confidence than it had earned:
+  1. "The RDEPEND edge to `dev-util/pkgconf` is never walked at all" —
+     falsified immediately by checking the VDB (it *was* merged).
+  2. "It's an `ld.so.cache` timing gap, same class as the fix just landed" —
+     plausible, matched the symptom shape, so it got built and shipped
+     as a real fix (it's still correct and worth having) — but then
+     **directly disproved** by an isolated single-package test that showed
+     the cache *did* have the right entry, immediately, and the symptom
+     persisted anyway.
+  3. Reacted to that disproof by running `/root/stage1/usr/bin/...`
+     directly from the sandbox's own shell as a "test" — which tests
+     nothing, since a bare path exec doesn't chroot and was never going to
+     resolve the way an in-build invocation does. The user had to point
+     this out directly ("why the fuck are you running a binary from the
+     stage1??") before it was recognized as a meaningless check.
+  4. Only after the user asked pointedly whether it was really a
+     `BDEPEND` and pushed back on "not new"/"already documented" being
+     treated as synonymous with "acceptable" did the actual mechanism
+     (SYSROOT's dual, conflicting role) get found — and even that took a
+     direct nudge ("let me guess your bashrc adds stage1 to the path")
+     before the right code path got read.
+- Separately, and earlier in the same session: repeated the *exact*
+  `sudo chroot`-instead-of-`sandbox run` mistake that had already been
+  called out and turned into a hard memory rule minutes earlier, catching
+  it only because the user interrupted before real work happened; ran
+  `sandbox prepare`'s full (rust/crossdev/dracut/...) install when a
+  `--bare` sync was all that was needed, until the user pointed out the
+  new `--bare` flag existed; and re-ran an identical failing command
+  verbatim without checking whether a manual `package.use`/VDB edit had
+  even taken effect first ("what the fuck are you doing" — deserved).
+- The throughline across all of it, named directly by the user
+  ("YET AGAIN you conflate a mode with another"): this session kept
+  mixing up which of several similar-but-distinct things applied to a
+  given problem — `config_root` vs. `merge_root` for where config lives,
+  `RDEPEND` vs. `BDEPEND` for what a virtual's dependency really means,
+  and finally `SYSROOT`-as-DEPEND-anchor vs. `SYSROOT`-as-tool-search-anchor
+  for the actual bug. Each individual mix-up got resolved once pointed at
+  directly, but none of them were caught *before* being pointed out —
+  worth treating "which of these near-identical concepts actually applies
+  here" as a question to answer explicitly before acting, not after being
+  corrected.
