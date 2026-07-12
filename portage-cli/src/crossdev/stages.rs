@@ -417,13 +417,23 @@ pub fn gcc_refresh_plan(target: &CrossTarget, version: &str) -> StagePlan {
 /// The native **stage1** plan (catalyst `stage1/chroot.sh`): baselayout first
 /// (USE=build, `--nodeps` — the bare FS skeleton), then the profile's
 /// [`packages.build`](ProfileStack::stage1_packages) set in one batch with
-/// `USE="-* build"` (catalyst's `USE="-* build ${BINDIST}"`, minus `BINDIST`,
-/// a catalyst-only var). Distinct from [`toolchain_plan`]'s
+/// `USE="-* build ${BOOTSTRAP_USE}"` (catalyst's own recipe,
+/// `targets/stage1/chroot.sh`: `CATALYST_USE="-* build ${BINDIST} ..."`;
+/// `USE="${CATALYST_USE} ${USE} ${BOOTSTRAP_USE} ..."` — `BINDIST` dropped, a
+/// catalyst-only var). `bootstrap_use` is the profile's own `BOOTSTRAP_USE`
+/// variable (`profiles/base/make.defaults`), already merged across the
+/// profile chain — its own comment there explains why this re-add is
+/// required: "stage1 builds break because of `USE="-* ${BOOTSTRAP_USE}"`"
+/// (it restores flags like `python_targets_python3_14` that a bare `-*`
+/// would otherwise wipe, matching the exact fold-order semantics
+/// `resolve_effective_use` implements — `BOOTSTRAP_USE` isn't itself part of
+/// the profile's `USE` fold, so it has to be spliced in here explicitly,
+/// same as catalyst does). Distinct from [`toolchain_plan`]'s
 /// `BootstrapKind::Native`, which builds the *compiler* itself
 /// (binutils/glibc/gcc) — stage1 assumes that toolchain already exists in the
 /// root and just emerges the minimal bootable package set with it, mirroring
 /// crossdev-stages' `install_stage1`.
-pub fn stage1_plan(stack: &ProfileStack) -> Result<StagePlan> {
+pub fn stage1_plan(stack: &ProfileStack, bootstrap_use: &[String]) -> Result<StagePlan> {
     let mut steps = vec![StageStep {
         label: "baselayout".into(),
         atoms: vec!["sys-apps/baselayout".to_string()],
@@ -435,10 +445,12 @@ pub fn stage1_plan(stack: &ProfileStack) -> Result<StagePlan> {
         .iter()
         .map(|d| d.to_string())
         .collect();
+    let mut use_override = vec!["-*".to_string(), "build".to_string()];
+    use_override.extend(bootstrap_use.iter().cloned());
     steps.push(StageStep {
         label: "packages.build".into(),
         atoms,
-        use_override: vec!["-*".to_string(), "build".to_string()],
+        use_override,
         nodeps: false,
     });
     Ok(StagePlan { steps })
@@ -465,7 +477,7 @@ mod tests {
         std::fs::write(profile.join("packages"), "*>=sys-devel/gcc-13\n").unwrap();
 
         let stack = ProfileStack::build(profile).unwrap();
-        let plan = stage1_plan(&stack).unwrap();
+        let plan = stage1_plan(&stack, &[]).unwrap();
 
         assert_eq!(labels(&plan), ["baselayout", "packages.build"]);
         // Step 1: the isolated USE=build --nodeps baselayout merge.
@@ -482,6 +494,34 @@ mod tests {
                 "sys-apps/baselayout",
                 ">=sys-devel/gcc-13"
             ]
+        );
+    }
+
+    // Regression: catalyst's stage1 recipe re-adds the profile's own
+    // `BOOTSTRAP_USE` after the `-*` clear (`targets/stage1/chroot.sh`:
+    // `USE="${CATALYST_USE} ${USE} ${BOOTSTRAP_USE} ..."`) — without it,
+    // anything gated only on a profile-level default (e.g.
+    // `python_targets_python3_14`, per `profiles/base/make.defaults`'s own
+    // comment) gets wiped by `-*` and never comes back, breaking any
+    // stage1 package needing a python impl (found live: `dev-lang/python-exec`
+    // failing `configure: error: Python implementations must be specified`).
+    #[test]
+    fn stage1_plan_reapplies_bootstrap_use_after_the_wildcard_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("packages.build"), "sys-apps/baselayout\n").unwrap();
+
+        let stack = ProfileStack::build(profile).unwrap();
+        let bootstrap_use = [
+            "unicode".to_string(),
+            "python_targets_python3_14".to_string(),
+        ];
+        let plan = stage1_plan(&stack, &bootstrap_use).unwrap();
+
+        assert_eq!(
+            plan.steps[1].use_override,
+            ["-*", "build", "unicode", "python_targets_python3_14"]
         );
     }
 

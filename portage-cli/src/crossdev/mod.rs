@@ -495,7 +495,8 @@ pub(crate) async fn stage1(args: &crate::cli::StagesArgs, globals: &Cli) -> Resu
         bail!("em stages --stage1 needs --root <dir>: a stage1 into / is meaningless");
     }
     let stack = profile_stack(globals)?;
-    let plan = stages::stage1_plan(&stack)?;
+    let bootstrap_use = bootstrap_use(&stack, globals).await;
+    let plan = stages::stage1_plan(&stack, &bootstrap_use)?;
     let refresh = maybe_weave_in_gcc_update(&stack, globals).await;
     let mut out = anstream::stdout();
     let verb = if globals.pretend { "Plan" } else { "Bootstrap" };
@@ -660,6 +661,34 @@ fn profile_stack(globals: &Cli) -> Result<ProfileStack> {
     let canon = std::fs::canonicalize(profile_link.as_std_path())
         .with_context(|| format!("cannot resolve make.profile at {profile_link}"))?;
     ProfileStack::build(canon).context("failed to build profile stack")
+}
+
+/// The profile's `BOOTSTRAP_USE` variable (`profiles/base/make.defaults`),
+/// after sourcing the profile chain — see [`stages::stage1_plan`]'s doc for
+/// why stage1 must re-add this after its `-*` clear. Read directly off the
+/// shell rather than through `ProfileEnv::merge`: `profile_env`'s per-layer
+/// capture only tracks `USE`/`USE_EXPAND`-family variables, and
+/// `BOOTSTRAP_USE` is neither — it's a plain, non-incremental profile
+/// variable, so its value just needs to still be sitting in the shell after
+/// the profile chain has been sourced (same pattern as `use_env.rs`'s
+/// `split_var` reading `USE_EXPAND`/`USE_EXPAND_HIDDEN` post-resolve).
+/// Best-effort: any failure sourcing the profile chain just means no extra
+/// flags get restored, the same "can't tell, leave the plan alone" posture
+/// as [`maybe_weave_in_gcc_update`], rather than blocking the whole stage1
+/// run over a variable that fixes correctness, not availability.
+async fn bootstrap_use(stack: &ProfileStack, globals: &Cli) -> Vec<String> {
+    async fn try_read(stack: &ProfileStack, globals: &Cli) -> Result<Vec<String>> {
+        let repo = main_repo(globals)?;
+        let mut shell = repo.shell().await?;
+        stack.profile_env(&mut shell).await?;
+        Ok(shell
+            .get_var("BOOTSTRAP_USE")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect())
+    }
+    try_read(stack, globals).await.unwrap_or_default()
 }
 
 /// `EROOT`/prefix the overlay, `repos.conf`, and `package.env` are written under
