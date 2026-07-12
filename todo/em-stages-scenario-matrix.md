@@ -258,6 +258,38 @@ STATUS: in progress — executing. Using one dedicated sandbox per scenario
   both the `m4 nls` and `baselayout -build` live cases now match real
   emerge exactly after rebuilding.
 
+- **New discrepancy found during regression spot-check, not yet root-caused
+  (separate from the package.use fix above — confirmed unrelated).** After
+  the package.use fix, re-ran `em --root /root/stage1-testing -vp
+  sys-devel/gcc` (plain, no `USE=-*`, no `~arm64`-specific config quirk
+  beyond the profile already in use) against real `emerge -vp` on the same
+  root: real emerge shows only `[R] sys-devel/gcc` (already installed,
+  matching version, nothing else needed); `em` additionally pulls in
+  `sys-libs/libxcrypt-4.4.38-r1` and `virtual/libcrypt-2-r1` as new
+  packages. Both tools show `gcc` with `sanitize` enabled (which is what
+  conditionally pulls `virtual/libcrypt` into `DEPEND` per
+  `toolchain.eclass:419`, `DEPEND+=" sanitize? ( virtual/libcrypt )"`), so
+  the flag isn't the differentiator.
+  - **Confirmed not caused by today's package.use fix**: this test sets no
+    `USE=-*`, so `apply_package_use`'s new `base.wildcard_reset()` check
+    evaluates to `false` and short-circuits to the exact pre-fix code path
+    — the fix is a structural no-op here.
+  - **Confirmed real emerge doesn't need it even when forced to
+    re-evaluate**: `emerge -pv --newuse sys-devel/gcc` (forces full USE/dep
+    re-check) still shows nothing for gcc/libxcrypt/libcrypt.
+  - Not yet root-caused. Hypothesis to check next: `compute_dependencies`'s
+    "already installed at matching version → skip DEPEND" branch
+    (`portage-atom-pubgrub/src/provider/solve.rs` ~line 305) may not be
+    firing for this gcc for some reason specific to this root (possibly
+    slot-related, since gcc is `:15` slotted) — worth checking whether
+    `self.installed.get(package)` actually finds an entry for this exact
+    `(cpn, slot)` pairing here, or whether real emerge's own "not
+    re-evaluating DEPEND for an installed, unchanged package" logic is
+    doing something em's port of the same rule doesn't quite replicate for
+    slotted DEPEND with a conditional (`sanitize?`) virtual.
+  - **Flagging, not fixing now** — this session has already covered a lot
+    of ground; treat as the next thing to pick up.
+
 - **`cede_required_use` bug scope broadened: also hits `--root` in an
   upgrade/resume scenario, not just `--prefix`.** Testing `ACCEPT_KEYWORDS="~arm64"`
   against the already-populated `/root/stage1-root` (134 packages installed
