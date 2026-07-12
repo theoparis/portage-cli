@@ -851,3 +851,62 @@ crossdev --target T --local --setup`. Worth a small usage-doc note or a
 clap fix (e.g. requiring `=` for `--local`'s optional value) so this
 doesn't cost someone else the same confusion — not investigated further
 this session.
+
+## `--local` bootstrap failures: narrowed to two distinct bugs, both open
+
+Follow-up on the `--local` preflight-explosion finding above. Confirmed
+`em setup --local` itself works cleanly in isolation (fresh sandbox: exit
+0, produces exactly `etc/portage/{bashrc,make.conf}` + the bare skeleton,
+idempotent). Everything below is what happens *after* that, still on a
+fresh, properly-`sandbox prepare --bare`d sandbox.
+
+**Bug 1 — solver pulls a hugely inflated closure under `--local`,
+regardless of which command drives it.** Both `em toolchain --setup
+--local` (step `[2/5] binutils`) and `em crossdev -T
+aarch64-unknown-linux-gnu --local --setup` (a same-arch "cross" target,
+step `[1/6] binutils`) fail at their first real build step with the
+identical-shaped pre-flight explosion: not just binutils' own direct
+`gettext`/`m4` need, but `gcc`/`glibc`/`gmp`/`mpfr`/`mpc`/`meson`/python,
+`sys-apps/portage`'s whole python-dependency chain (`mypy`, `requests`,
+`gemato`, `maturin`), and several USE/multilib-ABI-conditioned deps
+(`glibc[cet(-)?]`, `glibc[-crypt(-)]`, `libxml2[abi_x86_32...]`). The
+aarch64 crossdev run additionally pulls in `dev-vcs/git`/`gnutls`/`nettle`/
+`libidn2`/`libpsl` (crossdev's own extra deps) on top. **Ruled out**: this
+is not applet-specific (both `toolchain` and `crossdev` hit it identically)
+and not about the package list (same shape both times) — it's something
+about `--local`'s own `Roots`/solver-satisfaction configuration, since the
+exact same `binutils` step succeeds cleanly under bare `--root` even
+though `Roots::root_set()`/`broot()` configure `--local` and `--root`
+*identically* on paper (both "own BROOT", their own offset — confirmed by
+reading `cli.rs` directly, not assumed). Next step: compare the solver's
+`InstalledPolicy`/host-satisfaction logic's actual behavior between the
+two modes directly (not just their `Roots` values), since that's the
+layer that decides whether a `DEPEND` item gets treated as "the host
+already has an equivalent" vs. "must be built fresh into this plan" —
+`preflight.rs` itself has no `root_deps`-awareness at all (checked: zero
+references), so whatever's inflating the closure happens upstream of
+preflight, during solving.
+
+**Bug 2 — separate, earlier failure for a real foreign-arch target under
+`--local`.** `em crossdev -T riscv64-unknown-linux-gnu --local --setup`
+fails *before* reaching preflight at all: `error: no ebuilds found for
+'cross-riscv64-unknown-linux-gnu/binutils' (searched ::gentoo and
+overlays)` — right after printing `>>> cross target riscv64-unknown-linux-gnu
+ready` (sysroot `/root/.gentoo/usr/riscv64-unknown-linux-gnu`) as if the
+overlay/alias setup had succeeded. Contrast with the same-arch aarch64
+case, whose overlay *does* resolve correctly (`cross-aarch64-unknown-linux-gnu/binutils-9999`
+found fine) before hitting Bug 1 instead. So `--local`'s cross-overlay
+alias entry (`alias_repo_conf_entry`, written via `setup_root(globals) =
+globals.outer_roots().merge_root()` — `crossdev/mod.rs` lines ~701-895)
+gets created somewhere, but doesn't correctly resolve back to the real
+`::gentoo` tree from inside `--local`'s own repo/config view for a genuine
+foreign-arch tuple. Not yet traced past that pointer — worth checking
+whether `--local`'s own `repos.conf` (unlike `--root`/`--prefix`, which
+this session confirmed working for the identical riscv64 target) actually
+has a valid `gentoo` entry to alias *from* at all, per `ensure_repos_conf`'s
+own doc note about a fresh self-contained target starting with no
+`repos.conf` of its own.
+
+Both bugs are real, both are open, neither investigated to a root cause
+yet — flagging clearly rather than guessing further, per this session's
+own retrospective above.
