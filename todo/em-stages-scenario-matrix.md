@@ -197,6 +197,13 @@ STATUS: in progress — executing. Using one dedicated sandbox per scenario
   /root/stage1-root -p --autosolve-use`) now resolves cleanly — 78
   packages, exit 0, `tar` correctly autosolved to `libarchive`, no crash.
 
+- **Re-verified after the fix**: redeployed the fixed binary to all four
+  sandboxes. Scenario 2 (`--prefix`) and scenario 3 (`--local`) still show
+  exactly their previously-diagnosed, separate bugs (the `cede_required_use`
+  early-return gap; the preflight-vs-PATH-tools gap) unchanged — confirms
+  all three findings this session are independent, and the stack-overflow
+  fix introduced no regression in either.
+
 - **Scenario 4 (cross riscv64) — full success.** `em --target
   riscv64-unknown-linux-gnu crossdev --setup --jobs 1 --keep-going`
   completed cleanly end-to-end (binutils → os-headers → gcc-stage1 → libc →
