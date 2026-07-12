@@ -97,6 +97,14 @@ impl ProfileStack {
             // Determine which vars to isolate for this layer.
             // Start with the fixed incremental vars, then add all currently
             // known USE_EXPAND keys so their values are also captured cleanly.
+            let mut expand_keys: Vec<String> = acc
+                .get("USE_EXPAND")
+                .map(|v| v.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default();
+            let mut unprefixed_keys: Vec<String> = acc
+                .get("USE_EXPAND_UNPREFIXED")
+                .map(|v| v.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default();
             let mut incr: Vec<String> = vec![
                 "USE".into(),
                 "USE_EXPAND".into(),
@@ -104,19 +112,9 @@ impl ProfileStack {
                 "USE_EXPAND_IMPLICIT".into(),
                 "USE_EXPAND_UNPREFIXED".into(),
             ];
-            let expand_now = acc.get("USE_EXPAND").cloned().unwrap_or_default();
-            for key in expand_now.split_whitespace() {
-                if !incr.contains(&key.to_string()) {
-                    incr.push(key.to_string());
-                }
-            }
-            let unprefixed_now = acc
-                .get("USE_EXPAND_UNPREFIXED")
-                .cloned()
-                .unwrap_or_default();
-            for key in unprefixed_now.split_whitespace() {
-                if !incr.contains(&key.to_string()) {
-                    incr.push(key.to_string());
+            for key in expand_keys.iter().chain(&unprefixed_keys) {
+                if !incr.contains(key) {
+                    incr.push(key.clone());
                 }
             }
 
@@ -143,6 +141,9 @@ impl ProfileStack {
             // Discover any new USE_EXPAND keys this file introduced.
             let new_expand = shell.get_var("USE_EXPAND").unwrap_or_default();
             for key in new_expand.split_whitespace() {
+                if !expand_keys.iter().any(|k| k == key) {
+                    expand_keys.push(key.to_string());
+                }
                 if !incr.contains(&key.to_string())
                     && let Some(val) = shell.get_var(key)
                     && !val.is_empty()
@@ -153,6 +154,9 @@ impl ProfileStack {
             // Same for USE_EXPAND_UNPREFIXED keys.
             let new_unprefixed = shell.get_var("USE_EXPAND_UNPREFIXED").unwrap_or_default();
             for key in new_unprefixed.split_whitespace() {
+                if !unprefixed_keys.iter().any(|k| k == key) {
+                    unprefixed_keys.push(key.to_string());
+                }
                 if !incr.contains(&key.to_string())
                     && let Some(val) = shell.get_var(key)
                     && !val.is_empty()
@@ -161,8 +165,31 @@ impl ProfileStack {
                 }
             }
 
-            // Merge this layer's contributions into the external accumulator.
+            // Translate this layer's USE_EXPAND / USE_EXPAND_UNPREFIXED
+            // values into USE tokens and fold them, together with the layer's
+            // own `USE`, into the accumulator. Portage prepends the expansions
+            // to each make.defaults file's USE (config.py `regenerate()`,
+            // `make_defaults_use`) so profile defaults like `ELIBC="glibc"`
+            // participate in the incremental fold as ordinary flags
+            // (`elibc_glibc`) — this is how they reach `ResolvedUse::pre_env`
+            // and every per-package `resolve_effective_use` fold downstream.
+            let (unpref, pref) =
+                expand_var_tokens(|k| vars.get(k).cloned(), &unprefixed_keys, &expand_keys);
+            let mut layer_use: Vec<String> = unpref;
+            layer_use.extend(pref);
+            layer_use.extend(vars.get("USE").cloned());
+            if !layer_use.is_empty() {
+                let prev = acc.get("USE").cloned().unwrap_or_default();
+                let contrib = layer_use.join(" ");
+                let merged = merge_use_var("USE", [prev.as_str(), contrib.as_str()].into_iter());
+                acc.insert("USE".into(), merged.join(" "));
+            }
+
+            // Merge the remaining per-variable contributions.
             for (var, val) in &vars {
+                if var == "USE" {
+                    continue;
+                }
                 let prev = acc.get(var.as_str()).cloned().unwrap_or_default();
                 let merged = merge_use_var(var, [prev.as_str(), val.as_str()].into_iter());
                 acc.insert(var.clone(), merged.join(" "));
@@ -240,10 +267,12 @@ pub struct ResolvedUse {
     /// [`merge_flag_lists_signed`](crate::repo::profile::merge_flag_lists_signed)-style
     /// per-package folding *before* `package.use` and *before* the raw `env_use`.
     pub pre_env: String,
-    /// The raw `USE` value from the process environment (`std::env::var`),
-    /// unmerged. This is specifically what determines whether `package.use`
-    /// gets wiped: it must be folded in *after* `package.use`, matching
-    /// portage's `pkg < env` layer order.
+    /// The environment layer's `USE` contribution, unmerged: the raw `USE`
+    /// from the process environment plus the environment's translated
+    /// `USE_EXPAND`/`USE_EXPAND_UNPREFIXED` values (see [`env_layer_use`]).
+    /// This is specifically what determines whether `package.use` gets wiped:
+    /// it must be folded in *after* `package.use`, matching portage's
+    /// `pkg < env` layer order.
     pub env_use: String,
 }
 
@@ -256,14 +285,17 @@ pub struct ResolvedUse {
 ///
 /// Computation order:
 /// 1. Each `make.defaults` sourced through brush with per-layer USE isolation
-///    (see [`ProfileStack::profile_env`])
+///    (see [`ProfileStack::profile_env`]); each layer's `USE_EXPAND`/
+///    `USE_EXPAND_UNPREFIXED` values are translated into USE tokens and
+///    folded with that layer's own `USE` (portage's `make_defaults_use`
+///    translation, `config.py` `regenerate()`)
 /// 2. Each `extra_confs` script sourced with the same incremental treatment
+///    (its expand values folded after its `USE`, portage's conf-layer order)
 /// 3. Process-environment layer: `USE`, `USE_EXPAND` keys, and
-///    `USE_EXPAND_UNPREFIXED` keys read from `std::env` and merged
-/// 4. `USE_EXPAND_UNPREFIXED` values expanded directly into USE
-/// 5. `USE_EXPAND` values expanded with lowercase prefix
-/// 6. Profile `use.force` — unconditional add
-/// 7. Profile `use.mask` — unconditional remove
+///    `USE_EXPAND_UNPREFIXED` keys read from `std::env`, translated the same
+///    way, and merged
+/// 4. Profile `use.force` — unconditional add
+/// 5. Profile `use.mask` — unconditional remove
 ///
 /// `USE=-flag` disables (steps 1-3) are tracked separately and returned in
 /// [`ResolvedUse::disabled`]; `use.force` clears a flag from that set.
@@ -285,7 +317,7 @@ async fn resolve_use_flags(
     // per-package fold must resume from *before* `package.use`/`env`. See
     // `ResolvedUse::pre_env`'s doc.
     let pre_env = shell.get_var("USE").unwrap_or_default();
-    let env_use = std::env::var("USE").unwrap_or_default();
+    let env_use = env_layer_use(shell).join(" ");
 
     apply_env_layer(shell).await?;
 
@@ -321,11 +353,75 @@ async fn resolve_use_flags(
     })
 }
 
+/// Translate a single config layer's `USE_EXPAND` / `USE_EXPAND_UNPREFIXED`
+/// variable values into USE tokens, mirroring portage's `config.py`
+/// `regenerate()`: `ELIBC="glibc"` → `elibc_glibc`, sign-preserving
+/// (`PYTHON_TARGETS="-python3_12"` → `-python_targets_python3_12`);
+/// unprefixed values pass through verbatim (`ARCH="amd64"` → `amd64`).
+///
+/// Portage folds these expansions per layer, *as USE tokens*, so they get the
+/// same incremental `-flag`/`-*` treatment as everything else in the fold.
+/// Returns `(unprefixed_tokens, prefixed_tokens)`; the caller places them
+/// around the layer's own `USE` per portage's order (make.defaults: both
+/// before USE; conf/env layers: unprefixed before, prefixed after).
+fn expand_var_tokens(
+    get: impl Fn(&str) -> Option<String>,
+    unprefixed_keys: &[String],
+    expand_keys: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut unprefixed = Vec::new();
+    for key in unprefixed_keys {
+        if let Some(val) = get(key) {
+            unprefixed.extend(val.split_whitespace().map(str::to_string));
+        }
+    }
+    let mut prefixed = Vec::new();
+    for key in expand_keys {
+        if let Some(val) = get(key) {
+            let prefix = key.to_lowercase();
+            for v in val.split_whitespace() {
+                match v.strip_prefix('-') {
+                    Some(n) => prefixed.push(format!("-{prefix}_{n}")),
+                    None => prefixed.push(format!("{prefix}_{v}")),
+                }
+            }
+        }
+    }
+    (unprefixed, prefixed)
+}
+
+/// The process environment's USE-layer contribution: unprefixed expand
+/// values, the raw `USE`, then prefixed `USE_EXPAND` expansions — portage's
+/// within-layer order for the `env` layer (a `-*` in the environment `USE`
+/// clears lower layers but not the environment's own expand variables).
+fn env_layer_use(shell: &EbuildShell) -> Vec<String> {
+    let expand_keys: Vec<String> = shell
+        .get_var("USE_EXPAND")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let unprefixed_keys: Vec<String> = shell
+        .get_var("USE_EXPAND_UNPREFIXED")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let (unpref, pref) =
+        expand_var_tokens(|k| std::env::var(k).ok(), &unprefixed_keys, &expand_keys);
+    let mut out = unpref;
+    out.extend(std::env::var("USE").ok());
+    out.extend(pref);
+    out
+}
+
 /// Merge process-environment USE variables into the shell as a final incremental layer.
 ///
 /// Reads `USE`, all `USE_EXPAND` keys, and all `USE_EXPAND_UNPREFIXED` keys from
 /// `std::env`.  Any present values are merged with the accumulated shell state using
-/// the same incremental semantics as profile layers (tokens prefixed with `-` remove).
+/// the same incremental semantics as profile layers (tokens prefixed with `-` remove);
+/// the expand-variable contributions are also translated into USE tokens
+/// ([`env_layer_use`]) so they land in the `USE` fold itself.
 ///
 /// This is how `PYTHON_TARGETS=python3_15 em cat/pkg` adds a target without
 /// replacing the full flag set, mirroring how `CC=my-cc` is applied in `init_build_env`.
@@ -333,7 +429,7 @@ async fn apply_env_layer(shell: &mut EbuildShell) -> Result<()> {
     let use_expand = shell.get_var("USE_EXPAND").unwrap_or_default();
     let unprefixed = shell.get_var("USE_EXPAND_UNPREFIXED").unwrap_or_default();
 
-    let mut vars = vec!["USE".to_string()];
+    let mut vars: Vec<String> = Vec::new();
     for k in use_expand.split_whitespace() {
         vars.push(k.to_string());
     }
@@ -350,6 +446,13 @@ async fn apply_env_layer(shell: &mut EbuildShell) -> Result<()> {
             let merged = merge_use_var(var, [existing.as_str(), env_val.as_str()].into_iter());
             restore += &format!("{}={}\n", var, shell_quote(&merged.join(" ")));
         }
+    }
+    let layer_use = env_layer_use(shell);
+    if !layer_use.is_empty() {
+        let existing = shell.get_var("USE").unwrap_or_default();
+        let contrib = layer_use.join(" ");
+        let merged = merge_use_var("USE", [existing.as_str(), contrib.as_str()].into_iter());
+        restore += &format!("USE={}\n", shell_quote(&merged.join(" ")));
     }
     if !restore.is_empty() {
         shell.run_string(&restore).await?;
@@ -407,8 +510,12 @@ async fn source_incremental(shell: &mut EbuildShell, path: &std::path::Path) -> 
         }
     }
     // Pick up any new USE_EXPAND keys the file introduced.
+    let mut expand_keys: Vec<String> = expand.split_whitespace().map(str::to_string).collect();
     let new_expand = shell.get_var("USE_EXPAND").unwrap_or_default();
     for key in new_expand.split_whitespace() {
+        if !expand_keys.iter().any(|k| k == key) {
+            expand_keys.push(key.to_string());
+        }
         if !incr.contains(&key.to_string())
             && let Some(val) = shell.get_var(key)
             && !val.is_empty()
@@ -416,10 +523,34 @@ async fn source_incremental(shell: &mut EbuildShell, path: &std::path::Path) -> 
             contributed.insert(key.to_string(), val);
         }
     }
+    let unprefixed_keys: Vec<String> = unprefixed.split_whitespace().map(str::to_string).collect();
+
+    // Translate the file's USE_EXPAND contributions into USE tokens. In a
+    // conf layer portage folds unprefixed values *before* the file's USE and
+    // prefixed expansions *after* it (config.py `regenerate()`'s layer loop),
+    // so `PYTHON_TARGETS=…` in make.conf survives a `USE="-*"` in the same
+    // file.
+    let (unpref, pref) = expand_var_tokens(
+        |k| contributed.get(k).cloned(),
+        &unprefixed_keys,
+        &expand_keys,
+    );
+    let mut layer_use: Vec<String> = unpref;
+    layer_use.extend(contributed.get("USE").cloned());
+    layer_use.extend(pref);
 
     // Merge contributions with saved state and restore.
     let mut merged_acc: HashMap<String, String> = saved;
+    if !layer_use.is_empty() {
+        let prev = merged_acc.get("USE").cloned().unwrap_or_default();
+        let contrib = layer_use.join(" ");
+        let merged = merge_use_var("USE", [prev.as_str(), contrib.as_str()].into_iter());
+        merged_acc.insert("USE".into(), merged.join(" "));
+    }
     for (var, new_val) in &contributed {
+        if var == "USE" {
+            continue;
+        }
         let prev = merged_acc.get(var.as_str()).cloned().unwrap_or_default();
         let merged = merge_use_var(var, [prev.as_str(), new_val.as_str()].into_iter());
         merged_acc.insert(var.clone(), merged.join(" "));
@@ -482,27 +613,10 @@ fn collect_use_flags(shell: &EbuildShell) -> CollectedUse {
         }
     }
 
-    let unprefixed = shell.get_var("USE_EXPAND_UNPREFIXED").unwrap_or_default();
-    for var in unprefixed.split_whitespace() {
-        let val = shell.get_var(var).unwrap_or_default();
-        for v in val.split_whitespace() {
-            if !flags.iter().any(|f| f == v) {
-                flags.push(v.to_string());
-            }
-        }
-    }
-
-    let use_expand = shell.get_var("USE_EXPAND").unwrap_or_default();
-    for var in use_expand.split_whitespace() {
-        let val = shell.get_var(var).unwrap_or_default();
-        let prefix = var.to_lowercase();
-        for v in val.split_whitespace() {
-            let flag = format!("{prefix}_{v}");
-            if !flags.iter().any(|f| f == &flag) {
-                flags.push(flag);
-            }
-        }
-    }
+    // `USE_EXPAND`/`USE_EXPAND_UNPREFIXED` values are already translated into
+    // USE tokens per layer (see `expand_var_tokens`' callers), so the shell's
+    // `USE` is the complete fold — no post-hoc re-expansion, which would
+    // resurrect expansions a later layer's `-*`/`-flag` legitimately cleared.
 
     CollectedUse {
         enabled: flags,
@@ -714,6 +828,118 @@ mod tests {
         let use_val = shell.get_var("USE").unwrap_or_default();
         let flags: HashSet<&str> = use_val.split_whitespace().collect();
         assert!(flags.contains("amd64"), "ARCH added unprefixed");
+    }
+
+    /// Profile-injected USE_EXPAND defaults (the `elibc_glibc`/`kernel_linux`/
+    /// `python_targets_*` family: `profiles/base/make.defaults` sets
+    /// `USE_EXPAND="… ELIBC …"` + `ELIBC="glibc"`) must be translated into USE
+    /// tokens *inside the fold*, so they reach `ResolvedUse::pre_env` and every
+    /// per-package `resolve_effective_use` downstream — dep conditionals like
+    /// `!elibc_glibc? ( dev-libs/libintl )` depend on it.
+    #[tokio::test]
+    async fn use_expand_defaults_reach_pre_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let profile = make_profile(&dir, "test", &[]);
+        std::fs::write(
+            profile.join("make.defaults"),
+            "USE_EXPAND=\"ELIBC PYTHON_TARGETS\"\n\
+             USE_EXPAND_IMPLICIT=\"ELIBC\"\n\
+             USE_EXPAND_UNPREFIXED=\"ARCH\"\n\
+             ELIBC=\"glibc\"\n\
+             PYTHON_TARGETS=\"python3_13\"\n\
+             ARCH=\"amd64\"\n\
+             USE=\"foo\"\n",
+        )
+        .unwrap();
+
+        let stack = ProfileStack::build(profile).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let resolved = stack.use_flags(&mut shell, &[]).await.unwrap();
+
+        let pre_env: HashSet<&str> = resolved.pre_env.split_whitespace().collect();
+        assert!(
+            pre_env.contains("elibc_glibc"),
+            "ELIBC expanded: {pre_env:?}"
+        );
+        assert!(
+            pre_env.contains("python_targets_python3_13"),
+            "PYTHON_TARGETS expanded: {pre_env:?}"
+        );
+        assert!(pre_env.contains("amd64"), "ARCH added unprefixed");
+        assert!(pre_env.contains("foo"), "plain USE kept");
+    }
+
+    /// A `-*` in a child profile's USE clears the parent's USE_EXPAND
+    /// expansions too — they are ordinary tokens folded at the parent's layer
+    /// (portage translates each make.defaults' expand values into that file's
+    /// USE, so a later layer's clear-all wipes them like any other flag).
+    #[tokio::test]
+    async fn use_expand_expansion_cleared_by_child_wildcard_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let parent = make_profile(&dir, "parent", &[]);
+        std::fs::write(
+            parent.join("make.defaults"),
+            "USE_EXPAND=\"ELIBC\"\nELIBC=\"glibc\"\n",
+        )
+        .unwrap();
+        let child = make_profile(&dir, "child", &["../parent"]);
+        std::fs::write(child.join("make.defaults"), "USE=\"-* build\"\n").unwrap();
+
+        let stack = ProfileStack::build(child).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let resolved = stack.use_flags(&mut shell, &[]).await.unwrap();
+
+        let pre_env: Vec<&str> = resolved.pre_env.split_whitespace().collect();
+        assert!(
+            pre_env.contains(&"-*"),
+            "clear-all marker preserved for the per-package fold: {pre_env:?}"
+        );
+        assert!(pre_env.contains(&"build"));
+        assert!(
+            !pre_env.contains(&"elibc_glibc"),
+            "parent-layer expansion wiped by the child's -*: {pre_env:?}"
+        );
+    }
+
+    /// make.conf's own USE_EXPAND values are folded *after* its USE (portage's
+    /// conf-layer order), so they survive a `USE="-*"` in the same file while
+    /// the profile's expansions from the layer below are cleared.
+    #[tokio::test]
+    async fn conf_expand_values_survive_conf_level_wildcard() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let profile = make_profile(&dir, "test", &[]);
+        std::fs::write(
+            profile.join("make.defaults"),
+            "USE_EXPAND=\"PYTHON_TARGETS\"\nPYTHON_TARGETS=\"python3_12\"\n",
+        )
+        .unwrap();
+        let make_conf = dir.path().join("make.conf");
+        std::fs::write(
+            &make_conf,
+            "USE=\"-* build\"\nPYTHON_TARGETS=\"python3_13\"\n",
+        )
+        .unwrap();
+
+        let stack = ProfileStack::build(profile).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let resolved = stack
+            .use_flags(&mut shell, &[make_conf.as_path()])
+            .await
+            .unwrap();
+
+        let pre_env: Vec<&str> = resolved.pre_env.split_whitespace().collect();
+        assert!(
+            !pre_env.contains(&"python_targets_python3_12"),
+            "profile-layer expansion cleared by make.conf's -*: {pre_env:?}"
+        );
+        assert!(
+            pre_env.contains(&"python_targets_python3_13"),
+            "make.conf's own expand value folded after its USE: {pre_env:?}"
+        );
+        assert!(pre_env.contains(&"build"));
     }
 
     #[tokio::test]

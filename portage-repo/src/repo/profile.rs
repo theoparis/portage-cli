@@ -667,41 +667,6 @@ impl ProfileEnv {
     pub fn merge(&self, var: &str) -> Vec<String> {
         merge_flag_lists(self.layers.iter().filter_map(|l| l.get(var)))
     }
-
-    /// The `USE_EXPAND` variable names after merging all layers.
-    pub fn use_expand_keys(&self) -> Vec<String> {
-        self.merge("USE_EXPAND")
-    }
-
-    /// All effective USE flags, including values from `USE_EXPAND` variables
-    /// expanded as `lowercase_key_value` tokens, and `USE_EXPAND_UNPREFIXED`
-    /// variables expanded directly.
-    ///
-    /// This is the final profile-level USE; `make.conf` and `use.force`/`use.mask`
-    /// have not yet been applied.
-    pub fn use_flags(&self) -> Vec<String> {
-        let mut flags = self.merge("USE");
-
-        for key in self.merge("USE_EXPAND_UNPREFIXED") {
-            for v in self.merge(&key) {
-                if !flags.contains(&v) {
-                    flags.push(v);
-                }
-            }
-        }
-
-        for key in self.use_expand_keys() {
-            let prefix = key.to_lowercase();
-            for v in self.merge(&key) {
-                let flag = format!("{prefix}_{v}");
-                if !flags.contains(&flag) {
-                    flags.push(flag);
-                }
-            }
-        }
-
-        flags
-    }
 }
 
 /// Merge space-separated flag lists with incremental semantics.

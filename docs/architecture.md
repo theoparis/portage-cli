@@ -362,6 +362,17 @@ the `USE`/`USE_EXPAND` env vars, and finally global `use.force`/`use.mask` add/r
 flags. So `USE="-X" em -p www-client/firefox` *does* enter the stack — but
 `package.use`/`use.force` (layers 5–6) sit above it and can pin a flag back on.
 
+Within each of layers 2–4, `USE_EXPAND`/`USE_EXPAND_UNPREFIXED` variable values
+are translated into USE tokens (`ELIBC="glibc"` → `elibc_glibc`, `ARCH="amd64"`
+→ `amd64`) and folded *at that layer's position*, exactly as Portage's
+`config.py` `regenerate()` does: prepended to each `make.defaults` file's own
+`USE` (layer 2), and folded after the file's/environment's `USE` for
+`make.conf`/env (layers 3–4, so `PYTHON_TARGETS=…` survives a `USE="-*"` in
+the same layer). This is how the implicit `elibc_*`/`kernel_*` flags and
+profile defaults like `python_targets_*` reach `ResolvedUse::pre_env` and every
+per-package `resolve_effective_use` fold — and why a later layer's `-*`
+legitimately clears expansions from the layers below it.
+
 Layer 5 (`package.use`) is applied **per package** at solve/display time via
 `apply_package_use`. The **per-package** parts of layer 6 — `package.use.force`/
 `package.use.mask` and all `*.stable.*` variants — are applied on top of that by
