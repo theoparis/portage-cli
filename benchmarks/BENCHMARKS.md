@@ -136,6 +136,54 @@ parity + timing) — see `git log` from `12ed0bf` through `9cff6ff` for the comp
 (crossdev preflight fix, `host_copies` interleave correctness fix, the two-part regression root cause, five
 allocation/interning fixes, the `dhat-heap` tooling addition, and the `bdepend_trim` O(n²)→O(n) fix).
 
+## Update 2026-07-12: `UseConfig`/`ForceMask` per-version cost cut (commit `d4091a3`)
+
+`todo/useconfig-clone-elimination.md` had proposed making the solver's
+per-version `VersionData.desired` a `Cow<UseConfig>` so a package with no
+local IUSE/`package.use` match could borrow the global config instead of
+cloning it. An independent review (Fable model) of that plan, done *before*
+implementation, found the premise false: `desired_use` already forces
+`.into_owned()` before `ForceMask::apply` runs, and `ForceMask::apply`
+mutates `cfg` for essentially every real package (`ForceMask::is_empty()`
+requires the *global* `use.mask` to be empty too, which no real profile
+has) — so the proposed "free borrow" path would never fire in practice.
+
+The review found the actual dominant per-version cost instead:
+`ForceMask::effective` unconditionally scanned the *entire* global
+`use.mask` (hundreds of entries on a real profile) and disabled every one
+on `cfg`, per version, regardless of whether the package's own `IUSE` even
+declares that flag. Fixed by restricting that scan to the package's own
+`IUSE` set (safe: `UseConfig` already defaults an absent flag to
+`Disabled`, same as an explicit `disable()` would). Also fixed
+`apply_package_use`, which cloned whenever the `package.use` list was
+non-empty rather than when an entry actually matched the package — true on
+every call on a real profile, since *some* `package.use` entry always
+exists somewhere in the system.
+
+| Target | Before | After | Speedup |
+|---|---|---|---|
+| `dev-qt/qtwebengine` `-p` (82-pkg plan) | 755.6 ms | 701.7 ms | ~8% |
+| `app-office/libreoffice` `-p` (134-pkg plan) | 874.9 ms | 810.9 ms | ~8% |
+| `sys-devel/gcc` `-p` (16-pkg plan, light IUSE) | 520.0 ms | 523.1 ms | none (below noise floor, as expected) |
+
+The win scales with plan size × IUSE richness (what the fixed scan is
+proportional to), not a fixed per-invocation overhead — small plans see
+nothing, which matches the earlier estimate in
+`todo/useconfig-clone-elimination.md` that the *originally proposed* fix
+would be below the noise floor end-to-end. This one wasn't, because it
+targeted the actual dominant cost instead of the one the doc guessed at.
+
+Parity unchanged (`benchmarks/bench-em-vs-emerge.sh SKIP_TIMING=1`): same
+pre-existing diff counts on firefox/thunderbird/libreoffice, both before
+and after this change. Bonus: the `ForceMask` fix incidentally corrected a
+latent over-masking bug — the pre-fix binary carried two phantom packages
+(`virtual/libintl`, `virtual/libiconv`) into the `sys-devel/gcc` plan that
+real `ROOT=<dir> emerge -vp sys-devel/gcc` does not include; post-fix, the
+two plans match exactly (16/16 packages, byte-identical USE flags).
+
+Repro: `cargo build --release -p portage-cli`, then the two-binary
+`hyperfine` recipe in [`docs/benchmarks.md`](../docs/benchmarks.md#before-after-comparisons-for-a-specific-change).
+
 ## Locations of Benchmarks
 
 ### Central harness & scripts
@@ -155,6 +203,7 @@ allocation/interning fixes, the `dhat-heap` tooling addition, and the `bdepend_t
 **No benches** in: portage-cli (binary), portage-repo, portage-metadata, gentoo-core, gentoo-stages, portage-distfiles (they are exercised via the central ones or examples).
 
 See also:
+- `docs/benchmarks.md` — quick-start map of what to run and where (this file is the historical record/data)
 - `docs/architecture.md` (mentions portage-bench)
 - `docs/build-roadmap.md` (references bench-em-vs-emerge.sh for parity milestones)
 

@@ -27,7 +27,8 @@ portage-atom ────┤
 ```
 
 `portage-bench` (in `benchmarks/`) depends on both solver bridges plus
-`portage-repo` for benchmarking.
+`portage-repo` for benchmarking. See [`docs/benchmarks.md`](benchmarks.md)
+for how to run benchmarks across the workspace.
 
 ## Crate catalog
 
