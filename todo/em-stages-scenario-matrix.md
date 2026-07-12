@@ -339,6 +339,134 @@ STATUS: in progress — executing. Using one dedicated sandbox per scenario
   actually decided (documenting the gap before deciding its resolution
   would just need re-editing).
 
+- **The `apply_package_use_inert_under_wildcard_reset` fix above (the
+  `wildcard_reset`-under-Cow::Borrowed one) was itself falsified, then
+  replaced structurally, not patched again.** Live-testing with
+  `ACCEPT_KEYWORDS="~arm64"` found real emerge lets `package.use` survive a
+  `-*` set in `make.conf`, but **not** one set via the process environment
+  — a distinction a single `wildcard_reset: bool` cannot express (it was
+  already inert either way once `wildcard_reset` was true). Reading
+  portage's own `config.py`/`_config/UseManager.py`/`make.globals`
+  confirmed the real model: USE resolves via one ordered fold over 8 fixed
+  layers (`env.d < repo < features < pkginternal < defaults < conf < pkg <
+  env`), and `-*` just clears whatever the fold accumulated from lower
+  layers so far — `package.use` (`pkg`) sits between `conf` and `env`, so a
+  `conf`-level `-*` clears everything below `pkg` but `pkg` itself still
+  applies, while an `env`-level `-*` clears `pkg` too.
+
+  Fixed structurally instead of adding a second, narrower flag:
+  `portage_solver::resolve_effective_use(iuse_defaults, pre_env, cpv, slot,
+  package_use, env_use)` is now the single canonical per-package USE fold,
+  replacing `apply_package_use`/`fold_iuse_defaults`/`wildcard_reset`
+  everywhere in the workspace (`portage-repo`'s `ResolvedUse` now exposes
+  `pre_env`/`env_use` instead of a collapsed enabled/disabled set). Also
+  found and fixed during the migration: `force_mask.rs`'s `effective()` had
+  excluded global `use.force` on a since-invalidated assumption that it was
+  already baked into the base config; it now applies unconditionally like
+  `use.mask`, matching real portage's `use.force`/`use.mask` being
+  unconditional post-fold filters. Full detail + design rationale:
+  `use-config-duplicate-fallback-logic` memory. Verified: full workspace
+  suite (1212 tests), clippy, fmt all clean.
+
+  **Live re-verification, done on a freshly-`sandbox setup` sandbox
+  (`em-test-1`) — no manual mounts, no `sudo`, just `sandbox run`:**
+
+  ```sh
+  cd ../crossdev-stages
+  cargo run -- sandbox setup --arch aarch64 --name em-test-1   # if not already unpacked
+  cargo run -- sandbox prepare --name em-test-1
+  cp ../portage-cli/target/release/em ~/.cache/crossdev-stages/sandboxes/em-test-1/usr/local/bin/em
+
+  # set up the package.use test case
+  cargo run -- sandbox run --name em-test-1 -- \
+    "mkdir -p /etc/portage/package.use && printf 'sys-devel/m4 nls\n' > /etc/portage/package.use/zz-test"
+
+  # (a) no override
+  cargo run -- sandbox run --name em-test-1 -- "emerge -pv sys-devel/m4 2>&1 | grep m4-"
+  cargo run -- sandbox run --name em-test-1 -- "em -pv sys-devel/m4 2>&1 | grep m4-"
+
+  # (b) USE="-* build" in make.conf
+  cargo run -- sandbox run --name em-test-1 -- \
+    "sed -i '/^USE=/d' /etc/portage/make.conf; echo 'USE=\"-* build\"' >> /etc/portage/make.conf; emerge -pv sys-devel/m4 2>&1 | grep m4-"
+  cargo run -- sandbox run --name em-test-1 -- "em -pv sys-devel/m4 2>&1 | grep m4-"
+
+  # (c) USE="-* build" via env
+  cargo run -- sandbox run --name em-test-1 -- "USE='-* build' emerge -pv sys-devel/m4 2>&1 | grep m4-"
+  cargo run -- sandbox run --name em-test-1 -- "USE='-* build' em -pv sys-devel/m4 2>&1 | grep m4-"
+
+  # (d) USE="build" via env (no -*)
+  cargo run -- sandbox run --name em-test-1 -- "USE='build' emerge -pv sys-devel/m4 2>&1 | grep m4-"
+  cargo run -- sandbox run --name em-test-1 -- "USE='build' em -pv sys-devel/m4 2>&1 | grep m4-"
+
+  # cleanup
+  cargo run -- sandbox run --name em-test-1 -- \
+    "rm -f /etc/portage/package.use/zz-test && sed -i '/^USE=/d' /etc/portage/make.conf"
+  ```
+
+  Results: all four conditions match real emerge exactly —
+  (a) `nls` on, (b) `nls` on (survives make.conf `-*`), (c) `-nls`
+  (env `-*` wipes it), (d) `nls` on (plain env addition, no `-*`, doesn't
+  suppress package.use).
+
+  Also re-confirmed the `--autosolve-use` stack-overflow fix (the finding
+  above this one) live, on the same sandbox, against its pre-existing
+  installed `app-alternatives/tar` + `app-arch/libarchive`:
+
+  ```sh
+  cargo run -- sandbox run --name em-test-1 -- "em -p --autosolve-use app-alternatives/tar 2>&1"
+  ```
+
+  Resolves cleanly (reports the unsatisfied `^^ ( gnu libarchive )`
+  advisory since neither is enabled by default; no crash) — this is the
+  exact installed-alternative shape that used to stack-overflow.
+
+  **Note on methodology**: don't hand-patch an existing sandbox (manual
+  `sudo mount --bind`, `chown`, etc.) when it misbehaves — destroy and
+  `sandbox setup` a fresh one instead. See `crossdev-stages-sandbox`
+  memory for the incident that prompted this rule.
+
+- **Re-ran `em stages --stage1 -p --autosolve-use` on all three root-mode
+  scenarios (`em-stage1-matrix`, a fresh `sandbox setup`-only sandbox — no
+  `sandbox prepare`, see the corrected "Substrate" section below) to
+  confirm today's fix introduced no regressions.** `sudo chroot` was
+  briefly attempted here too (per the now-corrected "Substrate"/
+  "Per-scenario commands" sections below) and caught mid-attempt before
+  real work happened — see `crossdev-stages-sandbox` memory. All three
+  driven via `sandbox run` only, no manual mounts/chroot:
+
+  ```sh
+  cargo run -- sandbox run --name em-stage1-matrix -- \
+    "em stages --stage1 --root /root/stage1-root -p --autosolve-use"
+  cargo run -- sandbox run --name em-stage1-matrix -- \
+    "em stages --stage1 --prefix /root/stage1-prefix -p --autosolve-use"
+  cargo run -- sandbox run --name em-stage1-matrix -- \
+    "em stages --stage1 --local -p --autosolve-use"
+  ```
+
+  Results — no crashes, and both non-clean outcomes match this file's own
+  prior, already-documented findings exactly (same packages, same gaps):
+  - Scenario 1 (`--root`): **exit 0**, clean — every `^^`/`||` REQUIRED_USE
+    constraint correctly autosolved (tar, lex, yacc, gzip, bzip2, awk,
+    `sys-apps/portage`'s python target).
+  - Scenario 2 (`--prefix`): **exit 0** — one un-ceded `app-alternatives/awk`
+    `^^` constraint, which is the already-documented `cede_required_use`
+    early-return gap (finding above, "installed_cpvs.contains(cpv)"), not new.
+  - Scenario 3 (`--local`): **exit 1** — the already-documented
+    preflight-vs-PATH-tools gap (`app-portage/elt-patches needs
+    app-arch/xz-utils`, finding above), not new.
+
+  Conclusion: the `resolve_effective_use` USE-fold redesign and the
+  `--autosolve-use` stack-overflow fix are both clean across all three
+  root-mode scenarios, with zero new regressions. The real (non-`-p`)
+  `stages --stage1` build for scenario 1 hit an unrelated, separate
+  failure in `em toolchain --setup`'s bootstrap (glibc configure failing
+  for missing kernel headers despite a `virtual/os-headers` step in the
+  plan) — flagged but explicitly **not** investigated further this pass
+  per direction ("test `stages --stage1`, not the toolchain applet");
+  worth its own look at `sys-kernel/linux-headers` actually landing in
+  the ROOT via `virtual/os-headers`'s RDEPEND, next time toolchain
+  bootstrap itself is in scope.
+
 ## Why now
 
 This week landed a chain of fixes that all bear directly on whether
@@ -391,24 +519,50 @@ Scenario 4 reuses the riscv64 tuple from prior sessions
 
 ## Substrate: crossdev-stages sandbox, not a `/tmp` scratch dir
 
+**Correction (2026-07-12): this section originally recommended `sudo
+chroot`-ing directly into the sandbox rootfs. Don't do that — use
+`crossdev-stages sandbox run --name NAME "<cmd>"` for every command below
+instead, including the slow real builds. It works fine (confirmed
+repeatedly), needs no manual `proc`/`dev`/`sys` mount management, and
+running commands as real root on the host via raw `sudo chroot` is exactly
+the pattern that caused a bad session (see [[crossdev-stages-sandbox]]'s
+hard rule). The commands further down are left in their original
+`sudo chroot` form for the historical record of what was actually run
+before this correction — translate each to `sandbox run --name <name> --
+"<same command, unprefixed>"` before executing.**
+
 Per [[crossdev-stages-sandbox]] / [[chroot-test-em-method]]: drive `em`
-**inside** a clean stage3 chroot as real root, rather than pointing a
-host-run `em` at `--root </tmp/...>` — the latter has repeatedly hit
-relative-symlink and permission issues unrelated to the thing under test,
-and this session's own `/tmp/stage1-foo` has accumulated cross-session
-state that makes it unsuitable for a from-scratch re-validation anyway.
+**inside** a clean stage3 sandbox as real root (via `sandbox run`, not a
+manual `sudo chroot`), rather than pointing a host-run `em` at `--root
+</tmp/...>` — the latter has repeatedly hit relative-symlink and permission
+issues unrelated to the thing under test, and this session's own
+`/tmp/stage1-foo` has accumulated cross-session state that makes it
+unsuitable for a from-scratch re-validation anyway.
 
 **Note**: `crossdev-stages` itself drives *real* `emerge`/`{tuple}-emerge`
 (confirmed by reading `crossdev-stages/src/portage.rs` — `cross_emerge`
 shells out to the tuple's real crossdev-installed emerge wrapper). Its own
 `target setup`/`target stage1`/`sandbox crossdev` commands are **not** used
-here — only `sandbox setup`/`sandbox prepare` to get a clean rootfs, then
-our own `em` binary is copied in and driven directly.
+here — only `sandbox setup` to get a clean rootfs, then our own `em` binary
+is copied in and driven directly.
+
+**Correction (2026-07-12): don't run `sandbox prepare`.** It installs a big
+host-dependency list meant for the full board/image pipeline (`sys-devel/crossdev`,
+`dev-lang/rust` + a `cargo install`, `sys-kernel/dracut`, `sys-fs/genimage`,
+u-boot tools, etc.) via `emerge-webrsync` + `emerge`, none of which `em
+toolchain --setup`/`em stages --stage1` need — that's testing our own
+pre-built `em` binary against the repo tree, not building a cross toolchain
+or a board image. It's also slow (full tree sync + a real Rust build).
+The stage3 tarball `sandbox setup` unpacks already ships a full, current,
+md5-cache-populated `::gentoo` tree (confirmed: `/var/db/repos/gentoo` has
+~180 categories and a real `metadata/md5-cache`, dated to the stage3's own
+build snapshot) — `emerge --version`/`em --version` both work immediately
+after `sandbox setup`, no sync needed. `ACCEPT_KEYWORDS="~arm64"` is also
+already set by `sandbox setup`'s own `make.conf` writer.
 
 ```sh
 cd ~/Sources/crossdev-stages
-./target/release/crossdev-stages sandbox setup --arch aarch64 --name em-stage1-matrix
-./target/release/crossdev-stages sandbox prepare --name em-stage1-matrix   # host build deps; verify it doesn't assume real emerge-only tooling we don't need
+cargo run -- sandbox setup --arch aarch64 --name em-stage1-matrix
 ```
 
 Sandbox rootfs: `~/.cache/crossdev-stages/sandboxes/em-stage1-matrix/`.
@@ -422,12 +576,12 @@ cargo build --release -p portage-cli   # from portage-cli/
 cp target/release/em ~/.cache/crossdev-stages/sandboxes/em-stage1-matrix/usr/local/bin/em
 ```
 
-Scenarios 1–3 can share **one** sandbox chroot (each uses its own target
+Scenarios 1–3 can share **one** sandbox (each uses its own target
 subdirectory: e.g. `/root/stage1-root`, `/root/stage1-prefix`, `~/.gentoo`
-for `--local`'s default) since they don't interact — running as real root
-inside the chroot (`sudo chroot ... /usr/local/bin/em ...`) covers `--root`
-directly and is also sufficient privilege for `--prefix`/`--local`
-(unprivileged modes still work fine as root; `--privilege` auto-detects).
+for `--local`'s default) since they don't interact — `sandbox run` executes
+as real root inside the sandbox already, which covers `--root` directly and
+is also sufficient privilege for `--prefix`/`--local` (unprivileged modes
+still work fine as root; `--privilege` auto-detects).
 Scenario 4 (cross) needs its own sandbox or at least its own subtree since
 it also writes a crossdev overlay + sysroot config into the chroot's `/`.
 
@@ -442,29 +596,31 @@ previously-blocking `curl[quic]`→`ngtcp2[gnutls]` case no longer appears at
 all; if it still does, that's the first thing to re-diagnose.
 
 ```sh
+cd ~/Sources/crossdev-stages
+
 # Scenario 1 — native --root
-sudo chroot ~/.cache/crossdev-stages/sandboxes/em-stage1-matrix \
-  /usr/local/bin/em toolchain --setup --root /root/stage1-root
-sudo chroot ~/.cache/crossdev-stages/sandboxes/em-stage1-matrix \
-  /usr/local/bin/em stages --stage1 --root /root/stage1-root --autosolve-use --keep-going --buildpkg
+cargo run -- sandbox run --name em-stage1-matrix -- \
+  "em toolchain --setup --root /root/stage1-root"
+cargo run -- sandbox run --name em-stage1-matrix -- \
+  "em stages --stage1 --root /root/stage1-root --autosolve-use --buildpkg"
 
 # Scenario 2 — --prefix overlay
-sudo chroot ~/.cache/crossdev-stages/sandboxes/em-stage1-matrix \
-  /usr/local/bin/em toolchain --setup --prefix /root/stage1-prefix
-sudo chroot ~/.cache/crossdev-stages/sandboxes/em-stage1-matrix \
-  /usr/local/bin/em stages --stage1 --prefix /root/stage1-prefix --autosolve-use --keep-going --buildpkg
+cargo run -- sandbox run --name em-stage1-matrix -- \
+  "em toolchain --setup --prefix /root/stage1-prefix"
+cargo run -- sandbox run --name em-stage1-matrix -- \
+  "em stages --stage1 --prefix /root/stage1-prefix --autosolve-use --buildpkg"
 
-# Scenario 3 — --local (defaults to ~/.gentoo inside the chroot)
-sudo chroot ~/.cache/crossdev-stages/sandboxes/em-stage1-matrix \
-  /usr/local/bin/em toolchain --setup --local
-sudo chroot ~/.cache/crossdev-stages/sandboxes/em-stage1-matrix \
-  /usr/local/bin/em stages --stage1 --local --autosolve-use --keep-going --buildpkg
+# Scenario 3 — --local (defaults to ~/.gentoo inside the sandbox)
+cargo run -- sandbox run --name em-stage1-matrix -- \
+  "em toolchain --setup --local"
+cargo run -- sandbox run --name em-stage1-matrix -- \
+  "em stages --stage1 --local --autosolve-use --buildpkg"
 
 # Scenario 4 — cross, riscv64 (separate sandbox/subtree)
-sudo chroot ~/.cache/crossdev-stages/sandboxes/em-stage1-cross \
-  /usr/local/bin/em --target riscv64-unknown-linux-gnu crossdev --setup
-sudo chroot ~/.cache/crossdev-stages/sandboxes/em-stage1-cross \
-  /usr/local/bin/em --target riscv64-unknown-linux-gnu stages --stage1 --autosolve-use --keep-going --buildpkg
+cargo run -- sandbox run --name em-stage1-cross -- \
+  "em --target riscv64-unknown-linux-gnu crossdev --setup"
+cargo run -- sandbox run --name em-stage1-cross -- \
+  "em --target riscv64-unknown-linux-gnu stages --stage1 --autosolve-use --buildpkg"
 ```
 
 Start with a **`-p`/pretend pass of `stages --stage1`** for every scenario

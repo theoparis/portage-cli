@@ -406,7 +406,23 @@ async fn merge_sequential(
             .await
         };
         match result {
-            Ok(()) => merged += 1,
+            Ok(()) => {
+                merged += 1;
+                // Refresh this root's `ld.so.cache` immediately, not just once
+                // at the very end of the whole batch (the caller's own
+                // `env_update` after `merge_sequential` returns) — a later
+                // package in this same batch may need to dynamically load a
+                // library this one just installed (found live: `pkgconf`
+                // merging mid-`stages --stage1` left a stale cache, so the
+                // very next package's `configure` couldn't load the freshly
+                // installed `libpkgconf.so`, even though both the package and
+                // the cache entry were correct by the time the whole run
+                // finished — the cache just wasn't refreshed yet at the
+                // moment it was needed).
+                if let Err(e) = maint::env::env_update(merge_root) {
+                    eprintln!("warning: env-update failed: {e:#}");
+                }
+            }
             Err(e) => {
                 eprintln!(">>> Failed to emerge {} — {e:#}", planned.cpv);
                 failures.push(MergeFailure {
@@ -657,6 +673,14 @@ async fn merge_parallel(
             Ok(()) => {
                 merged += 1;
                 sched.complete(i);
+                // See the matching comment in `merge_sequential`: refresh this
+                // entry's root `ld.so.cache` right away, not just once for the
+                // whole batch — a still-running or not-yet-started sibling may
+                // need to dynamically load what this merge just installed.
+                let merge_root = entry_roots(&plan[i], roots, host_roots).merge_root();
+                if let Err(e) = maint::env::env_update(merge_root) {
+                    eprintln!("warning: env-update failed: {e:#}");
+                }
             }
             Err(e) => {
                 eprintln!(">>> Failed to emerge {} — {e:#}", plan[i].cpv);
