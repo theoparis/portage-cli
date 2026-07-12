@@ -232,15 +232,26 @@ impl UseOverride {
 /// is policy resolution the *caller* performs to build the desired set; the
 /// solver itself never calls it. Overrides are pre-parsed [`UseOverride`]s, so
 /// this does no string work.
+///
+/// Also returns [`Cow::Borrowed`] unconditionally when `base`'s
+/// [`wildcard_reset`](UseConfig::wildcard_reset) is set: a `USE=-*` clear-all
+/// makes `package.use` entirely inert in real portage, not just unable to
+/// revive an IUSE default — confirmed empirically (`em stages --stage1`
+/// live-testing, 2026-07-12): `package.use`'s `sys-devel/m4 nls` and
+/// `sys-apps/baselayout -build` both had zero effect under `USE="-* build"`
+/// (neither a `+flag` nor a `-flag` override took hold), while the exact same
+/// entries worked normally without the wildcard reset. `package.use` is just
+/// another layer in the same incremental accumulation that `-*` wipes.
 pub fn apply_package_use<'a>(
     base: &'a UseConfig,
     cpv: &Cpv,
     slot: Option<Interned<DefaultInterner>>,
     package_use: &[(Dep, Vec<UseOverride>)],
 ) -> Cow<'a, UseConfig> {
-    if !package_use
-        .iter()
-        .any(|(dep, _)| atom_matches_cpv(dep, cpv, slot))
+    if base.wildcard_reset()
+        || !package_use
+            .iter()
+            .any(|(dep, _)| atom_matches_cpv(dep, cpv, slot))
     {
         return Cow::Borrowed(base);
     }
@@ -468,6 +479,30 @@ mod tests {
         };
         assert_eq!(owned.get(flag("ssl")), UseFlagState::Enabled);
         assert_eq!(owned.get(flag("debug")), UseFlagState::Disabled);
+    }
+
+    #[test]
+    fn apply_package_use_inert_under_wildcard_reset() {
+        // USE=-* makes package.use entirely inert in real portage — confirmed
+        // empirically against `sys-devel/m4 nls` and `sys-apps/baselayout
+        // -build`, neither a `+flag` nor a `-flag` override took effect under
+        // USE="-* build" (both worked normally without it).
+        let mut base = UseConfig::new();
+        base.set_wildcard_reset();
+        let cpv = Cpv::parse("dev-libs/openssl-3.0.0").unwrap();
+        let dep = Dep::parse("dev-libs/openssl").unwrap();
+        let out = apply_package_use(
+            &base,
+            &cpv,
+            None,
+            &[(
+                dep,
+                vec![UseOverride::parse("ssl"), UseOverride::parse("-debug")],
+            )],
+        );
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out.get_opt(flag("ssl")), None);
+        assert_eq!(out.get_opt(flag("debug")), None);
     }
 
     #[test]

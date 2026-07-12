@@ -231,6 +231,33 @@ STATUS: in progress — executing. Using one dedicated sandbox per scenario
   - **None of these are new findings requiring an `em` fix.** The stack
     overflow above is the real, `em`-specific bug from this run.
 
+- **New real bug found via direct real-`emerge` comparison, and fixed:
+  `package.use` survived `USE=-*` wildcard-reset in `em`, but real portage
+  makes it entirely inert.** Prompted directly by "did you compare with the
+  plan emerge produced?" — ran real `emerge -pv` against the same fresh
+  `/root/stage1-testing` root under `ACCEPT_KEYWORDS="~arm64"` and
+  `USE="-* build"` with a `package.use` entry `sys-devel/m4 nls`: real
+  emerge showed `-nls` (the override had **zero effect**); without the `-*
+  build` override, the same entry correctly forced `nls` on in both real
+  emerge and `em`. Cross-checked the other direction too:
+  `sys-apps/baselayout -build` in `package.use` also had zero effect under
+  `-* build` (real emerge still showed `build` enabled) — confirming
+  `package.use` is entirely bypassed once a `-*` wildcard reset is in
+  effect, not merely unable to *revive* something, in either direction.
+
+  `em`'s `apply_package_use` (`portage-solver/src/use_config.rs`) applied
+  `package.use` overrides unconditionally, with no awareness of
+  `wildcard_reset` — a gap in this week's earlier `USE=-*` fix, since
+  `package.use` is a separate code path from the IUSE-default fallback
+  that fix already covered. Fixed: `apply_package_use` now returns
+  `Cow::Borrowed` (package.use entirely skipped) whenever `base.wildcard_reset()`
+  is set, matching real portage's "package.use is just another layer the
+  `-*` wildcard wipes" semantics. Added
+  `apply_package_use_inert_under_wildcard_reset` (`portage-solver/src/use_config.rs`).
+  Verified: full workspace suite passes (1211 tests), clippy/fmt clean, and
+  both the `m4 nls` and `baselayout -build` live cases now match real
+  emerge exactly after rebuilding.
+
 - **`cede_required_use` bug scope broadened: also hits `--root` in an
   upgrade/resume scenario, not just `--prefix`.** Testing `ACCEPT_KEYWORDS="~arm64"`
   against the already-populated `/root/stage1-root` (134 packages installed
