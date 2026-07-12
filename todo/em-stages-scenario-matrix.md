@@ -1,6 +1,153 @@
 # `em stages --stage1` scenario matrix — full re-validation across root modes
 
-STATUS: plan only, nothing executed yet.
+STATUS: in progress — executing. Using one dedicated sandbox per scenario
+(not shared) since `crossdev-stages sandbox setup` is fast/cheap per-name.
+
+## Execution log
+
+- **`crossdev-stages sandbox setup --dry-run` is not actually a dry-run**:
+  running it against a new `--name` unpacked the real 1.8G stage3 anyway
+  (confirmed: `sandbox list` showed it `state=unpacked` immediately after,
+  `du -sh` showed 1.8G). Not our code (crossdev-stages is a sibling repo,
+  not fixed here per [[dont-commit-to-sibling-repos]]) — just noting so a
+  future `--dry-run` isn't trusted at face value for this tool.
+- `em-stage1-root` sandbox created (aarch64, 1.8G unpacked). All four
+  sandboxes created: `em-stage1-root`, `em-stage1-prefix`, `em-stage1-local`,
+  `em-stage1-cross` — each `crossdev-stages sandbox setup --arch aarch64
+  --name <name>` (few seconds each). Bind-mounted this workspace's own
+  `portage-repo/gentoo` tree (already has a real md5-cache) at
+  `<sandbox>/var/db/repos/gentoo`, plus `/proc`, `/dev` (rbind), `/sys`,
+  `/etc/resolv.conf` (copied — chroot doesn't get one by default, breaks
+  distfile fetch DNS), and the host's `/var/cache/distfiles` bind-mounted at
+  the same path (cache hits avoid needing network for most distfiles).
+- `em --help` and a `toolchain --setup -p` resolve both work cleanly inside
+  the bare chroot (`em-stage1-root`, scenario 1): 53 packages, no
+  REQUIRED_USE violation, no autounmask needed. Real build kicked off.
+- **Finding (not a bug): `--prefix`/`--local` toolchain --setup is a weak
+  test here.** Per `docs/root-model.md`'s scenario table, `--prefix P` keeps
+  `base_root = /` (host) as the "already installed" view and only overlays
+  the delta into `P` — `planner installed = host ∪ VDB(P)`. Since these
+  sandboxes are real stage3s (already have a working baselayout/binutils/
+  glibc/gcc at their own `/`), `toolchain --setup --prefix <dir>` correctly
+  sees the toolchain as already satisfied by the base and only shows
+  `[ebuild R]` (reinstall, since the atoms are the explicit targets) with no
+  dependency closure — there's no bootstrap to observe, because there's
+  nothing missing for the overlay to fill in. This is the planner working
+  exactly as documented, not a gap. **Consequence for this matrix**:
+  scenarios 2/3 (`--prefix`/`--local`) are more meaningfully tested via
+  `em stages --stage1` directly (the full `packages.build` list, `USE="-*
+  build"`, which can differ from what the stage3 already has installed)
+  rather than `toolchain --setup` first — skip straight to the stage1 step
+  for these two scenarios and treat any `toolchain --setup` output as a
+  planner-correctness sanity check, not a real bootstrap exercise.
+
+- **Real finding: `em stages --stage1 --prefix <dir> -p --autosolve-use`
+  reports a genuine REQUIRED_USE violation for `app-alternatives/awk-4`**
+  (`^^ ( gawk busybox mawk nawk )`, all four showing disabled) that
+  `--autosolve-use` should have resolved but didn't. Root-caused, not yet
+  fixed (out of scope for this validation pass per its own rules):
+
+  - `app-alternatives.eclass`'s `_app-alternatives_set_globals` sets
+    `IUSE="+gawk busybox mawk nawk"` (only the *first* alternative gets a
+    `+` default — "yep, that's a cheap hack", the eclass's own comment) and
+    `REQUIRED_USE="^^ ( gawk busybox mawk nawk )"`. Under normal USE, gawk's
+    `+` default alone satisfies `^^`. Under `stages --stage1`'s `USE="-*
+    build"`, this week's wildcard-reset fix *correctly* suppresses that `+`
+    default too (matching real portage — the whole point of that fix), so
+    nothing satisfies the constraint anymore. This part is working as
+    intended.
+  - The gap: `Adapter::cede_required_use` (`repo.rs:600`) has
+    `if self.installed_cpvs.contains(cpv) { return; }` as its *first* check
+    — before even looking at whether the current desired USE actually
+    satisfies REQUIRED_USE. Under `--prefix`, `installed_cpvs` is
+    `target_installed_cpvs` seeded from the **host** VDB (`mod.rs:302-324`,
+    matching `docs/root-model.md`'s "planner installed = host ∪ VDB(P)" —
+    correct for that purpose). Since the sandbox's stage3 base already has
+    `app-alternatives/awk-4` installed, this early return fires and Level-C
+    never gets a chance to cede/re-decide its flags for the *new* build
+    under `-* build`, even though the constraint demonstrably doesn't hold
+    for the desired USE this build is about to use.
+  - The function's own doc comment says it "skips ceding entirely when the
+    constraint already holds" — that's exactly what the later
+    `unsatisfied.is_empty()` check (already present, a few lines down)
+    covers correctly. The `installed_cpvs.contains(cpv)` early return looks
+    like a separate, overly-broad guard (probably intended to avoid
+    re-deciding USE for settled/unrelated already-installed packages) that
+    happens to also suppress the one case where re-deciding is exactly what
+    stage1's use-override rebuild needs. Suspect fix direction: drop the
+    `installed_cpvs` early return and rely on the `unsatisfied.is_empty()`
+    check alone (which already re-derives from the *current* `cfg`, so a
+    genuinely-settled package still short-circuits correctly) — needs its
+    own careful pass (why was the separate check added at all? check
+    blame/history) before touching it, not a same-session fix.
+  - Scope check still needed: does this affect scenario 1 (`--root`, empty
+    target, nothing "already installed")? Should not — `installed_cpvs`
+    there is empty for a fresh bootstrap. Likely `--prefix`/`--local`-
+    specific (and possibly a real, un-tested `--root --update` /
+    `--newuse` reinstall-over-existing-VDB case too — worth a follow-up
+    check once this matrix is done).
+
+- **Second real finding, scenario 3 (`--local`): `stages --stage1` exits 1
+  on a genuine preflight BDEPEND failure**, distinct from the `--prefix`
+  finding above (and confirms it by contrast — see below). Log:
+  `error: pre-flight dependency check failed`, listing `app-portage/elt-patches`
+  needing `app-arch/xz-utils`, `app-arch/zstd` needing `>=dev-build/meson-1.2.3`,
+  `sys-libs/glibc` needing `>=sys-devel/gcc-6.2` — all **genuinely present**
+  in the sandbox (`which gcc meson xz` and `qlist -Iv` inside the chroot
+  confirm `sys-devel/gcc-15.3.0`, `dev-build/meson-1.11.1`,
+  `app-arch/xz-utils-5.8.3` are installed and on `PATH`).
+
+  Root cause: `Cli::base_roots()`'s `--local` branch (`cli.rs:567-581`) sets
+  `broot: Some(prefix.clone())` — **`--local`'s BROOT is the prefix itself,
+  not the host**, by design (the branch's own comment: "standalone
+  Gentoo-Prefix, own BROOT... during bootstrap the host compiler is reached
+  via PATH, never via a symlink masquerading as a prefix-owned file"). That
+  comment describes the *build-execution*-time behavior (a spawned
+  build correctly finds `gcc`/`meson`/`xz` via the chroot's inherited
+  `PATH` env, no VDB entry needed) — but `preflight.rs`'s BDEPEND check
+  (`portage-cli/src/preflight.rs`, `roots.satisfaction_root(DepClass::Bdepend)`)
+  has no equivalent "found via PATH, no VDB tracking needed" concept: it
+  only ever checks VDB entries at the BROOT it's given, which for `--local`
+  is the prefix's own (still-empty, this being a from-scratch bootstrap)
+  VDB. So preflight fails a check that the actual build wouldn't have — a
+  real gap between what preflight validates and what `--local`'s own design
+  comment says should work.
+
+  **Confirms the `--prefix` finding by contrast**: `--prefix`'s BROOT is
+  `/` (`cli.rs:592`, the host) — same chroot, same real gcc/meson/xz — and
+  its resolve got past preflight to the actual REQUIRED_USE stage, meaning
+  preflight's BDEPEND check *does* work correctly when BROOT is a real VDB
+  with these tools registered. The `--local` case is the one that needs
+  either (a) a documented, deliberate exception in `preflight.rs` for
+  `--local`'s PATH-based BDEPEND model, or (b) BROOT weaving in the host's
+  VDB for `--local` too (contradicting its own "own BROOT" design intent —
+  would need to reconcile with why `--local` was built to *not* do that
+  overlay in the first place, likely relocatability: a `--local` prefix is
+  meant to be usable standalone/moved, so depending on host VDB state would
+  be a regression). Needs its own design pass, not a quick fix here.
+
+  **Positive confirmation of the `--prefix` diagnosis**: this run's own
+  `--autosolve-use` output shows it *correctly* ceding all seven
+  `app-alternatives/*` `^^` constraints (awk, bzip2, gzip, lex, ninja, tar,
+  yacc — all reported as "configured off" → autosolved to the first listed
+  alternative) — because under `--local` nothing is "already installed"
+  (fresh prefix), so `cede_required_use`'s `installed_cpvs.contains(cpv)`
+  early return never fires here. This is exactly the contrast predicted by
+  the `--prefix` root-cause analysis above, now empirically confirmed:
+  same wildcard-reset-suppressed defaults, same `^^` constraints, but
+  autosolve-use works here and doesn't there, and the only difference is
+  whether the cpv is already in `installed_cpvs`.
+
+- **`docs/root-model.md` is stale w.r.t. `--local`**: it documents `--root`/
+  `--prefix` in detail (the scenario table, BDEPEND/RDEPEND satisfaction
+  roots) but has no section for `--local` at all — its BROOT model
+  (`broot = prefix`, distinct from both `--root` and `--prefix`) isn't
+  captured anywhere in that doc, which is why the preflight gap above took
+  direct code reading to find rather than being a documented, deliberate
+  divergence. **Follow-up**: add a `--local` row/section to
+  `docs/root-model.md` once the preflight-vs-PATH reconciliation above is
+  actually decided (documenting the gap before deciding its resolution
+  would just need re-editing).
 
 ## Why now
 

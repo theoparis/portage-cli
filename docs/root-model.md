@@ -54,12 +54,35 @@ That is the whole difference between "full offset" and "overlay":
 | `em --root stage1/ @system` | stage1/ | stage1/ | empty | **build a stage from scratch** |
 | `em --prefix foo/ firefox` | / | foo/ | host ∪ VDB(foo/) | host is the base; install only the **new** packages into `foo/` — unprivileged `.local` **overlay** |
 | `em --prefix a/ --root b/ firefox` | b/ | a/ | VDB(b/) ∪ VDB(a/) | general overlay: base `b/`, delta into `a/`, config from `b/` |
+| `em --local [DIR]` firefox | DIR (default `~/.gentoo`) | DIR | VDB(DIR) (empty ⇒ **full closure**) | standalone Gentoo-Prefix — like `--root`, but relocatable (`EPREFIX`) and **its own BROOT** (see below), not the host's |
 | `{target}-emerge` (crossdev) | `/` (BROOT) | `/usr/<CHOST>/` or overridden `ROOT` | host VDB + target VDB | cross-compile; see [BDEPEND / crossdev](#bdepend-rdepend-and-with-bdeps) |
 | `em` crossdev parity (future) | host | target | same model as portage | Stage 3 — dual-root plan entries |
 
 `em --root foo/` and `em --prefix foo/` differ in exactly one thing: whether the
 host counts as already installed. `--root` ignores it (full closure rebuilt into
 `foo/`); `--prefix` keeps it (only the delta lands in `foo/`).
+
+`--local` is a **third, distinct** mode, not "`--root` plus `EPREFIX`": its
+BROOT is the prefix itself (`Cli::base_roots()`'s `--local` branch,
+`cli.rs:567-581` — `broot: Some(prefix.clone())`), unlike `--root` and
+`--prefix`, both of which use the real host `/` as BROOT
+(`self.root_set().broot()` / `Some("/")` respectively). The design intent
+(per that branch's own comment) is relocatability: build tools invoked
+during a `--local` build are found via the shell's inherited `PATH`, not by
+depending on the host's portage-tracked VDB state, so a finished `--local`
+prefix can be moved/used standalone without carrying an implicit host
+dependency. **Known gap (found 2026-07-12, see
+`todo/em-stages-scenario-matrix.md`)**: `preflight.rs`'s BDEPEND check has
+no equivalent "found via `PATH`, no VDB entry needed" concept — it only
+checks VDB entries at the BROOT it's given, which for `--local` is the
+prefix's own (empty, for a from-scratch build) VDB. This makes a `--local`
+`stages --stage1` bootstrap fail preflight for tools (`meson`, `xz-utils`,
+`gcc`) that are genuinely present and would work fine at actual build time —
+a real divergence between what preflight validates and what the "own BROOT,
+PATH-based" design comment says should work. Not yet resolved; needs a
+design decision (teach preflight about PATH-found tools for `--local`, or
+reconsider whether `--local`'s BROOT should weave in the host after all)
+before `--local` `stages --stage1` can complete end-to-end.
 
 ## Planner behaviour
 
@@ -79,7 +102,7 @@ PMS splits build-time needs across three dep classes, each with its own
 
 | class | runs on / resolved against | typical role |
 |---|---|---|
-| `BDEPEND` | **BROOT** (always host `/`) | build-host tools: `cmake`, `perl`, host `python` |
+| `BDEPEND` | **BROOT** (host `/` for `--root`/`--prefix`/cross; the prefix itself for `--local`, see below) | build-host tools: `cmake`, `perl`, host `python` |
 | `DEPEND` | **SYSROOT** / **ESYSROOT** | headers/libs `.pc` files for the compile |
 | `RDEPEND` | **ROOT** (install destination) | binaries/libraries needed at runtime on the target |
 
