@@ -1065,16 +1065,42 @@ impl PortageDependencyProvider {
 
     /// Newest installed version reachable one level out of a single version's
     /// merged constraints: a direct dep is looked up in `self.installed`, a
-    /// nested virtual branch (e.g. a `:*` SlotChoice) is resolved via
-    /// [`Self::branch_best_installed`]. `None` when nothing is installed.
-    fn branch_installed_ver(&self, vd: &VersionData) -> Option<Version> {
+    /// nested `Choice`/`SlotChoice` branch (e.g. a `:*` SlotChoice) is resolved
+    /// via [`Self::branch_best_installed`]. `None` when nothing is installed.
+    ///
+    /// Only recurses into `Choice`/`SlotChoice` virtuals — real `||`/`:*`
+    /// provider alternatives, which form an acyclic tree down to concrete
+    /// packages. Other virtuals (`UseDecision`, `Root`) are *not* recursed
+    /// into: `UseDecision` nodes encode `REQUIRED_USE` Level-C constraints
+    /// (e.g. a `^^` group's mutual-exclusion pairs), which reference each
+    /// other symmetrically — recursing into those the same way overflowed the
+    /// stack (found 2026-07-12, `em stages --stage1` on a root with a real
+    /// installed toolchain: `app-alternatives/tar`'s `^^ ( gnu libarchive )`
+    /// only crashed when the `libarchive` alternative's own dependency was
+    /// already installed, which is exactly what gates this function being
+    /// called at all — see `newest_installed_choice_branch`'s
+    /// installed-count-greater-than-zero guard). This heuristic was never
+    /// meant to look inside Level-C encoding in the first place, only at
+    /// genuine provider alternatives.
+    ///
+    /// `depth` additionally bounds the recursion (see
+    /// [`Self::branch_best_installed`]'s doc) as defense-in-depth: this is a
+    /// tie-break nicety, not correctness-critical, so a real but unusually
+    /// deep or (despite the above) unexpectedly cyclic `Choice`/`SlotChoice`
+    /// shape degrades to "no preference" instead of a stack overflow.
+    fn branch_installed_ver(&self, vd: &VersionData, depth: u8) -> Option<Version> {
         let Dependencies::Available(ref cs) = vd.merged else {
             return None;
         };
         cs.iter()
             .filter_map(|(p, _)| {
-                if p.is_virtual() {
-                    self.branch_best_installed(p)
+                if matches!(
+                    p,
+                    PortagePackage::Choice { .. } | PortagePackage::SlotChoice { .. }
+                ) {
+                    self.branch_best_installed(p, depth)
+                } else if p.is_virtual() {
+                    None
                 } else {
                     self.installed.get(p).map(|(v, _)| v.clone())
                 }
@@ -1090,13 +1116,24 @@ impl PortageDependencyProvider {
     /// branch of a provider `||` group is installed at some version: the branch
     /// with the newer installed version wins (matching emerge's `dep_zapdeps`),
     /// avoiding a needless `[NS]` of the first-listed provider's newest slot.
-    pub(crate) fn branch_best_installed(&self, pkg: &PortagePackage) -> Option<Version> {
+    ///
+    /// `depth` is the remaining recursion budget shared with
+    /// [`Self::branch_installed_ver`]; the public entry point
+    /// (`newest_installed_choice_branch`) starts it at [`Self::BRANCH_DEPTH_LIMIT`].
+    pub(crate) fn branch_best_installed(&self, pkg: &PortagePackage, depth: u8) -> Option<Version> {
+        let depth = depth.checked_sub(1)?;
         let data = self.package_data(pkg)?;
         data.versions
             .values()
-            .filter_map(|vd| self.branch_installed_ver(vd))
+            .filter_map(|vd| self.branch_installed_ver(vd, depth))
             .max()
     }
+
+    /// Recursion budget for [`Self::branch_installed_ver`]/
+    /// [`Self::branch_best_installed`]. Real `||`/`:*` provider trees are a
+    /// handful of levels deep at most; this is generous headroom for that
+    /// while still bounding a pathological or unexpectedly cyclic shape.
+    const BRANCH_DEPTH_LIMIT: u8 = 16;
 
     /// For an all-branches-installed provider `||` Choice, return the candidate
     /// branch whose reachable installed version is newest — emerge's
@@ -1119,7 +1156,7 @@ impl PortageDependencyProvider {
             let Some(vd) = data.versions.get(ver) else {
                 continue;
             };
-            if let Some(iv) = self.branch_installed_ver(vd) {
+            if let Some(iv) = self.branch_installed_ver(vd, Self::BRANCH_DEPTH_LIMIT) {
                 // Prefer a strictly-newer reachable installed version; on a tie
                 // keep the higher choice version (= first-listed alternative),
                 // matching emerge's `dep_zapdeps`, which only re-picks the

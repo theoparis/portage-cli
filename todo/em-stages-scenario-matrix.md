@@ -22,7 +22,22 @@ STATUS: in progress — executing. Using one dedicated sandbox per scenario
   the same path (cache hits avoid needing network for most distfiles).
 - `em --help` and a `toolchain --setup -p` resolve both work cleanly inside
   the bare chroot (`em-stage1-root`, scenario 1): 53 packages, no
-  REQUIRED_USE violation, no autounmask needed. Real build kicked off.
+  REQUIRED_USE violation, no autounmask needed.
+- **Scenario 1 (native `--root`) — full success.** `em toolchain --setup
+  --root /root/stage1-root --jobs 1 --keep-going` completed: "35 package(s)
+  merged into /root/stage1-root", ">>> native toolchain ready", 0 real
+  failures (grep for `failed to merge`/`die:`/`>>> Failed` — none). Verified
+  the built compiler is genuinely self-contained: `gcc --version` must be
+  run via a **nested** `chroot` into `/root/stage1-root` itself (`sudo
+  chroot "$SB/root/stage1-root" /usr/bin/...-gcc --version`), not by
+  executing a path inside it from the outer sandbox chroot — the target's
+  gcc-config symlinks are absolute (`/usr/aarch64-.../gcc-bin/15/...`) and
+  only resolve correctly once that offset *is* `/`. Running it the naive
+  way (single chroot, full inner path) silently resolves to the sandbox's
+  own host gcc instead (a testing-methodology trap, not an `em` bug — worth
+  remembering for any future verification of a `--root`-built toolchain).
+  Nested-chroot check confirms `gcc-15.2.1_p20260214`, matching the merge
+  log exactly.
 - **Finding (not a bug): `--prefix`/`--local` toolchain --setup is a weak
   test here.** Per `docs/root-model.md`'s scenario table, `--prefix P` keeps
   `base_root = /` (host) as the "already installed" view and only overlays
@@ -137,6 +152,50 @@ STATUS: in progress — executing. Using one dedicated sandbox per scenario
   same wildcard-reset-suppressed defaults, same `^^` constraints, but
   autosolve-use works here and doesn't there, and the only difference is
   whether the cpv is already in `installed_cpvs`.
+
+- **CRITICAL BUG FOUND AND FIXED: `--autosolve-use` stack overflow on a
+  populated root.** `em stages --stage1 --root /root/stage1-root -p
+  --autosolve-use` (scenario 1, native `--root`, real installed toolchain)
+  crashed with `fatal runtime error: stack overflow, aborting`. Without
+  `--autosolve-use` the same command resolved cleanly (exit 0, reporting the
+  7 expected `^^` REQUIRED_USE violations) — isolating the bug precisely to
+  Level-C autosolve combined with a real, non-empty installed base.
+
+  Minimal repro found by bisecting the atom list down from the full
+  packages.build set: `USE="-* build" em --root <dir> -p --autosolve-use
+  app-alternatives/tar` alone crashes when `app-arch/libarchive` (one of
+  tar's `^^ ( gnu libarchive )` alternatives) is already installed in
+  `<dir>`; the identical command against a fresh/empty root does not crash.
+  Reproduced in-process via a new unit test
+  (`required_use_exactly_one_with_installed_alternative_does_not_overflow`,
+  `portage-atom-pubgrub/src/provider/tests.rs`) — a minimal `^^ ( w x )`
+  shape with `w`'s own dependency pre-installed, no chroot/real-repo needed.
+
+  Root cause (found via `perf record --call-graph dwarf` on a `profiling`-
+  profile build, then confirmed instantly with `gdb bt` against the debug
+  unit test once minimized): `PortageDependencyProvider::branch_installed_ver`/
+  `branch_best_installed` (`provider/mod.rs`) — a `choose_version`
+  tie-break heuristic ("prefer the alternative reaching a newer installed
+  version") — recursed into **any** virtual package reachable from a
+  version's merged deps, with **no cycle guard**. Safe for its intended
+  target (`Choice`/`SlotChoice` `||`/`:*` provider trees, which are acyclic
+  DAGs down to real packages), but `UseDecision` nodes (Level-C `REQUIRED_USE`
+  encoding) reference each other **symmetrically** for a `^^` group's
+  mutual-exclusion pairs — an inherent 2-cycle this function was never
+  designed to enter. It's gated behind `newest_installed_choice_branch`'s
+  "at least one candidate branch reaches an installed package" check, which
+  is exactly why it only fired once `libarchive` was genuinely installed.
+
+  Fixed (`portage-atom-pubgrub/src/provider/mod.rs`): restricted the
+  recursion to `Choice`/`SlotChoice` only (matching the same distinction
+  `host_satisfied_on_broot_inner` already makes for a different function),
+  plus a `BRANCH_DEPTH_LIMIT = 16` recursion budget threaded through both
+  functions as defense-in-depth, since the heuristic's own docs say "one
+  level" but the implementation was actually unbounded. Verified: the unit
+  test passes, the full workspace suite passes (1210 tests), clippy/fmt
+  clean, and the original real-world repro (`em stages --stage1 --root
+  /root/stage1-root -p --autosolve-use`) now resolves cleanly — 78
+  packages, exit 0, `tar` correctly autosolved to `libarchive`, no crash.
 
 - **Scenario 4 (cross riscv64) — full success.** `em --target
   riscv64-unknown-linux-gnu crossdev --setup --jobs 1 --keep-going`

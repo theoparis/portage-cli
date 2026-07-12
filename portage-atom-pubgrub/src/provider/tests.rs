@@ -1272,6 +1272,59 @@ fn required_use_exactly_one_picks_one() {
 }
 
 #[test]
+fn required_use_exactly_one_with_installed_alternative_does_not_overflow() {
+    use crate::required_use::RequiredUse::ExactlyOne;
+    // Reproduces a 2026-07-12 stack overflow found via `em stages --stage1
+    // --root <dir>` on a root with a real, already-built toolchain:
+    // app-alternatives/tar's `^^ ( gnu libarchive )` crashed only when
+    // app-arch/libarchive was already installed in that root under
+    // --autosolve-use; the identical atom against a fresh/empty root
+    // resolved fine. Minimal shape: `^^ ( w x )`, both ceded off, where
+    // "w"'s own dependency is already installed.
+    let mut repo = InMemoryRepository::new();
+    repo.add_version(
+        portage_atom::Cpv::parse("dev-libs/pw-1.0").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        empty_deps(),
+    );
+    repo.add_version(
+        portage_atom::Cpv::parse("dev-libs/px-1.0").unwrap(),
+        Some(Interned::intern("0")),
+        None,
+        empty_deps(),
+    );
+    repo.add_version_with_required_use(
+        portage_atom::Cpv::parse("app-misc/a-1.0").unwrap(),
+        Some(Interned::intern("0")),
+        vec![Interned::intern("w"), Interned::intern("x")],
+        PackageDeps {
+            rdepend: DepEntry::parse("w? ( dev-libs/pw ) x? ( dev-libs/px )")
+                .unwrap()
+                .into(),
+            ..empty_deps()
+        },
+        ExactlyOne(vec![flag("w", false), flag("x", false)]),
+    );
+    let mut cfg = UseConfig::new();
+    cfg.solver_decide(Interned::intern("w"), false);
+    cfg.solver_decide(Interned::intern("x"), false);
+    repo.set_use_config(cfg);
+    let mut provider = PortageDependencyProvider::new(repo);
+    provider.add_installed(InstalledPackage {
+        package: PortagePackage::unslotted(Cpn::parse("dev-libs/pw").unwrap()),
+        version: Version::parse("1.0").unwrap(),
+        policy: InstalledPolicy::Favor,
+        active_use: vec![],
+        iuse: vec![],
+    });
+    let a = PortagePackage::slotted(Cpn::parse("app-misc/a").unwrap(), Interned::intern("0"));
+    let _sol = provider
+        .resolve_targets(vec![(a, PortageVersionSet::any())])
+        .unwrap();
+}
+
+#[test]
 fn required_use_any_of_enables_at_least_one() {
     use crate::required_use::RequiredUse::AnyOf;
     // || ( x y ), both ceded off → at least one on.
