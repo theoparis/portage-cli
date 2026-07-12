@@ -1,7 +1,79 @@
 # Eliminate the per-package `UseConfig` clone in `desired_use`
 
-STATUS: **proposal, nothing implemented.** Measured as worth doing; the
-correctness groundwork (the `wildcard_reset` bit) landed in `2f846a4`.
+STATUS: **superseded — implemented differently.** The Cow-through-solver
+plan below (Option 2) was reviewed independently (Fable model) before
+implementation and found unsound: its core premise doesn't hold on real
+profiles. See "What actually shipped" below for the fix that replaced it.
+
+## What actually shipped
+
+Fable's review (and a follow-up spot-check against the actual code)
+found two things:
+
+1. **The "free borrow" fast path in Option 2 never fires in practice.**
+   `desired_use` (`repo.rs`) already calls `.into_owned()` unconditionally
+   before `apply_iuse_defaults`, and the very next step,
+   `ForceMask::apply`, mutates `cfg` for essentially every real package —
+   `ForceMask::is_empty()` requires the *global* `use.mask` to be empty
+   too, which no real Gentoo profile has. So there is no case in practice
+   where a version's effective USE could have been served by borrowing
+   the global config directly; Option 1/2's premise doesn't hold.
+2. **A real, cheaper bug**: `apply_package_use` (`portage-solver/src/use_config.rs`)
+   only returned `Cow::Borrowed` when the whole `package_use` list was
+   empty, not when no entry actually matched the package — so it cloned
+   on every call once *any* `package.use` entry existed anywhere in the
+   system (i.e. always, on a real profile).
+3. **The actual dominant per-version cost** wasn't the ~35-entry global
+   clone this doc focused on — it was `ForceMask::effective` unconditionally
+   extending the masked set with the *entire* global `use.mask` (hundreds
+   of entries) and disabling every one of them on `cfg`, for every version,
+   regardless of whether the package's own `IUSE` even declares that flag.
+
+Implemented instead (uncommitted as of this writing, in the working tree):
+
+- `apply_package_use`: checks for an actual atom match before cloning,
+  not just whether the list is non-empty.
+- `ForceMask::effective`/`apply`/`pins`: take the package's own `IUSE` set
+  and restrict the global `use.mask` scan to flags actually in it — a
+  masked flag outside a package's `IUSE` can never be resurrected by that
+  package's own `+flag` default, so skipping it is a no-op for correctness
+  (verified: `UseConfig::get`/`get_with_iuse_default` already default an
+  absent flag to `Disabled`, same as an explicit `disable()` would set).
+  `pins()` still includes the full global set regardless (needed for the
+  Level-C cede gate; cheap, not the hot path), so this only narrows what
+  `apply()` computes.
+
+### Verification
+
+- `cargo nextest run --workspace --exclude portage-bench`: 1209 passed (3
+  new: `apply_package_use_borrowed_when_list_nonempty_but_no_match`,
+  `global_use_mask_only_applies_to_packages_own_iuse`, plus the existing
+  force_mask tests updated for the new `iuse` parameter). Clippy/fmt clean.
+- Parity: `USE="-* build"`-style live comparison of
+  `em --root <dir> -vp sys-devel/gcc` against real
+  `ROOT=<dir> emerge -vp sys-devel/gcc` — exact 16/16 package and USE-flag
+  match (byte-identical modulo cosmetic formatting). Notably, the *old*
+  (pre-fix) binary had 2 phantom packages (`virtual/libintl`,
+  `virtual/libiconv`) that real emerge does not include — the `ForceMask`
+  fix incidentally corrected this latent over-masking bug too.
+- `benchmarks/bench-em-vs-emerge.sh SKIP_TIMING=1`: identical diff counts
+  before and after (7/7/7 on firefox/thunderbird/libreoffice — a
+  pre-existing, unrelated discrepancy; 0 elsewhere) — confirms no new
+  parity regression.
+- End-to-end timing (`hyperfine --warmup 2`, this host):
+  - `dev-qt/qtwebengine` (82-package plan, heavy IUSE): 755.6 ms → 701.7 ms
+    (≈8% faster, before 1.08±0.04× slower than after).
+  - `app-office/libreoffice` (134-package plan): 874.9 ms → 810.9 ms
+    (≈8% faster).
+  - `sys-devel/gcc` (16-package plan, light IUSE): no measurable
+    difference (520.0 ms vs 523.1 ms) — as expected, the win scales with
+    the size/IUSE-richness of the dependency closure the solver walks,
+    not with small plans.
+
+## Original proposal (superseded, kept for context)
+
+Measured as worth doing; the correctness groundwork (the `wildcard_reset`
+bit) landed in `2f846a4`.
 
 ## Why
 

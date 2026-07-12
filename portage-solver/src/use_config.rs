@@ -226,17 +226,22 @@ impl UseOverride {
 /// Apply per-package USE flag overrides on top of a base [`UseConfig`].
 ///
 /// Scans `package_use` in order and applies any entries whose atom matches
-/// `cpv`. Returns [`Cow::Borrowed`] when no entries match to avoid a clone.
-/// This is policy resolution the *caller* performs to build the desired set;
-/// the solver itself never calls it. Overrides are pre-parsed
-/// [`UseOverride`]s, so this does no string work.
+/// `cpv`. Returns [`Cow::Borrowed`] when no entry actually matches (not merely
+/// when the list is empty — a system-wide `package.use` list is almost never
+/// empty, but any given package is rarely named in it) to avoid a clone. This
+/// is policy resolution the *caller* performs to build the desired set; the
+/// solver itself never calls it. Overrides are pre-parsed [`UseOverride`]s, so
+/// this does no string work.
 pub fn apply_package_use<'a>(
     base: &'a UseConfig,
     cpv: &Cpv,
     slot: Option<Interned<DefaultInterner>>,
     package_use: &[(Dep, Vec<UseOverride>)],
 ) -> Cow<'a, UseConfig> {
-    if package_use.is_empty() {
+    if !package_use
+        .iter()
+        .any(|(dep, _)| atom_matches_cpv(dep, cpv, slot))
+    {
         return Cow::Borrowed(base);
     }
     let mut cfg = base.clone();
@@ -429,6 +434,17 @@ mod tests {
         let base = UseConfig::new();
         let cpv = Cpv::parse("dev-libs/openssl-3.0.0").unwrap();
         let out = apply_package_use(&base, &cpv, None, &[]);
+        assert!(matches!(out, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn apply_package_use_borrowed_when_list_nonempty_but_no_match() {
+        // A system-wide package.use list is almost never empty, but any given
+        // package is rarely named in it — this must stay a borrow, not a clone.
+        let base = UseConfig::new();
+        let cpv = Cpv::parse("dev-libs/openssl-3.0.0").unwrap();
+        let dep = Dep::parse("dev-libs/other").unwrap();
+        let out = apply_package_use(&base, &cpv, None, &[(dep, vec![UseOverride::parse("ssl")])]);
         assert!(matches!(out, Cow::Borrowed(_)));
     }
 

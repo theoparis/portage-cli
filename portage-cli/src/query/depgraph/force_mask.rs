@@ -18,7 +18,7 @@
 //! `multilib`/`cet`/`nopie`, which only take effect once package-level force/mask
 //! are applied to effective USE.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep};
@@ -96,9 +96,25 @@ fn accumulate(rules: &PkgRules, cpv: &Cpv, set: &mut BTreeSet<Flag>) {
 impl ForceMask {
     /// The net forced and masked flag names for `cpv` that are **not** already in
     /// the base config — i.e. package-level force/mask always, plus the
-    /// `*.stable.*` sets when `stable`. Global non-stable `use.force`/`use.mask`
-    /// are excluded (they live in the base config). Mask wins over force.
-    pub(super) fn effective(&self, cpv: &Cpv, stable: bool) -> (BTreeSet<Flag>, BTreeSet<Flag>) {
+    /// `*.stable.*` sets when `stable`. Global non-stable `use.force` is
+    /// excluded (it lives in the base config); global `use.mask` is not (see
+    /// below). Mask wins over force.
+    ///
+    /// `iuse` restricts which global `use.mask` flags are even considered: a
+    /// masked flag the package doesn't declare in `IUSE` can never be
+    /// resurrected by that package's own `+flag` IUSE default (the only thing
+    /// this guards against, see below), so it costs nothing to skip. Global
+    /// `use.mask` commonly has hundreds of entries while a package's own IUSE
+    /// is a few dozen at most, so this turns a per-package O(global use.mask)
+    /// cost into O(package IUSE ∩ global use.mask) — the dominant cost of
+    /// `apply()` before this filter, since it ran for every version the solver
+    /// instantiated.
+    pub(super) fn effective(
+        &self,
+        cpv: &Cpv,
+        stable: bool,
+        iuse: &HashSet<Flag>,
+    ) -> (BTreeSet<Flag>, BTreeSet<Flag>) {
         let mut forced = BTreeSet::new();
         let mut masked = BTreeSet::new();
         // Global `use.mask` must force a flag *off* per package, overriding the
@@ -107,7 +123,7 @@ impl ForceMask {
         // `llvm-runtimes/compiler-rt-sanitizers`'s `+abi_x86_32`, masked on
         // arm64 by `arch/base/use.mask`) would otherwise re-enable. Added before
         // the per-package rules so `package.use.mask -flag` can unmask it.
-        masked.extend(self.use_mask.iter().copied());
+        masked.extend(self.use_mask.iter().copied().filter(|f| iuse.contains(f)));
         accumulate(&self.pkg_force, cpv, &mut forced);
         accumulate(&self.pkg_mask, cpv, &mut masked);
         if stable {
@@ -123,8 +139,10 @@ impl ForceMask {
     /// Apply force/mask to a package's effective USE: enable forced flags, then
     /// disable masked ones (mask wins). Overrides `package.use` and the
     /// configured value, matching Portage. Flags are already interned.
-    pub(super) fn apply(&self, cfg: &mut UseConfig, cpv: &Cpv, stable: bool) {
-        let (forced, masked) = self.effective(cpv, stable);
+    ///
+    /// `iuse` is the package's own declared `IUSE` flags — see [`Self::effective`].
+    pub(super) fn apply(&self, cfg: &mut UseConfig, cpv: &Cpv, stable: bool, iuse: &HashSet<Flag>) {
+        let (forced, masked) = self.effective(cpv, stable, iuse);
         for &f in &forced {
             cfg.enable(f);
         }
@@ -135,8 +153,15 @@ impl ForceMask {
 
     /// Every flag pinned for `cpv` (global force/mask + the package-level and
     /// stable sets) — the Level-C cede gate must never cede any of these.
-    pub(super) fn pins(&self, cpv: &Cpv, stable: bool) -> BTreeSet<Flag> {
-        let (mut pins, masked) = self.effective(cpv, stable);
+    ///
+    /// Unlike [`Self::apply`], this always includes the *full* global
+    /// `use.force`/`use.mask` sets regardless of `iuse` — a flag outside the
+    /// package's `IUSE` can never be ceded anyway (the caller in
+    /// `cede_required_use` already skips any flag not in `IUSE`), so the
+    /// `iuse` restriction on [`Self::effective`]'s internal call here is a
+    /// no-op for the final result, just cheaper to compute.
+    pub(super) fn pins(&self, cpv: &Cpv, stable: bool, iuse: &HashSet<Flag>) -> BTreeSet<Flag> {
+        let (mut pins, masked) = self.effective(cpv, stable, iuse);
         pins.extend(masked);
         pins.extend(self.use_force.iter().copied());
         pins.extend(self.use_mask.iter().copied());
@@ -179,6 +204,10 @@ mod tests {
         Interned::intern(s)
     }
 
+    fn iuse_of(names: &[&str]) -> HashSet<Flag> {
+        names.iter().map(|n| flag(n)).collect()
+    }
+
     #[test]
     fn package_force_and_mask_apply_with_mask_winning() {
         let fm = ForceMask {
@@ -193,7 +222,8 @@ mod tests {
             ..Default::default()
         };
         let c = cpv("cross-foo/gcc-13.2");
-        let (forced, masked) = fm.effective(&c, false);
+        let iuse = iuse_of(&["multilib", "shared", "cet"]);
+        let (forced, masked) = fm.effective(&c, false, &iuse);
         assert!(forced.contains(&flag("multilib")));
         assert!(
             !forced.contains(&flag("shared")),
@@ -204,7 +234,7 @@ mod tests {
 
         let mut cfg = UseConfig::new();
         cfg.enable(Interned::intern("cet")); // user tried to enable a masked flag
-        fm.apply(&mut cfg, &c, false);
+        fm.apply(&mut cfg, &c, false, &iuse);
         assert_eq!(cfg.get(Interned::intern("multilib")), UseFlagState::Enabled);
         assert_eq!(cfg.get(Interned::intern("cet")), UseFlagState::Disabled);
         assert_eq!(cfg.get(Interned::intern("shared")), UseFlagState::Disabled);
@@ -220,7 +250,7 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let (forced, _) = fm.effective(&cpv("cross-foo/gcc-13.2"), false);
+        let (forced, _) = fm.effective(&cpv("cross-foo/gcc-13.2"), false, &HashSet::new());
         assert!(!forced.contains(&flag("multilib")), "-multilib unforced it");
     }
 
@@ -232,12 +262,46 @@ mod tests {
         };
         let c = cpv("dev-libs/foo-1");
         assert!(
-            !fm.effective(&c, false).1.contains(&flag("risky")),
+            !fm.effective(&c, false, &HashSet::new())
+                .1
+                .contains(&flag("risky")),
             "ignored when unstable"
         );
         assert!(
-            fm.effective(&c, true).1.contains(&flag("risky")),
+            fm.effective(&c, true, &HashSet::new())
+                .1
+                .contains(&flag("risky")),
             "applied when stable"
         );
+    }
+
+    #[test]
+    fn global_use_mask_only_applies_to_packages_own_iuse() {
+        // Global use.mask commonly has hundreds of entries; a package that
+        // doesn't declare a masked flag in its own IUSE can never have it
+        // resurrected by a `+flag` IUSE default, so it must not appear in
+        // `effective()`'s masked set (the whole point of the `iuse` filter).
+        let fm = ForceMask {
+            use_mask: vec!["abi_x86_32".into(), "unrelated_flag".into()],
+            ..Default::default()
+        };
+        let c = cpv("dev-libs/foo-1");
+        let iuse = iuse_of(&["abi_x86_32"]);
+        let (_, masked) = fm.effective(&c, false, &iuse);
+        assert!(
+            masked.contains(&flag("abi_x86_32")),
+            "flag in the package's IUSE stays masked"
+        );
+        assert!(
+            !masked.contains(&flag("unrelated_flag")),
+            "flag absent from the package's IUSE is filtered out"
+        );
+
+        // pins() must still protect the *full* global set regardless — a
+        // flag outside IUSE can't be ceded in the first place, so this is
+        // just cheaper to compute, not narrower in its final result.
+        let pins = fm.pins(&c, false, &iuse);
+        assert!(pins.contains(&flag("abi_x86_32")));
+        assert!(pins.contains(&flag("unrelated_flag")));
     }
 }

@@ -20,7 +20,7 @@ mod required_use;
 mod subslot;
 mod use_env;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use camino::Utf8Path;
 use gentoo_core::Arch;
@@ -596,7 +596,10 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 let keywords = cache.map(|c| c.metadata.keywords.as_slice()).unwrap_or(&[]);
                 let slot = cache.map(|c| c.metadata.slot.slot);
                 let stable = accept_keywords.is_stable(keywords, &cpv, slot);
-                let (forced, masked) = force_mask.effective(&cpv, stable);
+                let iuse: HashSet<Interned<DefaultInterner>> = cache
+                    .map(|c| c.metadata.iuse.iter().map(Interned::from).collect())
+                    .unwrap_or_default();
+                let (forced, masked) = force_mask.effective(&cpv, stable, &iuse);
                 if !forced.is_empty() || !masked.is_empty() {
                     let mut overrides: Vec<UseOverride> = forced
                         .iter()

@@ -349,7 +349,9 @@ fn effective_use_config(
     apply_iuse_defaults(&mut cfg, meta);
     if !force_mask.is_empty() {
         let stable = accept_keywords.is_stable(&meta.keywords, cpv, slot);
-        force_mask.apply(&mut cfg, cpv, stable);
+        let iuse: std::collections::HashSet<Interned<DefaultInterner>> =
+            meta.iuse.iter().map(Interned::from).collect();
+        force_mask.apply(&mut cfg, cpv, stable, &iuse);
     }
     cfg
 }
@@ -612,9 +614,11 @@ impl Adapter<'_> {
         let empty = UseConfig::new();
         let pins = apply_package_use(&empty, cpv, slot, self.package_use);
         let iuse: std::collections::HashSet<&str> = m.iuse.iter().map(|iu| iu.name()).collect();
+        let iuse_flags: std::collections::HashSet<Interned<DefaultInterner>> =
+            m.iuse.iter().map(Interned::from).collect();
         // Flags pinned by use.force/use.mask (global, package-level and the stable
         // variants): hard profile decisions, never ceded.
-        let forced_masked = self.force_mask.pins(cpv, stable);
+        let forced_masked = self.force_mask.pins(cpv, stable, &iuse_flags);
         // Only flags mentioned in the *violated* clause(s), not the whole
         // REQUIRED_USE tree: a package can have several independent top-level
         // clauses (e.g. util-linux's `python? ( ... ) su? ( pam )`), and one
@@ -699,7 +703,10 @@ impl PackageRepository for Adapter<'_> {
                 .is_stable(&m.keywords, cpv, Some(m.slot.slot))
         });
         if !self.force_mask.is_empty() {
-            self.force_mask.apply(&mut cfg, cpv, stable);
+            let iuse: std::collections::HashSet<Interned<DefaultInterner>> = meta
+                .map(|m| m.iuse.iter().map(Interned::from).collect())
+                .unwrap_or_default();
+            self.force_mask.apply(&mut cfg, cpv, stable, &iuse);
         }
 
         // Level-C: cede this package's REQUIRED_USE flags to the solver.
