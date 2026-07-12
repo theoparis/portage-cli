@@ -15,15 +15,20 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::cli::Cli;
 
-use super::{OVERLAY_NAME, symlink_force};
+use super::symlink_force;
 use crate::util::write_if_absent;
 
-/// The full `[crossdev]` `Location::Alias` body for `category`/`packages_line`
-/// — the single formatter both `ConfigEntry::Alias`'s `change()` (comparison)
-/// and `apply()` (write) use, so they can never drift apart from each other.
-fn alias_body(category: &str, packages_line: &str) -> String {
+/// The full `[crossdev.<tuple>]` `Location::Alias` body for
+/// `name`/`category`/`packages_line` — the single formatter both
+/// `ConfigEntry::Alias`'s `change()` (comparison) and `apply()` (write) use,
+/// so they can never drift apart from each other. `name` is per-target
+/// (`crossdev.<tuple>`, see `super::overlay_name`) so each cross target gets
+/// its own section/file and multiple targets can coexist on one prefix
+/// instead of the last `--setup`/`--init-target` silently orphaning the
+/// previous target's alias.
+fn alias_body(name: &str, category: &str, packages_line: &str) -> String {
     format!(
-        "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
+        "[{name}]\nalias-source = gentoo\nalias-target = {category}\n\
          alias-packages = {packages_line}\n"
     )
 }
@@ -39,12 +44,15 @@ pub(super) enum ConfigEntry {
     /// string), or it may belong to something else entirely em must not
     /// clobber.
     CreateOnly { path: Utf8PathBuf, desired: String },
-    /// A `Location::Alias` `[crossdev]` repos.conf entry: refreshed when it's
-    /// recognisably em's own (has an `alias-target =` key) but stale, left
-    /// alone when it's foreign (e.g. a real crossdev/eselect-managed
-    /// physical overlay with a `location =` key instead).
+    /// A `Location::Alias` `[crossdev.<tuple>]` repos.conf entry: refreshed
+    /// when it's recognisably em's own (has an `alias-target =` key) but
+    /// stale, left alone when it's foreign (e.g. a real crossdev/eselect-
+    /// managed physical overlay with a `location =` key instead). `name` is
+    /// per-target (see `super::overlay_name`), so it also doubles as the
+    /// filename stem — each target's alias lives in its own file/section.
     Alias {
         path: Utf8PathBuf,
+        name: String,
         category: String,
         packages_line: String,
     },
@@ -128,6 +136,7 @@ impl ConfigEntry {
             }
             ConfigEntry::Alias {
                 path,
+                name,
                 category,
                 packages_line,
             } => match std::fs::read_to_string(path) {
@@ -140,7 +149,7 @@ impl ConfigEntry {
                 // package silently survive while an edit anywhere else in
                 // the line would just as silently have been clobbered, an
                 // inconsistency with no principled reason to keep.
-                Ok(existing) if existing == alias_body(category, packages_line) => {
+                Ok(existing) if existing == alias_body(name, category, packages_line) => {
                     Change::Unchanged
                 }
                 // Foreign (no `alias-target =` key at all) — never touch.
@@ -174,6 +183,7 @@ impl ConfigEntry {
             ConfigEntry::CreateOnly { path, desired } => write_if_absent(path, desired),
             ConfigEntry::Alias {
                 path,
+                name,
                 category,
                 packages_line,
             } => {
@@ -184,7 +194,7 @@ impl ConfigEntry {
                 {
                     return Ok(());
                 }
-                std::fs::write(path, alias_body(category, packages_line))
+                std::fs::write(path, alias_body(name, category, packages_line))
                     .with_context(|| format!("writing {path}"))
             }
             ConfigEntry::Dir { path } => {
@@ -388,6 +398,7 @@ mod tests {
         std::fs::write(&path, &foreign).unwrap();
         let entries = vec![ConfigEntry::Alias {
             path: path.clone(),
+            name: "crossdev.riscv64-unknown-linux-gnu".to_owned(),
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils".to_owned(),
         }];
@@ -416,6 +427,7 @@ mod tests {
         .unwrap();
         let entries = vec![ConfigEntry::Alias {
             path: path.clone(),
+            name: "crossdev.riscv64-unknown-linux-gnu".to_owned(),
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils".to_owned(),
         }];
@@ -475,10 +487,15 @@ mod tests {
     fn fill_gaps_only_never_touches_an_existing_alias_even_with_a_different_packages_line() {
         let dir = tempfile::tempdir().unwrap();
         let path = Utf8PathBuf::from_path_buf(dir.path().join("crossdev.conf")).unwrap();
-        let existing = alias_body("cross-riscv64-unknown-linux-gnu", "sys-devel/binutils");
+        let existing = alias_body(
+            "crossdev.riscv64-unknown-linux-gnu",
+            "cross-riscv64-unknown-linux-gnu",
+            "sys-devel/binutils",
+        );
         std::fs::write(&path, &existing).unwrap();
         let entries = vec![ConfigEntry::Alias {
             path: path.clone(),
+            name: "crossdev.riscv64-unknown-linux-gnu".to_owned(),
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils dev-vcs/git".to_owned(),
         }];

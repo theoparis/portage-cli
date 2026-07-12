@@ -114,8 +114,20 @@ fn merge_merge_flags(globals: &Cli, args: &MergeFlags) -> MergeFlags {
     }
 }
 
-/// The overlay name crossdev uses — one overlay holds every `cross-*` category.
+/// The overlay name prefix crossdev uses for its `Location::Alias` repos.conf
+/// entries.
 const OVERLAY_NAME: &str = "crossdev";
+
+/// The per-target overlay/section name (`crossdev.<tuple>`): each cross
+/// target gets its own file/section, so setting up a second target on the
+/// same prefix doesn't silently orphan the first one's alias (found live:
+/// `crossdev --setup` for a second target left the first target's alias
+/// untouched under `--setup`'s `FillGapsOnly` policy, since the fixed
+/// single `crossdev.conf` name made "already present" true regardless of
+/// which target it actually named).
+fn overlay_name(target: &CrossTarget) -> String {
+    format!("{OVERLAY_NAME}.{}", target.tuple)
+}
 
 pub async fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
     // `--target` is global (`Cli`, not `CrossdevArgs`): one flag, read the
@@ -892,8 +904,10 @@ fn alias_repo_conf_entry(
     }
 
     let conf_dir = setup_root(globals).join("etc/portage/repos.conf");
+    let name = overlay_name(target);
     Ok(config_plan::ConfigEntry::Alias {
-        path: conf_dir.join(format!("{OVERLAY_NAME}.conf")),
+        path: conf_dir.join(format!("{name}.conf")),
+        name,
         category: category.to_owned(),
         packages_line: alias_packages_line(target, extras),
     })
@@ -1053,13 +1067,15 @@ fn sysroot_repos_conf_entries(
     extras: &[Cpn],
 ) -> Vec<config_plan::ConfigEntry> {
     let dir = sysroot.join("etc/portage/repos.conf");
+    let name = overlay_name(target);
     vec![
         config_plan::ConfigEntry::CreateOnly {
             path: dir.join("gentoo.conf"),
             desired: format!("[DEFAULT]\nmain-repo = gentoo\n\n[gentoo]\nlocation = {gentoo}\n"),
         },
         config_plan::ConfigEntry::Alias {
-            path: dir.join(format!("{OVERLAY_NAME}.conf")),
+            path: dir.join(format!("{name}.conf")),
+            name,
             category: category.to_owned(),
             packages_line: alias_packages_line(target, extras),
         },
@@ -1768,7 +1784,8 @@ mod tests {
         let globals = test_cli_at_root(root);
 
         write_alias_repo_conf(&globals, &gentoo, &target, &category).unwrap();
-        let file = conf.join(format!("{OVERLAY_NAME}.conf"));
+        let name = overlay_name(&target);
+        let file = conf.join(format!("{name}.conf"));
         let body = std::fs::read_to_string(&file).unwrap();
         assert!(body.contains("alias-source = gentoo"));
         assert!(body.contains(&format!("alias-target = {category}")));
@@ -1776,7 +1793,7 @@ mod tests {
 
         // Parses back into a Location::Alias with the full package set.
         let rc = portage_repo::ReposConf::load_from(std::slice::from_ref(&conf)).unwrap();
-        let entry = rc.find(OVERLAY_NAME).expect("crossdev entry present");
+        let entry = rc.find(&name).expect("crossdev entry present");
         let portage_repo::Location::Alias { source, aliases } = &entry.location else {
             panic!("expected Location::Alias, got {:?}", entry.location);
         };
@@ -1796,6 +1813,52 @@ mod tests {
         let body_before = std::fs::read_to_string(&file).unwrap();
         write_alias_repo_conf(&globals, &gentoo, &target, &category).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), body_before);
+    }
+
+    /// Two different cross targets coexist on the same prefix: setting up a
+    /// second target must not orphan the first one's alias. Before
+    /// per-target naming, both targets shared one fixed `crossdev.conf`/
+    /// `[crossdev]` name, so the second `write_alias_repo_conf` call for a
+    /// different target either clobbered the first (`Sync`) or, under
+    /// `--setup`'s `FillGapsOnly` policy, silently no-op'd since the file
+    /// was merely *present* — either way the first target stopped resolving
+    /// (found live: `em crossdev -T aarch64... --local --setup` then `em
+    /// crossdev -T riscv64... --local --setup` left only the aarch64 alias
+    /// on disk, so `cross-riscv64-unknown-linux-gnu/binutils` resolved to
+    /// "no ebuilds found").
+    #[test]
+    fn write_alias_repo_conf_lets_two_targets_coexist() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let conf = root.join("etc/portage/repos.conf");
+        let gentoo = root.join("gentoo");
+        let riscv64 = CrossTarget::parse("riscv64-unknown-linux-gnu", false).unwrap();
+        let aarch64 = CrossTarget::parse("aarch64-unknown-linux-gnu", false).unwrap();
+        for target in [&riscv64, &aarch64] {
+            for (cat, pkg, _) in target.packages() {
+                std::fs::create_dir_all(gentoo.join(cat).join(pkg)).unwrap();
+            }
+        }
+        let globals = test_cli_at_root(root);
+
+        write_alias_repo_conf(&globals, &gentoo, &riscv64, &riscv64.category()).unwrap();
+        write_alias_repo_conf(&globals, &gentoo, &aarch64, &aarch64.category()).unwrap();
+
+        let rc = portage_repo::ReposConf::load_from(std::slice::from_ref(&conf)).unwrap();
+        for target in [&riscv64, &aarch64] {
+            let name = overlay_name(target);
+            let entry = rc
+                .find(&name)
+                .unwrap_or_else(|| panic!("{name} entry present"));
+            let portage_repo::Location::Alias { aliases, .. } = &entry.location else {
+                panic!("expected Location::Alias, got {:?}", entry.location);
+            };
+            assert!(
+                aliases.contains_key(&target.category()),
+                "{}'s alias missing after setting up the other target",
+                target.category()
+            );
+        }
     }
 
     /// A stale alias file from an earlier run (a different package set, e.g.
@@ -1819,13 +1882,14 @@ mod tests {
 
         let conf_dir = conf.clone();
         std::fs::create_dir_all(&conf_dir).unwrap();
-        let file = conf_dir.join(format!("{OVERLAY_NAME}.conf"));
+        let name = overlay_name(&target);
+        let file = conf_dir.join(format!("{name}.conf"));
         // Simulate a stale own-entry: our alias format, but a package set
         // that no longer matches what `packages()` computes now.
         std::fs::write(
             &file,
             format!(
-                "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
+                "[{name}]\nalias-source = gentoo\nalias-target = {category}\n\
                  alias-packages = sys-devel/binutils dev-debug/gdb\n"
             ),
         )
@@ -1838,7 +1902,7 @@ mod tests {
             "stale alias-packages line was not refreshed: {refreshed:?}"
         );
         let expected = format!(
-            "[{OVERLAY_NAME}]\nalias-source = gentoo\nalias-target = {category}\n\
+            "[{name}]\nalias-source = gentoo\nalias-target = {category}\n\
              alias-packages = {}\n",
             alias_packages_line(&target, &[])
         );
@@ -1863,8 +1927,9 @@ mod tests {
         let globals = test_cli_at_root(root);
 
         std::fs::create_dir_all(&conf).unwrap();
-        let file = conf.join(format!("{OVERLAY_NAME}.conf"));
-        let foreign = format!("[{OVERLAY_NAME}]\nlocation = /var/db/repos/{OVERLAY_NAME}\n");
+        let name = overlay_name(&target);
+        let file = conf.join(format!("{name}.conf"));
+        let foreign = format!("[{name}]\nlocation = /var/db/repos/{OVERLAY_NAME}\n");
         std::fs::write(&file, &foreign).unwrap();
 
         write_alias_repo_conf(&globals, &gentoo, &target, &category).unwrap();
