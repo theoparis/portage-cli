@@ -138,6 +138,21 @@ STATUS: in progress — executing. Using one dedicated sandbox per scenario
   autosolve-use works here and doesn't there, and the only difference is
   whether the cpv is already in `installed_cpvs`.
 
+- **Scenario 4 (cross riscv64) — full success.** `em --target
+  riscv64-unknown-linux-gnu crossdev --setup --jobs 1 --keep-going`
+  completed cleanly end-to-end (binutils → os-headers → gcc-stage1 → libc →
+  gcc-stage2, 0 failures): `>>> cross toolchain riscv64-unknown-linux-gnu
+  ready in //usr/riscv64-unknown-linux-gnu`. Verified the compiler actually
+  works (`riscv64-unknown-linux-gnu-gcc --version` runs). Followed by
+  `em --target riscv64-unknown-linux-gnu stages --stage1 -p --autosolve-use`:
+  103 packages, exit 0, all seven `app-alternatives/*` `^^` constraints
+  correctly autosolved (no unsatisfied-REQUIRED_USE report) — **further
+  confirms the `--prefix` root-cause diagnosis above**: cross's target
+  sysroot VDB is fresh/empty (nothing "already installed" there, same
+  reasoning as `--local`), so `cede_required_use`'s early return doesn't
+  fire and Level-C works as designed. Real `stages --stage1` build kicked
+  off.
+
 - **`docs/root-model.md` is stale w.r.t. `--local`**: it documents `--root`/
   `--prefix` in detail (the scenario table, BDEPEND/RDEPEND satisfaction
   roots) but has no section for `--local` at all — its BROOT model
