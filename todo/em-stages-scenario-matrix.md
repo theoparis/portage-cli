@@ -197,6 +197,40 @@ STATUS: in progress — executing. Using one dedicated sandbox per scenario
   /root/stage1-root -p --autosolve-use`) now resolves cleanly — 78
   packages, exit 0, `tar` correctly autosolved to `libarchive`, no crash.
 
+- **Scenario 1 (native `--root`) — real `stages --stage1` build, post-fix.**
+  71 of 77 packages merged; 6 failed. Checked each build.log directly
+  (not assumed) before categorizing, per the correction on this session's
+  earlier premature cross-build triage:
+  - `sys-devel/m4-1.4.20`, `sys-apps/coreutils-9.9-r1`, `app-editors/nano-8.7`:
+    all three fail with the identical gnulib error (`./stdlib.h:807:20:
+    error: expected identifier or '(' before '_Generic'` in `bsearch`'s
+    declaration) — a real gnulib/glibc C23 qualifier-generic-function
+    incompatibility (upstream fix: Gentoo bug 969219, "Port to C23
+    qualifier-generic fns like strchr"). **Verified, not assumed**: found
+    the actual fix already sitting in this repo tree at
+    `sys-apps/coreutils/files/coreutils-9.9-glibc-2.43-c23.patch`, but it is
+    **not wired into the ebuild's `PATCHES` array** (`coreutils-9.9-r1.ebuild`
+    `src_prepare`, only lists two unrelated patches plus a separately-fetched
+    `MY_PATCH` bundle that predates this Nov-2025 cherry-pick). `m4` has no
+    such patch file in this tree at all. This is a real gap in the checked-out
+    ebuild tree snapshot's patch set (would hit real `emerge` identically,
+    since it's a source-level compile error against this glibc version, not
+    anything `em`-specific) — not an `em` bug.
+  - `sys-apps/portage-3.0.77-r3`: meson configure fails with `<PythonExternalProgram
+    'python3'> is not a valid python or it is missing distutils` — the
+    well-known Python 3.12+ removal of the stdlib `distutils` module; this
+    ebuild's meson setup isn't distutils-free yet (or needs a shim). Also a
+    real, independently-known compatibility gap, not `em`-specific.
+  - `dev-lang/python-3.13.11` (×2, once per consumer needing it): "one or
+    more distfiles could not be fetched" — not investigated further (likely
+    a genuine cache-miss + this specific patch-level release not mirrored,
+    same class as the distfile-reliability gaps already tracked in
+    `todo/distfile-fetch-reliability.md`), but flagged here rather than
+    assumed, since this session's own earlier mistake was asserting
+    "legitimate" without checking.
+  - **None of these are new findings requiring an `em` fix.** The stack
+    overflow above is the real, `em`-specific bug from this run.
+
 - **Re-verified after the fix**: redeployed the fixed binary to all four
   sandboxes. Scenario 2 (`--prefix`) and scenario 3 (`--local`) still show
   exactly their previously-diagnosed, separate bugs (the `cede_required_use`
