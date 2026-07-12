@@ -103,10 +103,8 @@ for it:
   chroot and `sudo chroot` in, rather than driving a host `em` against
   `--root <chroot>` — the latter doesn't exercise the same privilege/
   environment boundaries a real build needs.
-- **`crossdev-stages` sandbox** (`../crossdev-stages`, `cargo run --
-  sandbox enter/run/setup`): a clean, disposable stage3 for repeatable
-  from-scratch bootstrap testing (native and cross toolchains), backed by
-  `hakoniwa`/`fakeroost` forks.
+- **`crossdev-stages` sandbox** for a clean, disposable, from-scratch stage3
+  — see the recipe below.
 - **`--local`/`--prefix` wall-testing**: building a real, complete
   dependency closure (e.g. the full native+cross toolchain bootstrap, or
   the firefox closure) end-to-end in a throwaway root is how privilege
@@ -119,6 +117,69 @@ These aren't scripted or repeatable in the way `bench-em-vs-emerge.sh` is;
 treat them as exploratory/regression sweeps to run before/after a change
 that touches build execution, privilege handling, or root/prefix mapping,
 not as a gate that runs every time.
+
+#### `crossdev-stages` sandbox recipe
+
+`../crossdev-stages` (`~/Sources/crossdev-stages`, a sibling Rust project)
+can spin up a clean, disposable stage3 rootfs in seconds — much faster than
+hand-rolling one, and it doesn't carry state from a previous test run the
+way a reused `/tmp`/`/var/tmp` scratch root can. **It drives real
+`emerge`/`{tuple}-emerge` internally for its own `sandbox crossdev`/
+`target stage1` commands — those are not used here.** Only `sandbox setup`
+(and optionally `sandbox prepare`) are used, to get a rootfs; `em` is then
+copied in and driven directly via `sudo chroot`, exactly like the plain
+chroot-testing recipe above, just with a faster/cleaner way to obtain the
+rootfs.
+
+```sh
+cd ~/Sources/crossdev-stages
+
+# One sandbox per scenario under test — cheap, don't share unless the
+# scenarios are guaranteed not to interact (e.g. two different --prefix
+# subdirs in the same chroot are fine; a from-scratch --root bootstrap and
+# a --local bootstrap probably shouldn't share one, to keep each run's
+# findings unambiguous).
+./target/release/crossdev-stages sandbox setup --arch aarch64 --name em-test-1
+# NOTE: --dry-run on `sandbox setup` is not actually a dry run (observed
+# 2026-07-12) — it unpacks the real stage3 anyway. Don't rely on it to
+# preview without side effects.
+
+cd /home/lu_zero/Sources/portage-cli
+cargo build --release -p portage-cli
+SB=~/.cache/crossdev-stages/sandboxes/em-test-1
+sudo mkdir -p "$SB/usr/local/bin"
+sudo cp target/release/em "$SB/usr/local/bin/em"
+
+# The bare stage3 has no repo tree, no /etc/resolv.conf (breaks distfile
+# fetch DNS), and no distfiles cache — wire all three in:
+sudo mkdir -p "$SB/var/db/repos/gentoo" "$SB/proc" "$SB/dev" "$SB/sys" "$SB/var/cache/distfiles"
+sudo mount --bind "$(pwd)/portage-repo/gentoo" "$SB/var/db/repos/gentoo"   # real tree + md5-cache, already checked out
+sudo mount --bind /proc "$SB/proc"
+sudo mount --rbind /dev "$SB/dev"
+sudo mount --bind /sys "$SB/sys"
+sudo cp /etc/resolv.conf "$SB/etc/resolv.conf"
+sudo mount --bind /var/cache/distfiles "$SB/var/cache/distfiles"   # cache hits avoid needing network for most fetches
+
+sudo chroot "$SB" /usr/local/bin/em --help   # sanity check before anything real
+```
+
+From there, drive scenarios exactly as documented in
+`docs/root-model.md`/`todo/em-stages-scenario-matrix.md`: e.g.
+`sudo chroot "$SB" /usr/local/bin/em toolchain --setup --root /root/x -p`
+first (fast, catches resolution regressions), then the real (non-`-p`) run.
+
+This exact recipe (2026-07-12, four sandboxes: native `--root`, `--prefix`,
+`--local`, cross riscv64) is what surfaced two real, previously-unknown
+bugs in a single session — `cede_required_use`'s early return silently
+skipping Level-C autosolve for already-installed packages under `--prefix`,
+and `--local`'s preflight BDEPEND check not recognizing `PATH`-found host
+tools — both invisible to `-p`-only testing against a repo tree with
+nothing installed, and both requiring a *real* stage3 base (already-populated
+VDB) to reproduce. See `todo/em-stages-scenario-matrix.md` for the full
+write-up.
+
+Clean up when done: `sudo umount "$SB"/{var/cache/distfiles,sys,dev,proc,var/db/repos/gentoo}` (or `umount -R`
+for the rbind under `dev`), then `./target/release/crossdev-stages sandbox destroy --name em-test-1`.
 
 ## What's *not* here (known gaps)
 
