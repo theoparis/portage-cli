@@ -231,6 +231,22 @@ STATUS: in progress — executing. Using one dedicated sandbox per scenario
   - **None of these are new findings requiring an `em` fix.** The stack
     overflow above is the real, `em`-specific bug from this run.
 
+- **`cede_required_use` bug scope broadened: also hits `--root` in an
+  upgrade/resume scenario, not just `--prefix`.** Testing `ACCEPT_KEYWORDS="~arm64"`
+  against the already-populated `/root/stage1-root` (134 packages installed
+  from the earlier successful real build, including `sys-apps/gawk-5.3.2`
+  and `app-alternatives/awk-4`) re-triggered the exact same
+  `installed_cpvs.contains(cpv)` early-return bug: `gawk` needed upgrading
+  to `5.4.0-r2` under the newly-accepted testing keywords, but
+  `app-alternatives/awk-4` being already-installed skipped Level-C
+  reconsideration, re-exposing its `^^ ( gawk busybox mawk nawk )` violation
+  with `--autosolve-use` unable to fix it (same shape as the `--prefix`
+  finding, just reached via "re-run stage1 against a partially-built root"
+  instead of "base = host"). **Not a `--prefix`-specific bug** — any
+  scenario where the target already has the package installed can hit it.
+  Redone on a fresh `/root/stage1-testing` root instead to get an
+  uncontaminated read on `~arm64`.
+
 - **Re-verified after the fix**: redeployed the fixed binary to all four
   sandboxes. Scenario 2 (`--prefix`) and scenario 3 (`--local`) still show
   exactly their previously-diagnosed, separate bugs (the `cede_required_use`
