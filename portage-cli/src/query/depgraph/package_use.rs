@@ -4,7 +4,7 @@ use std::io::Write as _;
 use camino::Utf8Path;
 use portage_atom::{Cpv, Dep, Version};
 use portage_atom_pubgrub::{
-    DepEdge, UseConfig, UseFlagRequirement, UseFlagState, UseOverride, apply_package_use,
+    DepEdge, UseFlagRequirement, UseFlagState, UseOverride, resolve_effective_use,
 };
 
 /// Entries to write into `/etc/portage/package.use`.
@@ -29,7 +29,8 @@ pub(super) fn build_entries(
     flag_reqs: &[UseFlagRequirement],
     root_atoms: &[String],
     edges: &[DepEdge],
-    use_config: &UseConfig,
+    pre_env: &str,
+    env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
 ) -> Vec<PackageUseEntry> {
     // Pre-compute once for all requirements.
@@ -66,7 +67,14 @@ pub(super) fn build_entries(
         // (e.g. a PYTHON_TARGETS member in the profile) just triggers a rebuild,
         // shown via the `*` USE marker — it is not an autounmask change.
         let cpv = Cpv::new(*cpn, ver.clone());
-        let eff = apply_package_use(use_config, &cpv, req.package.slot(), package_use);
+        let eff = resolve_effective_use(
+            &HashMap::new(),
+            pre_env,
+            &cpv,
+            req.package.slot(),
+            package_use,
+            env_use,
+        );
         let mut flags: Vec<String> = Vec::new();
         for f in &req.required_enabled {
             if eff.get_opt(*f) != Some(UseFlagState::Enabled) {

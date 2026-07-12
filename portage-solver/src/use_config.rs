@@ -10,7 +10,6 @@
 //! identical type today and will re-export this one in a follow-up so the two
 //! cannot drift.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 
 use portage_atom::interner::{DefaultInterner, Interned};
@@ -41,25 +40,20 @@ pub enum UseFlagState {
 
 /// Configuration for USE flag evaluation during dependency conversion.
 ///
-/// Unset flags default to [`UseFlagState::Disabled`] (falling back to the
-/// ebuild's own `+`/`-` IUSE default where the caller knows it — see
-/// [`get_with_iuse_default`] and [`fold_iuse_defaults`]).
+/// Unset flags default to [`UseFlagState::Disabled`].
 ///
 /// See [PMS 8.2](https://projects.gentoo.org/pms/9/pms.html#use-flag-dependent-dependencies).
 ///
-/// `wildcard_reset` records that a `-*` clear-all was in effect when this
-/// config was built. Portage seats the ebuild's own IUSE defaults *below* the
-/// profile/`make.conf`/env layers, so a `-*` there wipes them; `em` folds IUSE
-/// defaults in a later per-package step, so when this bit is set an unset flag
-/// is treated as definitively `Disabled` rather than taking its `+` default —
-/// e.g. curl's `+quic` stays off under `USE="-* build"`.
-///
-/// [`get_with_iuse_default`]: UseConfig::get_with_iuse_default
-/// [`fold_iuse_defaults`]: UseConfig::fold_iuse_defaults
+/// A fully-resolved `UseConfig` (the output of [`resolve_effective_use`]) has
+/// every flag the package cares about already decided — there is no separate
+/// "fall back to the IUSE default" step, because [`resolve_effective_use`]
+/// already folded the ebuild's own `+`/`-` IUSE defaults in at their correct
+/// position in portage's real USE-resolution order. See that function's doc
+/// for why a config built any other way (e.g. a bare [`UseConfig::new`] plus
+/// ad hoc overrides) must not be treated as authoritative for a real package.
 #[derive(Debug, Clone, Default)]
 pub struct UseConfig {
     flags: HashMap<Interned<DefaultInterner>, UseFlagState>,
-    wildcard_reset: bool,
 }
 
 impl UseConfig {
@@ -102,66 +96,6 @@ impl UseConfig {
         self.flags.get(&flag).copied()
     }
 
-    /// Record that a `-*` clear-all was in effect (see [`UseConfig`] docs).
-    pub fn set_wildcard_reset(&mut self) {
-        self.wildcard_reset = true;
-    }
-
-    /// Whether a `-*` clear-all was in effect when this config was built.
-    pub fn wildcard_reset(&self) -> bool {
-        self.wildcard_reset
-    }
-
-    /// Get the state of a flag, falling back to an IUSE default if the flag
-    /// is not explicitly configured.
-    ///
-    /// If the flag is set in the config, returns its state. Otherwise, if
-    /// [`wildcard_reset`](Self::wildcard_reset) is set (a `-*` clear-all was in
-    /// effect), returns `Disabled` unconditionally — `-*` means this flag was
-    /// explicitly reset, not merely unmentioned, so the package's own `+`
-    /// default must not resurrect it. Otherwise, if the IUSE default is
-    /// `Enabled` (the `+` prefix), returns `Enabled`; else `Disabled`.
-    pub fn get_with_iuse_default(
-        &self,
-        flag: Interned<DefaultInterner>,
-        iuse_default: Option<IUseDefault>,
-    ) -> UseFlagState {
-        match self.flags.get(&flag) {
-            Some(&state) => state,
-            None if self.wildcard_reset => UseFlagState::Disabled,
-            None => match iuse_default {
-                Some(IUseDefault::Enabled) => UseFlagState::Enabled,
-                _ => UseFlagState::Disabled,
-            },
-        }
-    }
-
-    /// Fold a version's IUSE defaults into this config: for every flag not
-    /// already set explicitly, apply its `+`/`-` default — unless
-    /// [`wildcard_reset`](Self::wildcard_reset) is set, in which case an unset
-    /// flag is recorded as `Disabled` instead (a `-*` clear-all explicitly
-    /// reset it; the package's own default must not resurrect it). After this,
-    /// the config is an authoritative "desired" set — a plain `get()` gives the
-    /// flag's effective state with no separate default lookup needed.
-    pub fn fold_iuse_defaults(
-        &mut self,
-        defaults: &HashMap<Interned<DefaultInterner>, IUseDefault>,
-    ) {
-        for (flag, def) in defaults {
-            if !self.flags.contains_key(flag) {
-                let state = if self.wildcard_reset {
-                    UseFlagState::Disabled
-                } else {
-                    match def {
-                        IUseDefault::Enabled => UseFlagState::Enabled,
-                        IUseDefault::Disabled => UseFlagState::Disabled,
-                    }
-                };
-                self.flags.insert(*flag, state);
-            }
-        }
-    }
-
     /// Returns all flags explicitly enabled in this config (sorted, for stable output).
     pub fn enabled_flags(&self) -> Vec<Interned<DefaultInterner>> {
         let mut v: Vec<Interned<DefaultInterner>> = self
@@ -195,8 +129,8 @@ impl UseFlagLookup for UseConfig {
 ///
 /// Parsing (`+flag`/`flag` → on, `-flag` → off) and interning happen once at
 /// config-read time (via [`UseOverride::parse`]) so the per-version
-/// [`apply_package_use`] call does no string work. Cheap to copy (an interned
-/// `u32` plus a bool).
+/// [`resolve_effective_use`] call does no string work. Cheap to copy (an
+/// interned `u32` plus a bool).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UseOverride {
     /// The interned flag name, with any `+`/`-` prefix stripped.
@@ -223,58 +157,148 @@ impl UseOverride {
     }
 }
 
-/// Apply per-package USE flag overrides on top of a base [`UseConfig`].
+/// Resolve a single package's effective USE.
 ///
-/// Scans `package_use` in order and applies any entries whose atom matches
-/// `cpv`. Returns [`Cow::Borrowed`] when no entry actually matches (not merely
-/// when the list is empty — a system-wide `package.use` list is almost never
-/// empty, but any given package is rarely named in it) to avoid a clone. This
-/// is policy resolution the *caller* performs to build the desired set; the
-/// solver itself never calls it. Overrides are pre-parsed [`UseOverride`]s, so
-/// this does no string work.
+/// This is the **only** place "is flag F on for package P" gets decided —
+/// every consumer that used to re-derive its own "unset flag → check the
+/// IUSE default" fallback (there were five independent copies of this logic
+/// scattered across `portage-cli` before 2026-07-12; see
+/// `use-config-duplicate-fallback-logic` in the project's own notes) must
+/// call this function instead. Do not reimplement any part of this fold
+/// elsewhere.
 ///
-/// Also returns [`Cow::Borrowed`] unconditionally when `base`'s
-/// [`wildcard_reset`](UseConfig::wildcard_reset) is set: a `USE=-*` clear-all
-/// makes `package.use` entirely inert in real portage, not just unable to
-/// revive an IUSE default — confirmed empirically (`em stages --stage1`
-/// live-testing, 2026-07-12): `package.use`'s `sys-devel/m4 nls` and
-/// `sys-apps/baselayout -build` both had zero effect under `USE="-* build"`
-/// (neither a `+flag` nor a `-flag` override took hold), while the exact same
-/// entries worked normally without the wildcard reset. `package.use` is just
-/// another layer in the same incremental accumulation that `-*` wipes.
-pub fn apply_package_use<'a>(
-    base: &'a UseConfig,
+/// Folds four token groups, in exactly portage's own USE-resolution order
+/// (`pkginternal < defaults/conf < pkg < env` — Portage's `USE_ORDER`,
+/// `config.py`'s `regenerate()`/`setcpv()`):
+///
+/// 1. `iuse_defaults` — the ebuild's own `+`/`-` IUSE defaults (`pkginternal`).
+/// 2. `pre_env` — the profile/`make.conf` fold, already computed by
+///    `portage_repo`'s `ResolvedUse::pre_env` (`defaults` + `conf`).
+/// 3. This package's matching `package_use` entries (`pkg`).
+/// 4. `env_use` — the raw process-environment `USE` value, unmerged (`env`).
+///
+/// A `-*` token in **any** of these clears exactly what's accumulated from
+/// the layers before it — that's an ordinary property of the fold itself
+/// (see [`merge_flag_lists_signed`]), not a derived flag anyone needs to
+/// track or branch on. This is why, empirically, `package.use` survives a
+/// `-*` in `make.conf` (layer 2) but not one in the environment (layer 4),
+/// and why the ebuild's own `+`-defaulted IUSE (layer 1) is wiped by a `-*`
+/// in *either* — confirmed against real `emerge` (`em stages --stage1`
+/// live-testing, 2026-07-12): `package.use`'s `sys-devel/m4 nls` survives a
+/// `make.conf`-level `USE="-* build"` but not an environment-level one;
+/// `app-alternatives/awk`'s `+gawk` IUSE default is wiped by either.
+pub fn resolve_effective_use(
+    iuse_defaults: &HashMap<Interned<DefaultInterner>, IUseDefault>,
+    pre_env: &str,
     cpv: &Cpv,
     slot: Option<Interned<DefaultInterner>>,
     package_use: &[(Dep, Vec<UseOverride>)],
-) -> Cow<'a, UseConfig> {
-    if base.wildcard_reset()
-        || !package_use
-            .iter()
-            .any(|(dep, _)| atom_matches_cpv(dep, cpv, slot))
-    {
-        return Cow::Borrowed(base);
-    }
-    let mut cfg = base.clone();
-    for (dep, overrides) in package_use {
-        if atom_matches_cpv(dep, cpv, slot) {
-            for ov in overrides {
-                if ov.enable {
-                    cfg.enable(ov.flag);
-                } else {
-                    cfg.disable(ov.flag);
-                }
-            }
+    env_use: &str,
+) -> UseConfig {
+    fn token(name: &str, enable: bool) -> String {
+        if enable {
+            name.to_string()
+        } else {
+            format!("-{name}")
         }
     }
-    Cow::Owned(cfg)
+
+    let iuse_tokens: String = iuse_defaults
+        .iter()
+        .map(|(flag, def)| token(flag.as_str(), matches!(def, IUseDefault::Enabled)))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let pkg_use_tokens: String = package_use
+        .iter()
+        .filter(|(dep, _)| atom_matches_cpv(dep, cpv, slot))
+        .flat_map(|(_, overrides)| overrides.iter())
+        .map(|ov| token(ov.flag.as_str(), ov.enable))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let folded = merge_flag_lists_signed(
+        [
+            iuse_tokens.as_str(),
+            pre_env,
+            pkg_use_tokens.as_str(),
+            env_use,
+        ]
+        .into_iter(),
+    );
+
+    let mut cfg = UseConfig::new();
+    for tok in folded {
+        // The fold marks a `-*` it saw with a leading literal token in its
+        // output — meaningful when the caller threads the result into a
+        // *further* fold, moot here since this is the terminal resolution.
+        if tok == "-*" {
+            continue;
+        }
+        match tok.strip_prefix('-') {
+            Some(name) => cfg.disable(Interned::intern(name)),
+            None => cfg.enable(Interned::intern(tok.as_str())),
+        }
+    }
+    cfg
+}
+
+/// Merge ordered token-group strings with incremental USE semantics: `-flag`
+/// removes a previously-accumulated `flag`, and the special token `-*` is the
+/// clear-all (make.conf(5): "Clearing these variables requires a clear-all as
+/// in: `export USE=-*`") — it discards every flag accumulated *from the
+/// groups before it*, in this call's own group order, so later groups rebuild
+/// from empty. Preserves explicit disables (`-flag` is emitted rather than
+/// dropped, even for a flag never enabled) and, if any group contained `-*`,
+/// prepends a leading `-*` marker to the output — meaningful only when the
+/// result is threaded into a further fold; [`resolve_effective_use`], the
+/// only caller in this crate, is always the terminal fold and skips it.
+///
+/// Intentionally duplicated from `portage_repo::repo::profile`'s
+/// identically-named, identically-behaved function rather than imported:
+/// `portage-solver` is meant to stay a lightweight, foundational vocabulary
+/// crate (see the module doc), and `portage-repo` is a heavier, higher-level
+/// crate (embedded ebuild shell, brush) with no existing dependency edge to
+/// this one. This function is ~15 lines of pure string processing with no
+/// external dependencies of its own — cheaper to keep in sync by inspection
+/// than to justify a new cross-crate dependency for.
+fn merge_flag_lists_signed<'a>(iter: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut order: Vec<String> = Vec::new();
+    let mut state: HashMap<String, bool> = HashMap::new();
+    let mut saw_wildcard = false;
+    for val in iter {
+        for tok in val.split_whitespace() {
+            if tok == "-*" {
+                order.clear();
+                state.clear();
+                saw_wildcard = true;
+                continue;
+            }
+            let (name, enabled) = match tok.strip_prefix('-') {
+                Some(n) => (n.to_string(), false),
+                None => (tok.to_string(), true),
+            };
+            if !state.contains_key(&name) {
+                order.push(name.clone());
+            }
+            state.insert(name, enabled);
+        }
+    }
+    let mut out: Vec<String> = order
+        .into_iter()
+        .map(|n| if state[&n] { n } else { format!("-{n}") })
+        .collect();
+    if saw_wildcard {
+        out.insert(0, "-*".to_string());
+    }
+    out
 }
 
 /// Whether a dependency atom matches a given `cpv` (+ optional slot).
 ///
-/// Pure helper used by [`apply_package_use`]; mirrors the PMS atom-matching
-/// operators (including `~` revision-stripping and `=*` glob) without taking a
-/// solver dependency.
+/// Pure helper used by [`resolve_effective_use`]; mirrors the PMS
+/// atom-matching operators (including `~` revision-stripping and `=*` glob)
+/// without taking a solver dependency.
 pub fn atom_matches_cpv(dep: &Dep, cpv: &Cpv, slot: Option<Interned<DefaultInterner>>) -> bool {
     use std::cmp::Ordering;
     if dep.cpn != cpv.cpn {
@@ -359,74 +383,6 @@ mod tests {
     }
 
     #[test]
-    fn get_with_iuse_default_none_is_disabled() {
-        assert_eq!(
-            UseConfig::new().get_with_iuse_default(flag("ssl"), None),
-            UseFlagState::Disabled
-        );
-    }
-
-    #[test]
-    fn get_with_iuse_default_overridden_by_config() {
-        let mut config = UseConfig::new();
-        config.disable(flag("ssl"));
-        assert_eq!(
-            config.get_with_iuse_default(flag("ssl"), Some(IUseDefault::Enabled)),
-            UseFlagState::Disabled
-        );
-    }
-
-    #[test]
-    fn fold_iuse_defaults_only_missing() {
-        let mut config = UseConfig::new();
-        config.disable(flag("a")); // explicit — must survive
-        let mut defaults = HashMap::new();
-        defaults.insert(flag("a"), IUseDefault::Enabled);
-        defaults.insert(flag("b"), IUseDefault::Enabled);
-        config.fold_iuse_defaults(&defaults);
-        // 'a' stays disabled (explicit), 'b' picks up its enabled default.
-        assert_eq!(config.get(flag("a")), UseFlagState::Disabled);
-        assert_eq!(config.get(flag("b")), UseFlagState::Enabled);
-    }
-
-    #[test]
-    fn wildcard_reset_suppresses_iuse_default() {
-        // USE="-*" means a `+`-defaulted IUSE flag stays off (portage seats
-        // IUSE defaults below the env layer, so the clear-all wipes them).
-        let mut config = UseConfig::new();
-        config.set_wildcard_reset();
-        assert_eq!(
-            config.get_with_iuse_default(flag("quic"), Some(IUseDefault::Enabled)),
-            UseFlagState::Disabled
-        );
-        // An explicitly-enabled flag is unaffected.
-        config.enable(flag("build"));
-        assert_eq!(
-            config.get_with_iuse_default(flag("build"), None),
-            UseFlagState::Enabled
-        );
-    }
-
-    #[test]
-    fn wildcard_reset_fold_marks_absent_disabled() {
-        let mut config = UseConfig::new();
-        config.set_wildcard_reset();
-        let mut defaults = HashMap::new();
-        defaults.insert(flag("quic"), IUseDefault::Enabled);
-        config.fold_iuse_defaults(&defaults);
-        assert_eq!(config.get(flag("quic")), UseFlagState::Disabled);
-    }
-
-    #[test]
-    fn wildcard_reset_propagates_through_clone() {
-        // apply_package_use clones the base config; the bit must survive.
-        let mut config = UseConfig::new();
-        config.set_wildcard_reset();
-        let cloned = config.clone();
-        assert!(cloned.wildcard_reset());
-    }
-
-    #[test]
     fn use_override_parse() {
         let on = UseOverride::parse("ssl");
         assert!(on.enable);
@@ -440,69 +396,172 @@ mod tests {
         assert!(!UseOverride::parse("+-ssl").enable);
     }
 
-    #[test]
-    fn apply_package_use_borrowed_when_empty() {
-        let base = UseConfig::new();
-        let cpv = Cpv::parse("dev-libs/openssl-3.0.0").unwrap();
-        let out = apply_package_use(&base, &cpv, None, &[]);
-        assert!(matches!(out, Cow::Borrowed(_)));
+    fn cpv() -> Cpv {
+        Cpv::parse("dev-libs/openssl-3.0.0").unwrap()
+    }
+
+    fn iuse_defaults(
+        pairs: &[(&str, IUseDefault)],
+    ) -> HashMap<Interned<DefaultInterner>, IUseDefault> {
+        pairs.iter().map(|(f, d)| (flag(f), *d)).collect()
+    }
+
+    fn pkg_use(atom: &str, overrides: &[&str]) -> Vec<(Dep, Vec<UseOverride>)> {
+        vec![(
+            Dep::parse(atom).unwrap(),
+            overrides.iter().map(|o| UseOverride::parse(o)).collect(),
+        )]
     }
 
     #[test]
-    fn apply_package_use_borrowed_when_list_nonempty_but_no_match() {
-        // A system-wide package.use list is almost never empty, but any given
-        // package is rarely named in it — this must stay a borrow, not a clone.
-        let base = UseConfig::new();
-        let cpv = Cpv::parse("dev-libs/openssl-3.0.0").unwrap();
-        let dep = Dep::parse("dev-libs/other").unwrap();
-        let out = apply_package_use(&base, &cpv, None, &[(dep, vec![UseOverride::parse("ssl")])]);
-        assert!(matches!(out, Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn apply_package_use_applies_matching_atom() {
-        let base = UseConfig::new();
-        let cpv = Cpv::parse("dev-libs/openssl-3.0.0").unwrap();
-        let dep = Dep::parse("dev-libs/openssl").unwrap();
-        let out = apply_package_use(
-            &base,
-            &cpv,
+    fn resolve_effective_use_baseline_no_wildcard() {
+        // No -* anywhere: package.use applies normally, matching real emerge's
+        // baseline behaviour (m4 nls with no override).
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[]),
+            "",
+            &cpv(),
             None,
-            &[(
-                dep,
-                vec![UseOverride::parse("ssl"), UseOverride::parse("-debug")],
-            )],
+            &pkg_use("dev-libs/openssl", &["ssl"]),
+            "",
         );
-        let owned = match out {
-            Cow::Owned(c) => c,
-            _ => panic!("expected owned"),
-        };
-        assert_eq!(owned.get(flag("ssl")), UseFlagState::Enabled);
-        assert_eq!(owned.get(flag("debug")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(flag("ssl")), UseFlagState::Enabled);
     }
 
     #[test]
-    fn apply_package_use_inert_under_wildcard_reset() {
-        // USE=-* makes package.use entirely inert in real portage — confirmed
-        // empirically against `sys-devel/m4 nls` and `sys-apps/baselayout
-        // -build`, neither a `+flag` nor a `-flag` override took effect under
-        // USE="-* build" (both worked normally without it).
-        let mut base = UseConfig::new();
-        base.set_wildcard_reset();
-        let cpv = Cpv::parse("dev-libs/openssl-3.0.0").unwrap();
-        let dep = Dep::parse("dev-libs/openssl").unwrap();
-        let out = apply_package_use(
-            &base,
-            &cpv,
+    fn resolve_effective_use_package_use_survives_conf_level_wildcard() {
+        // A `-*` in `pre_env` (i.e. from profile make.defaults or make.conf)
+        // does NOT wipe package.use — confirmed against real emerge: adding
+        // `USE="-* build"` to make.conf still let `package.use: sys-devel/m4
+        // nls` apply.
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[]),
+            "-* build",
+            &cpv(),
             None,
-            &[(
-                dep,
-                vec![UseOverride::parse("ssl"), UseOverride::parse("-debug")],
-            )],
+            &pkg_use("dev-libs/openssl", &["ssl"]),
+            "",
         );
-        assert!(matches!(out, Cow::Borrowed(_)));
-        assert_eq!(out.get_opt(flag("ssl")), None);
-        assert_eq!(out.get_opt(flag("debug")), None);
+        assert_eq!(cfg.get(flag("ssl")), UseFlagState::Enabled);
+        assert_eq!(cfg.get(flag("build")), UseFlagState::Enabled);
+    }
+
+    #[test]
+    fn resolve_effective_use_package_use_wiped_by_env_level_wildcard() {
+        // A `-*` in `env_use` (the raw process environment) DOES wipe
+        // package.use — confirmed against real emerge: `USE="-* build"` at
+        // invocation left `package.use: sys-devel/m4 nls` with zero effect.
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[]),
+            "",
+            &cpv(),
+            None,
+            &pkg_use("dev-libs/openssl", &["ssl"]),
+            "-* build",
+        );
+        assert_eq!(cfg.get(flag("ssl")), UseFlagState::Disabled);
+        assert_eq!(cfg.get(flag("build")), UseFlagState::Enabled);
+    }
+
+    #[test]
+    fn resolve_effective_use_env_presence_without_wildcard_does_not_suppress_package_use() {
+        // `USE="build"` (env, no `-*`) must NOT suppress package.use —
+        // confirmed against real emerge.
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[]),
+            "",
+            &cpv(),
+            None,
+            &pkg_use("dev-libs/openssl", &["ssl"]),
+            "build",
+        );
+        assert_eq!(cfg.get(flag("ssl")), UseFlagState::Enabled);
+        assert_eq!(cfg.get(flag("build")), UseFlagState::Enabled);
+    }
+
+    #[test]
+    fn resolve_effective_use_iuse_default_suppressed_by_conf_level_wildcard() {
+        // pkginternal sits *below* both conf and env, so a `-*` in `pre_env`
+        // wipes a `+`-defaulted IUSE flag too — confirmed against real
+        // emerge's app-alternatives/awk `+gawk` default.
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[("quic", IUseDefault::Enabled)]),
+            "-* build",
+            &cpv(),
+            None,
+            &[],
+            "",
+        );
+        assert_eq!(cfg.get(flag("quic")), UseFlagState::Disabled);
+    }
+
+    #[test]
+    fn resolve_effective_use_iuse_default_suppressed_by_env_level_wildcard() {
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[("quic", IUseDefault::Enabled)]),
+            "",
+            &cpv(),
+            None,
+            &[],
+            "-* build",
+        );
+        assert_eq!(cfg.get(flag("quic")), UseFlagState::Disabled);
+    }
+
+    #[test]
+    fn resolve_effective_use_iuse_default_kept_without_any_wildcard() {
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[("quic", IUseDefault::Enabled)]),
+            "",
+            &cpv(),
+            None,
+            &[],
+            "",
+        );
+        assert_eq!(cfg.get(flag("quic")), UseFlagState::Enabled);
+    }
+
+    #[test]
+    fn resolve_effective_use_explicit_config_beats_iuse_default() {
+        // pre_env explicitly disabling a flag must survive even though the
+        // ebuild's own IUSE default is `+` (portage's USE-over-IUSE-default
+        // precedence) — pkginternal is folded first, so a later explicit
+        // -flag in pre_env/pkg/env always overrides it.
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[("ssl", IUseDefault::Enabled)]),
+            "-ssl",
+            &cpv(),
+            None,
+            &[],
+            "",
+        );
+        assert_eq!(cfg.get(flag("ssl")), UseFlagState::Disabled);
+    }
+
+    #[test]
+    fn resolve_effective_use_package_use_only_applies_to_matching_atom() {
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[]),
+            "",
+            &cpv(),
+            None,
+            &pkg_use("dev-libs/other", &["ssl"]),
+            "",
+        );
+        assert_eq!(cfg.get(flag("ssl")), UseFlagState::Disabled);
+    }
+
+    #[test]
+    fn resolve_effective_use_package_use_disable_overrides_pre_env_enable() {
+        let cfg = resolve_effective_use(
+            &iuse_defaults(&[]),
+            "ssl",
+            &cpv(),
+            None,
+            &pkg_use("dev-libs/openssl", &["-ssl"]),
+            "",
+        );
+        assert_eq!(cfg.get(flag("ssl")), UseFlagState::Disabled);
     }
 
     #[test]

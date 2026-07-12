@@ -6,7 +6,7 @@ use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, Version};
 use portage_atom_pubgrub::{
     CededFlag, DepClass, DroppedDep, PortagePackage, UseConfig, UseFlagRequirement, UseFlagState,
-    UseOverride, apply_package_use,
+    UseOverride, resolve_effective_use,
 };
 use portage_metadata::CacheEntry;
 
@@ -343,7 +343,7 @@ pub(super) fn report_dropped_deps(dropped: &[DroppedDep], data: &RepoData, arch:
 /// from the installed version's active USE (emerge -p behavior).
 fn format_flags(
     cache: &CacheEntry,
-    use_config: &UseConfig,
+    effective_use: &UseConfig,
     use_expand: &[String],
     use_expand_hidden: &[String],
     is_reinstall: bool,
@@ -361,16 +361,11 @@ fn format_flags(
 
     for f in flags {
         let name = f.name();
-        let iuse_default_enabled =
-            matches!(f.default, Some(portage_metadata::IUseDefault::Enabled));
         let interned = Interned::intern(name);
-        let mut enabled = match use_config.get_opt(interned) {
-            Some(UseFlagState::Enabled) => true,
-            Some(_) => false,
-            // A `-*` clear-all suppresses a `+` IUSE default (the flag was
-            // explicitly reset, not merely unmentioned).
-            None => iuse_default_enabled && !use_config.wildcard_reset(),
-        };
+        // `effective_use` already folded this package's IUSE defaults in (via
+        // `resolve_effective_use`), so every mentioned-or-defaulted flag is
+        // resolved; nothing left unset needs a fallback here.
+        let mut enabled = matches!(effective_use.get(interned), UseFlagState::Enabled);
 
         // In diff mode (upgrade/downgrade), skip flags that haven't changed
         if let Some(installed_use) = installed_active_use {
@@ -603,7 +598,8 @@ pub(super) struct PrettyCtx<'a> {
     pub data: &'a RepoData,
     pub installed: &'a HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
     pub installed_entries: &'a [super::installed::VdbEntry],
-    pub use_config: &'a UseConfig,
+    pub pre_env: &'a str,
+    pub env_use: &'a str,
     pub package_use: &'a [(Dep, Vec<UseOverride>)],
     pub use_expand: &'a [String],
     pub use_expand_hidden: &'a [String],
@@ -649,7 +645,8 @@ fn print_pretty_with_roots(
         data,
         installed,
         installed_entries,
-        use_config,
+        pre_env,
+        env_use,
         package_use,
         use_expand,
         use_expand_hidden,
@@ -681,7 +678,11 @@ fn print_pretty_with_roots(
         // emerge -p always shows USE flags; -v additionally shows the
         // :slot/subslot::repo suffix and download size.
         let cpv = Cpv::new(*cpn, ver.clone());
-        let effective_use = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
+        let defaults = cache
+            .map(super::effective_use::iuse_defaults)
+            .unwrap_or_default();
+        let effective_use =
+            resolve_effective_use(&defaults, pre_env, &cpv, pkg.slot(), package_use, env_use);
 
         // For upgrades/downgrades, find the installed entry to compare USE flags
         let installed_active_use = if tag == "U" || tag == "D" {

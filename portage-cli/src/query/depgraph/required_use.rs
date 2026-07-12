@@ -1,10 +1,7 @@
-use portage_atom::interner::Interned;
 use portage_atom::{Cpv, Dep, Version};
-use portage_atom_pubgrub::{
-    PortagePackage, UseConfig, UseFlagState, UseOverride, apply_package_use,
-};
-use portage_metadata::IUseDefault;
+use portage_atom_pubgrub::{PortagePackage, UseOverride, resolve_effective_use};
 
+use super::effective_use::iuse_defaults;
 use super::repo::{RepoData, find_cache};
 
 /// A `REQUIRED_USE` constraint left unsatisfied by a planned package's
@@ -26,7 +23,8 @@ pub(super) struct RequiredUseViolation {
 pub(super) fn find_violations(
     data: &RepoData,
     order: &[(PortagePackage, Version)],
-    use_config: &UseConfig,
+    pre_env: &str,
+    env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
 ) -> Vec<RequiredUseViolation> {
     let mut out = Vec::new();
@@ -42,24 +40,17 @@ pub(super) fn find_violations(
         };
 
         let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-        let effective = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
+        let defaults = iuse_defaults(cache);
+        let effective =
+            resolve_effective_use(&defaults, pre_env, &cpv, pkg.slot(), package_use, env_use);
 
-        // Mirror format_flags: a flag's effective state is the configured value
-        // if set, otherwise its IUSE default (`+flag`) — unless a `-*`
-        // clear-all suppressed the default.
+        // `effective` already has this package's IUSE defaults folded in, so
+        // an unset flag is simply Disabled — no fallback needed.
         let enabled = |flag: &str| -> bool {
-            let interned = Interned::intern(flag);
-            match effective.get_opt(interned) {
-                Some(UseFlagState::Enabled) => true,
-                Some(_) => false,
-                None if effective.wildcard_reset() => false,
-                None => cache
-                    .metadata
-                    .iuse
-                    .iter()
-                    .find(|f| f.name() == flag)
-                    .is_some_and(|f| matches!(f.default, Some(IUseDefault::Enabled))),
-            }
+            matches!(
+                effective.get(portage_atom::interner::Interned::intern(flag)),
+                portage_atom_pubgrub::UseFlagState::Enabled
+            )
         };
 
         let unmet = required_use.unsatisfied(&enabled);

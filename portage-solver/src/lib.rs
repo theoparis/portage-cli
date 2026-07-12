@@ -8,9 +8,9 @@
 //!   [`PackageDeps`], [`DepClass`], [`RequiredUse`]: what a consumer feeds a
 //!   solver.
 //! - **USE policy vocabulary** — [`UseConfig`], [`UseFlagState`],
-//!   [`IUseDefault`], [`apply_package_use`]: the per-package resolved policy
-//!   the consumer computes and the solver consumes (the solver never resolves
-//!   policy).
+//!   [`IUseDefault`], [`resolve_effective_use`]: the per-package resolved
+//!   policy the consumer computes and the solver consumes (the solver never
+//!   resolves policy).
 //! - **Solution/plan vocabulary** — [`SelectedPackage`], [`DepEdge`],
 //!   [`InstalledPackage`], [`TargetSpec`], [`Violation`]: what a solver
 //!   produces, in plain Portage terms (`Cpn`, `Version`, slot) rather than
@@ -43,7 +43,9 @@ pub use solution::{
     SelectedPackage, SolveError, TargetSpec, UseFlagRequirement, Violation,
 };
 pub use solver::Solver;
-pub use use_config::{UseConfig, UseFlagState, UseOverride, apply_package_use, atom_matches_cpv};
+pub use use_config::{
+    UseConfig, UseFlagState, UseOverride, atom_matches_cpv, resolve_effective_use,
+};
 
 // Re-export the shared atom vocabulary so consumers can `use portage_solver::`
 // for everything they need without a second crate import.

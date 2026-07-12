@@ -3,12 +3,10 @@ use std::collections::HashMap;
 use camino::Utf8Path;
 use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Dep, Version};
-use portage_atom_pubgrub::{
-    PortagePackage, UseConfig, UseFlagState, UseOverride, apply_package_use,
-};
-use portage_metadata::IUseDefault;
+use portage_atom_pubgrub::{PortagePackage, UseFlagState, UseOverride, resolve_effective_use};
 use portage_repo::{Manifest, ManifestEntry};
 
+use super::effective_use::iuse_defaults;
 use super::repo::{RepoData, find_cache};
 
 /// Per-package download size, in **bytes**, of the distfiles that are not
@@ -24,7 +22,8 @@ pub(super) fn compute(
     distdir: &str,
     data: &RepoData,
     order: &[(PortagePackage, Version)],
-    use_config: &UseConfig,
+    pre_env: &str,
+    env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
 ) -> HashMap<Cpv, u64> {
     let distdir = Utf8Path::new(distdir);
@@ -47,20 +46,11 @@ pub(super) fn compute(
         }
 
         let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-        let effective = apply_package_use(use_config, &cpv, pkg.slot(), package_use);
+        let defaults = iuse_defaults(cache);
+        let effective =
+            resolve_effective_use(&defaults, pre_env, &cpv, pkg.slot(), package_use, env_use);
         let enabled = |flag: &str| -> bool {
-            let interned = Interned::intern(flag);
-            match effective.get_opt(interned) {
-                Some(UseFlagState::Enabled) => true,
-                Some(_) => false,
-                None if effective.wildcard_reset() => false,
-                None => cache
-                    .metadata
-                    .iuse
-                    .iter()
-                    .find(|f| f.name() == flag)
-                    .is_some_and(|f| matches!(f.default, Some(IUseDefault::Enabled))),
-            }
+            matches!(effective.get(Interned::intern(flag)), UseFlagState::Enabled)
         };
 
         let mut wanted: Vec<String> = Vec::new();

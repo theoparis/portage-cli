@@ -96,7 +96,8 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
         }
         let Some(deps) = effective_use::evaluated_deps(
             cand.ctx.data,
-            cand.ctx.use_config,
+            cand.ctx.pre_env,
+            cand.ctx.env_use,
             cand.ctx.package_use,
             consumer,
             consumer_ver,
@@ -140,8 +141,6 @@ fn target_avail_for_consumer(
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use portage_atom_pubgrub::UseConfig;
-
     use super::super::repo::RepoData;
     use super::*;
     use crate::cli::Roots;
@@ -170,14 +169,14 @@ mod tests {
             repo_of: HashMap::new(),
             real_cpn_of: HashMap::new(),
         };
-        let use_config = UseConfig::new();
         let root_cpns = HashSet::new();
         let reinstall = HashSet::new();
         let roots = empty_roots();
         let ctx = TrimCtx {
             roots: &roots,
             data: &data,
-            use_config: &use_config,
+            pre_env: "",
+            env_use: "",
             package_use: &[],
             root_cpns: &root_cpns,
             reinstall_cpns: &reinstall,

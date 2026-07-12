@@ -29,18 +29,23 @@ pub(super) fn iuse_defaults(cache: &CacheEntry) -> HashMap<Interned<DefaultInter
 }
 
 pub(super) fn effective_use(
-    use_config: &UseConfig,
+    pre_env: &str,
+    env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
     pkg: &PortagePackage,
     ver: &Version,
     cache: &CacheEntry,
 ) -> UseConfig {
     let cpv = Cpv::new(*pkg.cpn(), ver.clone());
-    let mut cfg =
-        portage_atom_pubgrub::apply_package_use(use_config, &cpv, pkg.slot(), package_use)
-            .into_owned();
-    cfg.fold_iuse_defaults(&iuse_defaults(cache));
-    cfg
+    let defaults = iuse_defaults(cache);
+    portage_atom_pubgrub::resolve_effective_use(
+        &defaults,
+        pre_env,
+        &cpv,
+        pkg.slot(),
+        package_use,
+        env_use,
+    )
 }
 
 /// A `(pkg, ver)`'s cache entry plus its effective USE, with each dep class
@@ -78,12 +83,13 @@ impl EvaluatedDeps<'_> {
 
 pub(super) fn evaluated_deps<'a>(
     data: &'a RepoData,
-    use_config: &UseConfig,
+    pre_env: &str,
+    env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
     pkg: &PortagePackage,
     ver: &Version,
 ) -> Option<EvaluatedDeps<'a>> {
     let cache = repo::find_cache(data, pkg, ver)?;
-    let effective = effective_use(use_config, package_use, pkg, ver, cache);
+    let effective = effective_use(pre_env, env_use, package_use, pkg, ver, cache);
     Some(EvaluatedDeps { cache, effective })
 }

@@ -998,7 +998,6 @@ enum Group {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::IUseDefault;
 
     fn empty_slots() -> SlotMap {
         HashMap::new()
@@ -1323,15 +1322,17 @@ mod tests {
         assert_eq!(result.blockers[0].cpn.package.as_str(), "openssl-compat");
     }
 
-    // IUSE defaults are folded into the desired config by the caller (via
-    // UseConfig::fold_iuse_defaults) before conversion; convert then reads the
-    // resolved state.  These tests fold first, then convert.
+    // IUSE defaults are folded into the desired config by the caller (in
+    // production, via `portage_solver::resolve_effective_use`) before
+    // conversion; convert then reads the resolved state. These tests set the
+    // already-folded result directly — a real `+`/`-` IUSE default with
+    // nothing else configuring the flag is indistinguishable, at this layer,
+    // from `resolve_effective_use`'s own output, since both just mean "this
+    // flag ended up on/off".
     #[test]
     fn convert_iuse_default_enabled() {
         let mut config = UseConfig::new();
-        let mut defaults = HashMap::new();
-        defaults.insert(Interned::intern("ssl"), IUseDefault::Enabled);
-        config.fold_iuse_defaults(&defaults);
+        config.enable(Interned::intern("ssl")); // resolved: +ssl default, nothing else set
         let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
         let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert_eq!(
@@ -1343,10 +1344,7 @@ mod tests {
 
     #[test]
     fn convert_iuse_default_disabled() {
-        let mut config = UseConfig::new();
-        let mut defaults = HashMap::new();
-        defaults.insert(Interned::intern("ssl"), IUseDefault::Disabled);
-        config.fold_iuse_defaults(&defaults);
+        let config = UseConfig::new(); // resolved: -ssl default (or unset), same effective state
         let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
         let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert!(
@@ -1358,10 +1356,7 @@ mod tests {
     #[test]
     fn convert_iuse_default_overridden_by_config() {
         let mut config = UseConfig::new();
-        config.disable(Interned::intern("ssl"));
-        let mut defaults = HashMap::new();
-        defaults.insert(Interned::intern("ssl"), IUseDefault::Enabled);
-        config.fold_iuse_defaults(&defaults); // explicit -ssl wins; fold leaves it
+        config.disable(Interned::intern("ssl")); // explicit -ssl wins over a +ssl IUSE default
         let entries = DepEntry::parse("ssl? ( dev-libs/openssl )").unwrap();
         let result = convert_deps(&entries, "test/pkg", &config, &empty_slots());
         assert!(

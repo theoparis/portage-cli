@@ -214,19 +214,37 @@ pub async fn configure_shell(
 /// flags an explicit `-flag` USE token turned off. `disabled` is carried so the
 /// per-package step can record them as explicit `Disabled` and override a
 /// `+flag` IUSE default — portage gives a configured `USE=-flag` precedence over
-/// the ebuild's default. `enabled`/`disabled` are disjoint.
+/// the ebuild's default. `enabled`/`disabled` are disjoint. Package-independent
+/// (no `package.use`, no ebuild's own IUSE defaults) — see [`Self::pre_env`]/
+/// [`Self::env_use`] for the pieces a per-package fold still needs.
 ///
-/// `wildcard_reset` is set when a `-*` clear-all appeared anywhere in the
-/// accumulated USE (profile `make.defaults`, `make.conf`, or the `USE` env
-/// var). Portage seats the ebuild's own `+`/`-` IUSE defaults (`pkginternal`)
-/// *below* those layers, so a `-*` wipes them; `em` folds IUSE defaults in a
-/// later per-package step, so it carries this bit out so the fold can suppress
-/// a `+`-defaulted flag the user cleared (e.g. curl's `+quic` under
-/// `USE="-* build"`) instead of resurrecting it.
+/// `pre_env` and `env_use` exist because real portage resolves USE as **one
+/// ordered fold over fixed layers** (`pkginternal < defaults < conf < pkg <
+/// env`, Portage's own `USE_ORDER`/`config.py` `regenerate()`/`setcpv()`), and
+/// `-*` is not a mode — it's an ordinary token that clears whatever the fold
+/// accumulated from *lower* layers so far. `package.use` (`pkg`) sits between
+/// `conf` and `env`, so a `-*` in `make.conf` doesn't affect it but a `-*` in
+/// the environment does; `em`'s canonical per-package resolver
+/// (`portage_solver::resolve_effective_use`) needs the fold's state
+/// immediately before `pkg`/`env` to reproduce this — a single collapsed
+/// `enabled`/`disabled` set (or a `wildcard_reset` bool derived from it) can't
+/// express it, since the information is *where in the fold order* a `-*`
+/// appeared, not a fact about the final state. See
+/// `docs/architecture.md`'s USE resolution section for the full model.
 pub struct ResolvedUse {
     pub enabled: UseFlags,
     pub disabled: Vec<Interned<DefaultInterner>>,
-    pub wildcard_reset: bool,
+    /// Raw, marker-preserving fold of profile `make.defaults` + `extra_confs`
+    /// (`make.conf`), i.e. the shell's `USE` value immediately before the
+    /// environment layer is applied. Feed this into
+    /// [`merge_flag_lists_signed`](crate::repo::profile::merge_flag_lists_signed)-style
+    /// per-package folding *before* `package.use` and *before* the raw `env_use`.
+    pub pre_env: String,
+    /// The raw `USE` value from the process environment (`std::env::var`),
+    /// unmerged. This is specifically what determines whether `package.use`
+    /// gets wiped: it must be folded in *after* `package.use`, matching
+    /// portage's `pkg < env` layer order.
+    pub env_use: String,
 }
 
 /// Resolve the effective USE flags for a profile stack without setting the
@@ -262,12 +280,18 @@ async fn resolve_use_flags(
         source_incremental(shell, conf).await?;
     }
 
+    // Snapshot the fold immediately before the environment layer — this is
+    // `pkginternal < defaults < conf` in portage's layer order, the state a
+    // per-package fold must resume from *before* `package.use`/`env`. See
+    // `ResolvedUse::pre_env`'s doc.
+    let pre_env = shell.get_var("USE").unwrap_or_default();
+    let env_use = std::env::var("USE").unwrap_or_default();
+
     apply_env_layer(shell).await?;
 
     let CollectedUse {
         mut enabled,
         mut disabled,
-        wildcard_reset,
     } = collect_use_flags(shell);
 
     let flag_set: HashSet<String> = enabled.iter().cloned().collect();
@@ -292,7 +316,8 @@ async fn resolve_use_flags(
             .iter()
             .map(|f| Interned::<DefaultInterner>::intern(f.as_str()))
             .collect(),
-        wildcard_reset,
+        pre_env,
+        env_use,
     })
 }
 
@@ -419,33 +444,29 @@ fn shell_quote(s: &str) -> String {
 /// `disabled` carries flags a `-flag` token turned off (from the signed `USE`
 /// merge), kept so the per-package step can override a `+flag` IUSE default.
 ///
-/// `wildcard_reset` records that a `-*` clear-all appeared in the accumulated
-/// `USE` (surfaced as a leading `-*` marker by `merge_flag_lists_signed`, which
-/// preserves it so this parser can see it after the shell has assembled the
-/// final value). See [`ResolvedUse::wildcard_reset`] for why it matters.
+/// This collapses the fold to a package-independent flat set — used by
+/// [`configure_shell`] (real ebuild execution, which needs a simple flag
+/// list for the `use()`/`usex()` builtins, no `package.use`/per-package IUSE
+/// involved). The per-package resolver reads [`ResolvedUse::pre_env`]/
+/// [`ResolvedUse::env_use`] instead, which preserve *where* a `-*` appeared.
 struct CollectedUse {
     enabled: Vec<String>,
     disabled: Vec<String>,
-    wildcard_reset: bool,
 }
 
 fn collect_use_flags(shell: &EbuildShell) -> CollectedUse {
     let use_str = shell.get_var("USE").unwrap_or_default();
     let mut flags: Vec<String> = Vec::new();
     let mut disabled: Vec<String> = Vec::new();
-    let mut wildcard_reset = false;
 
     for token in use_str.split_whitespace() {
-        // `-*` clear-all (make.conf(5)): discard everything gathered so far and
-        // remember it happened, so a later IUSE-default fold treats an absent
-        // flag as definitively off rather than falling back to the ebuild's
-        // own `+` default. `merge_flag_lists_signed` preserves the token as a
-        // leading marker so it reaches this parser; the plain `merge_flag_lists`
-        // path consumes it, hence the fallback comment below.
+        // `-*` clear-all (make.conf(5)): discard everything gathered so far.
+        // `merge_flag_lists_signed` preserves it as a leading marker in the
+        // shell's `USE` value; this collapsed view has no further use for the
+        // marker itself (unlike the per-package fold), so it's just consumed.
         if token == "-*" {
             flags.clear();
             disabled.clear();
-            wildcard_reset = true;
             continue;
         }
         if let Some(name) = token.strip_prefix('-') {
@@ -486,7 +507,6 @@ fn collect_use_flags(shell: &EbuildShell) -> CollectedUse {
     CollectedUse {
         enabled: flags,
         disabled,
-        wildcard_reset,
     }
 }
 

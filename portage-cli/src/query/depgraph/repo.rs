@@ -328,6 +328,27 @@ fn license_has_conditional(expr: &LicenseExpr) -> bool {
     }
 }
 
+/// Build the `iuse_defaults` map `resolve_effective_use`/`PackageVersions`
+/// need from an ebuild's parsed `IUSE` list — shared by every call site that
+/// resolves a package's effective USE, so the `+`/`-` default conversion
+/// lives in exactly one place.
+fn iuse_defaults_map(
+    meta: &portage_metadata::EbuildMetadata,
+) -> HashMap<Interned<DefaultInterner>, IUseDefault> {
+    meta.iuse
+        .iter()
+        .filter_map(|iu| {
+            iu.default.map(|d| {
+                let val = match d {
+                    portage_metadata::IUseDefault::Enabled => IUseDefault::Enabled,
+                    portage_metadata::IUseDefault::Disabled => IUseDefault::Disabled,
+                };
+                (Interned::from(iu), val)
+            })
+        })
+        .collect()
+}
+
 /// Build the effective USE config for `cpv` from the resolved global USE,
 /// per-version `package.use`, the ebuild's IUSE defaults and the profile
 /// force/mask sets — the same layering `Adapter::desired_use` does, minus the
@@ -335,7 +356,8 @@ fn license_has_conditional(expr: &LicenseExpr) -> bool {
 /// the version filter and the autounmask reasons (which have no `Adapter`).
 #[allow(clippy::too_many_arguments)]
 fn effective_use_config(
-    use_config: &portage_atom_pubgrub::UseConfig,
+    pre_env: &str,
+    env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
     force_mask: &super::force_mask::ForceMask,
     accept_keywords: &AcceptKeywords,
@@ -343,10 +365,10 @@ fn effective_use_config(
     meta: &portage_metadata::EbuildMetadata,
     slot: Option<Interned<DefaultInterner>>,
 ) -> portage_atom_pubgrub::UseConfig {
-    use portage_atom_pubgrub::apply_package_use;
+    use portage_atom_pubgrub::resolve_effective_use;
 
-    let mut cfg = apply_package_use(use_config, cpv, slot, package_use).into_owned();
-    apply_iuse_defaults(&mut cfg, meta);
+    let iuse_defaults = iuse_defaults_map(meta);
+    let mut cfg = resolve_effective_use(&iuse_defaults, pre_env, cpv, slot, package_use, env_use);
     if !force_mask.is_empty() {
         let stable = accept_keywords.is_stable(&meta.keywords, cpv, slot);
         let iuse: std::collections::HashSet<Interned<DefaultInterner>> =
@@ -370,7 +392,8 @@ fn license_ok_for(
     cpv: &Cpv,
     meta: &portage_metadata::EbuildMetadata,
     accept_licenses: &AcceptLicenses,
-    use_config: &portage_atom_pubgrub::UseConfig,
+    pre_env: &str,
+    env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
     force_mask: &super::force_mask::ForceMask,
     accept_keywords: &AcceptKeywords,
@@ -384,7 +407,8 @@ fn license_ok_for(
         return license_accepted(lic, &accept, &|_| false);
     }
     let cfg = effective_use_config(
-        use_config,
+        pre_env,
+        env_use,
         package_use,
         force_mask,
         accept_keywords,
@@ -487,9 +511,14 @@ pub(super) struct Adapter<'a> {
     pub(super) package_mask: &'a [Dep],
     pub(super) package_unmask: &'a [Dep],
     pub(super) accept_licenses: &'a AcceptLicenses,
-    /// Global desired USE (profile + make.conf), folded with per-version
+    /// USE folded up through `make.conf` (profile make.defaults + extra
+    /// confs) — everything below the `package.use`/`env` layers in portage's
+    /// real fold order. Combined with `env_use` and per-version
     /// `package.use` + IUSE defaults by `desired_use`.
-    pub(super) use_config: &'a portage_atom_pubgrub::UseConfig,
+    pub(super) pre_env: &'a str,
+    /// The raw process-environment `USE` value — the highest-priority layer,
+    /// applied after `package.use` (see `resolve_effective_use`).
+    pub(super) env_use: &'a str,
     pub(super) package_use: &'a [(Dep, Vec<UseOverride>)],
     /// Profile USE force/mask policy: applied to each version's effective USE and
     /// consulted by the Level-C cede gate (pinned flags are never ceded).
@@ -503,34 +532,6 @@ pub(super) struct Adapter<'a> {
     /// the solver (`SolverDecided`) instead of fixing them. See
     /// `portage-atom-pubgrub/docs/required-use-level-c.md`.
     pub(super) autosolve_use: bool,
-}
-
-/// Apply the ebuild's IUSE defaults: every IUSE flag not already set by the
-/// resolved config takes its `+`/`-` default — unless a `-*` clear-all was in
-/// effect (`cfg.wildcard_reset()`), in which case an unset flag stays
-/// `Disabled`, matching real portage (a `+`-default like curl's `+quic` is
-/// suppressed under `USE="-* build"`).
-fn apply_iuse_defaults(
-    cfg: &mut portage_atom_pubgrub::UseConfig,
-    m: &portage_metadata::EbuildMetadata,
-) {
-    use portage_atom_pubgrub::UseFlagState;
-    for iu in &m.iuse {
-        let flag = Interned::from(iu);
-        if cfg.get_opt(flag).is_none() {
-            if cfg.wildcard_reset() {
-                cfg.set(flag, UseFlagState::Disabled);
-            } else if let Some(def) = iu.default {
-                cfg.set(
-                    flag,
-                    match def {
-                        portage_metadata::IUseDefault::Enabled => UseFlagState::Enabled,
-                        portage_metadata::IUseDefault::Disabled => UseFlagState::Disabled,
-                    },
-                );
-            }
-        }
-    }
 }
 
 impl Adapter<'_> {
@@ -569,7 +570,8 @@ impl Adapter<'_> {
             cpv,
             meta,
             self.accept_licenses,
-            self.use_config,
+            self.pre_env,
+            self.env_use,
             self.package_use,
             self.force_mask,
             self.accept_keywords,
@@ -595,7 +597,7 @@ impl Adapter<'_> {
         slot: Option<Interned<DefaultInterner>>,
         stable: bool,
     ) {
-        use portage_atom_pubgrub::{UseConfig, UseFlagState, apply_package_use};
+        use portage_atom_pubgrub::{UseFlagState, resolve_effective_use};
 
         if self.installed_cpvs.contains(cpv) {
             return;
@@ -609,10 +611,10 @@ impl Adapter<'_> {
             return;
         }
 
-        // Flags the user pinned via package.use: applying it to an empty base
-        // leaves exactly those flags set.
-        let empty = UseConfig::new();
-        let pins = apply_package_use(&empty, cpv, slot, self.package_use);
+        // Flags the user pinned via package.use: folding it against an empty
+        // base (no IUSE defaults, no pre_env, no env_use) leaves exactly
+        // those flags set.
+        let pins = resolve_effective_use(&HashMap::new(), "", cpv, slot, self.package_use, "");
         let iuse: std::collections::HashSet<&str> = m.iuse.iter().map(|iu| iu.name()).collect();
         let iuse_flags: std::collections::HashSet<Interned<DefaultInterner>> =
             m.iuse.iter().map(Interned::from).collect();
@@ -673,7 +675,7 @@ impl PackageRepository for Adapter<'_> {
     }
 
     fn desired_use(&self, cpv: &Cpv) -> portage_atom_pubgrub::UseConfig {
-        use portage_atom_pubgrub::{UseConfig, apply_package_use};
+        use portage_atom_pubgrub::resolve_effective_use;
 
         let meta = self
             .data
@@ -684,18 +686,24 @@ impl PackageRepository for Adapter<'_> {
 
         let slot = meta.map(|m| m.slot.slot);
 
-        // Caller-resolved policy: package.use over global USE, then the ebuild's
-        // IUSE defaults for anything still unset → the authoritative desired set.
-        let mut cfg: UseConfig =
-            apply_package_use(self.use_config, cpv, slot, self.package_use).into_owned();
-        if let Some(m) = meta {
-            apply_iuse_defaults(&mut cfg, m);
-        }
+        // Caller-resolved policy: the full ordered fold (IUSE defaults, then
+        // pre_env, then package.use, then env_use) → the authoritative
+        // desired set.
+        let iuse_defaults = meta.map(iuse_defaults_map).unwrap_or_default();
+        let mut cfg = resolve_effective_use(
+            &iuse_defaults,
+            self.pre_env,
+            cpv,
+            slot,
+            self.package_use,
+            self.env_use,
+        );
 
         // Profile USE force/mask override package.use and the configured value
-        // (Portage semantics). Global use.force/use.mask are already in the base
-        // config; this layers the package-level sets plus the *.stable.* sets,
-        // the latter only when this version is merged due to a stable keyword.
+        // (Portage semantics), applied as the final post-fold step, matching
+        // real portage's `use.force`/`use.mask` (outside the layer stack).
+        // This layers the package-level sets plus the *.stable.* sets, the
+        // latter only when this version is merged due to a stable keyword.
         // This is what makes crossdev's package.use.force/mask (multilib/cet/…)
         // take effect on cross-* packages.
         let stable = meta.is_some_and(|m| {
@@ -769,23 +777,7 @@ impl PackageRepository for Adapter<'_> {
                         // already in hand.
                         let iuse: Vec<Interned<DefaultInterner>> =
                             meta.iuse.iter().map(Interned::from).collect();
-                        let iuse_defaults: HashMap<Interned<DefaultInterner>, IUseDefault> = meta
-                            .iuse
-                            .iter()
-                            .filter_map(|iu| {
-                                iu.default.map(|d| {
-                                    let val = match d {
-                                        portage_metadata::IUseDefault::Enabled => {
-                                            IUseDefault::Enabled
-                                        }
-                                        portage_metadata::IUseDefault::Disabled => {
-                                            IUseDefault::Disabled
-                                        }
-                                    };
-                                    (Interned::from(iu), val)
-                                })
-                            })
-                            .collect();
+                        let iuse_defaults = iuse_defaults_map(meta);
                         let deps = package_deps_from_metadata(meta);
                         // Translate the parsed metadata grammar into the solver's
                         // interned-flag fact vocabulary (the crate stays free of
@@ -978,7 +970,8 @@ pub(super) fn target_package(
     package_mask: &[Dep],
     package_unmask: &[Dep],
     accept_licenses: &AcceptLicenses,
-    use_config: &portage_atom_pubgrub::UseConfig,
+    pre_env: &str,
+    env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
     force_mask: &super::force_mask::ForceMask,
 ) -> portage_atom_pubgrub::PortagePackage {
@@ -1004,7 +997,8 @@ pub(super) fn target_package(
                     cpv,
                     &cache.metadata,
                     accept_licenses,
-                    use_config,
+                    pre_env,
+                    env_use,
                     package_use,
                     force_mask,
                     accept_keywords,
@@ -1086,7 +1080,8 @@ pub(super) fn find_autounmask_candidates(
     package_mask: &[Dep],
     package_unmask: &[Dep],
     accept_licenses: &AcceptLicenses,
-    use_config: &portage_atom_pubgrub::UseConfig,
+    pre_env: &str,
+    env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
     force_mask: &super::force_mask::ForceMask,
 ) -> Vec<AutounmaskCandidate> {
@@ -1127,7 +1122,8 @@ pub(super) fn find_autounmask_candidates(
                 // USE so a non-FREE license behind a disabled flag is not flagged.
                 let needed = if license_has_conditional(lic) {
                     let cfg = effective_use_config(
-                        use_config,
+                        pre_env,
+                        env_use,
                         package_use,
                         force_mask,
                         accept_keywords,
@@ -1166,7 +1162,7 @@ pub(super) fn find_autounmask_candidates(
 mod tests {
     use super::super::force_mask::{ForceMask, index_by_cpn};
     use super::*;
-    use portage_atom_pubgrub::{PackageRepository, UseConfig, UseFlagState};
+    use portage_atom_pubgrub::{PackageRepository, UseFlagState};
     use portage_repo::{AcceptLicense, LicenseGroupRegistry};
 
     fn accept_all_licenses() -> AcceptLicense {
@@ -1435,7 +1431,8 @@ mod tests {
                 &[],
                 &[],
                 &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
-                &UseConfig::new(),
+                "",
+                "",
                 &[],
                 &ForceMask::default(),
             )
@@ -1464,9 +1461,7 @@ mod tests {
             "EAPI=7\nSLOT=0\nIUSE=a b\nREQUIRED_USE=?? ( a b )\nKEYWORDS=amd64\nDESCRIPTION=t\n",
         );
         let arch = Arch::intern("amd64");
-        let mut use_config = UseConfig::new();
-        use_config.enable(Interned::intern("a"));
-        use_config.enable(Interned::intern("b")); // both on ⇒ ?? ( a b ) violated
+        let pre_env = "a b"; // both on ⇒ ?? ( a b ) violated
 
         let fm = ForceMask {
             use_force: vec![Interned::intern("a")],
@@ -1480,7 +1475,8 @@ mod tests {
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
             accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
-            use_config: &use_config,
+            pre_env,
+            env_use: "",
             package_use: &[],
             force_mask: &fm, // a is use.force'd
             autosolve_use: true,
@@ -1508,9 +1504,7 @@ mod tests {
             "EAPI=7\nSLOT=0\nIUSE=a b\nREQUIRED_USE=?? ( a b )\nKEYWORDS=amd64\nDESCRIPTION=t\n",
         );
         let arch = Arch::intern("amd64");
-        let mut use_config = UseConfig::new();
-        use_config.enable(Interned::intern("a"));
-        use_config.enable(Interned::intern("b"));
+        let pre_env = "a b";
 
         let fm = ForceMask::default();
         let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
@@ -1521,7 +1515,8 @@ mod tests {
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
             accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
-            use_config: &use_config,
+            pre_env,
+            env_use: "",
             package_use: &[],
             force_mask: &fm,
             autosolve_use: true,
@@ -1547,8 +1542,7 @@ mod tests {
             "EAPI=7\nSLOT=0\nIUSE=a b\nREQUIRED_USE=?? ( a b )\nKEYWORDS=amd64\nDESCRIPTION=t\n",
         );
         let arch = Arch::intern("amd64");
-        let mut use_config = UseConfig::new();
-        use_config.enable(Interned::intern("a")); // only a on ⇒ ?? satisfied
+        let pre_env = "a"; // only a on ⇒ ?? satisfied
 
         let fm = ForceMask::default();
         let ak = AcceptKeywords::from_global(&arch, &["amd64"]);
@@ -1559,7 +1553,8 @@ mod tests {
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
             accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
-            use_config: &use_config,
+            pre_env,
+            env_use: "",
             package_use: &[],
             force_mask: &fm,
             autosolve_use: true,
@@ -1594,8 +1589,7 @@ mod tests {
              REQUIRED_USE=python? ( foo ) su? ( pam )\nKEYWORDS=amd64\nDESCRIPTION=t\n",
         );
         let arch = Arch::intern("amd64");
-        let mut use_config = UseConfig::new();
-        use_config.enable(Interned::intern("su")); // su on, pam off ⇒ su?(pam) violated
+        let pre_env = "su"; // su on, pam off ⇒ su?(pam) violated
         // python left unset ⇒ Disabled ⇒ python?(foo) vacuously satisfied
 
         let fm = ForceMask::default();
@@ -1607,7 +1601,8 @@ mod tests {
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
             accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
-            use_config: &use_config,
+            pre_env,
+            env_use: "",
             package_use: &[],
             force_mask: &fm,
             autosolve_use: true,
@@ -1644,8 +1639,7 @@ mod tests {
             "EAPI=8\nSLOT=0\nIUSE=multilib cet\nKEYWORDS=~amd64\nDESCRIPTION=t\n",
         );
         let arch = Arch::intern("amd64");
-        let mut use_config = UseConfig::new();
-        use_config.enable(Interned::intern("cet")); // user enabled a flag the profile masks
+        let pre_env = "cet"; // user enabled a flag the profile masks
 
         let fm = ForceMask {
             pkg_force: index_by_cpn(vec![(dep("cross-foo/gcc"), vec!["multilib".to_string()])]),
@@ -1660,7 +1654,8 @@ mod tests {
             package_unmask: &[],
             installed_cpvs: &std::collections::HashSet::new(),
             accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
-            use_config: &use_config,
+            pre_env,
+            env_use: "",
             package_use: &[],
             force_mask: &fm,
             autosolve_use: false,

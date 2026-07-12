@@ -20,7 +20,7 @@
 use gentoo_core::Arch;
 use portage_atom::{Cpv, Dep};
 use portage_atom_pubgrub::{
-    PortageDependencyProvider, PortageVersionSet, UseConfig, UseFlagRequirement, UseOverride,
+    PortageDependencyProvider, PortageVersionSet, UseFlagRequirement, UseOverride,
 };
 use portage_metadata::CacheEntry;
 use std::collections::HashMap;
@@ -91,7 +91,6 @@ fn solve_with(
         Vec::new(),
     );
     let fm = ForceMask::default();
-    let use_config = UseConfig::new();
     let adapter = Adapter {
         data,
         accept_keywords: &accept,
@@ -99,7 +98,8 @@ fn solve_with(
         package_unmask: &[],
         installed_cpvs: &std::collections::HashSet::new(),
         accept_licenses: &lic,
-        use_config: &use_config,
+        pre_env: "",
+        env_use: "",
         package_use: pu,
         force_mask: &fm,
         autosolve_use: true,
@@ -109,7 +109,7 @@ fn solve_with(
         .iter()
         .map(|t| {
             let dep = Dep::parse(t).unwrap();
-            let pkg = target_package(data, &dep, &accept, &[], &[], &lic, &use_config, pu, &fm);
+            let pkg = target_package(data, &dep, &accept, &[], &[], &lic, "", "", pu, &fm);
             (pkg, PortageVersionSet::any())
         })
         .collect();

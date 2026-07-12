@@ -246,7 +246,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     );
     let use_env = use_env_result?;
     let use_env::UseEnv {
-        config: use_config,
+        pre_env,
+        env_use,
         expand: use_expand,
         expand_hidden: use_expand_hidden,
         package_use,
@@ -349,7 +350,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             &package_mask,
             &package_unmask,
             &accept_licenses,
-            &use_config,
+            &pre_env,
+            &env_use,
             &package_use,
             &force_mask,
         );
@@ -389,7 +391,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         package_mask: &package_mask,
         package_unmask: &package_unmask,
         accept_licenses: &accept_licenses,
-        use_config: &use_config,
+        pre_env: &pre_env,
+        env_use: &env_use,
         package_use: &package_use,
         force_mask: &force_mask,
         installed_cpvs: solver_installed_cpvs,
@@ -425,7 +428,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             package_mask: &package_mask,
             package_unmask: &package_unmask,
             accept_licenses: &accept_licenses,
-            use_config: &use_config,
+            pre_env: &pre_env,
+            env_use: &env_use,
             package_use: pkg_use,
             force_mask: &force_mask,
             installed_cpvs: solver_installed_cpvs,
@@ -640,7 +644,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         &package_mask,
         &package_unmask,
         &accept_licenses,
-        &use_config,
+        &pre_env,
+        &env_use,
         &package_use,
         &force_mask,
     );
@@ -754,7 +759,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
     let trim_ctx = bdepend_trim::TrimCtx {
         roots,
         data: &data,
-        use_config: &use_config,
+        pre_env: &pre_env,
+        env_use: &env_use,
         package_use: &package_use,
         root_cpns: &root_cpns,
         reinstall_cpns: &reinstall_cpns,
@@ -865,7 +871,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         package_mask: &package_mask,
         package_unmask: &package_unmask,
         accept_licenses: &accept_licenses,
-        use_config: &use_config,
+        pre_env: &pre_env,
+        env_use: &env_use,
         package_use: &package_use,
         force_mask: &force_mask,
         installed_cpvs: solver_installed_cpvs,
@@ -923,7 +930,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             &combined,
             atoms,
             &edges,
-            &use_config,
+            &pre_env,
+            &env_use,
             &pristine_package_use,
         );
         if autounmask_write && !entries.is_empty() {
@@ -938,7 +946,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         package_mask: &package_mask,
         package_unmask: &package_unmask,
         accept_licenses: &accept_licenses,
-        use_config: &use_config,
+        pre_env: &pre_env,
+        env_use: &env_use,
         package_use: &package_use,
         force_mask: &force_mask,
         installed_cpvs: solver_installed_cpvs,
@@ -956,7 +965,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                     &distdir,
                     &data,
                     &order,
-                    &use_config,
+                    &pre_env,
+                    &env_use,
                     &package_use,
                 )
             } else {
@@ -967,7 +977,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                     data: &data,
                     installed: &installed,
                     installed_entries: &target_installed,
-                    use_config: &use_config,
+                    pre_env: &pre_env,
+                    env_use: &env_use,
                     package_use: &package_use,
                     use_expand: &use_expand,
                     use_expand_hidden: &use_expand_hidden,
@@ -1035,7 +1046,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             output::report_solver_violations(&violations);
         }
 
-        let ru_violations = required_use::find_violations(&data, &order, &use_config, &package_use);
+        let ru_violations =
+            required_use::find_violations(&data, &order, &pre_env, &env_use, &package_use);
         if !ru_violations.is_empty() {
             output::report_required_use(&ru_violations);
         }
@@ -1082,24 +1094,27 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             let ver = &entry.version;
             let cpn = pkg.cpn();
             let cpv = Cpv::new(*cpn, ver.clone());
-            let (depend, bdepend, mut flags) =
-                if let Some(cache) = repo::find_cache(&data, pkg, ver) {
-                    let effective =
-                        effective_use::effective_use(&use_config, &package_use, pkg, ver, cache);
-                    (
-                        cache.metadata.depend.to_vec(),
-                        cache.metadata.bdepend.to_vec(),
-                        effective.enabled_flags(),
-                    )
-                } else {
-                    let effective = portage_atom_pubgrub::apply_package_use(
-                        &use_config,
-                        &cpv,
-                        pkg.slot(),
-                        &package_use,
-                    );
-                    (Vec::new(), Vec::new(), effective.enabled_flags())
-                };
+            let (depend, bdepend, mut flags) = if let Some(cache) =
+                repo::find_cache(&data, pkg, ver)
+            {
+                let effective =
+                    effective_use::effective_use(&pre_env, &env_use, &package_use, pkg, ver, cache);
+                (
+                    cache.metadata.depend.to_vec(),
+                    cache.metadata.bdepend.to_vec(),
+                    effective.enabled_flags(),
+                )
+            } else {
+                let effective = portage_atom_pubgrub::resolve_effective_use(
+                    &HashMap::new(),
+                    &pre_env,
+                    &cpv,
+                    pkg.slot(),
+                    &package_use,
+                    &env_use,
+                );
+                (Vec::new(), Vec::new(), effective.enabled_flags())
+            };
             flags.sort();
             flags.dedup();
             // A cross-derived cpn (`cross-<tuple>/gcc`) has no on-disk tree of

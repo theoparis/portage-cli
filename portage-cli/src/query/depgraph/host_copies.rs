@@ -176,7 +176,8 @@ fn visit_unsatisfied(
 ) {
     let Some(deps) = effective_use::evaluated_deps(
         ctx.adapter.data,
-        ctx.adapter.use_config,
+        ctx.adapter.pre_env,
+        ctx.adapter.env_use,
         ctx.adapter.package_use,
         pkg,
         ver,
@@ -230,7 +231,6 @@ fn resolve(cpn: Cpn, ctx: &Ctx<'_>) -> Option<(Version, PortagePackage)> {
 
 #[cfg(test)]
 mod tests {
-    use portage_atom_pubgrub::UseConfig;
     use portage_metadata::CacheEntry;
     use portage_repo::{AcceptLicense, LicenseGroupRegistry};
 
@@ -307,7 +307,6 @@ mod tests {
 
         let arch = gentoo_core::Arch::intern("amd64");
         let accept_keywords = AcceptKeywords::from_global(&arch, &["amd64"]);
-        let use_config = UseConfig::new();
         let force_mask = ForceMask::default();
         let installed_cpvs = std::collections::HashSet::new();
         let adapter = Adapter {
@@ -316,7 +315,8 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
-            use_config: &use_config,
+            pre_env: "",
+            env_use: "",
             package_use: &[],
             force_mask: &force_mask,
             installed_cpvs: &installed_cpvs,
@@ -388,7 +388,6 @@ mod tests {
 
         let arch = gentoo_core::Arch::intern("amd64");
         let accept_keywords = AcceptKeywords::from_global(&arch, &["amd64"]);
-        let use_config = UseConfig::new();
         let force_mask = ForceMask::default();
         let installed_cpvs = std::collections::HashSet::new();
         let adapter = Adapter {
@@ -397,7 +396,8 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
-            use_config: &use_config,
+            pre_env: "",
+            env_use: "",
             package_use: &[],
             force_mask: &force_mask,
             installed_cpvs: &installed_cpvs,
@@ -470,7 +470,6 @@ mod tests {
 
         let arch = gentoo_core::Arch::intern("amd64");
         let accept_keywords = AcceptKeywords::from_global(&arch, &["amd64"]);
-        let use_config = UseConfig::new();
         let force_mask = ForceMask::default();
         let installed_cpvs = std::collections::HashSet::new();
         let adapter = Adapter {
@@ -479,7 +478,8 @@ mod tests {
             package_mask: &[],
             package_unmask: &[],
             accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
-            use_config: &use_config,
+            pre_env: "",
+            env_use: "",
             package_use: &[],
             force_mask: &force_mask,
             installed_cpvs: &installed_cpvs,

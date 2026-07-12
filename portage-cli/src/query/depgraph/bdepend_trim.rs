@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use portage_atom::{Cpn, Cpv, DepEntry, Version};
-use portage_atom_pubgrub::{PortagePackage, UseConfig, UseOverride};
+use portage_atom_pubgrub::{PortagePackage, UseOverride};
 
 use crate::bdepend_avail::Avail;
 use crate::cli::Roots;
@@ -20,7 +20,8 @@ pub struct TrimCtx<'a> {
     /// caller already has for `DEPEND`, not a separately-picked one.
     pub roots: &'a Roots,
     pub data: &'a RepoData,
-    pub use_config: &'a UseConfig,
+    pub pre_env: &'a str,
+    pub env_use: &'a str,
     pub package_use: &'a [(portage_atom::Dep, Vec<UseOverride>)],
     pub root_cpns: &'a HashSet<Cpn>,
     pub reinstall_cpns: &'a HashSet<Cpn>,
@@ -86,9 +87,14 @@ pub fn trim_within_run_bdepend(
 fn runtime_required_cpns(order: &[(PortagePackage, Version)], ctx: &TrimCtx<'_>) -> HashSet<Cpn> {
     let mut out = HashSet::new();
     for (pkg, ver) in order {
-        let Some(deps) =
-            effective_use::evaluated_deps(ctx.data, ctx.use_config, ctx.package_use, pkg, ver)
-        else {
+        let Some(deps) = effective_use::evaluated_deps(
+            ctx.data,
+            ctx.pre_env,
+            ctx.env_use,
+            ctx.package_use,
+            pkg,
+            ver,
+        ) else {
             continue;
         };
         for entries in [
@@ -142,7 +148,8 @@ fn should_keep(cand: &TrimCandidate<'_, '_>) -> bool {
         let avail = avail_for_consumer(j, cand.kept, cand.kept_indices, cand.base_avail);
         let Some(deps) = effective_use::evaluated_deps(
             cand.ctx.data,
-            cand.ctx.use_config,
+            cand.ctx.pre_env,
+            cand.ctx.env_use,
             cand.ctx.package_use,
             consumer,
             consumer_ver,
@@ -177,7 +184,6 @@ fn avail_for_consumer(
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use portage_atom_pubgrub::UseConfig;
     use portage_metadata::CacheEntry;
 
     use super::*;
@@ -249,14 +255,14 @@ mod tests {
         let order = vec![consumer.clone(), reallib.clone()];
         let full_solution_order = vec![consumer.clone(), virtual_lib, reallib.clone()];
 
-        let use_config = UseConfig::new();
         let root_cpns: HashSet<Cpn> = [*consumer.0.cpn()].into_iter().collect();
         let reinstall = HashSet::new();
         let roots = empty_roots();
         let ctx = TrimCtx {
             roots: &roots,
             data: &data,
-            use_config: &use_config,
+            pre_env: "",
+            env_use: "",
             package_use: &[],
             root_cpns: &root_cpns,
             reinstall_cpns: &reinstall,
@@ -291,14 +297,14 @@ mod tests {
             repo_of: HashMap::new(),
             real_cpn_of: HashMap::new(),
         };
-        let use_config = UseConfig::new();
         let root_cpns = HashSet::new();
         let reinstall = HashSet::new();
         let roots = empty_roots();
         let ctx = TrimCtx {
             roots: &roots,
             data: &data,
-            use_config: &use_config,
+            pre_env: "",
+            env_use: "",
             package_use: &[],
             root_cpns: &root_cpns,
             reinstall_cpns: &reinstall,

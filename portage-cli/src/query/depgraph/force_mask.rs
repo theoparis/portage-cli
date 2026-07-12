@@ -1,11 +1,13 @@
 //! Profile USE *force* and *mask*, resolved per package.
 //!
-//! Global `use.force`/`use.mask` are already folded into the base `UseConfig`
-//! by `portage-repo`'s `resolve_use_flags`, so they are kept here only for the
-//! Level-C cede gate (a globally pinned flag must never be ceded). The
-//! **package-level** sets (`package.use.force`/`package.use.mask`) and all the
-//! **`*.stable.*`** variants are otherwise applied *nowhere*; this module layers
-//! them onto a package's effective USE.
+//! Real portage applies `use.force`/`use.mask` as unconditional post-filters
+//! *outside* the 8-layer USE fold (`config.py`'s `_getUseMask`/`_getUseForce`,
+//! applied after `pkg`/`env`) — this module is that final step for `em`, for
+//! both the global (`use.force`/`use.mask`) and **package-level**
+//! (`package.use.force`/`package.use.mask`) sets, plus all the **`*.stable.*`**
+//! variants. None of these are folded into `resolve_effective_use`'s `pre_env`/
+//! `package_use`/`env_use` layers; `effective()`/`apply()` here are what
+//! layers them onto a package's already-resolved USE.
 //!
 //! The `.stable.*` files only influence a package "merged due to a stable
 //! keyword" (portage(5)); the caller passes that `stable` decision in (Portage's
@@ -94,21 +96,24 @@ fn accumulate(rules: &PkgRules, cpv: &Cpv, set: &mut BTreeSet<Flag>) {
 }
 
 impl ForceMask {
-    /// The net forced and masked flag names for `cpv` that are **not** already in
-    /// the base config — i.e. package-level force/mask always, plus the
-    /// `*.stable.*` sets when `stable`. Global non-stable `use.force` is
-    /// excluded (it lives in the base config); global `use.mask` is not (see
-    /// below). Mask wins over force.
+    /// The net forced and masked flag names for `cpv` — global `use.force`/
+    /// `use.mask` (both, as of 2026-07-12; see below) plus package-level
+    /// force/mask always, plus the `*.stable.*` sets when `stable`. Mask wins
+    /// over force. Portage applies force/mask strictly *after* the rest of
+    /// USE resolution (profile/`make.conf`/`package.use`/environment,
+    /// `portage_solver::resolve_effective_use`'s fold) — this is that final
+    /// step, not folded into any earlier layer.
     ///
-    /// `iuse` restricts which global `use.mask` flags are even considered: a
-    /// masked flag the package doesn't declare in `IUSE` can never be
-    /// resurrected by that package's own `+flag` IUSE default (the only thing
-    /// this guards against, see below), so it costs nothing to skip. Global
-    /// `use.mask` commonly has hundreds of entries while a package's own IUSE
-    /// is a few dozen at most, so this turns a per-package O(global use.mask)
-    /// cost into O(package IUSE ∩ global use.mask) — the dominant cost of
-    /// `apply()` before this filter, since it ran for every version the solver
-    /// instantiated.
+    /// `iuse` restricts which global `use.force`/`use.mask` flags are even
+    /// considered: a forced/masked flag the package doesn't declare in `IUSE`
+    /// can never affect that package (there's no `+flag` IUSE default to
+    /// resurrect, and forcing on a flag outside `IUSE` is a no-op — the
+    /// package's own dependencies can't reference it), so it costs nothing to
+    /// skip. Global `use.force`/`use.mask` commonly have hundreds of entries
+    /// while a package's own IUSE is a few dozen at most, so this turns a
+    /// per-package O(global set) cost into O(package IUSE ∩ global set) — the
+    /// dominant cost of `apply()` before this filter, since it ran for every
+    /// version the solver instantiated.
     pub(super) fn effective(
         &self,
         cpv: &Cpv,
@@ -117,12 +122,17 @@ impl ForceMask {
     ) -> (BTreeSet<Flag>, BTreeSet<Flag>) {
         let mut forced = BTreeSet::new();
         let mut masked = BTreeSet::new();
-        // Global `use.mask` must force a flag *off* per package, overriding the
-        // ebuild's IUSE default — `config` only excludes masked flags from the
-        // globally-enabled set, which a `+flag` IUSE default (e.g.
+        // Global `use.force`/`use.mask` are no longer folded into any earlier
+        // layer (`resolve_effective_use`'s `pre_env` doesn't carry them —
+        // unlike the pre-2026-07-12 collapsed `config`), so both are applied
+        // here unconditionally, restricted to the package's own IUSE (see
+        // above). `use.mask` in particular must force a flag *off* per
+        // package, overriding the ebuild's IUSE default — e.g.
         // `llvm-runtimes/compiler-rt-sanitizers`'s `+abi_x86_32`, masked on
-        // arm64 by `arch/base/use.mask`) would otherwise re-enable. Added before
-        // the per-package rules so `package.use.mask -flag` can unmask it.
+        // arm64 by `arch/base/use.mask`, would otherwise be re-enabled by the
+        // fold. Added before the per-package rules so `package.use.mask
+        // -flag` can unmask it.
+        forced.extend(self.use_force.iter().copied().filter(|f| iuse.contains(f)));
         masked.extend(self.use_mask.iter().copied().filter(|f| iuse.contains(f)));
         accumulate(&self.pkg_force, cpv, &mut forced);
         accumulate(&self.pkg_mask, cpv, &mut masked);
@@ -303,5 +313,39 @@ mod tests {
         let pins = fm.pins(&c, false, &iuse);
         assert!(pins.contains(&flag("abi_x86_32")));
         assert!(pins.contains(&flag("unrelated_flag")));
+    }
+
+    // Regression for the gap found migrating off the collapsed `UseConfig`
+    // (`use-config-duplicate-fallback-logic`): global `use.force` used to be
+    // excluded from `effective()` on the assumption it was already baked into
+    // the base config by `resolve_use_flags`. Since `resolve_effective_use`'s
+    // `pre_env` no longer carries it, `effective()` must apply it directly —
+    // mirrors `global_use_mask_only_applies_to_packages_own_iuse` for force.
+    #[test]
+    fn global_use_force_only_applies_to_packages_own_iuse() {
+        let fm = ForceMask {
+            use_force: vec!["abi_x86_32".into(), "unrelated_flag".into()],
+            ..Default::default()
+        };
+        let c = cpv("dev-libs/foo-1");
+        let iuse = iuse_of(&["abi_x86_32"]);
+        let (forced, _) = fm.effective(&c, false, &iuse);
+        assert!(
+            forced.contains(&flag("abi_x86_32")),
+            "flag in the package's IUSE is forced on"
+        );
+        assert!(
+            !forced.contains(&flag("unrelated_flag")),
+            "flag absent from the package's IUSE is filtered out"
+        );
+
+        let mut cfg = UseConfig::new();
+        cfg.disable(Interned::intern("abi_x86_32")); // user tried to disable a forced flag
+        fm.apply(&mut cfg, &c, false, &iuse);
+        assert_eq!(
+            cfg.get(Interned::intern("abi_x86_32")),
+            UseFlagState::Enabled,
+            "use.force overrides an explicit disable"
+        );
     }
 }

@@ -271,11 +271,22 @@ impl PackageRepository for InMemoryRepository {
     }
 
     fn desired_use(&self, cpv: &Cpv) -> UseConfig {
+        // Test/benchmark fixture only (see the struct doc) — synthetic data
+        // never needs the real make.conf-vs-environment wildcard distinction
+        // `portage_solver::resolve_effective_use` models, so this just fills
+        // in each IUSE default for a flag the fixture's base config left unset.
         let mut cfg = self.use_config.clone();
         if let Some(versions) = self.packages.get(&cpv.cpn)
             && let Some((_, meta)) = versions.iter().find(|(c, _)| c.version == cpv.version)
         {
-            cfg.fold_iuse_defaults(&meta.iuse_defaults);
+            for (flag, def) in &meta.iuse_defaults {
+                if cfg.get_opt(*flag).is_none() {
+                    match def {
+                        IUseDefault::Enabled => cfg.enable(*flag),
+                        IUseDefault::Disabled => cfg.disable(*flag),
+                    }
+                }
+            }
         }
         cfg
     }
