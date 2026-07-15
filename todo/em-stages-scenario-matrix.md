@@ -1202,3 +1202,49 @@ during `dev-lang/python`'s build) and two `error: declare: cannot mutate
 readonly variable` (during `sys-devel/gcc`'s Gentoo-patch application) —
 neither stopped its package from registering successfully, so flagged here
 for visibility rather than investigated.
+
+## Post-fix crossdev regression sweep (2026-07-15), plus two quirks investigated to a real conclusion
+
+After all the fixes above, re-ran `em crossdev --setup` (riscv64 target) on
+fresh sandboxes in two more root modes to confirm nothing regressed:
+
+- **Bare invocation (no `--root`, real host `/`)**: full 6-step bootstrap
+  completes, `>>> cross toolchain riscv64-unknown-linux-gnu ready`,
+  `linux-headers version (7.1.0 >= 3.2.0)` correct both `glibc` merges.
+- **`--prefix /var/tmp/xp`**: same, full success, `ready in
+  /var/tmp/xp/usr/riscv64-unknown-linux-gnu`.
+
+Both hit two cosmetic, non-fatal messages, investigated to a definitive,
+real (not `em`-specific) root cause rather than dismissed on sight:
+
+- **`aarch64-unknown-linux-gnu-gcc: error: unrecognized command-line
+  option '-mno-relax'`**: `glibc-2.43/nptl/Makefile:537`'s own
+  `dir=$(CC) $(CFLAGS) $(CPPFLAGS) -print-multi-directory` — for this one
+  recursive `install-headers` sub-make, `$(CC)` resolved to the host
+  compiler while `$(CFLAGS)`/`$(CPPFLAGS)` stayed correctly RISC-V-typed.
+  Narrow, isolated to this one multidir-name computation in the
+  headers-only pass; doesn't affect real compilation elsewhere in the
+  same log (confirmed by sampling occurrences after the `all` target
+  starts — those are glibc's own, entirely correct `BUILD_CC`
+  autoconf probing, not the same issue recurring). Non-blocking, not
+  chased further — not clearly attributable to `em` vs. upstream
+  GNU-make variable propagation without a real-`emerge` comparison.
+- **`failed to redirect to <EROOT>/etc/hosts` / `sed: can't read
+  <ED>/etc/host.conf`**: fully root-caused in `sys-libs/glibc`'s own
+  ebuild, not `em`. `src_install` has an explicit `is_crosscompile &&
+  ... return 0` before the section that installs `/etc/host.conf`/
+  `nsswitch.conf`/`gai.conf` (`alt_prefix()`/`is_crosscompile()`,
+  `glibc-2.43-r2.ebuild:275,1646-1659` — real portage's own cross-vs-native
+  contract, "CHOST = CTARGET → install into /; CHOST != CTARGET → install
+  into /usr/CTARGET/"), so a cross build never installs those files at
+  all. `pkg_postinst` isn't equally gated: it unconditionally `sed`s
+  `${ED}/etc/host.conf` (predictably absent, hence the message) and reads
+  `${EROOT}/etc/hosts` (a real read, not a write — succeeds silently
+  against a real host's own file, fails against a genuinely fresh
+  `--root`/`--prefix` that's never had `baselayout` merged into it, since
+  `crossdev --setup` alone never merges it). Confirmed real crossdev
+  would hit the identical behavior if pointed at a fresh `ROOT=` the same
+  way (it never sets `ROOT=` itself, so in normal use its `EROOT` is
+  always the real, already-populated host, which is why this never
+  surfaces there) — not an `em` bug, not a real file collision with the
+  host's own native glibc, purely cosmetic. No action needed.
