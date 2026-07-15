@@ -501,8 +501,17 @@ still open.
   highest-risk, deferred). Surprise finding: `overlay.rs` (204 lines)
   belongs in neither place — it's `portage-repo` territory, and the
   designated first migration slice. Staged order (7 stages, each
-  independently green/revertible, ~6-7 sessions total): `overlay.rs` →
-  `portage-repo`; create-crate + move `Roots`; move `bdepend_avail.rs`;
+  independently green/revertible, ~6-7 sessions total):
+  **stage 1 DONE (2026-07-15)** — `overlay.rs` moved to `portage-repo`
+  verbatim (`overlay_entries`, made `pub`; its two helpers stay private to
+  the new module). Sole caller (`repo.rs`'s `load_repos`) updated to
+  `portage_repo::overlay_entries`. No unit tests existed for this file, so
+  live-verified against a real overlay on this host instead of a synthetic
+  repro (`/var/db/repos/crossdev`, a real crossdev overlay with no
+  `metadata/md5-cache`, symlinked package dirs into `::gentoo`): `em -p
+  cross-riscv64-unknown-linux-gnu/gcc` resolved correctly through the moved
+  `master_cache_entry` symlink-resolution path. Remaining stages: create the
+  crate + move `Roots`; move `bdepend_avail.rs`;
   move the `repo.rs`/`force_mask.rs`/`effective_use.rs` core; move the
   `use_env.rs`/`installed.rs`/`conflicts.rs`/`subslot.rs` group; move the
   `Roots`-consumer group (`root_aware.rs`/`bdepend_trim.rs`/

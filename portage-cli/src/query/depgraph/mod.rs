@@ -13,7 +13,6 @@ mod download_size;
 mod force_mask;
 mod installed;
 mod output;
-mod overlay;
 mod package_use;
 mod repo;
 mod required_use;

@@ -889,7 +889,7 @@ pub(super) async fn load_repos(
     }
 
     for (overlay, masters) in overlays {
-        for (cpv, entry) in super::overlay::overlay_entries(overlay, masters).await {
+        for (cpv, entry) in portage_repo::overlay_entries(overlay, masters).await {
             if !seen.insert(cpv.clone()) {
                 continue;
             }

@@ -12,18 +12,17 @@ use std::collections::HashMap;
 use camino::Utf8PathBuf;
 use portage_atom::Cpv;
 use portage_metadata::CacheEntry;
-use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
+
+use crate::cache::{CacheReadOpts, cache_entries_parallel};
+use crate::repo::Repository;
 
 /// Every metadata entry of `repo`: its own md5-cache when present and fresh,
 /// the user cache when valid, sourcing as the fallback.
-pub(super) async fn overlay_entries(
-    repo: &Repository,
-    masters: &[Repository],
-) -> Vec<(Cpv, CacheEntry)> {
+pub async fn overlay_entries(repo: &Repository, masters: &[Repository]) -> Vec<(Cpv, CacheEntry)> {
     let mut cached: HashMap<Cpv, CacheEntry> = cache_entries_parallel(
         std::slice::from_ref(repo),
         &CacheReadOpts::default(),
-        |text| CacheEntry::parse(text).map_err(portage_repo::Error::from),
+        |text| CacheEntry::parse(text).map_err(crate::Error::from),
     )
     .await
     .into_iter()
@@ -154,7 +153,7 @@ pub(super) async fn overlay_entries(
 /// The master-repo md5-cache entry for a symlinked ebuild, when the link
 /// resolves inside a master and the cache entry matches the file (`_md5_`).
 fn master_cache_entry(
-    ebuild: &portage_repo::Ebuild,
+    ebuild: &crate::repo::Ebuild,
     masters: &[Repository],
     digest: &str,
 ) -> Option<CacheEntry> {
