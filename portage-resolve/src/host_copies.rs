@@ -57,12 +57,12 @@ use std::collections::{HashMap, HashSet};
 use portage_atom::{Cpn, Cpv, Version};
 use portage_atom_pubgrub::{MergeRoot, PortagePackage};
 
-use portage_resolve::Roots;
-use portage_resolve::{Avail, unsatisfied_cpns};
+use crate::Roots;
+use crate::{Avail, unsatisfied_cpns};
 
-use super::effective_use;
-use super::repo::Adapter;
-use super::root_aware::CrossContext;
+use crate::effective_use;
+use crate::repo::Adapter;
+use crate::root_aware::CrossContext;
 
 /// Static inputs shared across the walk.
 struct Ctx<'a> {
@@ -234,10 +234,10 @@ mod tests {
     use portage_metadata::CacheEntry;
     use portage_repo::{AcceptLicense, LicenseGroupRegistry};
 
-    use super::super::force_mask::ForceMask;
-    use super::super::repo::{self, AcceptKeywords, AcceptLicenses};
-    use super::super::root_aware;
     use super::*;
+    use crate::force_mask::ForceMask;
+    use crate::repo::{self, AcceptKeywords, AcceptLicenses};
+    use crate::root_aware;
 
     fn accept_all_licenses() -> AcceptLicense {
         AcceptLicense::from_tokens(&["*".into()], &LicenseGroupRegistry::default())

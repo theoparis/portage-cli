@@ -1,8 +1,4 @@
 mod autounmask;
-mod bdepend_trim;
-mod depend_trim;
-mod host_copies;
-mod root_aware;
 
 pub use portage_atom_pubgrub::MergeRoot;
 #[cfg(test)]
@@ -12,7 +8,10 @@ mod output;
 mod package_use;
 mod required_use;
 
-use portage_resolve::{conflicts, effective_use, installed, repo, subslot, use_env};
+use portage_resolve::{
+    bdepend_trim, conflicts, depend_trim, effective_use, host_copies, installed, repo, root_aware,
+    subslot, use_env,
+};
 // Not referenced directly here (only via a `force_mask::ForceMask` value
 // returned from `use_env`), but `c7.rs`/`host_copies.rs`'s own tests still
 // reach it through `super::force_mask`/`super::super::force_mask` — keep the

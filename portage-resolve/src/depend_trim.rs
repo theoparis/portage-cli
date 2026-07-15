@@ -4,17 +4,17 @@
 //! Host-config stage (`--config-root / --root <empty>`) and prefix overlays
 //! (`--prefix`) stamp `DEPEND` onto the target merge root in the solver, which
 //! can over-pull bootstrap packages (e.g. `sys-devel/gcc-11.5.0`) that the
-//! host sysroot already provides. This pass mirrors [`super::bdepend_trim`] but
+//! host sysroot already provides. This pass mirrors `crate::bdepend_trim` but
 //! checks `DEPEND` against the sysroot VDB only — within-run target merges do
 //! not satisfy build-time `DEPEND` on a foreign sysroot.
 
 use portage_atom::{Cpn, Cpv, Version};
 use portage_atom_pubgrub::PortagePackage;
 
-use portage_resolve::Avail;
+use crate::Avail;
 
-use super::bdepend_trim::TrimCtx;
-use super::effective_use;
+use crate::bdepend_trim::TrimCtx;
+use crate::effective_use;
 
 /// Drop entries only needed for `DEPEND` edges already satisfied on the
 /// sysroot. No-op when `sysroot == target` (full offset / crossdev sysroot).
@@ -141,9 +141,9 @@ fn target_avail_for_consumer(
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use super::super::repo::RepoData;
     use super::*;
-    use portage_resolve::Roots;
+    use crate::Roots;
+    use crate::repo::RepoData;
 
     fn empty_roots() -> Roots {
         Roots::default()

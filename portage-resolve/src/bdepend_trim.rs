@@ -6,24 +6,30 @@ use std::collections::HashSet;
 use portage_atom::{Cpn, Cpv, DepEntry, Version};
 use portage_atom_pubgrub::{PortagePackage, UseOverride};
 
-use portage_resolve::Avail;
-use portage_resolve::Roots;
+use crate::Avail;
+use crate::Roots;
 
-use super::effective_use;
-use super::repo::RepoData;
+use crate::effective_use;
+use crate::repo::RepoData;
 
 /// Context for [`trim_within_run_bdepend`].
 pub struct TrimCtx<'a> {
-    /// See [`portage_resolve::Avail::initial_bdepend`] — carries BROOT
+    /// See [`crate::Avail::initial_bdepend`] — carries BROOT
     /// via `satisfaction_root(DepClass::Bdepend)` even under an active
     /// `--target` sysroot substitution, so this is the same `Roots` the
     /// caller already has for `DEPEND`, not a separately-picked one.
     pub roots: &'a Roots,
+    /// The loaded repository facts.
     pub data: &'a RepoData,
+    /// USE folded up through `make.conf`.
     pub pre_env: &'a str,
+    /// The raw process-environment `USE` value.
     pub env_use: &'a str,
+    /// Per-version `package.use` overrides.
     pub package_use: &'a [(portage_atom::Dep, Vec<UseOverride>)],
+    /// CPNs explicitly requested on the command line — never trimmed.
     pub root_cpns: &'a HashSet<Cpn>,
+    /// CPNs the solver kept for a same-version USE rebuild — never trimmed.
     pub reinstall_cpns: &'a HashSet<Cpn>,
 }
 
@@ -187,7 +193,7 @@ mod tests {
     use portage_metadata::CacheEntry;
 
     use super::*;
-    use portage_resolve::Roots;
+    use crate::Roots;
 
     fn empty_roots() -> Roots {
         Roots::default()

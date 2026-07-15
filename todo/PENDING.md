@@ -632,10 +632,43 @@ still open.
   and confirmed a real `package.use` entry on this host
   (`cross-riscv64-unknown-linux-gnu/gcc`) is actually applied in the
   resolved USE flags — not just defaulting to empty. Full workspace
-  check/clippy -D warnings/fmt/test clean. Remaining stages:
-  move the `Roots`-consumer group (`root_aware.rs`/`bdepend_trim.rs`/
-  `depend_trim.rs`/`host_copies.rs`); move `required_use.rs`/
-  `download_size.rs`/split `package_use.rs`/move `c7.rs`. Not yet started.
+  check/clippy -D warnings/fmt/test clean.
+  **stage 6 DONE (2026-07-16)** — `root_aware.rs` (`CrossContext`
+  detection + `PlanEntry`/`build_plan`/`display_root`), `bdepend_trim.rs`
+  (within-run BROOT `BDEPEND` trim, `TrimCtx`), `depend_trim.rs`
+  (sysroot `DEPEND` trim), `host_copies.rs` (Tier-1 native-offset host
+  build-copies closure walk) all moved verbatim — the `Roots`-consumer
+  group. Same visibility-bump rationale as stages 4/5 (nearly every
+  `pub(super)` item and its fields → `pub`, since `mod.rs`/`output.rs`/
+  `autounmask.rs`/`package_use.rs` — staying in `portage-cli` — construct
+  `CrossContext`/`PlanEntry`/`TrimCtx` via bare struct literals and read
+  fields directly). Same module-path trick as stages 4/5: `mod.rs`'s
+  `use portage_resolve::{...}` line grew `bdepend_trim, depend_trim,
+  host_copies, root_aware`, replacing 4 more `mod X;` declarations, with
+  zero of the other not-yet-moved files needing touching. New wrinkle
+  this stage (first hit in stage 5's `installed.rs`, but affecting all
+  4 files here): each of these 4 files, in its OLD home, referenced
+  `portage_resolve::Roots`/`portage_resolve::Avail` etc. (correct from
+  `portage-cli`'s perspective) — once the file itself moves INTO
+  `portage-resolve`, that must become `crate::Roots`/`crate::Avail`;
+  fixed on each file with `sed -i 's/portage_resolve::/crate::/g'`
+  immediately after the `pub(super)`→`pub` bump, before compiling. Fixed
+  9 new `missing_docs` warnings (mostly `TrimCtx`'s remaining
+  undocumented fields in `bdepend_trim.rs`, and `PlanEntry`'s 3 fields
+  in `root_aware.rs`). Test-count accounting: 145 + 51 before → 135 + 61
+  after (10 moved: 3+2+3+2 `#[test]` counted in the 4 files, exact
+  match). Live-verified against the real binary: a native `--root`
+  offset resolve pulling host build-copies (`net-misc/curl` to a fresh
+  `--root`, exercising `host_copies.rs`'s closure walk), a `--target
+  riscv64-unknown-linux-gnu` cross resolve (confirming `root_aware.rs`'s
+  `Root-aware cross plan: CHOST=... CBUILD=... sysroot=... target=...`
+  banner and correct merge destination), and `--with-bdeps` under both
+  a `--root` offset (BROOT-satisfied `BDEPEND` edges dropped by
+  `bdepend_trim.rs`) and combined with `--target` (both `depend_trim.rs`
+  sysroot-`DEPEND` and `bdepend_trim.rs` BROOT trims firing together) —
+  all correct. Full workspace check/clippy -D warnings/fmt/test clean.
+  Remaining stage: move `required_use.rs`/`download_size.rs`/split
+  `package_use.rs`/move `c7.rs`. Not yet started.
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.
 - 🔴 Signing/verify (`BINPKG_GPG_*`) — last (lives in `portage-binpkg`).
 
