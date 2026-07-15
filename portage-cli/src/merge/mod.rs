@@ -43,7 +43,7 @@ pub(crate) fn confirm_merge(count: usize) -> Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
-/// Which [`cli::Roots`] a plan entry actually installs into: the outer EROOT
+/// Which [`portage_resolve::Roots`] a plan entry actually installs into: the outer EROOT
 /// (`host_roots`) for a Host-rooted entry — an unsatisfied BDEPEND scheduled
 /// onto the build host by a `--target` solve (see `cross_target_runtime_deps`
 /// in portage-atom-pubgrub) — or the `--target`-substituted sysroot (`roots`,
@@ -58,9 +58,9 @@ pub(crate) fn confirm_merge(count: usize) -> Result<bool> {
 /// looked. See `todo/stage-build-shakeout.md`.
 fn entry_roots<'a>(
     planned: &query::depgraph::PlannedMerge,
-    roots: &'a cli::Roots,
-    host_roots: &'a cli::Roots,
-) -> &'a cli::Roots {
+    roots: &'a portage_resolve::Roots,
+    host_roots: &'a portage_resolve::Roots,
+) -> &'a portage_resolve::Roots {
     if planned.merge_root == query::depgraph::MergeRoot::Host {
         host_roots
     } else {
@@ -78,7 +78,7 @@ fn entry_roots<'a>(
 pub(crate) async fn run_merge_plan(
     plan: &[query::depgraph::PlannedMerge],
     blockers: &[Vec<usize>],
-    roots: &cli::Roots,
+    roots: &portage_resolve::Roots,
     work_base: &camino::Utf8Path,
     distdir: Option<&camino::Utf8Path>,
     quiet: bool,
@@ -260,8 +260,8 @@ pub(crate) async fn run_merge_plan(
 #[allow(clippy::too_many_arguments)]
 async fn merge_sequential(
     plan: &[query::depgraph::PlannedMerge],
-    roots: &cli::Roots,
-    host_roots: &cli::Roots,
+    roots: &portage_resolve::Roots,
+    host_roots: &portage_resolve::Roots,
     work_base: &camino::Utf8Path,
     distdir: Option<&camino::Utf8Path>,
     quiet: bool,
@@ -534,8 +534,8 @@ impl Scheduler {
 async fn merge_parallel(
     plan: &[query::depgraph::PlannedMerge],
     blockers: &[Vec<usize>],
-    roots: &cli::Roots,
-    host_roots: &cli::Roots,
+    roots: &portage_resolve::Roots,
+    host_roots: &portage_resolve::Roots,
     work_base: &camino::Utf8Path,
     distdir: Option<&camino::Utf8Path>,
     quiet: bool,
@@ -732,8 +732,9 @@ mod entry_roots_tests {
 
     #[test]
     fn host_entry_installs_into_outer_eroot_not_the_cross_sysroot() -> Result<()> {
-        let roots = cli::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
-        let host_roots = cli::Roots::for_test("/var/tmp/cross-stage1");
+        let roots =
+            portage_resolve::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
+        let host_roots = portage_resolve::Roots::for_test("/var/tmp/cross-stage1");
         let p = planned(MergeRoot::Host)?;
         assert_eq!(
             entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
@@ -744,8 +745,9 @@ mod entry_roots_tests {
 
     #[test]
     fn target_entry_uses_the_plans_own_root() -> Result<()> {
-        let roots = cli::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
-        let host_roots = cli::Roots::for_test("/var/tmp/cross-stage1");
+        let roots =
+            portage_resolve::Roots::for_test("/var/tmp/cross-stage1/usr/riscv64-unknown-linux-gnu");
+        let host_roots = portage_resolve::Roots::for_test("/var/tmp/cross-stage1");
         let p = planned(MergeRoot::Target)?;
         assert_eq!(
             entry_roots(&p, &roots, &host_roots).merge_root().as_str(),
@@ -760,8 +762,8 @@ mod entry_roots_tests {
     /// which now resolves to the prefix (`outer_roots()`), not the host.
     #[test]
     fn host_entry_installs_into_the_prefix_under_overlay_not_the_host() -> Result<()> {
-        let roots = cli::Roots::for_test("/opt/p");
-        let host_roots = cli::Roots::for_test_overlay("/", "/opt/p");
+        let roots = portage_resolve::Roots::for_test("/opt/p");
+        let host_roots = portage_resolve::Roots::for_test_overlay("/", "/opt/p");
         let p = planned(MergeRoot::Host)?;
         assert_eq!(
             entry_roots(&p, &roots, &host_roots).merge_root().as_str(),

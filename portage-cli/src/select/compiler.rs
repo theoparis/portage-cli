@@ -10,7 +10,8 @@ use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use super::{Cli, env_d};
-use crate::cli::{CompilerAction, Roots};
+use crate::cli::CompilerAction;
+use portage_resolve::Roots;
 
 /// GCC-specific profile type.
 pub struct GccProfileType;

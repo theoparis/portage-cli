@@ -143,7 +143,7 @@ mod tests {
 
     use super::super::repo::RepoData;
     use super::*;
-    use crate::cli::Roots;
+    use portage_resolve::Roots;
 
     fn empty_roots() -> Roots {
         Roots::default()

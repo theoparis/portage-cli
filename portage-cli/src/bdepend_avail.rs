@@ -11,7 +11,7 @@ use portage_atom::{Cpn, Cpv, Dep, DepEntry, UseDefault, UseDep, UseDepKind};
 use portage_atom_pubgrub::{DepClass, MergeRoot};
 use portage_vdb::{InstalledPackage, Vdb};
 
-use crate::cli::Roots;
+use portage_resolve::Roots;
 
 /// Interned `(enabled, iuse)` USE state — see `AvailEntry::interned_use`.
 type InternedUse = (

@@ -9,7 +9,8 @@ use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use super::{Cli, env_d};
-use crate::cli::{BinutilsAction, Roots};
+use crate::cli::BinutilsAction;
+use portage_resolve::Roots;
 
 /// Binutils-specific profile type.
 pub struct BinutilsProfileType;

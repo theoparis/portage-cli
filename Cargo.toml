@@ -32,10 +32,12 @@ portage-metadata = { version = "0.8", path = "portage-metadata" }
 portage-solver = { version = "0.1", path = "portage-solver" }
 portage-atom-pubgrub = { version = "0.6", path = "portage-atom-pubgrub" }
 portage-atom-resolvo = { version = "0.7.1", path = "portage-atom-resolvo" }
-portage-resolve = { version = "0.0.1", path = "portage-resolve" }
 portage-repo = { path = "portage-repo" }
 portage-distfiles = { path = "portage-distfiles" }
 portage-vdb = { path = "portage-vdb" }
+# portage-resolve: published once as an empty v0.0.1 placeholder to reserve
+# the name; unpublishable from here on (depends on portage-repo, below).
+portage-resolve = { path = "portage-resolve" }
 portage-binpkg = { path = "portage-binpkg" }
 
 # Shared external dependencies

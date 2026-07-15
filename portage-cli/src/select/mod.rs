@@ -23,8 +23,9 @@ mod repos;
 use anyhow::Result;
 use camino::Utf8PathBuf;
 
-use crate::cli::{Cli, Roots, SelectCommand};
+use crate::cli::{Cli, SelectCommand};
 use crate::style::{C_HOST, C_PREFIX};
+use portage_resolve::Roots;
 
 /// Activate the newest binutils profile built into `roots`' merge root for
 /// `target` (the `binutils-config` half of `crossdev --setup`'s toolchain

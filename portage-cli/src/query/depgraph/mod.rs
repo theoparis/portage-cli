@@ -106,7 +106,7 @@ pub struct DepgraphOpts<'a> {
     /// carries BROOT correctly even under an active `--target` sysroot
     /// substitution, so a separate `host_roots` field is no longer needed
     /// (see `Cli::roots`'s doc comment).
-    pub roots: &'a crate::cli::Roots,
+    pub roots: &'a portage_resolve::Roots,
     /// Where a `MergeRoot::Host` plan entry actually merges — `Cli::broot()`'s
     /// `merge_root()`. Passed separately from `roots` because `roots` can be
     /// `--target`-substituted (its `eprefix`/`is_overlay()` cleared), which

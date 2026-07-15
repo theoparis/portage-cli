@@ -10,8 +10,9 @@ use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use super::{config_portage_dir_for, get_chost, is_prefix_context_for, source_label};
-use crate::cli::{Cli, Roots};
+use crate::cli::Cli;
 use crate::style::C_STAR;
+use portage_resolve::Roots;
 
 /// Trait for env.d-based profile selection modules.
 pub trait EnvDProfile: Sized + 'static {

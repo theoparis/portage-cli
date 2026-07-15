@@ -7,7 +7,7 @@ use portage_atom::{Cpn, Cpv, DepEntry, Version};
 use portage_atom_pubgrub::{PortagePackage, UseOverride};
 
 use crate::bdepend_avail::Avail;
-use crate::cli::Roots;
+use portage_resolve::Roots;
 
 use super::effective_use;
 use super::repo::RepoData;
@@ -187,7 +187,7 @@ mod tests {
     use portage_metadata::CacheEntry;
 
     use super::*;
-    use crate::cli::Roots;
+    use portage_resolve::Roots;
 
     fn empty_roots() -> Roots {
         Roots::default()

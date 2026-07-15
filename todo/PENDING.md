@@ -510,8 +510,36 @@ still open.
   repro (`/var/db/repos/crossdev`, a real crossdev overlay with no
   `metadata/md5-cache`, symlinked package dirs into `::gentoo`): `em -p
   cross-riscv64-unknown-linux-gnu/gcc` resolved correctly through the moved
-  `master_cache_entry` symlink-resolution path. Remaining stages: create the
-  crate + move `Roots`; move `bdepend_avail.rs`;
+  `master_cache_entry` symlink-resolution path.
+  **stage 2 DONE (2026-07-16)** — `Roots` (struct + impl) moved from
+  `portage-cli/src/cli.rs` into `portage-resolve/src/roots.rs` verbatim,
+  `pub(crate)` methods bumped to `pub` (`config_root_explicit`,
+  `is_overlay`, `is_self_contained_root`,
+  `with_own_config_root_if_self_contained`, `satisfaction_root`). Since
+  its fields are private and construction now crosses a crate boundary,
+  added `with_*` builder methods (one per field, `mut self -> Self`,
+  matching the pre-existing `with_own_config_root_if_self_contained`
+  idiom) plus two new getters (`broot()`, `is_cross_arch()`) that didn't
+  exist before because the impl itself used to reach the fields directly.
+  The 3 `#[cfg(test)]`-gated test constructors (`for_test`,
+  `for_test_root_with_broot`, `for_test_overlay`, used by 7 other files'
+  own tests) became `#[doc(hidden)] pub` instead — `#[cfg(test)]` doesn't
+  survive a crate boundary (it's only `true` while *that* crate itself is
+  under test). `portage-cli`'s 4 real construction call sites
+  (`roots`/`outer_roots`/`base_roots`/`broot`) rewritten from struct
+  literals to builder chains; ~15 consumer files across `portage-cli`
+  updated from `use crate::cli::Roots` to `use portage_resolve::Roots`
+  (mechanical). **Consequence surfaced, not previously concrete**: this is
+  the point `portage-resolve` actually gained a `portage-repo` dependency
+  (for `Roots::repos_conf`'s `Result`/`ReposConf`), so `publish = false`
+  is now set — the placeholder `v0.0.1` on crates.io was the last
+  publishable version, exactly as Fable's plan flagged as the eventual
+  outcome. Live-verified against the real binary across all four root
+  topologies (bare, `--root`, `--target` sysroot substitution against a
+  real pre-built `/usr/riscv64-unknown-linux-gnu`, `--prefix`, `--local`)
+  — all resolve and plan correctly. Full workspace check/clippy -D
+  warnings/fmt/test clean, no tests lost (234 in `portage-cli`'s own lib,
+  unchanged). Remaining stages: move `bdepend_avail.rs`;
   move the `repo.rs`/`force_mask.rs`/`effective_use.rs` core; move the
   `use_env.rs`/`installed.rs`/`conflicts.rs`/`subslot.rs` group; move the
   `Roots`-consumer group (`root_aware.rs`/`bdepend_trim.rs`/

@@ -9,7 +9,7 @@ use gentoo_core::Arch;
 use portage_atom::Version;
 use portage_atom_pubgrub::{MergeRoot, PortagePackage};
 
-use crate::cli::Roots;
+use portage_resolve::Roots;
 
 /// Cross-compilation context derived from CLI roots.
 ///
@@ -184,7 +184,7 @@ mod tests {
     /// used to be host-anchored for every topology.
     #[test]
     fn host_entry_displays_as_landing_in_the_prefix_under_overlay() {
-        let roots = crate::cli::Roots::for_test_overlay("/", "/opt/p");
+        let roots = portage_resolve::Roots::for_test_overlay("/", "/opt/p");
         let cross = detect(&roots, Utf8Path::new("/opt/p"));
         assert!(cross.active);
         assert_eq!(
@@ -197,7 +197,7 @@ mod tests {
     /// real host `/` — unaffected by the overlay-only display fix.
     #[test]
     fn host_entry_displays_as_landing_on_the_real_host_under_offset() {
-        let roots = crate::cli::Roots::for_test("/srv/x");
+        let roots = portage_resolve::Roots::for_test("/srv/x");
         let cross = detect(&roots, Utf8Path::new("/"));
         assert_eq!(
             display_root(MergeRoot::Host, &cross.target, &cross).as_str(),
@@ -212,7 +212,8 @@ mod tests {
     /// `roots.is_overlay()` inside `detect`.
     #[test]
     fn host_entry_displays_as_landing_in_the_prefix_even_when_roots_is_target_substituted() {
-        let sysroot_roots = crate::cli::Roots::for_test("/opt/p/usr/riscv64-unknown-linux-gnu");
+        let sysroot_roots =
+            portage_resolve::Roots::for_test("/opt/p/usr/riscv64-unknown-linux-gnu");
         let cross = detect(&sysroot_roots, Utf8Path::new("/opt/p"));
         assert_eq!(
             display_root(MergeRoot::Host, &cross.target, &cross).as_str(),

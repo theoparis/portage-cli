@@ -21,8 +21,8 @@
 use anyhow::{Context, Result};
 use camino::Utf8Path;
 
-use crate::cli::Roots;
 use crate::util::write_if_absent;
+use portage_resolve::Roots;
 
 /// The `bashrc` recipe for an in-place (`--local`) prefix: paths are already
 /// correct in the installed `.pc`, so only the search path is added.

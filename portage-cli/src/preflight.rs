@@ -32,8 +32,8 @@ use portage_atom::interner::Interned;
 use portage_atom::{Cpv, DepEntry};
 
 use crate::bdepend_avail::{Avail, collect_unsatisfied};
-use crate::cli::Roots;
 use portage_atom_pubgrub::MergeRoot;
+use portage_resolve::Roots;
 
 use crate::query::depgraph::PlannedMerge;
 

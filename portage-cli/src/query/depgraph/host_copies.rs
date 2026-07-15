@@ -58,7 +58,7 @@ use portage_atom::{Cpn, Cpv, Version};
 use portage_atom_pubgrub::{MergeRoot, PortagePackage};
 
 use crate::bdepend_avail::{Avail, unsatisfied_cpns};
-use crate::cli::Roots;
+use portage_resolve::Roots;
 
 use super::effective_use;
 use super::repo::Adapter;

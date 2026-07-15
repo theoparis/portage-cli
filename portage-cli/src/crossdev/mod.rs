@@ -1175,7 +1175,7 @@ fn make_conf_body(target: &CrossTarget, sysroot: &Utf8Path, outer_root: &Utf8Pat
 /// merge actually lands on and is checked against everywhere else this
 /// session (`preflight`/`bdepend_avail`/`host_copies`).
 fn host_installed_versions(
-    roots: &crate::cli::Roots,
+    roots: &portage_resolve::Roots,
     cat: &str,
     pkg: &str,
 ) -> Vec<(Version, String)> {
@@ -1250,7 +1250,7 @@ fn branch_bound(version: &Version) -> String {
 ///   some packages (`sys-devel/rust-std`) are permanently unkeyworded by
 ///   Gentoo convention, not "live" in the churning sense, and still need it.
 fn host_arch_keyword_line(
-    roots: &crate::cli::Roots,
+    roots: &portage_resolve::Roots,
     gentoo: &Utf8Path,
     category: &str,
     pkg: &str,
@@ -1681,7 +1681,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = camino::Utf8Path::from_path(dir.path()).unwrap();
         write_vdb_entry(root, "sys-devel", "binutils-2.46.0", "2.46");
-        let roots = crate::cli::Roots::for_test(root.as_str());
+        let roots = portage_resolve::Roots::for_test(root.as_str());
 
         let installed = host_installed_versions(&roots, "sys-devel", "binutils");
         assert_eq!(
@@ -1698,7 +1698,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = camino::Utf8Path::from_path(dir.path()).unwrap();
         let gentoo = root.join("gentoo");
-        let roots = crate::cli::Roots::for_test(root.as_str());
+        let roots = portage_resolve::Roots::for_test(root.as_str());
 
         let line = host_arch_keyword_line(
             &roots,
@@ -1722,7 +1722,7 @@ mod tests {
         let gentoo = root.join("gentoo");
         write_ebuild(&gentoo, "sys-devel", "rust-std", "1.94.0");
         write_ebuild(&gentoo, "sys-devel", "rust-std", "1.95.0");
-        let roots = crate::cli::Roots::for_test(root.as_str());
+        let roots = portage_resolve::Roots::for_test(root.as_str());
 
         let line = host_arch_keyword_line(
             &roots,
@@ -1748,7 +1748,7 @@ mod tests {
         write_ebuild(&gentoo, "sys-devel", "binutils", "2.45.1");
         write_ebuild(&gentoo, "sys-devel", "binutils", "2.46.0");
         write_vdb_entry(root, "sys-devel", "binutils-2.46.0", "2.46");
-        let roots = crate::cli::Roots::for_test(root.as_str());
+        let roots = portage_resolve::Roots::for_test(root.as_str());
 
         let line = host_arch_keyword_line(
             &roots,
@@ -1778,7 +1778,7 @@ mod tests {
         write_ebuild(&gentoo, "sys-devel", "gcc", "16.2.1_p20260523");
         write_ebuild(&gentoo, "sys-devel", "gcc", "17.0.9999");
         write_vdb_entry(root, "sys-devel", "gcc-16.1.0", "16");
-        let roots = crate::cli::Roots::for_test(root.as_str());
+        let roots = portage_resolve::Roots::for_test(root.as_str());
 
         let line = host_arch_keyword_line(
             &roots,

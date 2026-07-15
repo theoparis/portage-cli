@@ -28,7 +28,7 @@ pub(super) struct VdbEntry {
 /// `--emptytree` does **not** clear this view — emerge still reads the VDB for
 /// action tags and post-solve checks; only package *selection* changes (see
 /// `InstalledPolicy::Rebuild` in the solver).
-pub(super) fn load_target_installed(roots: &crate::cli::Roots) -> Vec<VdbEntry> {
+pub(super) fn load_target_installed(roots: &portage_resolve::Roots) -> Vec<VdbEntry> {
     let base = roots.base();
     let target = roots.target();
     if base != target {
@@ -85,7 +85,7 @@ pub(super) struct HostInstalledEntry {
 /// keyed by package, so whichever entry is appended last wins — matching
 /// "what is in the prefix drives" for a package present in both (host
 /// entries come first, prefix second).
-pub(super) fn load_host_installed(roots: &crate::cli::Roots) -> Vec<HostInstalledEntry> {
+pub(super) fn load_host_installed(roots: &portage_resolve::Roots) -> Vec<HostInstalledEntry> {
     crate::bdepend_avail::broot_vdb_packages(roots)
         .into_iter()
         .map(|pkg| {
@@ -216,7 +216,7 @@ mod tests {
         .unwrap();
 
         let root_str = tmp.path().to_str().unwrap();
-        let host_roots = crate::cli::Roots::for_test(root_str);
+        let host_roots = portage_resolve::Roots::for_test(root_str);
         let entries = load_host_installed(&host_roots);
 
         assert_eq!(
@@ -261,7 +261,7 @@ mod tests {
             "python_targets_python3_14",
         );
 
-        let roots = crate::cli::Roots::for_test_overlay(
+        let roots = portage_resolve::Roots::for_test_overlay(
             host.path().to_str().unwrap(),
             prefix.path().to_str().unwrap(),
         );
@@ -291,7 +291,7 @@ mod tests {
         let prefix = tempfile::tempdir().unwrap();
         write_fake_vdb_entry(host.path(), "dev-python/jinja2-3.1.6", "");
 
-        let roots = crate::cli::Roots::for_test_overlay(
+        let roots = portage_resolve::Roots::for_test_overlay(
             host.path().to_str().unwrap(),
             prefix.path().to_str().unwrap(),
         );

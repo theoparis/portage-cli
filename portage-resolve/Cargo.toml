@@ -10,5 +10,12 @@ keywords = ["gentoo", "portage", "resolver", "dependency", "pms"]
 rust-version.workspace = true
 repository.workspace = true
 categories = ["algorithms", "development-tools"]
+# Unpublishable from this point on: depends on portage-repo, which pulls in
+# the brush fork via git. v0.0.1 (published) is the last publishable version
+# — it reserved the name while still empty; real content requires this.
+publish = false
 
 [dependencies]
+camino = { workspace = true }
+portage-atom-pubgrub = { workspace = true }
+portage-repo = { workspace = true }
