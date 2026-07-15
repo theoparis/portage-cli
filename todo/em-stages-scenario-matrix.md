@@ -1077,4 +1077,86 @@ since a genuinely foreign-arch tool has no host fallback the way `cpp`
 does) and is out of scope to redesign further this pass, though the same
 "pass the right flag instead of executing a guest binary" philosophy may
 apply there too (e.g. `-B`/`--with-as`/`--with-ld` instead of a live PATH
+
+## Two more real fixes (2026-07-12): tar ownership under a constrained sandbox, and `--autosolve-use` wiped by its own `-*`
+
+Re-running the real (non-`-p`) native `--root` `stages --stage1` build after
+the `LD_LIBRARY_PATH`/PATH-prepend fix above surfaced two further genuine
+bugs, both now fixed and committed (`b880d84`, `5b00c74`):
+
+**`dev-lang/perl` (and by extension anything with a similarly-shaped
+release tarball) died `unpack failed`.** Root cause: nothing to do with
+distfile fetch/corruption (the archive verified clean with `tar tJf`) — GNU
+`tar` defaults to `--same-owner` when the calling process is real root, and
+perl's official tarball embeds file ownership `uid/gid 197609` (and `544`
+for the top dir), values outside this sandbox's user-namespace uid map
+(confirmed via `/proc/self/uid_map`: only uid `0` and `1-65536` are
+mapped), so the `chown()` call fails `EINVAL`. `em` runs its whole build as
+real root here (`privilege.rs`'s own rule: "Already root ⇒ no wrapping"),
+so it never got the `--no-same-owner` protection a normal
+`FEATURES=userpriv` Gentoo build gets for free (tar defaults to
+`--no-same-owner` when *not* literal root). Fixed: `unpack.rs` now passes
+`--no-same-owner` unconditionally on every tar extraction — WORKDIR
+ownership doesn't matter for the build per PMS; only install/qmerge
+(already correctly privilege-scoped) needs real ownership. Caught and fixed
+a real mistake in the first attempt too: putting `--no-same-owner` *before*
+the old-style combined mode letters (`xjf` etc.) makes GNU tar stop parsing
+them as short options entirely and die "You must specify one of
+'-Acdtrux'" — verified the corrected (trailing) argument order directly in
+the sandbox before trusting it.
+
+**`--autosolve-use` never actually worked under `USE="-* build"` — its own
+core use case.** `app-alternatives/lex` died `No selected alternative
+found (REQUIRED_USE ignored?!)` on a completely fresh `--root`, even though
+`--autosolve-use` correctly *reported* it would cede `+reflex`. Root cause:
+the ceded decision was folded into a synthetic `package.use` entry — but
+this session's own earlier `USE=-*` layer-fold redesign correctly makes
+`package.use` lose to an *env-level* `-*`, and `em stages --stage1`'s own
+`use_override` operates at exactly that layer. So the ceded flag was wiped
+out by the very `-*` that made ceding necessary in the first place — this
+bug meant `--autosolve-use` could never have worked for a real `USE="-*
+build"` stage1/catalyst-style build, on any root mode, the whole time.
+Also explains the earlier-flagged "display shows pre-autosolve flags"
+cosmetic bug (same root cause). Fixed: ceded flags now apply as a final,
+unconditional override (`effective_use::apply_ceded`), the same standing as
+`use.force`/`use.mask`, threaded through the merge plan, the REQUIRED_USE
+check, the download-size estimate, and the `-p` display. Two new unit
+tests (`effective_use.rs`); live-verified `app-alternatives/lex` (and,
+in the full re-run below, `app-alternatives/awk` too) now actually merge
+under `USE="-* build"`.
+
+**Net result of this pass's two fixes**: native `--root` `stages --stage1`
+went from stalling at 24-50 of ~89 packages to **147 of ~148 merging
+cleanly**, reaching `sys-devel/gcc` itself.
+
+**New, different, real finding at that point — out of scope for this
+pass**: `gcc-16`'s own `libgcc` build fails `fatal error: stdio.h: No such
+file or directory`. Confirmed `sys-libs/glibc` is not merged into the
+target root at all (no `var/db/pkg/sys-libs/glibc*` entry) and, tellingly,
+is not even present in the active profile's `packages.build` set
+(`default/linux/arm64/23.0` + `base`, checked directly — zero matches for
+"glibc"). This isn't a regression from today's fixes; it's a gap in the
+*test's own premise*: real catalyst's stage1 assumes a pre-existing "seed"
+toolchain (baked into the stage0-produced seed tarball it starts from) —
+`packages.build` was never meant to build glibc from scratch, only to
+rebuild build-essential packages *on top of* an already-working native
+toolchain. This session's from-absolute-scratch `em setup --root` (no
+seed) has been testing a scenario catalyst itself never exercises. `gcc`'s
+own `econf` correctly passes `--with-sysroot=<ROOT>` for a genuine
+bootstrap (deliberately isolating it from the host's own headers, unlike
+ordinary packages which fall back to the host's default search when
+nothing chroots) — so it fails exactly where it should, given the target
+truly has no libc. Needs a design decision, not a quick fix: either (a)
+seed a minimal native toolchain into the target root before running
+`stages --stage1` (matching real catalyst's actual pipeline shape), or (b)
+decide `em`'s own from-scratch self-hosting story should explicitly include
+glibc+gcc as an earlier, separate bootstrap phase ahead of
+`packages.build`. Not investigated further this pass.
+
+Also noticed, non-blocking, not chased: two `error: the following required
+arguments were not provided: <ATOM>` (`has_version` called with no atom,
+during `dev-lang/python`'s build) and two `error: declare: cannot mutate
+readonly variable` (during `sys-devel/gcc`'s Gentoo-patch application) —
+neither stopped its package from registering successfully, so flagged here
+for visibility rather than investigated.
 search) — flagging as a follow-up, not chasing it now.
