@@ -388,6 +388,21 @@ download-size and autounmask all agree). The solver itself never recomputes any 
 this; it consumes the resolved `desired` set (see the
 [USE/solver boundary doc](../portage-atom-pubgrub/docs/use-and-solver-boundary.md)).
 
+**Layer 7 (`em`-only, no PMS equivalent): `--autosolve-use` ceded flags.**
+When a package's `REQUIRED_USE` is violated, `cede_required_use` hands its
+flags to the solver as preferences (`UseFlagState::SolverDecided`); once the
+solve picks a final value, `effective_use::apply_ceded` applies it as a
+**final, unconditional override** — sitting above even layer 6, applied
+*after* the whole layers-1–6 fold (including any `-*`) has already run, at
+every place that needs the real post-solve USE (the merge plan, the
+`REQUIRED_USE` check, download-size, and the `-p` display). This has to sit
+above the fold rather than be folded in as a `package.use` entry (layer 5):
+a ceded flag's entire purpose is to repair a violation an env-level `-*`
+caused, so if it were subject to the same fold, that same `-*` would wipe it
+right back out — which is exactly the bug this layer was added to fix
+(`em stages --stage1`'s `USE="-* build"` silently defeated `--autosolve-use`
+for every package it touched until this landed, 2026-07-12).
+
 ## Post-solve validation
 
 The solver decides *versions*; several constraints are intentionally **not**
