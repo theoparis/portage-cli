@@ -9,6 +9,7 @@ members = [
     "portage-atom-pubgrub",
     "portage-atom-resolvo",
     "portage-solver",
+    "portage-resolve",
     "portage-repo",
     "portage-distfiles",
     "portage-vdb",
@@ -31,6 +32,7 @@ portage-metadata = { version = "0.8", path = "portage-metadata" }
 portage-solver = { version = "0.1", path = "portage-solver" }
 portage-atom-pubgrub = { version = "0.6", path = "portage-atom-pubgrub" }
 portage-atom-resolvo = { version = "0.7.1", path = "portage-atom-resolvo" }
+portage-resolve = { version = "0.0.1", path = "portage-resolve" }
 portage-repo = { path = "portage-repo" }
 portage-distfiles = { path = "portage-distfiles" }
 portage-vdb = { path = "portage-vdb" }
