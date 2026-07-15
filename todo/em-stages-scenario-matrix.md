@@ -1002,3 +1002,79 @@ either of these (its target sysroot VDB is fresh, so `cede_required_use`
 doesn't misfire, and it's a genuine cross build so the direct-tool-execution
 gap doesn't apply the same way — worth double-checking that assumption
 before relying on it, not done this pass).
+
+## The native `--root` LD_LIBRARY_PATH framing above was wrong — fixed the real bug instead
+
+The write-up above proposed adding an `LD_LIBRARY_PATH` bashrc export for
+self-contained `--root`, treating the missing-shared-lib symptom as the
+bug. Direct challenge ("even for --root stages should not set the PATH to
+include the stage1 this is a different bug") led to finding the *actual*
+mechanism: `portage-repo/src/build/shell.rs`'s `run_phase` unconditionally
+prepended `<root_str>usr/bin` onto `PATH` for **any** self-contained
+`--root` build (not stage1-specific — `em stages --stage1` is just a thin
+wrapper computing `use_override` and handing off to the exact same generic
+`emerge_atoms` path any `em --root <dir> <atoms>` call uses, confirmed by
+reading `crossdev::run_staged`). That's why `configure` found and directly
+executed the ROOT-installed `pkg-config` in the first place — a plain
+`$PATH` hit, not an `ESYSROOT`/`AC_PATH_TOOL` cross-search as first
+claimed.
+
+That PATH-prepend was itself the bug, not something needing a companion
+`LD_LIBRARY_PATH` fix: it was written for one narrow, real, previously
+live-verified case (`sys-libs/glibc`'s `get_kheader_version()` needing to
+find `${CTARGET}-cpp` during a genuine cross-toolchain bootstrap,
+`stage-build-shakeout.md`'s 10th finding, 2026-07-03) but generalized "by
+analogy" to *also* fire for any plain native self-contained build with no
+cross involved at all — a case that was never actually live-tested until
+this session's real (non-`-p`) re-run found it actively harmful.
+
+**Fixed** (`portage-repo/src/build/shell.rs`): narrowed the condition from
+`(build_config_root.is_none() || cross_host_tool_tuple.is_some())` to just
+`cross_host_tool_tuple.is_some()` — the PATH-prepend now only fires when
+building `cross-<T>/{binutils,gcc,gdb,clang-crossdev-wrappers}` themselves,
+never for a plain self-contained bootstrap with no cross target at all.
+
+**Risk found and checked before trusting it**: `cross_host_tool_tuple`'s
+`pn` filter doesn't include `glibc` — so the *original* motivating case
+(cross `libc`'s `get_kheader_version`) gets no PATH-prepend either way
+under the new condition, raising a real concern that the narrowing had
+just reopened the 2026-07-03 bug. Checked empirically rather than assumed:
+re-ran a full `em --target riscv64-unknown-linux-gnu crossdev --setup`
+from scratch with the fixed binary. Result: `* Checking linux-headers
+version (7.1.0 >= 3.2.0) ...` — the correct value, not `0.0.0` — and the
+full 6-step bootstrap completed (`>>> cross toolchain
+riscv64-unknown-linux-gnu ready`). Not regressed.
+
+Why it isn't regressed: `tc-getCPP`'s fallback (`toolchain-funcs.eclass`)
+is `"${CC:-gcc} -E"` — when no `${CTARGET}-cpp`/`${CTARGET}-gcc` is found
+on `PATH`, it falls back to the plain host `gcc -E`. A C preprocessor
+reading `linux/version.h` for a `#define` macro is architecture-agnostic —
+the host's own `cpp`, given the explicit `-I "${ESYSROOT}$(alt_headers)"`
+the ebuild already passes, reads the right value regardless of which
+architecture's `cpp` binary actually runs. So the original fix's own
+motivating case turns out not to have needed the ROOT-installed binary
+specifically either — the same "any correctly-invoked tool works if given
+the right sysroot/include path, no need to execute a guest binary" logic
+that fixed the `pkg-config` case applies here too, just via the eclass's
+own fallback rather than anything `em` needed to add.
+
+Re-verified the native `--root` case too with the fixed binary
+(`em-stage1-live` sandbox, real `em stages --stage1 --root
+/root/stage1-testing --autosolve-use --jobs 4`): `app-portage/portage-utils`
+now merges cleanly (`registered (counter=69)`); the run got to 24/54
+merged before a new, unrelated failure — `dev-lang/perl-5.42.2`: `phase
+unpack failed: shell error: src_unpack: die: unpack failed` — not
+investigated further, looks like the same class of distfile-reliability
+gap already tracked in `todo/distfile-fetch-reliability.md`, not an `em`
+regression from this fix.
+
+Full workspace suite (1217 tests), clippy, and fmt all clean with the
+narrowed condition. The remaining `cross_host_tool_tuple`-gated
+PATH-prepend (for `binutils`/`gcc`/`gdb` finding *each other's* already-
+merged output during the toolchain's own bootstrap) is left as is — it's
+demonstrated necessary (the whole crossdev bootstrap needs it structurally,
+since a genuinely foreign-arch tool has no host fallback the way `cpp`
+does) and is out of scope to redesign further this pass, though the same
+"pass the right flag instead of executing a guest binary" philosophy may
+apply there too (e.g. `-B`/`--with-as`/`--with-ld` instead of a live PATH
+search) — flagging as a follow-up, not chasing it now.

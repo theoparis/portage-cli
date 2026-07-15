@@ -1476,50 +1476,46 @@ impl EbuildShell {
                 format!("{s}/")
             }
         };
-        // `<root>/usr/bin` on PATH: for `--local`, `BASHRC_LOCAL` already adds
-        // `<EPREFIX>/usr/bin` (it's sourced per phase from the config overlay).
-        // A self-contained `--root DIR` (`self.build_eprefix` AND
-        // `self.build_sysroot` both `None` — no `--local`, and no separate
-        // host base to layer over, matching the same `self_contained`
-        // condition `setup::bootstrap`'s bashrc/make.conf fixes use) has no
-        // such hook — and the "cross-CC auto-export" PATH-prepend a few lines
-        // above only fires when `CHOST != CBUILD`, which never happens in
-        // this em-config (the "cross" in a `cross-<tuple>/*` build lives
-        // entirely in `CTARGET`, parsed by `toolchain.eclass` — `CHOST`/
-        // `CBUILD` stay the *host* arch throughout a staged `em crossdev
-        // --setup`/`em toolchain --setup` bootstrap). So a plain PATH-based
-        // tool lookup for anything this root already installed (e.g. glibc's
-        // `get_kheader_version` doing `$(tc-getCPP ${CTARGET})`, needing the
-        // already-installed, already-`em select`-activated
-        // `<root>/usr/bin/<CTARGET>-cpp` wrapper) silently fails — not found,
-        // not a die, just wrong output (glibc read `0.0.0` and treated it as
-        // a real too-low kernel-headers version) — found 2026-07-03 doing a
-        // from-scratch cross-stage1 test, see [[stage-build-shakeout]].
+        // `<root>/usr/bin` on PATH, for the host-side cross-toolchain-building
+        // steps only (`cross_host_tool_tuple.is_some()`: this package is
+        // `cross-<T>/{binutils,gcc,gdb,clang-crossdev-wrappers}` itself, built
+        // to run on CBUILD). A later step in that same sequence genuinely
+        // needs an earlier one's own `<root>/usr/bin/<T>-*` output (e.g.
+        // `cross-<T>/gcc` invoking `cross-<T>/binutils`'s `<T>-as`) that
+        // exists *only* there — no host copy exists to fall back to, since
+        // `<T>` is a foreign target the host was never going to have on its
+        // own PATH. Found 2026-07-03 doing a from-scratch cross-stage1 test,
+        // see [[stage-build-shakeout]].
         //
-        // Deliberately scoped to self-contained only (not a plain `--prefix`,
-        // which shares the host base): unlike the self-contained case, a
-        // `--prefix` layering already has a working host toolchain reachable
-        // via the untouched host PATH, and prepending the prefix's own
-        // `usr/bin` there would be a *new* preference-order change for that
-        // mode with no reported gap motivating it.
+        // NOT applied to a plain self-contained `--root DIR` bootstrap with
+        // no active `--cross` at all (`cross_host_tool_tuple.is_none()` and
+        // `build_config_root.is_none()` both true) — this used to also fire
+        // there, reasoning by analogy that `root_str` is equally
+        // host-arch-executable in that case too. Live-tested for the first
+        // time 2026-07-12 doing a real (non-`-p`) `em stages --stage1 --root`
+        // run and found actively harmful: `dev-util/pkgconf` merges, then the
+        // *next* package's `configure` finds and directly executes the
+        // ROOT-installed `pkg-config` (shadowing the host's own, since it's
+        // prepended first) — which dies loading `libpkgconf.so.8`, because
+        // nothing here chroots or sets `LD_LIBRARY_PATH` for it. Unlike the
+        // cross case above, a plain native bootstrap never actually needed
+        // this: the one motivating check that prompted the original, broader
+        // version of this fix — glibc's `get_kheader_version` doing
+        // `$(tc-getCPP ${CTARGET}) -I "${ESYSROOT}$(alt_headers)"` — already
+        // passes the header search path explicitly, so *any* working,
+        // safely-host-executable `${CTARGET}`-prefixed cpp gives the right
+        // answer; for a plain same-arch bootstrap the host's own toolchain
+        // already provides one under that exact name, reachable via the
+        // untouched PATH, with no need to shadow it with the ROOT's own copy.
         //
-        // Also gated on NOT being an ordinary package under an active
-        // `--cross` (`build_config_root` is the cross sysroot precisely when
-        // one is): for glibc/the other genuine host-side toolchain steps,
-        // `root_str` here is the top-level EROOT (host-arch-executable, the
-        // original motivating case above). But an *ordinary* package merely
-        // installing *into* the cross target sysroot (`em stages --stage1
-        // --cross <tuple>`, e.g. plain `sys-libs/ncurses`) has `root_str` ==
-        // that foreign-arch sysroot itself — prepending its `usr/bin` put a
-        // riscv64 `sed`/`patch`/`gsed` ahead of the host's own on PATH,
-        // breaking every `eltpatch`/`eapply` call in the package's own
-        // prepare phase with "Exec format error". Found 2026-07-03 doing the
-        // first real (non-pretend) `em stages --stage1 --cross` run — see
-        // [[stage-build-shakeout]].
+        // Also not applied to `--prefix`/`--local`: `--prefix` shares the
+        // host base (a working toolchain is already on PATH); `--local` gets
+        // its own EPREFIX-keyed PATH/`LD_LIBRARY_PATH` hook from
+        // `BASHRC_LOCAL` (`setup.rs`).
         if root_str != "/"
             && self.build_eprefix.is_none()
             && self.build_sysroot.is_none()
-            && (self.build_config_root.is_none() || cross_host_tool_tuple.is_some())
+            && cross_host_tool_tuple.is_some()
         {
             let bin = format!("{root_str}usr/bin");
             let path = self.get_var("PATH").unwrap_or_default();
