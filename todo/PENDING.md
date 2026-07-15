@@ -538,8 +538,22 @@ still open.
   topologies (bare, `--root`, `--target` sysroot substitution against a
   real pre-built `/usr/riscv64-unknown-linux-gnu`, `--prefix`, `--local`)
   — all resolve and plan correctly. Full workspace check/clippy -D
-  warnings/fmt/test clean, no tests lost (234 in `portage-cli`'s own lib,
-  unchanged). Remaining stages: move `bdepend_avail.rs`;
+  warnings/fmt/test clean, no tests lost (`portage-cli`'s own lib: 196).
+  **stage 3 DONE (2026-07-16)** — `bdepend_avail.rs` (BROOT/within-run
+  `BDEPEND` availability checks, `Avail` + its free functions) moved
+  verbatim into `portage-resolve`. `entry_satisfied` (previously
+  `pub(crate)` for no reason any consumer needed — grepped, only used
+  within the file itself) demoted to private; everything else that was
+  actually consumed cross-module (`broot_vdb_packages`, `entry_satisfied`
+  was the one exception) bumped from `pub(crate)` to `pub`. 5 consumer
+  files (`preflight.rs`, `query/depgraph/{bdepend_trim,depend_trim,
+  host_copies,installed}.rs`) updated to `use portage_resolve::...`.
+  All 18 tests moved with the logic (verified via a `git stash`
+  before/after comparison of the exact `portage-cli`-lib + `portage-resolve`
+  totals, not just "still green" — 196 before == 178 + 18 after). Live-
+  verified `--with-bdeps` across bare/`--root`/`--prefix` topologies
+  against the real binary. Full workspace check/clippy -D warnings/fmt/test
+  clean. Remaining stages:
   move the `repo.rs`/`force_mask.rs`/`effective_use.rs` core; move the
   `use_env.rs`/`installed.rs`/`conflicts.rs`/`subslot.rs` group; move the
   `Roots`-consumer group (`root_aware.rs`/`bdepend_trim.rs`/

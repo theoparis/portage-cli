@@ -13,6 +13,8 @@
 //! `portage-repo`, which pulls in the brush fork via git.
 #![warn(missing_docs)]
 
+mod bdepend_avail;
 mod roots;
 
+pub use bdepend_avail::{Avail, broot_vdb_packages, collect_unsatisfied, unsatisfied_cpns};
 pub use roots::Roots;

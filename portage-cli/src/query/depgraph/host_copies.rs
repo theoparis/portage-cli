@@ -57,8 +57,8 @@ use std::collections::{HashMap, HashSet};
 use portage_atom::{Cpn, Cpv, Version};
 use portage_atom_pubgrub::{MergeRoot, PortagePackage};
 
-use crate::bdepend_avail::{Avail, unsatisfied_cpns};
 use portage_resolve::Roots;
+use portage_resolve::{Avail, unsatisfied_cpns};
 
 use super::effective_use;
 use super::repo::Adapter;

@@ -31,9 +31,9 @@ use anyhow::{Result, bail};
 use portage_atom::interner::Interned;
 use portage_atom::{Cpv, DepEntry};
 
-use crate::bdepend_avail::{Avail, collect_unsatisfied};
 use portage_atom_pubgrub::MergeRoot;
 use portage_resolve::Roots;
+use portage_resolve::{Avail, collect_unsatisfied};
 
 use crate::query::depgraph::PlannedMerge;
 

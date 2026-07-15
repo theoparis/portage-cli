@@ -17,5 +17,10 @@ publish = false
 
 [dependencies]
 camino = { workspace = true }
+portage-atom = { workspace = true }
 portage-atom-pubgrub = { workspace = true }
 portage-repo = { workspace = true }
+portage-vdb = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

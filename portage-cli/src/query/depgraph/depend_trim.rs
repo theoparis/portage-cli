@@ -11,7 +11,7 @@
 use portage_atom::{Cpn, Cpv, Version};
 use portage_atom_pubgrub::PortagePackage;
 
-use crate::bdepend_avail::Avail;
+use portage_resolve::Avail;
 
 use super::bdepend_trim::TrimCtx;
 use super::effective_use;

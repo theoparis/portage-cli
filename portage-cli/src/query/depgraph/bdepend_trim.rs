@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use portage_atom::{Cpn, Cpv, DepEntry, Version};
 use portage_atom_pubgrub::{PortagePackage, UseOverride};
 
-use crate::bdepend_avail::Avail;
+use portage_resolve::Avail;
 use portage_resolve::Roots;
 
 use super::effective_use;
@@ -14,7 +14,7 @@ use super::repo::RepoData;
 
 /// Context for [`trim_within_run_bdepend`].
 pub struct TrimCtx<'a> {
-    /// See [`crate::bdepend_avail::Avail::initial_bdepend`] — carries BROOT
+    /// See [`portage_resolve::Avail::initial_bdepend`] — carries BROOT
     /// via `satisfaction_root(DepClass::Bdepend)` even under an active
     /// `--target` sysroot substitution, so this is the same `Roots` the
     /// caller already has for `DEPEND`, not a separately-picked one.

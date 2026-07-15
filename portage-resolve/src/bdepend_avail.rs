@@ -1,6 +1,6 @@
 //! BROOT / within-run package availability for `BDEPEND` checks.
 //!
-//! Shared by [`crate::preflight`] (validate) and the depgraph post-solve
+//! Shared by `em`'s `preflight` module (validate) and the depgraph post-solve
 //! `BDEPEND` trim pass.
 
 use std::cell::OnceCell;
@@ -11,7 +11,7 @@ use portage_atom::{Cpn, Cpv, Dep, DepEntry, UseDefault, UseDep, UseDepKind};
 use portage_atom_pubgrub::{DepClass, MergeRoot};
 use portage_vdb::{InstalledPackage, Vdb};
 
-use portage_resolve::Roots;
+use crate::Roots;
 
 /// Interned `(enabled, iuse)` USE state — see `AvailEntry::interned_use`.
 type InternedUse = (
@@ -187,6 +187,8 @@ impl Avail {
         });
     }
 
+    /// Whether `dep` is already satisfied by this availability set (CPN,
+    /// version, slot, and any USE-dep brackets — see [`use_deps_satisfied`]).
     pub fn atom_satisfied(&self, dep: &Dep) -> bool {
         self.0
             .iter()
@@ -305,7 +307,7 @@ fn avail_entries_from(pkgs: Vec<InstalledPackage>) -> Vec<AvailEntry> {
 /// (union for `Avail`, last-wins insert for `add_host_installed`) — host
 /// entries come first, then prefix, so both behaviours fall out of
 /// iteration order.
-pub(crate) fn broot_vdb_packages(roots: &Roots) -> Vec<InstalledPackage> {
+pub fn broot_vdb_packages(roots: &Roots) -> Vec<InstalledPackage> {
     let mut out = vdb_packages_at(roots.satisfaction_root(DepClass::Bdepend));
     if roots.is_overlay() {
         out.extend(vdb_packages_at(roots.merge_root()));
@@ -386,7 +388,7 @@ fn group_satisfied(entries: &[DepEntry], avail: &Avail) -> bool {
 }
 
 /// Whether `e` is satisfied on `avail` (blockers count as satisfied).
-pub(crate) fn entry_satisfied(e: &DepEntry, avail: &Avail) -> bool {
+fn entry_satisfied(e: &DepEntry, avail: &Avail) -> bool {
     match e {
         DepEntry::Atom(dep) => dep.blocker.is_some() || avail.atom_satisfied(dep),
         DepEntry::AllOf(c) => c.iter().all(|e| entry_satisfied(e, avail)),

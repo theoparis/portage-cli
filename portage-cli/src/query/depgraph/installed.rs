@@ -77,7 +77,7 @@ pub(super) struct HostInstalledEntry {
 /// (each slot is a distinct `PortagePackage`).
 ///
 /// The root selection (BROOT, plus the prefix's own VDB under `--prefix`) is
-/// `crate::bdepend_avail::broot_vdb_packages` — shared with
+/// `portage_resolve::broot_vdb_packages` — shared with
 /// `Avail::initial_bdepend`, which the same #28/#30 bug (reading the bare
 /// host `/var/db/pkg` instead of the given BROOT) was once fixed in
 /// separately; see that function's doc comment for the full rationale.
@@ -86,7 +86,7 @@ pub(super) struct HostInstalledEntry {
 /// "what is in the prefix drives" for a package present in both (host
 /// entries come first, prefix second).
 pub(super) fn load_host_installed(roots: &portage_resolve::Roots) -> Vec<HostInstalledEntry> {
-    crate::bdepend_avail::broot_vdb_packages(roots)
+    portage_resolve::broot_vdb_packages(roots)
         .into_iter()
         .map(|pkg| {
             let slot = pkg.slot_main().ok();
