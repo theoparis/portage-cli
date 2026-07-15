@@ -1132,21 +1132,34 @@ cleanly**, reaching `sys-devel/gcc` itself.
 **New, different, real finding at that point — out of scope for this
 pass**: `gcc-16`'s own `libgcc` build fails `fatal error: stdio.h: No such
 file or directory`. Confirmed `sys-libs/glibc` is not merged into the
-target root at all (no `var/db/pkg/sys-libs/glibc*` entry) and, tellingly,
-is not even present in the active profile's `packages.build` set
-(`default/linux/arm64/23.0` + `base`, checked directly — zero matches for
-"glibc"). This isn't a regression from today's fixes; it's a gap in the
-*test's own premise*: real catalyst's stage1 assumes a pre-existing "seed"
-toolchain (baked into the stage0-produced seed tarball it starts from) —
-`packages.build` was never meant to build glibc from scratch, only to
-rebuild build-essential packages *on top of* an already-working native
-toolchain. This session's from-absolute-scratch `em setup --root` (no
-seed) has been testing a scenario catalyst itself never exercises. `gcc`'s
-own `econf` correctly passes `--with-sysroot=<ROOT>` for a genuine
-bootstrap (deliberately isolating it from the host's own headers, unlike
-ordinary packages which fall back to the host's default search when
-nothing chroots) — so it fails exactly where it should, given the target
-truly has no libc. Needs a design decision, not a quick fix: either (a)
+target root at all (no `var/db/pkg/sys-libs/glibc*` entry there).
+
+**Correction, checked directly after an initial wrong claim**: first said
+`packages.build` doesn't reference glibc at all — wrong, and only reached
+by grepping for the literal string "glibc" and missing the indirection.
+`profiles/default/linux/packages.build` (part of the active stack) lists
+`virtual/libc`, whose own `RDEPEND` is `elibc_glibc? ( sys-libs/glibc:2.2
+)`. It *is* in the plan: `[ebuild R] virtual/libc-1-r1` registered
+(`counter=101`) in this run. The real mechanism: `virtual/libc`'s RDEPEND
+was satisfied by checking the **host's** VDB (`broot`, which genuinely has
+`sys-libs/glibc-2.43-r2` installed at its own real `/`, confirmed via
+`qlist -Iv`) rather than by merging a real `sys-libs/glibc` into
+`/root/stage1-testing` — so `virtual/libc` shows as a same-version no-op
+reinstall with nothing underneath it in the target root at all.
+
+That's the same underlying question as before, just precisely mislocated
+at first: real catalyst's stage1 assumes a pre-existing "seed" toolchain
+(baked into the stage0-produced seed tarball it starts from) — a plain
+`--root` build's RDEPEND-satisfied-by-broot logic is *correct* for real
+portage's own `ROOT=X emerge` semantics (confirmed empirically earlier
+this session: a host-satisfied virtual doesn't need its own copy in an
+ordinary offset install) and is *correct* for every other package in this
+run. It only breaks for `gcc`'s own bootstrap specifically, because
+`econf` correctly passes `--with-sysroot=<ROOT>` for a genuine from-scratch
+build (deliberately isolating it from the host's own headers, unlike
+ordinary packages, which fall back to the host's default header search
+when nothing chroots) — so it fails exactly where it should, given the
+target truly has no libc. Needs a design decision, not a quick fix: either (a)
 seed a minimal native toolchain into the target root before running
 `stages --stage1` (matching real catalyst's actual pipeline shape), or (b)
 decide `em`'s own from-scratch self-hosting story should explicitly include
