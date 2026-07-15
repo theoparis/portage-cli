@@ -926,3 +926,79 @@ expected).
 
 Both targets, once alias resolution is out of the way, hit Bug 1 (below)
 identically — that one's still open.
+
+## `em stages --stage1` real (non-`-p`) re-validation, 2026-07-12, fresh sandboxes with today's binary
+
+Rebuilt release binary (includes the multi-alias fix, unrelated to this),
+fresh `crossdev-stages sandbox setup` + `sandbox prepare --bare` per
+scenario (`em-stage1-live`, `em-stage1-prefix-live`), `--autosolve-use
+--jobs 4`, no `--keep-going` (per standing rule — so each run stops at its
+first real failure rather than surveying every package in one pass).
+
+**Native `--root`: root-caused the previously-abstract "SYSROOT dual role"
+finding down to a concrete, fixable gap.** 50 of 89 packages merged, then
+died on `app-portage/portage-utils`'s `econf`: `.../aarch64-unknown-linux-gnu-pkg-config:
+error while loading shared libraries: libpkgconf.so.8: cannot open shared
+object file`. `dev-util/pkgconf` (providing that exact library) had merged
+successfully 35+ packages earlier — this is the identical symptom
+`476491b`'s per-package `ld.so.cache` refresh was meant to fix, recurring
+after that fix already landed, which is the tell: refreshing
+`/root/stage1-testing/etc/ld.so.cache` can't matter here, because `em`
+never chroots into `ROOT` for build execution (confirmed: zero `chroot`
+calls anywhere in `portage-cli`/`portage-repo` outside doc-comments) — a
+target-root binary that `configure`'s `AC_PATH_TOOL`/`PKG_CHECK_MODULES`
+finds via `$ESYSROOT` (`portage-repo/src/build/commands/econf.rs:54`) and
+executes directly resolves its shared-library deps through the *calling*
+process's own namespace (this sandbox's own `/etc/ld.so.cache`), not the
+target root's.
+
+Root cause, precisely: `setup.rs`'s three bashrc recipes
+(`self_contained`/`is_overlay`/else, lines 190-199) — `--prefix`
+(`BASHRC_PREFIX`) and `--local` (`BASHRC_LOCAL`) both `export
+LD_LIBRARY_PATH="${_ov}/usr/${_libdir}..."` for exactly this reason (see
+`BASHRC_LOCAL`'s own comment, lines 58-64: "tools whose rpath the host
+loader still doesn't search — needs the prefix libdir on the runtime
+search path"). Bare `--root` (`self_contained`) gets an **empty** bashrc —
+deliberately, per the comment at lines 174-189, but that comment's
+rationale is specifically about *not* injecting `CPPFLAGS`/`LDFLAGS` (compile/link-time
+search paths, which the SYSROOT/CHOST toolchain wiring already handles
+correctly and which injecting would actively break, per the 2026-07-03
+`obstack.h` incident). It says nothing about *runtime* shared-library
+resolution for a directly-executed tool binary, which is a narrower,
+separate need `--root` still has and doesn't get — the two other modes
+have it as an accident of already needing an EPREFIX-keyed bashrc for
+other reasons, not because someone reasoned about this case for them
+specifically either.
+
+**Fix direction** (not yet implemented): bare `--root` needs its own
+minimal bashrc exporting `LD_LIBRARY_PATH` for its own `usr/$(get_libdir)`
+— just the runtime search-path line, none of `BASHRC_PREFIX`/`BASHRC_LOCAL`'s
+`CPPFLAGS`/`PKG_CONFIG_*`/`CMAKE_PREFIX_PATH` machinery (those exist to
+bridge two *different* trees; `--root` only has the one).
+
+**`--prefix`: reconfirmed the already-documented `cede_required_use`
+early-return bug, now with a harder failure mode than previously seen.**
+15 of 36 packages merged, then `app-alternatives/awk-4` **died at
+`src_install`** (not just an unsatisfied-REQUIRED_USE report): `die: No
+selected alternative found (REQUIRED_USE ignored?!)` — the eclass's own
+`get_alternative()` runtime guard firing because every alternative flag is
+really off. Same root cause as the earlier-documented finding
+(`Adapter::cede_required_use`'s `installed_cpvs.contains(cpv)` early return
+skipping Level-C reconsideration because the host already has
+`app-alternatives/awk` installed) — this run just demonstrates it's not
+merely a cosmetic "unsatisfied REQUIRED_USE reported" gap, it's a hard
+build-stopping failure for any real `--prefix` stage1 attempt. Still open,
+same fix direction as previously recorded (drop the `installed_cpvs`
+early return, rely on the already-correct `unsatisfied.is_empty()` check).
+
+**Net effect**: neither native `--root` nor `--prefix` currently completes
+a real `stages --stage1` build end-to-end. `--root` gets further (50/89)
+before hitting the LD_LIBRARY_PATH gap above; `--prefix` stops much sooner
+(15/36) on the known `cede_required_use` bug. `--local` isn't a meaningful
+third data point yet — it can't even get past its own `toolchain --setup`
+prerequisite (Bug 1, above). Cross (native-target, e.g. riscv64) previously
+completed a full real build in this file's earlier entries and doesn't hit
+either of these (its target sysroot VDB is fresh, so `cede_required_use`
+doesn't misfire, and it's a genuine cross build so the direct-tool-execution
+gap doesn't apply the same way — worth double-checking that assumption
+before relying on it, not done this pass).
