@@ -67,7 +67,18 @@ impl ProfileStack {
         shell: &mut EbuildShell,
         extra_confs: &[&std::path::Path],
     ) -> Result<ResolvedUse> {
-        resolve_use_flags(shell, self, extra_confs).await
+        resolve_use_flags(shell, self, extra_confs, None).await
+    }
+
+    /// As [`use_flags`](Self::use_flags), plus a transient conf-layer USE
+    /// override (see [`resolve_use_flags`]'s `extra_use_override`).
+    pub async fn use_flags_with_override(
+        &self,
+        shell: &mut EbuildShell,
+        extra_confs: &[&std::path::Path],
+        extra_use_override: &str,
+    ) -> Result<ResolvedUse> {
+        resolve_use_flags(shell, self, extra_confs, Some(extra_use_override)).await
     }
 
     /// Build the layered profile environment by sourcing each `make.defaults`
@@ -232,7 +243,7 @@ pub async fn configure_shell(
     stack: &ProfileStack,
     extra_confs: &[&std::path::Path],
 ) -> Result<()> {
-    let resolved = resolve_use_flags(shell, stack, extra_confs).await?;
+    let resolved = resolve_use_flags(shell, stack, extra_confs, None).await?;
     let refs: Vec<&str> = resolved.enabled.iter().map(|f| f.as_str()).collect();
     shell.set_use_flags(&refs)
 }
@@ -305,11 +316,20 @@ async fn resolve_use_flags(
     shell: &mut EbuildShell,
     stack: &ProfileStack,
     extra_confs: &[&std::path::Path],
+    extra_use_override: Option<&str>,
 ) -> Result<ResolvedUse> {
     let ProfileEnv { layers: _ } = stack.profile_env(shell).await?;
 
     for conf in extra_confs {
-        source_incremental(shell, conf).await?;
+        source_incremental(shell, ConfSource::File(conf)).await?;
+    }
+    // A transient, in-process conf-layer override (e.g. `em stages --stage1`'s
+    // `USE="-* build ${BOOTSTRAP_USE}"`) — folded at the exact same position
+    // as a real make.conf, after it, so it behaves as "one more conf file"
+    // rather than the process-environment layer a raw `std::env::set_var`
+    // would land at (which would incorrectly wipe `package.use`, layer 5).
+    if let Some(content) = extra_use_override {
+        source_incremental(shell, ConfSource::Str(content)).await?;
     }
 
     // Snapshot the fold immediately before the environment layer — this is
@@ -466,7 +486,17 @@ async fn apply_env_layer(shell: &mut EbuildShell) -> Result<()> {
 /// keys) are reset to empty so the file's own assignments represent its pure
 /// contribution.  After sourcing, those contributions are merged back into
 /// the accumulated shell state using [`merge_flag_lists`].
-async fn source_incremental(shell: &mut EbuildShell, path: &std::path::Path) -> Result<()> {
+/// Where one `source_incremental` layer's content comes from: a real conf
+/// file (`/etc/portage/make.conf`), or a raw string — e.g. a transient
+/// `USE="-* build ${BOOTSTRAP_USE}"` override synthesized in-process (`em
+/// stages --stage1`'s recipe), which needs the exact same conf-layer
+/// incremental treatment without needing a real file on disk.
+enum ConfSource<'a> {
+    File(&'a std::path::Path),
+    Str(&'a str),
+}
+
+async fn source_incremental(shell: &mut EbuildShell, source: ConfSource<'_>) -> Result<()> {
     // Collect the set of incremental vars to isolate.
     let mut incr: Vec<String> = vec![
         "USE".into(),
@@ -497,8 +527,11 @@ async fn source_incremental(shell: &mut EbuildShell, path: &std::path::Path) -> 
     let reset: String = incr.iter().map(|v| format!("{}=\"\"\n", v)).collect();
     shell.run_string(&reset).await?;
 
-    // Source the file through brush.
-    shell.source_make_defaults(path).await?;
+    // Source the layer's content through brush.
+    match source {
+        ConfSource::File(path) => shell.source_make_defaults(path).await?,
+        ConfSource::Str(content) => shell.run_string(content).await?,
+    }
 
     // Collect this file's contributions.
     let mut contributed: HashMap<String, String> = HashMap::new();
@@ -940,6 +973,43 @@ mod tests {
             "make.conf's own expand value folded after its USE: {pre_env:?}"
         );
         assert!(pre_env.contains(&"build"));
+    }
+
+    /// `use_flags_with_override`'s whole point: a transient conf-layer
+    /// override (`em stages --stage1`'s `USE="-* build ${BOOTSTRAP_USE}"`)
+    /// must land in `pre_env`, not `env_use` — otherwise it behaves like a
+    /// `std::env::set_var("USE", ...)` mutation (the pre-2026-07-12
+    /// mechanism), which sits *above* `package.use` and wipes it. Folding it
+    /// as one more conf file instead keeps `env_use` as the real,
+    /// untouched process environment.
+    #[tokio::test]
+    async fn use_flags_with_override_lands_in_pre_env_not_env_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = make_test_repo(&dir);
+        let profile = make_profile(&dir, "test", &[]);
+        std::fs::write(profile.join("make.defaults"), "USE=\"unrelated\"\n").unwrap();
+
+        let stack = ProfileStack::build(profile).unwrap();
+        let mut shell = repo.shell().await.unwrap();
+        let resolved = stack
+            .use_flags_with_override(&mut shell, &[], "USE=\"-* build\"\n")
+            .await
+            .unwrap();
+
+        let pre_env: Vec<&str> = resolved.pre_env.split_whitespace().collect();
+        assert!(
+            pre_env.contains(&"-*") && pre_env.contains(&"build"),
+            "override folded into pre_env: {pre_env:?}"
+        );
+        assert!(
+            !pre_env.contains(&"unrelated"),
+            "the override's own -* clears the lower defaults layer: {pre_env:?}"
+        );
+        assert!(
+            resolved.env_use.is_empty(),
+            "the override must not leak into env_use (the real process env): {:?}",
+            resolved.env_use
+        );
     }
 
     #[tokio::test]

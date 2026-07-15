@@ -283,6 +283,7 @@ async fn run_query(command: &QueryCommand, globals: &cli::Cli) -> Result<()> {
                 root_deps_rdeps: *root_deps || globals.merge_flags.root_deps,
                 deep: depgraph_flags.deep || globals.depgraph_flags.deep,
                 nodeps: globals.nodeps,
+                extra_use_override: None,
             })
             .await?;
             if outcome.exit_code != 0 {

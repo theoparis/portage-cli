@@ -60,14 +60,16 @@ pub(super) async fn build_use_env(
     repo: &Repository,
     root: Option<&Utf8Path>,
     config_overlay: Option<&Utf8Path>,
+    extra_use_override: Option<&str>,
 ) -> Result<UseEnv> {
-    compute_use_env(repo, root, config_overlay).await
+    compute_use_env(repo, root, config_overlay, extra_use_override).await
 }
 
 async fn compute_use_env(
     repo: &Repository,
     root: Option<&Utf8Path>,
     config_overlay: Option<&Utf8Path>,
+    extra_use_override: Option<&str>,
 ) -> Result<UseEnv> {
     let portage_dir = root.unwrap_or(Utf8Path::new("/")).join("etc/portage");
     let root_dir = root.unwrap_or(Utf8Path::new("/"));
@@ -98,10 +100,16 @@ async fn compute_use_env(
         .map(|p| p.as_std_path())
         .collect();
 
-    let resolved = stack
-        .use_flags(&mut shell, &confs)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to evaluate USE flags: {e}"))?;
+    let resolved = match extra_use_override {
+        Some(content) => stack
+            .use_flags_with_override(&mut shell, &confs, content)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to evaluate USE flags: {e}"))?,
+        None => stack
+            .use_flags(&mut shell, &confs)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to evaluate USE flags: {e}"))?,
+    };
 
     let split_var = |name: &str| -> Vec<String> {
         shell

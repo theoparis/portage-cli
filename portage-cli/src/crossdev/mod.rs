@@ -653,6 +653,7 @@ async fn resolve_gcc_version(globals: &Cli) -> Option<String> {
         root_deps_rdeps: false,
         deep: false,
         nodeps: true,
+        extra_use_override: None,
     })
     .await
     .ok()?;
@@ -693,12 +694,31 @@ async fn bootstrap_use(stack: &ProfileStack, globals: &Cli) -> Vec<String> {
         let repo = main_repo(globals)?;
         let mut shell = repo.shell().await?;
         stack.profile_env(&mut shell).await?;
-        Ok(shell
+        let mut use_tokens: Vec<String> = shell
             .get_var("BOOTSTRAP_USE")
             .unwrap_or_default()
             .split_whitespace()
             .map(str::to_string)
-            .collect())
+            .collect();
+        // `ELIBC`/`KERNEL` (`USE_EXPAND_IMPLICIT` in every profile,
+        // profiles/base/make.defaults) are folded as ordinary USE_EXPAND
+        // tokens (`elibc_glibc`, `kernel_linux`) at the profile's own
+        // "defaults" layer — the *same* layer BOOTSTRAP_USE's own flags
+        // need re-adding from, and for the identical reason: `-*` wipes
+        // them just as it wipes everything else below it (verified against
+        // real portage's config.py `regenerate()`, not assumed). Real
+        // catalyst's own CATALYST_USE construction must re-add these too,
+        // for its stage1 to end up with a working `virtual/libc` — found
+        // live: without this, `sys-libs/glibc` never enters the stage1
+        // plan at all (`virtual/libc`'s `elibc_glibc? ( sys-libs/glibc )`
+        // RDEPEND silently never fires), and `gcc`'s own `libgcc` build
+        // then fails `fatal error: stdio.h: No such file or directory`.
+        for var in ["ELIBC", "KERNEL"] {
+            if let Some(val) = shell.get_var(var).filter(|v| !v.is_empty()) {
+                use_tokens.push(format!("{}_{val}", var.to_lowercase()));
+            }
+        }
+        Ok(use_tokens)
     }
     try_read(stack, globals).await.unwrap_or_default()
 }

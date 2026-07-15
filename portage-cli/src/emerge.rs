@@ -90,8 +90,14 @@ fn expand_sets(raw: &[String], config_root: Option<&Utf8Path>, eroot: &Utf8Path)
 }
 pub(crate) struct EmergeOpts<'a> {
     /// USE tokens (emerge syntax: `headers-only`, `-cxx`) forced on top of the
-    /// configured USE, for both the resolve and the build (applied via the `USE`
-    /// env, as `USE=… emerge` does).
+    /// configured USE, for both the resolve and the build — applied as a
+    /// transient conf-layer override (`DepgraphOpts::extra_use_override`),
+    /// matching where catalyst's own `CATALYST_USE` actually lands
+    /// (`make.conf`, layer 3), NOT the process environment (layer 4, which
+    /// would sit above `package.use` and incorrectly wipe it — found live,
+    /// `em stages --stage1`'s `USE="-* build"` silently defeated
+    /// `--autosolve-use` for exactly this reason until this was fixed
+    /// 2026-07-12).
     pub use_override: &'a [String],
     /// `--nodeps`: merge only the named atoms, no dependency expansion.
     pub nodeps: bool,
@@ -124,36 +130,22 @@ pub(crate) async fn emerge_atoms(
     raw_atoms: &[String],
     opts: EmergeOpts<'_>,
 ) -> Result<()> {
-    // Apply the per-step USE override to the process env for the duration of the
-    // step (restored after), so the resolve's USE-conditional expansion and the
-    // build phases both see it. Mirrors crossdev's `USE="…" doemerge`.
-    let saved_use = std::env::var("USE").ok();
-    if !opts.use_override.is_empty() {
-        let base = saved_use.clone().unwrap_or_default();
-        let merged = format!("{base} {}", opts.use_override.join(" "));
-        // SAFETY: the driver runs steps sequentially; no other task reads/writes
-        // USE between this set and the restore below.
-        unsafe { std::env::set_var("USE", merged.trim()) };
-    }
-    let result = emerge_atoms_inner(
+    // A conf-layer `USE=` assignment for this step, sourced at the same
+    // position as a real make.conf (`resolve_use_flags`'s `extra_use_override`)
+    // — not a process-env mutation, so it correctly sits *below*
+    // `package.use` (layer 5) instead of wiping it.
+    let extra_use_override = (!opts.use_override.is_empty())
+        .then(|| format!("USE=\"{}\"\n", opts.use_override.join(" ")));
+    emerge_atoms_inner(
         cli,
         raw_atoms,
         opts.nodeps,
         opts.depgraph_flags,
         opts.merge_flags,
         opts.bypass_cross_root,
+        extra_use_override.as_deref(),
     )
-    .await;
-    if !opts.use_override.is_empty() {
-        // SAFETY: see above.
-        unsafe {
-            match &saved_use {
-                Some(v) => std::env::set_var("USE", v),
-                None => std::env::remove_var("USE"),
-            }
-        }
-    }
-    result
+    .await
 }
 
 async fn emerge_atoms_inner(
@@ -163,6 +155,7 @@ async fn emerge_atoms_inner(
     depgraph_flags_override: Option<crate::cli::DepgraphFlags>,
     merge_flags_override: Option<crate::cli::MergeFlags>,
     bypass_cross_root: bool,
+    extra_use_override: Option<&str>,
 ) -> Result<()> {
     let merge_flags = merge_flags_override.as_ref().unwrap_or(&cli.merge_flags);
     let resolved = cli.repo_path();
@@ -257,6 +250,7 @@ async fn emerge_atoms_inner(
         root_deps_rdeps: merge_flags.root_deps,
         deep: depgraph_flags.0,
         nodeps,
+        extra_use_override,
     })
     .await?;
 

@@ -136,6 +136,15 @@ pub struct DepgraphOpts<'a> {
     /// `--nodeps` (emerge `-O`): merge only the named atoms, no dependency
     /// expansion. Used by the staged toolchain bootstrap.
     pub nodeps: bool,
+    /// A transient conf-layer USE override for this resolve, e.g. `em stages
+    /// --stage1`'s `USE="-* build ${BOOTSTRAP_USE}"` (catalyst's own
+    /// recipe). Folded at the conf layer (after real `make.conf`, before
+    /// `package.use`/env), matching where catalyst actually places
+    /// `CATALYST_USE` — NOT the process environment, which would sit above
+    /// `package.use` and incorrectly wipe it. See
+    /// `portage_repo::build::profile::resolve_use_flags`'s
+    /// `extra_use_override` doc.
+    pub extra_use_override: Option<&'a str>,
 }
 
 pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome> {
@@ -156,6 +165,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         deep,
         nodeps,
         host_merge_root,
+        extra_use_override,
     } = opts;
     let cross = root_aware::detect(roots, host_merge_root);
     let config_root = roots.config();
@@ -242,7 +252,12 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             (ti, blockers)
         },
         async { installed::load_host_installed(roots) },
-        use_env::build_use_env(&repo, config_root, roots.config_overlay()),
+        use_env::build_use_env(
+            &repo,
+            config_root,
+            roots.config_overlay(),
+            extra_use_override
+        ),
     );
     let use_env = use_env_result?;
     let use_env::UseEnv {
