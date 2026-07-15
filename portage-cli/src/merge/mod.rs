@@ -116,9 +116,9 @@ pub(crate) async fn run_merge_plan(
     // Open the local binpkg index once if any binpkg reuse is in effect.
     let binpkg_index = if want_local {
         let pkgdir = binpkg::resolve_pkgdir(globals);
-        match binpkg::BinpkgIndex::open(pkgdir.as_std_path()) {
+        match portage_binpkg::BinpkgIndex::open(pkgdir.as_std_path()) {
             Ok(idx) => {
-                if idx.len() > 0 {
+                if !idx.is_empty() {
                     println!(
                         ">>> --usepkg: {} local binary package(s) in {pkgdir}",
                         idx.len()
@@ -136,7 +136,7 @@ pub(crate) async fn run_merge_plan(
     };
 
     // Fetch each configured remote binhost's Packages index. `-g`/`-G` only.
-    let remote_indices: Vec<binpkg::RemoteBinpkgIndex> = if want_remote {
+    let remote_indices: Vec<portage_binpkg::RemoteBinpkgIndex> = if want_remote {
         let binhosts = binpkg::portage_binhosts(globals);
         if binhosts.is_empty() {
             eprintln!(
@@ -148,7 +148,7 @@ pub(crate) async fn run_merge_plan(
             let base = &repo.sync_uri;
             match crate::binhost_cache::fetch_index_cached(repo, roots.merge_root()).await {
                 Ok((text, reason)) => {
-                    let idx = binpkg::RemoteBinpkgIndex::new(&text, base);
+                    let idx = portage_binpkg::RemoteBinpkgIndex::new(&text, base);
                     println!(
                         ">>> --getbinpkg: {} package(s) on {base} ({reason})",
                         idx.len()
@@ -262,8 +262,8 @@ async fn merge_sequential(
     keep_going: bool,
     emptytree: bool,
     buildpkg: bool,
-    binpkg_index: Option<&binpkg::BinpkgIndex>,
-    remote_indices: &[binpkg::RemoteBinpkgIndex],
+    binpkg_index: Option<&portage_binpkg::BinpkgIndex>,
+    remote_indices: &[portage_binpkg::RemoteBinpkgIndex],
     enforce_no_source: bool,
 ) -> (usize, usize, Vec<MergeFailure>) {
     let total = plan.len();
@@ -537,8 +537,8 @@ async fn merge_parallel(
     emptytree: bool,
     jobs: usize,
     buildpkg: bool,
-    binpkg_index: Option<&binpkg::BinpkgIndex>,
-    remote_indices: &[binpkg::RemoteBinpkgIndex],
+    binpkg_index: Option<&portage_binpkg::BinpkgIndex>,
+    remote_indices: &[portage_binpkg::RemoteBinpkgIndex],
     enforce_no_source: bool,
 ) -> (usize, usize, Vec<MergeFailure>) {
     let total = plan.len();

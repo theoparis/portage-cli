@@ -371,7 +371,7 @@ pub async fn build_and_merge(
 /// into the work tree, then run only the `qmerge` phase (which sources the
 /// ebuild for env/hooks and merges from `work_root/image`). Skips fetch →
 /// compile entirely. The caller has already validated the binpkg is reusable
-/// (version + USE + slot match) via [`crate::binpkg::BinpkgIndex`].
+/// (version + USE + slot match) via [`portage_binpkg::BinpkgIndex`].
 #[allow(clippy::too_many_arguments)]
 pub async fn merge_binpkg(
     binpkg_path: &Utf8Path,

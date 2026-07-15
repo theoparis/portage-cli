@@ -28,4 +28,12 @@ pub enum Error {
     /// The container is missing a required member or is otherwise malformed.
     #[error("corrupt or incomplete GPKG: {0}")]
     Corrupt(String),
+
+    /// No `Packages` index file exists yet at this `PKGDIR`.
+    #[error("no Packages index at {} — run `em maint binhost` first", .0.display())]
+    NoIndex(PathBuf),
+
+    /// `PKGDIR` itself does not exist.
+    #[error("PKGDIR does not exist: {}", .0.display())]
+    NoPkgdir(PathBuf),
 }

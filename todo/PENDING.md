@@ -406,11 +406,21 @@ still open.
   installed on this host to verify parity against, and no confirmed gap
   depends on it). `verify`/`list`/`prune`'s core logic takes `pkgdir`/`chost`
   directly (not `&Cli`), so all three are covered by real-gpkg-container
-  integration tests (`portage-cli/src/maint/binpkg.rs`) seeding containers via
-  `portage_binpkg::write_gpkg`, corrupting/duplicating/removing them, and
-  asserting the reported outcome — this caught a real bug pre-merge (`Utf8Path
-  ::with_extension` only replaces the last `.tar` of `.gpkg.tar`, silently
-  producing `foo.gpkg.gpkg.tar.corrupt`; fixed to a plain string-append).
+  integration tests seeding containers via `portage_binpkg::write_gpkg`,
+  corrupting/duplicating/removing them, and asserting the reported outcome —
+  this caught a real bug pre-merge (`Utf8Path::with_extension` only replaces
+  the last `.tar` of `.gpkg.tar`, silently producing
+  `foo.gpkg.gpkg.tar.corrupt`; fixed to a plain string-append).
+  **Relocated (2026-07-15):** this logic, plus the `Packages` index
+  parser/writer and `BinpkgIndex`/`RemoteBinpkgIndex` USE-reuse matching that
+  used to live in `portage-cli/src/binpkg.rs`/`maint/{binhost,binpkg}.rs`,
+  moved into the standalone `portage-binpkg` crate (`index`/`scan`/`regen`/
+  `maint` modules) — it has no `&Cli`/fork dependency, so it belongs with the
+  GPKG reader/writer it already builds on rather than in the CLI crate.
+  `verify`/`list_index`/`prune` now return structured reports instead of
+  printing; `portage-cli/src/maint/binpkg.rs` is a thin formatter over them.
+  `portage-cli/src/binpkg.rs` keeps only what genuinely needs `&Cli`
+  (`PKGDIR` resolution, `binrepos.conf`/`PORTAGE_BINHOST`).
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.
 - 🔴 Signing/verify (`BINPKG_GPG_*`) — last (lives in `portage-binpkg`).
 

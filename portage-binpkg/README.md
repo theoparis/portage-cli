@@ -12,6 +12,14 @@ Used by the [`em`](https://github.com/lu-zero/portage-cli) Portage CLI for
   (GNU `tar` + `zstd`, matching Portage's approach for capabilities/ACLs)
 - **Metadata reader** — [`read_metadata`] reads GPKG metadata without full extraction
 - **Image extraction** — [`extract_image`] unpacks the installed image from a GPKG
+- **`Packages` index** (`index`) — parse/write the binhost index format, plus
+  the local (`BinpkgIndex`) and remote (`RemoteBinpkgIndex`) USE-reuse
+  matching `-k`/`-g` build on
+- **`PKGDIR` scan/regen** (`scan`, `regen`) — container discovery, checksums,
+  and index regeneration from a directory of containers
+- **Maintenance** (`maint`) — `verify`/`list_index`/`prune`: check indexed
+  containers against the files on disk, list what's indexed, and collapse
+  leftover multi-`BUILD_ID` containers down to the newest one
 
 ## Example
 
