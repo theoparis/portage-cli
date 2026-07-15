@@ -968,6 +968,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                     &pre_env,
                     &env_use,
                     &package_use,
+                    &ceded,
                 )
             } else {
                 HashMap::new()
@@ -986,6 +987,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                     sizes: &sizes,
                     slot_op_cpns: &slot_op_cpns,
                     verbose,
+                    ceded: &ceded,
                 },
                 &plan_entries,
                 &cross,
@@ -1047,7 +1049,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         }
 
         let ru_violations =
-            required_use::find_violations(&data, &order, &pre_env, &env_use, &package_use);
+            required_use::find_violations(&data, &order, &pre_env, &env_use, &package_use, &ceded);
         if !ru_violations.is_empty() {
             output::report_required_use(&ru_violations);
         }
@@ -1094,27 +1096,34 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             let ver = &entry.version;
             let cpn = pkg.cpn();
             let cpv = Cpv::new(*cpn, ver.clone());
-            let (depend, bdepend, mut flags) = if let Some(cache) =
-                repo::find_cache(&data, pkg, ver)
-            {
-                let effective =
-                    effective_use::effective_use(&pre_env, &env_use, &package_use, pkg, ver, cache);
-                (
-                    cache.metadata.depend.to_vec(),
-                    cache.metadata.bdepend.to_vec(),
-                    effective.enabled_flags(),
-                )
-            } else {
-                let effective = portage_atom_pubgrub::resolve_effective_use(
-                    &HashMap::new(),
-                    &pre_env,
-                    &cpv,
-                    pkg.slot(),
-                    &package_use,
-                    &env_use,
-                );
-                (Vec::new(), Vec::new(), effective.enabled_flags())
-            };
+            let (depend, bdepend, mut flags) =
+                if let Some(cache) = repo::find_cache(&data, pkg, ver) {
+                    let effective = effective_use::effective_use(
+                        &pre_env,
+                        &env_use,
+                        &package_use,
+                        pkg,
+                        ver,
+                        cache,
+                        &ceded,
+                    );
+                    (
+                        cache.metadata.depend.to_vec(),
+                        cache.metadata.bdepend.to_vec(),
+                        effective.enabled_flags(),
+                    )
+                } else {
+                    let mut effective = portage_atom_pubgrub::resolve_effective_use(
+                        &HashMap::new(),
+                        &pre_env,
+                        &cpv,
+                        pkg.slot(),
+                        &package_use,
+                        &env_use,
+                    );
+                    effective_use::apply_ceded(&mut effective, *cpn, &ceded);
+                    (Vec::new(), Vec::new(), effective.enabled_flags())
+                };
             flags.sort();
             flags.dedup();
             // A cross-derived cpn (`cross-<tuple>/gcc`) has no on-disk tree of

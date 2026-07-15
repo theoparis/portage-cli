@@ -1,7 +1,7 @@
 use portage_atom::{Cpv, Dep, Version};
-use portage_atom_pubgrub::{PortagePackage, UseOverride, resolve_effective_use};
+use portage_atom_pubgrub::{CededFlag, PortagePackage, UseOverride, resolve_effective_use};
 
-use super::effective_use::iuse_defaults;
+use super::effective_use::{apply_ceded, iuse_defaults};
 use super::repo::{RepoData, find_cache};
 
 /// A `REQUIRED_USE` constraint left unsatisfied by a planned package's
@@ -26,6 +26,7 @@ pub(super) fn find_violations(
     pre_env: &str,
     env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
+    ceded: &[CededFlag],
 ) -> Vec<RequiredUseViolation> {
     let mut out = Vec::new();
     for (pkg, ver) in order {
@@ -41,8 +42,9 @@ pub(super) fn find_violations(
 
         let cpv = Cpv::new(*pkg.cpn(), ver.clone());
         let defaults = iuse_defaults(cache);
-        let effective =
+        let mut effective =
             resolve_effective_use(&defaults, pre_env, &cpv, pkg.slot(), package_use, env_use);
+        apply_ceded(&mut effective, *pkg.cpn(), ceded);
 
         // `effective` already has this package's IUSE defaults folded in, so
         // an unset flag is simply Disabled — no fallback needed.

@@ -607,6 +607,7 @@ pub(super) struct PrettyCtx<'a> {
     pub sizes: &'a HashMap<Cpv, u64>,
     pub slot_op_cpns: &'a std::collections::HashSet<Cpn>,
     pub verbose: u8,
+    pub ceded: &'a [CededFlag],
 }
 
 /// Print the emerge-style pretty plan, honouring each entry's
@@ -654,6 +655,7 @@ fn print_pretty_with_roots(
         sizes,
         slot_op_cpns,
         verbose,
+        ceded,
     } = ctx;
     let mut out = anstream::stdout();
 
@@ -681,8 +683,9 @@ fn print_pretty_with_roots(
         let defaults = cache
             .map(super::effective_use::iuse_defaults)
             .unwrap_or_default();
-        let effective_use =
+        let mut effective_use =
             resolve_effective_use(&defaults, pre_env, &cpv, pkg.slot(), package_use, env_use);
+        super::effective_use::apply_ceded(&mut effective_use, *cpn, ceded);
 
         // For upgrades/downgrades, find the installed entry to compare USE flags
         let installed_active_use = if tag == "U" || tag == "D" {
