@@ -146,7 +146,13 @@ pub(crate) async fn run_merge_plan(
         let mut fetched = Vec::new();
         for repo in &binhosts {
             let base = &repo.sync_uri;
-            match crate::binhost_cache::fetch_index_cached(repo, roots.merge_root()).await {
+            match portage_distfiles::fetch_index_cached(
+                &repo.sync_uri,
+                repo.frozen,
+                roots.merge_root(),
+            )
+            .await
+            {
                 Ok((text, reason)) => {
                     let idx = portage_binpkg::RemoteBinpkgIndex::new(&text, base);
                     println!(

@@ -39,6 +39,7 @@ pub mod cache;
 mod error;
 pub mod make_conf;
 pub mod package_conf;
+pub mod package_env;
 pub(crate) mod repo;
 pub mod source;
 
@@ -56,6 +57,7 @@ pub use gentoo_core::arch::ExoticKey;
 pub use gentoo_core::{Arch, KnownArch, arch};
 pub use make_conf::{DEFAULT_MAKE_CONF, LEGACY_MAKE_CONF, MakeConf};
 pub use package_conf::{PackageConf, Token as PackageToken};
+pub use package_env::env_files_for;
 pub use portage_metadata::EbuildMetadata;
 pub use portage_metadata::interner::{
     DefaultInterner, GlobalInterner, Interned, Interner, NoInterner,

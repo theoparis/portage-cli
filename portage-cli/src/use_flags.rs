@@ -10,23 +10,7 @@ pub fn run(add: &[String], remove: &[String], make_conf: Option<&Utf8Path>) -> R
     }
 
     let mut mc = MakeConf::load(&path).with_context(|| format!("reading {path}"))?;
-
-    let current = mc.get("USE").unwrap_or("").to_string();
-    let mut flags: Vec<String> = current.split_whitespace().map(str::to_string).collect();
-
-    for flag in remove {
-        let flag = flag.trim_start_matches('+');
-        flags.retain(|f| f != flag && f != &format!("+{flag}"));
-    }
-
-    for flag in add {
-        let flag = flag.trim_start_matches('+');
-        flags.retain(|f| f != flag && f != &format!("+{flag}") && f != &format!("-{flag}"));
-        flags.push(flag.to_string());
-    }
-
-    let new_use = flags.join(" ");
-    mc.set("USE", &new_use);
+    let new_use = mc.apply_use_changes(add, remove);
     mc.save(&path).with_context(|| format!("writing {path}"))?;
 
     println!("USE=\"{}\"", new_use);

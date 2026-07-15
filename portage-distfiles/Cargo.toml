@@ -25,6 +25,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 flate2 = { workspace = true }
 httpdate = { workspace = true }
+url = { workspace = true }
 # Reused transitively via portage-repo; parsed directly here for distfiles.xml.
 roxmltree = { workspace = true }
 

@@ -184,6 +184,30 @@ impl MakeConf {
         }
     }
 
+    /// Add/remove USE flags in `USE`, portage's simple bare-flag model (no
+    /// separate profile-level `+`/`-` handling here — a leading `+` on an
+    /// `add`/`remove` token is stripped and ignored, matching `em useflags`'s
+    /// own single-string USE editor). Returns the new `USE` value for the
+    /// caller to report.
+    pub fn apply_use_changes(&mut self, add: &[String], remove: &[String]) -> String {
+        let current = self.get("USE").unwrap_or("").to_string();
+        let mut flags: Vec<String> = current.split_whitespace().map(str::to_string).collect();
+
+        for flag in remove {
+            let flag = flag.trim_start_matches('+');
+            flags.retain(|f| f != flag && f != &format!("+{flag}"));
+        }
+        for flag in add {
+            let flag = flag.trim_start_matches('+');
+            flags.retain(|f| f != flag && f != &format!("+{flag}") && f != &format!("-{flag}"));
+            flags.push(flag.to_string());
+        }
+
+        let new_use = flags.join(" ");
+        self.set("USE", &new_use);
+        new_use
+    }
+
     /// Save to `path`.
     pub fn save(&self, path: &Utf8Path) -> Result<()> {
         std::fs::write(path, self.to_string()).map_err(|e| Error::Io {
@@ -462,6 +486,30 @@ mod tests {
         let out = mc.to_string();
         assert!(out.contains("NEW_VAR=\"hello\""));
         assert!(out.contains("FOO=\"bar\""));
+    }
+
+    #[test]
+    fn apply_use_changes_adds_and_removes() {
+        let mut mc = parse("USE=\"ssl nls\"\n");
+        let new_use = mc.apply_use_changes(&["python".to_string()], &["nls".to_string()]);
+        assert_eq!(new_use, "ssl python");
+        assert_eq!(mc.get("USE"), Some("ssl python"));
+    }
+
+    #[test]
+    fn apply_use_changes_strips_leading_plus_and_dedupes() {
+        let mut mc = parse("USE=\"-ssl\"\n");
+        // Adding "+ssl" over an existing "-ssl" replaces it, not both.
+        let new_use = mc.apply_use_changes(&["+ssl".to_string()], &[]);
+        assert_eq!(new_use, "ssl");
+    }
+
+    #[test]
+    fn apply_use_changes_on_empty_use() {
+        let mut mc = parse("FOO=\"bar\"\n");
+        let new_use = mc.apply_use_changes(&["nls".to_string()], &[]);
+        assert_eq!(new_use, "nls");
+        assert_eq!(mc.get("USE"), Some("nls"));
     }
 
     #[test]

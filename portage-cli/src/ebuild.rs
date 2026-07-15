@@ -657,9 +657,7 @@ async fn run_inner(
             .ok()
             .flatten()
             .map(|c| c.metadata.slot.slot.as_str().to_string());
-        for env_file in
-            crate::package_env::env_files_for(&portage_dirs, ebuild.cpv(), slot.as_deref())
-        {
+        for env_file in portage_repo::env_files_for(&portage_dirs, ebuild.cpv(), slot.as_deref()) {
             shell
                 .source_env_file(&env_file)
                 .await

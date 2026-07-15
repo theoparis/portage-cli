@@ -1,7 +1,6 @@
 //! Gentoo Portage command-line library backing the `em` binary.
 
 pub(crate) mod bdepend_avail;
-pub(crate) mod binhost_cache;
 pub(crate) mod binpkg;
 pub mod cli;
 pub(crate) mod crossdev;
@@ -12,7 +11,6 @@ pub(crate) mod emerge;
 pub(crate) mod error;
 pub(crate) mod maint;
 pub(crate) mod merge;
-pub(crate) mod package_env;
 pub(crate) mod pkg;
 pub(crate) mod postprocess;
 pub(crate) mod preflight;

@@ -30,6 +30,9 @@ pub enum Error {
 
     #[error("failed to parse mirror list: {0}")]
     MirrorParse(String),
+
+    #[error("binhost {url} returned 304 (Not Modified) with no local cache to revalidate")]
+    StaleNotModified { url: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

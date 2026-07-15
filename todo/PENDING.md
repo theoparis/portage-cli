@@ -350,8 +350,11 @@ still open.
     takes an `if_modified_since: Option<&str>` and returns an `IndexFetch`
     enum (`NotModified` | `Fresh { text, last_modified }`), sending
     `If-Modified-Since` and recognizing HTTP 304 on both the `.gz` and plain
-    `Packages` code paths. `portage-cli`'s new `binhost_cache` module
-    (`fetch_index_cached`) implements real portage's exact decision tree from
+    `Packages` code paths. `portage-distfiles`'s `binhost_cache` module
+    (`fetch_index_cached`, **relocated from `portage-cli` 2026-07-15** —
+    it only needed `sync_uri`/`frozen`/`eroot`, not `&Cli`, so it now lives
+    next to the `fetch_index` it wraps) implements real portage's exact
+    decision tree from
     `bintree.py::_populate_remote_repo`: a local cache at
     `${EROOT}/var/cache/edb/binhost/<host>/<url-path>/Packages` carries
     `TIMESTAMP` (server generation time, echoed back as the next
@@ -421,6 +424,29 @@ still open.
   printing; `portage-cli/src/maint/binpkg.rs` is a thin formatter over them.
   `portage-cli/src/binpkg.rs` keeps only what genuinely needs `&Cli`
   (`PKGDIR` resolution, `binrepos.conf`/`PORTAGE_BINHOST`).
+- ✅ **Library-relocation pass, round 2 (2026-07-15):** a full survey of
+  `portage-cli/src` for logic with no real `&Cli` dependency found a much
+  bigger candidate (`query/depgraph/*`, 8.5k lines, effectively zero `Cli`
+  coupling — belongs in `portage-solver`) plus the build/merge engine
+  (`ebuild.rs`/`merge/mod.rs`/`postprocess.rs`/`elfscan.rs`) as future,
+  larger-effort moves. This round did the small, mechanical ones:
+  `use_flags.rs`'s USE add/remove algorithm → `MakeConf::apply_use_changes`
+  (`portage-repo`, alongside the `MakeConf` it edits); `package_env.rs`
+  (whole file, pure) → `portage_repo::env_files_for`; `binhost_cache.rs` →
+  `portage_distfiles::fetch_index_cached` (decoupled from the CLI-only
+  `BinRepoEntry` type — takes `sync_uri`/`frozen` directly now). All test
+  coverage moved with the logic (portage-repo +9, portage-distfiles +6,
+  portage-cli −12 tests), plus a live smoke test of `em use --add/--remove`
+  against the real release binary. `search.rs` was surveyed too but turned
+  out to be presentation logic (terminal color/formatting via `anstream`/
+  `style.rs`) tightly interleaved with its matching logic, not a clean
+  mechanical move — deferred, would need a real pure/display split first.
+  Also found live (unrelated, not fixed): `em use`/`em pkg {use,keywords,
+  mask,env} add` all panic on `--help` or any invocation in debug builds —
+  clap's own `-a`/`--add` short flag collides with the global `-a`/`--ask`
+  flag (`cli.rs`, pre-existing, confirmed present 10+ commits back). Only
+  surfaces as a `debug_assert!` (release builds skip the check and work
+  fine — confirmed live), but real. Not yet fixed.
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.
 - 🔴 Signing/verify (`BINPKG_GPG_*`) — last (lives in `portage-binpkg`).
 

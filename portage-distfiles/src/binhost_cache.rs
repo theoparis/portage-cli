@@ -9,13 +9,14 @@
 //! write: `TIMESTAMP` (when the *server* generated this index — echoed back
 //! as `If-Modified-Since` on the next fetch) and `DOWNLOAD_TIMESTAMP` (when
 //! *we* last downloaded or revalidated it, used for the `TTL` check). A
-//! `binrepos.conf` repo marked `frozen`, or one still within its own `TTL`
-//! header, skips the network entirely; otherwise a conditional GET either
-//! confirms the cache (HTTP 304) or returns fresh content.
+//! binhost marked `frozen`, or one still within its own `TTL` header, skips
+//! the network entirely; otherwise a conditional GET either confirms the
+//! cache (HTTP 304) or returns fresh content.
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::binpkg::BinRepoEntry;
+use crate::binhost::{IndexFetch, fetch_index};
+use crate::error::{Error, Result};
 
 /// The subset of a `Packages` index header this cache cares about.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -102,9 +103,14 @@ fn write_cache(path: &Utf8Path, text: &str) {
     }
 }
 
-/// Fetch `repo`'s `Packages` index, using the local cache to skip the
+/// Fetch a binhost's `Packages` index, using the local cache to skip the
 /// network when possible. Returns the index text (fresh, cached, or
 /// revalidated) and a short reason for the caller to report.
+///
+/// `sync_uri` is the binhost's base URI (`binrepos.conf`'s `sync-uri` /
+/// `PORTAGE_BINHOST` entry); `frozen` is that repo's `frozen =` setting
+/// ("prefer the local cache, don't even ask the server"); `eroot` is where
+/// the cache directory is rooted.
 ///
 /// Order of checks (matching `_populate_remote_repo`):
 /// 1. `frozen` + a cached copy exists → use it, no network at all.
@@ -118,11 +124,12 @@ fn write_cache(path: &Utf8Path, text: &str) {
 /// 4. A network/HTTP failure falls back to a stale cached copy, if any,
 ///    rather than failing the whole `--getbinpkg` run over one unreachable
 ///    binhost.
-pub(crate) async fn fetch_index_cached(
-    repo: &BinRepoEntry,
+pub async fn fetch_index_cached(
+    sync_uri: &str,
+    frozen: bool,
     eroot: &Utf8Path,
-) -> anyhow::Result<(String, &'static str)> {
-    let cache_path = local_cache_path(eroot, &repo.sync_uri);
+) -> Result<(String, &'static str)> {
+    let cache_path = local_cache_path(eroot, sync_uri);
     let cached = cache_path
         .as_deref()
         .and_then(|p| std::fs::read_to_string(p).ok());
@@ -133,7 +140,7 @@ pub(crate) async fn fetch_index_cached(
     let now = now_unix();
 
     if let Some(cached_text) = &cached {
-        if repo.frozen {
+        if frozen {
             return Ok((cached_text.clone(), "frozen (using cached index)"));
         }
         if let (Some(dl), Some(ttl)) = (header.download_timestamp, header.ttl)
@@ -150,13 +157,12 @@ pub(crate) async fn fetch_index_cached(
         )
     });
 
-    match portage_distfiles::fetch_index(&repo.sync_uri, if_modified_since.as_deref()).await {
-        Ok(portage_distfiles::IndexFetch::NotModified) => {
+    match fetch_index(sync_uri, if_modified_since.as_deref()).await {
+        Ok(IndexFetch::NotModified) => {
             let Some(cached_text) = cached else {
-                anyhow::bail!(
-                    "binhost {} returned 304 (Not Modified) with no local cache to revalidate",
-                    repo.sync_uri
-                );
+                return Err(Error::StaleNotModified {
+                    url: sync_uri.to_string(),
+                });
             };
             if let Some(path) = &cache_path {
                 write_cache(
@@ -166,7 +172,7 @@ pub(crate) async fn fetch_index_cached(
             }
             Ok((cached_text, "not modified (304)"))
         }
-        Ok(portage_distfiles::IndexFetch::Fresh {
+        Ok(IndexFetch::Fresh {
             text,
             last_modified,
         }) => {
@@ -187,12 +193,11 @@ pub(crate) async fn fetch_index_cached(
         Err(e) => {
             if let Some(cached_text) = cached {
                 eprintln!(
-                    "warning: could not refresh binhost index {} ({e:#}); using cached copy",
-                    repo.sync_uri
+                    "warning: could not refresh binhost index {sync_uri} ({e:#}); using cached copy"
                 );
                 Ok((cached_text, "stale cache (refresh failed)"))
             } else {
-                Err(e.into())
+                Err(e)
             }
         }
     }
