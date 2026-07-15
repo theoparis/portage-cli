@@ -296,7 +296,7 @@ async fn emerge_atoms_inner(
     let distdir = relocate.map(|p| p.join("var/cache/distfiles"));
     let work_base = ebuild::default_work_base(relocate);
 
-    if cli.ask && !confirm_merge(outcome.plan.len())? {
+    if merge_flags.ask && !confirm_merge(outcome.plan.len())? {
         println!(">>> Quitting.");
         return Ok(());
     }

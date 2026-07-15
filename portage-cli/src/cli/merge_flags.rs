@@ -37,6 +37,24 @@
 //! `todo/stage-build-shakeout.md`.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct MergeFlags {
+    /// Ask for confirmation before performing actions.
+    ///
+    /// Lives here (not `global = true` on `Cli`) rather than in the wider
+    /// "meaningful to every applet" set alongside `--root`/`--privilege`:
+    /// unlike those, `--ask` only means anything to a merge-shaped command
+    /// (a bare atom build, or `crossdev`/`toolchain`/`stages`' own
+    /// config-write confirmation) — a config-only command like `em use`/
+    /// `em pkg use add` never reads it. Making it `global` inherited that
+    /// meaninglessness into every subcommand's argument set, which is also
+    /// what caused `-a` (already taken by `--ask`) to collide with `use`'s
+    /// own `-a`/`--add` — a real crash (`em use --help` panicked in debug
+    /// builds; release builds only skip the check, they don't fix the
+    /// semantic mismatch). See `merge_merge_flags` for how this still works
+    /// whether given before or after the subcommand name, the same as every
+    /// other field here.
+    #[arg(short = 'a', long)]
+    pub ask: bool,
+
     /// Update installed packages to newest available versions.
     #[arg(short = 'u', long)]
     pub update: bool,

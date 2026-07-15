@@ -441,12 +441,25 @@ still open.
   out to be presentation logic (terminal color/formatting via `anstream`/
   `style.rs`) tightly interleaved with its matching logic, not a clean
   mechanical move — deferred, would need a real pure/display split first.
-  Also found live (unrelated, not fixed): `em use`/`em pkg {use,keywords,
-  mask,env} add` all panic on `--help` or any invocation in debug builds —
-  clap's own `-a`/`--add` short flag collides with the global `-a`/`--ask`
-  flag (`cli.rs`, pre-existing, confirmed present 10+ commits back). Only
-  surfaces as a `debug_assert!` (release builds skip the check and work
-  fine — confirmed live), but real. Not yet fixed.
+  Also found live, and **fixed same session**: `em use`/`em pkg
+  {use,keywords,mask,env} add` all panicked on `--help` or any invocation in
+  debug builds — clap's own `-a`/`--add` short flag collided with the
+  global `-a`/`--ask` flag (pre-existing, confirmed present 10+ commits
+  back). Root cause wasn't the short-letter collision itself but that
+  `--ask` was `global = true` on `Cli` at all: unlike `--pretend`/`--root`/
+  `--privilege` (genuinely meaningful everywhere), `--ask` only means
+  anything to a merge-shaped command, so `global` inherited it into every
+  config-editing subcommand's argument set whether or not that subcommand
+  read it. Fix: moved `ask` into the existing `MergeFlags` mixin (already
+  flattened into `Cli`/`CrossdevArgs`/`ToolchainArgs`/`StagesArgs`, with the
+  established `merge_merge_flags` OR-merge precedence for "either position
+  works") instead of a bare `global` field — `use`/`pkg *` no longer
+  advertise or accept `--ask` at all, and the real consumers
+  (`emerge.rs`'s bare-atom flow, `crossdev/config_plan.rs`'s config-write
+  confirm) read the already-merged value. `--pretend` stayed global
+  (genuinely broad, no collision found). Verified live: `em use --help`/
+  `em pkg use --help` no longer panic in a debug build, `-a`/`--ask` still
+  parses both before and after `crossdev`, full workspace test suite green.
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.
 - 🔴 Signing/verify (`BINPKG_GPG_*`) — last (lives in `portage-binpkg`).
 

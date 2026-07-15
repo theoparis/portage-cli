@@ -40,10 +40,6 @@ pub struct Cli {
     #[arg(short = 'p', long, global = true)]
     pub pretend: bool,
 
-    /// Ask for confirmation before performing actions.
-    #[arg(short = 'a', long, global = true)]
-    pub ask: bool,
-
     /// Increase verbosity (can be repeated for more detail).
     #[arg(short = 'v', long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,

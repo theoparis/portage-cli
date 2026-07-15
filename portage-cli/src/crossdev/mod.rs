@@ -84,6 +84,7 @@ fn merge_depgraph_flags(globals: &Cli, args: &DepgraphFlags) -> DepgraphFlags {
 fn merge_merge_flags(globals: &Cli, args: &MergeFlags) -> MergeFlags {
     let g = &globals.merge_flags;
     MergeFlags {
+        ask: args.ask || g.ask,
         update: args.update || g.update,
         autounmask_write: args.autounmask_write || g.autounmask_write,
         oneshot: args.oneshot || g.oneshot,
@@ -146,7 +147,13 @@ pub async fn run(args: &CrossdevArgs, globals: &Cli) -> Result<()> {
         return show_target_cfg(&target, globals, &extras);
     }
     if args.init_target {
-        return init_target(&target, globals, &extras, config_plan::RefreshPolicy::Sync);
+        return init_target(
+            &target,
+            globals,
+            args,
+            &extras,
+            config_plan::RefreshPolicy::Sync,
+        );
     }
     if args.setup {
         return setup(&target, globals, args, &extras).await;
@@ -209,6 +216,7 @@ async fn setup(
     init_target(
         target,
         globals,
+        args,
         extras,
         config_plan::RefreshPolicy::FillGapsOnly,
     )?;
@@ -820,9 +828,11 @@ fn show_target_cfg(target: &CrossTarget, globals: &Cli, extras: &[Cpn]) -> Resul
 fn init_target(
     target: &CrossTarget,
     globals: &Cli,
+    args: &CrossdevArgs,
     extras: &[Cpn],
     policy: config_plan::RefreshPolicy,
 ) -> Result<()> {
+    let ask = merge_merge_flags(globals, &args.merge_flags).ask;
     // For a retargeted prefix (`--local`/`--prefix`/`--root`) bootstrap it first:
     // `setup::bootstrap` writes the prefix `bashrc` that re-adds `<EROOT>/usr/bin`
     // to the build PATH (the shell sanitiser strips `$HOME` paths, so a `--local`
@@ -866,7 +876,7 @@ fn init_target(
         extras,
     ));
 
-    if !config_plan::apply(entries, globals, policy)?.applied() {
+    if !config_plan::apply(entries, globals.pretend, ask, policy)?.applied() {
         return Ok(());
     }
 

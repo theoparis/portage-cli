@@ -2,8 +2,11 @@
 //!
 //! `--init-target` used to write every file unconditionally and immediately,
 //! with no way to preview or confirm it — unlike every other mutating `em`
-//! path, which honours the global `-p`/`--pretend` and `-a`/`--ask` flags.
-//! This collects the desired state of each file/symlink/dir as a
+//! path, which honours `-p`/`--pretend` (global on `Cli`) and `-a`/`--ask`
+//! (`MergeFlags`, resolved by the caller via `merge_merge_flags` — not
+//! global, since unlike `--pretend` it has no meaning outside a merge-shaped
+//! command; see `MergeFlags::ask`'s doc comment). This collects the desired
+//! state of each file/symlink/dir as a
 //! [`ConfigEntry`] (no I/O beyond validation), diffs it against what's
 //! actually on disk, and only then previews (`-p`), confirms (`-a`), or
 //! applies — the config-regeneration equivalent of a merge plan.
@@ -12,8 +15,6 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
-
-use crate::cli::Cli;
 
 use super::symlink_force;
 use crate::util::write_if_absent;
@@ -240,11 +241,16 @@ impl Outcome {
     }
 }
 
-/// Diff `entries` against disk under `policy` and, per
-/// `globals.pretend`/`globals.ask`, preview, confirm, or apply them.
+/// Diff `entries` against disk under `policy` and, per `pretend`/`ask`,
+/// preview, confirm, or apply them. `pretend` is `Cli`'s own `global` field
+/// (one shared value, works from any position); `ask` is the caller's
+/// already-merged `MergeFlags::ask` (see `merge_merge_flags`) — not global,
+/// so it has to be resolved by the caller instead of read straight off
+/// `&Cli`.
 pub(super) fn apply(
     entries: Vec<ConfigEntry>,
-    globals: &Cli,
+    pretend: bool,
+    ask: bool,
     policy: RefreshPolicy,
 ) -> Result<Outcome> {
     let mut to_apply: Vec<&ConfigEntry> = Vec::new();
@@ -263,16 +269,16 @@ pub(super) fn apply(
         return Ok(Outcome::NothingToApply);
     }
 
-    if globals.pretend || globals.ask {
+    if pretend || ask {
         println!(">>> config changes:");
         for (path, verb) in &changed {
             println!("  {verb} {path}");
         }
     }
-    if globals.pretend {
+    if pretend {
         return Ok(Outcome::Previewed);
     }
-    if globals.ask && !confirm_config_write(changed.len())? {
+    if ask && !confirm_config_write(changed.len())? {
         println!(">>> Quitting.");
         return Ok(Outcome::Declined);
     }
@@ -295,17 +301,7 @@ fn confirm_config_write(count: usize) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::*;
-
-    // `Cli` has `arg_required_else_help = true`, so at least one arg must
-    // always be present — `--root /` is a harmless no-op default here.
-    fn cli(args: &[&str]) -> Cli {
-        let mut full = vec!["em", "--root", "/"];
-        full.extend_from_slice(args);
-        Cli::parse_from(full)
-    }
 
     /// `-p`: nothing is written, even though there's a real change to make.
     #[test]
@@ -316,7 +312,7 @@ mod tests {
             path: path.clone(),
             desired: "CHOST=riscv64-unknown-linux-gnu\n".to_owned(),
         }];
-        let outcome = apply(entries, &cli(&["-p"]), RefreshPolicy::Sync).unwrap();
+        let outcome = apply(entries, true, false, RefreshPolicy::Sync).unwrap();
         assert!(matches!(outcome, Outcome::Previewed));
         assert!(!path.exists(), "pretend must not write {path}");
     }
@@ -331,7 +327,7 @@ mod tests {
             path: path.clone(),
             desired: desired.clone(),
         }];
-        let outcome = apply(entries, &cli(&[]), RefreshPolicy::Sync).unwrap();
+        let outcome = apply(entries, false, false, RefreshPolicy::Sync).unwrap();
         assert!(matches!(outcome, Outcome::Applied));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), desired);
     }
@@ -350,7 +346,7 @@ mod tests {
             path: path.clone(),
             desired,
         }];
-        let outcome = apply(entries, &cli(&[]), RefreshPolicy::Sync).unwrap();
+        let outcome = apply(entries, false, false, RefreshPolicy::Sync).unwrap();
         assert!(matches!(outcome, Outcome::NothingToApply));
         assert!(outcome.applied());
     }
@@ -366,7 +362,7 @@ mod tests {
             path: path.clone(),
             desired: "[gentoo]\nlocation = /var/db/repos/gentoo\n".to_owned(),
         }];
-        apply(entries, &cli(&[]), RefreshPolicy::Sync).unwrap();
+        apply(entries, false, false, RefreshPolicy::Sync).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "[gentoo]\nlocation = /somewhere/else\n"
@@ -381,7 +377,8 @@ mod tests {
         assert!(!path.is_dir());
         apply(
             vec![ConfigEntry::Dir { path: path.clone() }],
-            &cli(&[]),
+            false,
+            false,
             RefreshPolicy::Sync,
         )
         .unwrap();
@@ -402,7 +399,7 @@ mod tests {
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils".to_owned(),
         }];
-        let outcome = apply(entries, &cli(&[]), RefreshPolicy::Sync).unwrap();
+        let outcome = apply(entries, false, false, RefreshPolicy::Sync).unwrap();
         assert!(matches!(outcome, Outcome::NothingToApply));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
     }
@@ -431,7 +428,7 @@ mod tests {
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils".to_owned(),
         }];
-        let outcome = apply(entries, &cli(&[]), RefreshPolicy::Sync).unwrap();
+        let outcome = apply(entries, false, false, RefreshPolicy::Sync).unwrap();
         assert!(matches!(outcome, Outcome::Applied));
         assert!(
             !std::fs::read_to_string(&path)
@@ -453,7 +450,7 @@ mod tests {
             path: path.clone(),
             desired: "CHOST=riscv64-unknown-linux-gnu\n".to_owned(),
         }];
-        let outcome = apply(entries, &cli(&[]), RefreshPolicy::FillGapsOnly).unwrap();
+        let outcome = apply(entries, false, false, RefreshPolicy::FillGapsOnly).unwrap();
         assert!(matches!(outcome, Outcome::NothingToApply));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -473,7 +470,7 @@ mod tests {
             path: path.clone(),
             desired: desired.clone(),
         }];
-        let outcome = apply(entries, &cli(&[]), RefreshPolicy::FillGapsOnly).unwrap();
+        let outcome = apply(entries, false, false, RefreshPolicy::FillGapsOnly).unwrap();
         assert!(matches!(outcome, Outcome::Applied));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), desired);
     }
@@ -499,7 +496,7 @@ mod tests {
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils dev-vcs/git".to_owned(),
         }];
-        let outcome = apply(entries, &cli(&[]), RefreshPolicy::FillGapsOnly).unwrap();
+        let outcome = apply(entries, false, false, RefreshPolicy::FillGapsOnly).unwrap();
         assert!(matches!(outcome, Outcome::NothingToApply));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), existing);
     }
