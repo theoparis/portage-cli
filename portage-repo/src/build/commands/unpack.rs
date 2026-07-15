@@ -161,21 +161,27 @@ fn unpack_archive(src: &std::path::Path, cwd: &std::path::Path, eapi: u32) -> Re
     let stem = src.file_stem().unwrap_or_default();
 
     // Check .tar.* compound extensions before single-extension forms.
+    // `--no-same-owner` must come *after* the old-style combined mode
+    // letters (`xzf`, `xjf`, …): GNU tar only recognizes a bare, undashed
+    // option cluster as its *first* argument — once a long option precedes
+    // it, tar stops treating it as old-style short options at all and reads
+    // it as a plain (non-option) filename, dying with "You must specify one
+    // of the '-Acdtrux' ... options" (found live testing this exact fix).
     if ext(".tar.gz") || ext(".tgz") || ext(".tar.Z") {
-        unpack_cmd("tar", &["xzf", &src_s], cwd)
+        unpack_cmd("tar", &["xzf", &src_s, "--no-same-owner"], cwd)
     } else if ext(".tar.bz2") || ext(".tbz2") || ext(".tbz") {
-        unpack_cmd("tar", &["xjf", &src_s], cwd)
+        unpack_cmd("tar", &["xjf", &src_s, "--no-same-owner"], cwd)
     } else if ext(".tar.xz") || ext(".txz") {
         if eapi < 3 {
             return Err(format!(".tar.xz not supported in EAPI {eapi}"));
         }
-        unpack_cmd("tar", &["xJf", &src_s], cwd)
+        unpack_cmd("tar", &["xJf", &src_s, "--no-same-owner"], cwd)
     } else if ext(".tar.zst") {
-        unpack_cmd("tar", &["--zstd", "-xf", &src_s], cwd)
+        unpack_cmd("tar", &["--zstd", "-xf", &src_s, "--no-same-owner"], cwd)
     } else if ext(".tar.lz") {
-        unpack_cmd("tar", &["--lzip", "-xf", &src_s], cwd)
+        unpack_cmd("tar", &["--lzip", "-xf", &src_s, "--no-same-owner"], cwd)
     } else if ext(".tar.lzma") {
-        unpack_cmd("tar", &["--lzma", "-xf", &src_s], cwd)
+        unpack_cmd("tar", &["--lzma", "-xf", &src_s, "--no-same-owner"], cwd)
     } else if ext(".zip") {
         unpack_cmd("unzip", &["-qo", &src_s], cwd)
     } else if ext(".gz") || ext(".Z") {
