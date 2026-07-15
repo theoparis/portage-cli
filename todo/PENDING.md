@@ -441,6 +441,15 @@ still open.
   out to be presentation logic (terminal color/formatting via `anstream`/
   `style.rs`) tightly interleaved with its matching logic, not a clean
   mechanical move — deferred, would need a real pure/display split first.
+  `elfscan.rs` (~210 lines, zero `Cli`) was also considered for
+  `portage-vdb` since its output fields map onto `MergeSpec`'s by name —
+  rejected: that's just a shared naming convention, not a real code
+  dependency (`elfscan.rs` doesn't use `portage-vdb` at all), and it would
+  saddle an otherwise-lean crate with the `object` crate's ELF/COFF/PE
+  parsing for no functional reason. Left in `portage-cli` pending a fuller
+  audit of what else might want `object`-based binary parsing (QA checks,
+  a `revdep-rebuild`/`scanelf` workalike, …) so the crate boundary can be
+  decided once, not piecemeal.
   Also found live, and **fixed same session**: `em use`/`em pkg
   {use,keywords,mask,env} add` all panicked on `--help` or any invocation in
   debug builds — clap's own `-a`/`--add` short flag collided with the
