@@ -346,9 +346,28 @@ still open.
     the index's own `URI` header (server-controlled via
     `PORTAGE_BINHOST_HEADER_URI`), not the binhost's `sync-uri`. em uses
     `sync-uri`; both work when they match.
-  - 🟡 **Remote-index freshness** — em fetches the index fresh each run; portage
-    caches at `/var/cache/edb/binhost/<host>/<path>/Packages` with `TTL` +
-    `If-Modified-Since` (304 → reuse). Flagged.
+  - ✅ **Remote-index freshness** — DONE. `portage_distfiles::fetch_index` now
+    takes an `if_modified_since: Option<&str>` and returns an `IndexFetch`
+    enum (`NotModified` | `Fresh { text, last_modified }`), sending
+    `If-Modified-Since` and recognizing HTTP 304 on both the `.gz` and plain
+    `Packages` code paths. `portage-cli`'s new `binhost_cache` module
+    (`fetch_index_cached`) implements real portage's exact decision tree from
+    `bintree.py::_populate_remote_repo`: a local cache at
+    `${EROOT}/var/cache/edb/binhost/<host>/<url-path>/Packages` carries
+    `TIMESTAMP` (server generation time, echoed back as the next
+    `If-Modified-Since`), `DOWNLOAD_TIMESTAMP` (our last fetch/revalidation),
+    and `TTL` (freshness window). `frozen` or a live `TTL` skips the network
+    entirely; otherwise a conditional GET either revalidates (304, cache
+    kept, `DOWNLOAD_TIMESTAMP` bumped) or returns fresh content (cached,
+    `TIMESTAMP` backfilled from the response's `Last-Modified` if the index
+    itself didn't carry one). A fetch failure with a stale local cache falls
+    back to it with a warning rather than failing the whole `--getbinpkg`
+    run. `merge/mod.rs`'s `-g`/`-G` fetch loop now calls
+    `fetch_index_cached` per configured binhost instead of the raw
+    unconditional fetch. Covered by unit tests (header parse/write, cache
+    path derivation) plus a hand-rolled TCP mock-server integration test
+    (`portage-distfiles/tests/conditional_fetch.rs`) proving a real
+    `If-Modified-Since` round trip surfaces as `NotModified`.
   - 🟡 **gpkg GPG signature verify** — `binpkg-request-signature` FEATURE / repo
     `verify-signature=true` (default-on in shipped config) drops remote XPAK and
     GPG-verifies gpkg at unpack. em accepts unsigned. Last (with signing).

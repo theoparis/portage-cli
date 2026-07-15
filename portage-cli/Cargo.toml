@@ -65,6 +65,8 @@ thiserror = { workspace = true }
 mimalloc = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 md5 = { workspace = true }
+httpdate = { workspace = true }
+url = { workspace = true }
 sha1 = { workspace = true }
 hex = { workspace = true }
 object = { workspace = true }

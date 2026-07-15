@@ -14,13 +14,30 @@ use crate::error::{Error, Result};
 
 const PKG_VERSION: &str = concat!("em/", env!("CARGO_PKG_VERSION"));
 
-/// Fetch a binhost's `Packages` index as text.
+/// Outcome of a conditional [`fetch_index`] call.
+pub enum IndexFetch {
+    /// The server confirmed the caller's `if_modified_since` value is still
+    /// current (HTTP 304) — the caller's own cached copy remains valid.
+    NotModified,
+    /// Fresh index content, plus the response's `Last-Modified` header if the
+    /// server sent one (portage records this as the cached copy's new
+    /// `TIMESTAMP`, used as `if_modified_since` on the *next* conditional
+    /// fetch).
+    Fresh {
+        text: String,
+        last_modified: Option<String>,
+    },
+}
+
+/// Fetch a binhost's `Packages` index as text, optionally as a conditional
+/// GET (`If-Modified-Since: <if_modified_since>`, an RFC 7231 HTTP-date —
+/// see `httpdate::fmt_http_date`).
 ///
 /// Tries `<base>/Packages.gz` first (gzip-decompressed), falling back to
 /// `<base>/Packages` when the `.gz` is absent (portage: "not guaranteed to
 /// exist"). Any other HTTP error is surfaced. `base` has its trailing slash
 /// trimmed, matching portage's URL construction.
-pub async fn fetch_index(base_url: &str) -> Result<String> {
+pub async fn fetch_index(base_url: &str, if_modified_since: Option<&str>) -> Result<IndexFetch> {
     let client = reqwest::Client::builder()
         .user_agent(PKG_VERSION)
         .timeout(Duration::from_secs(60))
@@ -31,20 +48,33 @@ pub async fn fetch_index(base_url: &str) -> Result<String> {
         })?;
 
     let gz_url = format!("{}/Packages.gz", base_url.trim_end_matches('/'));
-    match client.get(&gz_url).send().await {
+    let mut req = client.get(&gz_url);
+    if let Some(v) = if_modified_since {
+        req = req.header(reqwest::header::IF_MODIFIED_SINCE, v);
+    }
+    match req.send().await {
+        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_MODIFIED => {
+            Ok(IndexFetch::NotModified)
+        }
         Ok(resp) if resp.status().is_success() => {
+            let last_modified = last_modified_header(&resp);
             let bytes = resp.bytes().await.map_err(|e| Error::Network {
                 url: gz_url.clone(),
                 source: e,
             })?;
-            gunzip(&bytes).map_err(|e| Error::Manifest(format!("gunzip {gz_url}: {e}")))
+            let text =
+                gunzip(&bytes).map_err(|e| Error::Manifest(format!("gunzip {gz_url}: {e}")))?;
+            Ok(IndexFetch::Fresh {
+                text,
+                last_modified,
+            })
         }
         Ok(resp)
             if resp.status() == reqwest::StatusCode::NOT_FOUND
                 || resp.status() == reqwest::StatusCode::FORBIDDEN =>
         {
             // .gz optional — fall through to the plain index.
-            fetch_plain(&client, base_url).await
+            fetch_plain(&client, base_url, if_modified_since).await
         }
         Ok(resp) => Err(Error::Http {
             url: gz_url,
@@ -59,26 +89,50 @@ pub async fn fetch_index(base_url: &str) -> Result<String> {
                     source: e,
                 });
             }
-            fetch_plain(&client, base_url).await
+            fetch_plain(&client, base_url, if_modified_since).await
         }
     }
 }
 
-async fn fetch_plain(client: &reqwest::Client, base_url: &str) -> Result<String> {
+fn last_modified_header(resp: &reqwest::Response) -> Option<String> {
+    resp.headers()
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+}
+
+async fn fetch_plain(
+    client: &reqwest::Client,
+    base_url: &str,
+    if_modified_since: Option<&str>,
+) -> Result<IndexFetch> {
     let url = format!("{}/Packages", base_url.trim_end_matches('/'));
-    let resp = client.get(&url).send().await.map_err(|e| Error::Network {
+    let mut req = client.get(&url);
+    if let Some(v) = if_modified_since {
+        req = req.header(reqwest::header::IF_MODIFIED_SINCE, v);
+    }
+    let resp = req.send().await.map_err(|e| Error::Network {
         url: url.clone(),
         source: e,
     })?;
+    if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(IndexFetch::NotModified);
+    }
     if !resp.status().is_success() {
         return Err(Error::Http {
             url,
             status: resp.status().as_u16(),
         });
     }
-    resp.text()
+    let last_modified = last_modified_header(&resp);
+    let text = resp
+        .text()
         .await
-        .map_err(|e| Error::Network { url, source: e })
+        .map_err(|e| Error::Network { url, source: e })?;
+    Ok(IndexFetch::Fresh {
+        text,
+        last_modified,
+    })
 }
 
 /// Download a binary package from `url` into `dest` (a file path). Streams to
