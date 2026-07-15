@@ -65,6 +65,7 @@ pub use repo::LayoutConf;
 pub use repo::Package;
 pub use repo::UseDb;
 pub use repo::UseExpand;
+pub use repo::ini;
 pub use repo::license_groups::{AcceptLicense, LicenseGroupRegistry};
 pub use repo::named_groups::{GROUP_PREFIX, group_ref_name, is_group_ref};
 pub use repo::sets::{SetResolver, is_set_ref, set_name};

@@ -320,9 +320,28 @@ still open.
   remote), `-G` is binpkg-only (no source fallback). **Validated**: served
   `Packages`+gpkg over http, `em -g` merged byte-identical payload; `-G` with no
   matching binpkg refuses to build. Commit `311d0f1`.
-  - 🔴 **`binrepos.conf`** (modern format) — currently only `PORTAGE_BINHOST`
-    (legacy, deprecated). `binrepos.conf` is INI with `[<name>]`, `sync-uri`,
-    `priority`, `frozen`, `verify-signature`; recursed if a directory (no `.d/`).
+  - ✅ **`binrepos.conf`** (modern format) — DONE (2026-07-15). `portage_binhosts`
+    now reads `binrepos.conf` (global defaults, then
+    `${PORTAGE_CONFIGROOT}/etc/portage/binrepos.conf`, either a file or a
+    directory of `*.conf` files) and combines it with legacy `PORTAGE_BINHOST`
+    in real portage's own priority order (`BinRepoConfigLoader`/`bintree.py`:
+    ascending sort by `(priority, name)`, then reversed for consumption —
+    verified against the real source, not assumed; for a plain
+    `PORTAGE_BINHOST` list with no `binrepos.conf` the double-reversal cancels
+    out to the original left-to-right order). New `BinRepoEntry` type
+    (`name`/`sync_uri`/`frozen`/`verify_signature`); `frozen`/
+    `verify_signature` are parsed and carried but not yet *enforced* (need the
+    still-open local-index-cache and GPG-verify items below, respectively).
+    Shared a generic single-level INI-section parser
+    (`portage_repo::ini::{collect_conf_files, merge_sections}`) out of
+    `ReposConf`'s own implementation rather than duplicating it. 8 new unit
+    tests (the priority/reversal algorithm, dedup against an explicit
+    section's `sync-uri`, missing-`sync-uri` skip, case-insensitive
+    `frozen`/`verify-signature`, plus one real-file-on-disk integration test
+    through the actual `portage_binhosts` entry point, not just the pure
+    combining core). No `%(VAR)s` interpolation and no `[DEFAULT]`-section
+    inheritance — same simplification `ReposConf` already makes for
+    `repos.conf`, no configured value observed in practice needs either.
   - 🔴 **`URI` header BASE_URI override** — portage resolves each entry's URL from
     the index's own `URI` header (server-controlled via
     `PORTAGE_BINHOST_HEADER_URI`), not the binhost's `sync-uri`. em uses

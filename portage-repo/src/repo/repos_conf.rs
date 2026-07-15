@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use camino::{Utf8Path, Utf8PathBuf};
 use portage_atom::Cpn;
 
+use super::ini;
 use super::repository::Repository;
-use super::util;
 use crate::error::Result;
 
 /// Where a configured repository's packages live.
@@ -93,13 +93,13 @@ impl ReposConf {
         let mut order: Vec<String> = Vec::new();
 
         for path in paths {
-            for file in collect_conf_files(path.as_ref())? {
+            for file in ini::collect_conf_files(path.as_ref())? {
                 let contents = match std::fs::read_to_string(&file) {
                     Ok(s) => s,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(e) => return Err(util::io_err(&file, e)),
+                    Err(e) => return Err(super::util::io_err(&file, e)),
                 };
-                merge_into(&mut sections, &mut order, &contents);
+                ini::merge_sections(&mut sections, &mut order, &contents);
             }
         }
 
@@ -185,58 +185,6 @@ impl ReposConf {
             .filter_map(|e| e.location.as_path())
             .map(Repository::open)
             .collect()
-    }
-}
-
-fn collect_conf_files(path: &Path) -> Result<Vec<PathBuf>> {
-    let meta = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(util::io_err(path, e)),
-    };
-    if meta.is_file() {
-        return Ok(vec![path.to_path_buf()]);
-    }
-    if !meta.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(path)
-        .map_err(|e| util::io_err(path, e))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("conf"))
-        .collect();
-    files.sort();
-    Ok(files)
-}
-
-fn merge_into(
-    sections: &mut HashMap<String, HashMap<String, String>>,
-    order: &mut Vec<String>,
-    contents: &str,
-) {
-    let mut current: String = "DEFAULT".to_string();
-    for raw in contents.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        if let Some(stripped) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            current = stripped.trim().to_string();
-            if !sections.contains_key(&current) {
-                if current != "DEFAULT" {
-                    order.push(current.clone());
-                }
-                sections.insert(current.clone(), HashMap::new());
-            }
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            sections
-                .entry(current.clone())
-                .or_default()
-                .insert(k.trim().to_string(), v.trim().to_string());
-        }
     }
 }
 

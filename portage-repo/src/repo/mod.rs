@@ -1,5 +1,6 @@
 pub mod category;
 pub mod ebuild;
+pub mod ini;
 pub mod layout;
 pub mod license_groups;
 pub mod manifest;
