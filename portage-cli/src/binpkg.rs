@@ -204,11 +204,13 @@ fn split_iuse(s: &str) -> HashSet<String> {
         .collect()
 }
 
-/// Parse a `Packages` index into `cpv → entry`. Shared by the local and remote
-/// consumers (the only difference is how `path` is resolved: a local `PKGDIR`
-/// join vs a remote `base_uri` join). The header block (no `CPV:`) is skipped.
-pub fn parse_packages_entries(text: &str) -> BTreeMap<String, BinpkgEntry> {
-    let mut entries = BTreeMap::new();
+/// Split a `Packages` index into its per-package `KEY: VALUE` blocks (the
+/// header block, which has no `CPV:` line, is skipped). Shared by every
+/// consumer that needs a different subset of fields than [`BinpkgEntry`]
+/// carries — e.g. `maint::binpkg`'s verify/list/prune, which also need
+/// `MD5`/`SHA1`/`SIZE`/`BUILD_ID`.
+pub(crate) fn parse_index_blocks(text: &str) -> Vec<BTreeMap<&str, &str>> {
+    let mut blocks = Vec::new();
     for block in text.split("\n\n") {
         let block = block.trim();
         if block.is_empty() || !block.lines().any(|l| l.starts_with("CPV:")) {
@@ -220,6 +222,19 @@ pub fn parse_packages_entries(text: &str) -> BTreeMap<String, BinpkgEntry> {
                 fields.insert(k, v);
             }
         }
+        if fields.contains_key("CPV") {
+            blocks.push(fields);
+        }
+    }
+    blocks
+}
+
+/// Parse a `Packages` index into `cpv → entry`. Shared by the local and remote
+/// consumers (the only difference is how `path` is resolved: a local `PKGDIR`
+/// join vs a remote `base_uri` join).
+pub fn parse_packages_entries(text: &str) -> BTreeMap<String, BinpkgEntry> {
+    let mut entries = BTreeMap::new();
+    for fields in parse_index_blocks(text) {
         let Some(&cpv) = fields.get("CPV") else {
             continue;
         };

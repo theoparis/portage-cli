@@ -186,6 +186,7 @@ fn run_maint(command: &Option<MaintCommand>, globals: &cli::Cli) -> Result<()> {
         None => bail!("not implemented: emaint (no subcommand)"),
         Some(MaintCommand::All) => bail!("not implemented: emaint all"),
         Some(MaintCommand::Binhost) => maint::binhost::run(globals),
+        Some(MaintCommand::Binpkg { action }) => maint::binpkg::run(action, globals),
         Some(MaintCommand::Cleanconfmem) => bail!("not implemented: emaint cleanconfmem"),
         Some(MaintCommand::Cleanresume) => bail!("not implemented: emaint cleanresume"),
         Some(MaintCommand::Logs) => bail!("not implemented: emaint logs"),

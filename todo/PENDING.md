@@ -389,11 +389,28 @@ still open.
     build-env fields into em's `Packages` and gate `find_reusable` on `-march`
     (opt-in). Deferred (later) — non-riscv64 CHOST+USE+ABI matching is portage-
     faithful for now.
-- 🔴 **`em maint binpkg` tooling** — the binhost substrate (Packages index + reader
-  + local/remote reuse) now invites `maint` family tools operating uniformly on
-  local PKGDIR and remote-cached binpkgs: `verify` (the `BinpkgVerifier` MD5/SHA1/
-  size integrity check), `list`/query, prune-old-`BUILD_ID`s (eclean-pkg
-  workalike). None built yet.
+- ✅ **`em maint binpkg` tooling** — DONE. `em maint binpkg {verify,list,prune}`,
+  an em-only extension (no real `emaint` module covers this; its own `emaint
+  binhost` only regenerates the index). `verify [--fix]` recomputes each
+  indexed container's size/MD5/SHA1 and compares against the `Packages`
+  index's recorded values (the same size-then-digest order as
+  `_emerge/BinpkgVerifier.py`), reporting ok/corrupt/missing counts; without
+  `--fix` a corrupt/missing binpkg fails the run (script-checkable), with
+  `--fix` corrupt containers are quarantined (renamed `<file>.corrupt`) and
+  the index is regenerated so missing/corrupt entries drop out. `list` prints
+  a cpv/build-id/size/path table over the index. `prune [--dry-run]` collapses
+  leftover multi-`BUILD_ID` containers for the same cpv down to the newest one
+  (em's own reuse model keeps at most one instance per cpv — see the
+  `binpkg-multi-instance` note above) and reindexes; this is *not* a full
+  `eclean-pkg` port (no installed-set/age/size pruning — gentoolkit isn't
+  installed on this host to verify parity against, and no confirmed gap
+  depends on it). `verify`/`list`/`prune`'s core logic takes `pkgdir`/`chost`
+  directly (not `&Cli`), so all three are covered by real-gpkg-container
+  integration tests (`portage-cli/src/maint/binpkg.rs`) seeding containers via
+  `portage_binpkg::write_gpkg`, corrupting/duplicating/removing them, and
+  asserting the reported outcome — this caught a real bug pre-merge (`Utf8Path
+  ::with_extension` only replaces the last `.tar` of `.gpkg.tar`, silently
+  producing `foo.gpkg.gpkg.tar.corrupt`; fixed to a plain string-append).
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.
 - 🔴 Signing/verify (`BINPKG_GPG_*`) — last (lives in `portage-binpkg`).
 

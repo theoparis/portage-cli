@@ -1,4 +1,5 @@
 pub mod binhost;
+pub mod binpkg;
 pub mod env;
 pub mod moveinst;
 pub mod regen_use;

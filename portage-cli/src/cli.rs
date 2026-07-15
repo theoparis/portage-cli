@@ -1206,6 +1206,11 @@ pub enum MaintCommand {
     All,
     #[command(about = "Generate binary package metadata index")]
     Binhost,
+    #[command(about = "Inspect/verify/prune local binary packages (em-only, no emaint equivalent)")]
+    Binpkg {
+        #[command(subcommand)]
+        action: BinpkgAction,
+    },
     #[command(about = "Discard stale config tracker entries")]
     Cleanconfmem,
     #[command(about = "Discard saved resume lists")]
@@ -1237,6 +1242,29 @@ pub enum MaintCommand {
         /// Remove orphaned entries from the world file
         #[arg(short, long)]
         fix: bool,
+    },
+}
+
+/// `em maint binpkg <action>` — local `PKGDIR` maintenance built on the
+/// `Packages` index/reader substrate. No real-portage `emaint` module exists
+/// for this (only `emaint binhost`, which just regenerates the index); this
+/// is an em-only extension.
+#[derive(Subcommand)]
+pub enum BinpkgAction {
+    #[command(about = "Check each indexed binpkg's size/MD5/SHA1 against the file on disk")]
+    Verify {
+        /// Quarantine corrupt containers (rename to `.corrupt`) and drop
+        /// missing/corrupt entries from the index by regenerating it.
+        #[arg(long)]
+        fix: bool,
+    },
+    #[command(about = "List indexed binary packages (cpv, build-id, size, path)")]
+    List,
+    #[command(about = "Keep only the newest BUILD_ID per package, deleting older ones")]
+    Prune {
+        /// Report what would be deleted without deleting or reindexing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

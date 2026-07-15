@@ -55,8 +55,10 @@ pub fn run(globals: &Cli) -> Result<()> {
 }
 
 /// Walk `pkgdir` for `*.gpkg.tar`, build per-package entries, and write the
-/// `Packages` index. Returns `(indexed, skipped)`.
-fn index_pkgdir(pkgdir: &Utf8Path, chost: &str) -> Result<(usize, usize)> {
+/// `Packages` index. Returns `(indexed, skipped)`. Shared with `maint::binpkg
+/// prune`, which deletes stale containers first and then calls this to bring
+/// the index back in sync.
+pub(crate) fn index_pkgdir(pkgdir: &Utf8Path, chost: &str) -> Result<(usize, usize)> {
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     find_gpkg_containers(pkgdir.as_std_path(), pkgdir.as_std_path(), &mut files)?;
     files.sort();
@@ -85,7 +87,11 @@ fn index_pkgdir(pkgdir: &Utf8Path, chost: &str) -> Result<(usize, usize)> {
 
 /// Recursively enumerate `*.gpkg.tar` container files under `root`, as
 /// `(rel_path, full)` pairs.
-fn find_gpkg_containers(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
+pub(crate) fn find_gpkg_containers(
+    dir: &Path,
+    root: &Path,
+    out: &mut Vec<(String, PathBuf)>,
+) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let ft = entry.file_type()?;
@@ -181,7 +187,9 @@ fn copy_field(meta: &BTreeMap<String, String>, out: &mut BTreeMap<String, String
 }
 
 /// Container file MD5+SHA1 (lowercase hex), byte size, and mtime (unix secs).
-fn checksum(path: &Path) -> Result<(String, String, u64, u64)> {
+/// Shared with `maint::binpkg verify`, which recomputes these to compare
+/// against the index's recorded values.
+pub(crate) fn checksum(path: &Path) -> Result<(String, String, u64, u64)> {
     let mut file = std::fs::File::open(path)?;
     let mut md5 = md5::Context::new();
     let mut sha1 = Sha1::new();
@@ -211,8 +219,8 @@ fn checksum(path: &Path) -> Result<(String, String, u64, u64)> {
 
 /// Parse the trailing `-<n>` build-id from a container basename, portage's
 /// `<PF>-<BUILD_ID>.gpkg.tar` layout. `None` for the single-instance
-/// `<PF>.gpkg.tar` form.
-fn parse_build_id_from_name(rel: &str) -> Option<u32> {
+/// `<PF>.gpkg.tar` form. Shared with `maint::binpkg prune`.
+pub(crate) fn parse_build_id_from_name(rel: &str) -> Option<u32> {
     let base = rel.rsplit('/').next()?;
     let stem = base.strip_suffix(".gpkg.tar")?;
     let (rest, id) = stem.rsplit_once('-')?;
