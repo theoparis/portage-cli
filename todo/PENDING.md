@@ -427,7 +427,9 @@ still open.
 - ✅ **Library-relocation pass, round 2 (2026-07-15):** a full survey of
   `portage-cli/src` for logic with no real `&Cli` dependency found a much
   bigger candidate (`query/depgraph/*`, 8.5k lines, effectively zero `Cli`
-  coupling — belongs in `portage-solver`) plus the build/merge engine
+  coupling — see the dedicated `portage-resolve` entry below for where it
+  actually belongs, corrected from an initial too-hasty "portage-solver"
+  guess) plus the build/merge engine
   (`ebuild.rs`/`merge/mod.rs`/`postprocess.rs`/`elfscan.rs`) as future,
   larger-effort moves. This round did the small, mechanical ones:
   `use_flags.rs`'s USE add/remove algorithm → `MakeConf::apply_use_changes`
@@ -469,6 +471,43 @@ still open.
   (genuinely broad, no collision found). Verified live: `em use --help`/
   `em pkg use --help` no longer panic in a debug build, `-a`/`--ask` still
   parses both before and after `crossdev`, full workspace test suite green.
+- 🟡 **`query/depgraph/*` → `portage-resolve` (staged migration, in progress)**
+  — a second opinion (Fable, 2026-07-15) on the round-2 survey's too-hasty
+  "belongs in `portage-solver`" guess found that's structurally wrong:
+  `portage-solver`/`portage-atom-pubgrub` are both published crates with
+  deliberately lean, publishable dependency sets, but the depgraph code
+  needs `portage-repo` (unpublishable — brush git fork), so folding it into
+  either would make a published crate unpublishable. Verdict: a **new,
+  currently-unpublished-in-practice crate `portage-resolve`** sitting
+  between `portage-atom-pubgrub`/`portage-repo`/`portage-vdb` and
+  `portage-cli` — the resolution/policy compute layer (repo-fact adaptation,
+  USE/keyword/mask policy, root-aware post-solve trimming, plan assembly),
+  no clap/anstream dependency enforced at the boundary. **The crate now
+  exists** (`portage-resolve`, placeholder `v0.0.1`, published to
+  crates.io to reserve the name — empty, nothing moved yet).
+  Per-file disposition (full detail in session transcript/Fable's report,
+  not duplicated here): moves — `repo.rs`, `force_mask.rs`,
+  `effective_use.rs`, `use_env.rs`, `installed.rs`, `conflicts.rs`,
+  `subslot.rs`, `root_aware.rs`, `bdepend_trim.rs`, `depend_trim.rs`,
+  `host_copies.rs`, `required_use.rs`, `download_size.rs`, `c7.rs`, most of
+  `package_use.rs`, plus (outside the directory) `bdepend_avail.rs` and
+  **`cli::Roots` itself** (moved, not mirrored — it's already portable, and
+  duplicating its correctness-sensitive `satisfaction_root` policy table
+  across two types would repeat this project's own "near-identical concepts
+  drift" failure mode). Stays in `portage-cli`: `output.rs` (pure anstyle
+  rendering, same precedent as `search.rs`), `autounmask.rs`, `package_use
+  .rs`'s `report()`, and `mod.rs` itself for now (genuinely command-shaped:
+  prints, writes config, sets exit codes — splitting it further is optional,
+  highest-risk, deferred). Surprise finding: `overlay.rs` (204 lines)
+  belongs in neither place — it's `portage-repo` territory, and the
+  designated first migration slice. Staged order (7 stages, each
+  independently green/revertible, ~6-7 sessions total): `overlay.rs` →
+  `portage-repo`; create-crate + move `Roots`; move `bdepend_avail.rs`;
+  move the `repo.rs`/`force_mask.rs`/`effective_use.rs` core; move the
+  `use_env.rs`/`installed.rs`/`conflicts.rs`/`subslot.rs` group; move the
+  `Roots`-consumer group (`root_aware.rs`/`bdepend_trim.rs`/
+  `depend_trim.rs`/`host_copies.rs`); move `required_use.rs`/
+  `download_size.rs`/split `package_use.rs`/move `c7.rs`. Not yet started.
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.
 - 🔴 Signing/verify (`BINPKG_GPG_*`) — last (lives in `portage-binpkg`).
 
