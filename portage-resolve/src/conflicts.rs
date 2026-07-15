@@ -4,16 +4,17 @@ use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep, DepEntry, Operator, Version};
 use portage_atom_pubgrub::PortageVersionSet;
 
-use super::installed::VdbEntry;
+use crate::installed::VdbEntry;
 
 /// An interned slot name (`None` = unslotted). Interned handles are cheap to
 /// copy and compare, so the whole conflict check stays handle-based.
 type Slot = Option<Interned<DefaultInterner>>;
 
 /// A constraint violated by the proposed solution.
-pub(super) struct Conflict {
+pub struct Conflict {
     /// The installed package whose dep is violated.
     pub installed_cpn: Cpn,
+    /// The installed package's version.
     pub installed_ver: Version,
     /// The dep atom that is not satisfied.
     pub dep: Dep,
@@ -24,9 +25,12 @@ pub(super) struct Conflict {
 /// A package the plan installs or upgrades, carrying its slot so the conflict
 /// check can reason per-slot rather than collapsing every slot of a name into
 /// one version.
-pub(super) struct ProposedPkg {
+pub struct ProposedPkg {
+    /// The package name.
     pub cpn: Cpn,
+    /// Its slot, if any.
     pub slot: Slot,
+    /// The version the plan installs.
     pub version: Version,
 }
 
@@ -39,7 +43,7 @@ pub(super) struct ProposedPkg {
 /// new slot (e.g. `llvm:21`) alongside a retained old slot (`llvm:20`) does not
 /// break an installed consumer that pinned `~llvm:20`, whereas an in-slot
 /// upgrade past a `<` bound (e.g. `docutils:0` to `0.23`) still does.
-pub(super) fn find_conflicts(installed: &[VdbEntry], proposed: &[ProposedPkg]) -> Vec<Conflict> {
+pub fn find_conflicts(installed: &[VdbEntry], proposed: &[ProposedPkg]) -> Vec<Conflict> {
     // `(cpn, slot)` pairs the plan installs into; a same-slot installed package
     // is replaced and therefore not retained.
     let replaced: HashSet<(Cpn, Slot)> = proposed.iter().map(|p| (p.cpn, p.slot)).collect();
@@ -155,7 +159,7 @@ fn collect_violations(
 /// against its VDB flags). Fed to the solver so `check_blockers` can report a
 /// blocker a retained installed owner points at the plan — the owner is never
 /// in the solve graph, so its blockers are otherwise invisible.
-pub(super) fn installed_blocker_atoms(entry: &VdbEntry) -> Vec<Dep> {
+pub fn installed_blocker_atoms(entry: &VdbEntry) -> Vec<Dep> {
     // Most installed packages declare no blockers; a cheap structural pre-scan
     // skips the evaluate_use + clone for them, keeping this whole-VDB walk cheap.
     if !has_blocker_atom(&entry.deps) {
@@ -192,7 +196,9 @@ fn collect_blocker_atoms(entries: &[DepEntry], out: &mut Vec<Dep>) {
     }
 }
 
-pub(super) fn dep_to_version_set(dep: &Dep) -> PortageVersionSet {
+/// Translate a dep atom's version constraint into the solver's
+/// [`PortageVersionSet`] (a bare atom with no version op accepts any version).
+pub fn dep_to_version_set(dep: &Dep) -> PortageVersionSet {
     match &dep.version {
         None => PortageVersionSet::any(),
         Some(v) => {

@@ -599,8 +599,40 @@ still open.
   cross-`*` alias injection (`load_repos`'s in-memory crossdev-symlink
   equivalent), `--with-bdeps` full multi-package resolution, and
   `--autounmask` reporting — all correct. Full workspace check/clippy -D
-  warnings/fmt/test clean. Remaining stages:
-  move the `use_env.rs`/`installed.rs`/`conflicts.rs`/`subslot.rs` group;
+  warnings/fmt/test clean.
+  **stage 5 DONE (2026-07-16)** — `use_env.rs` (profile/`make.conf`/
+  `package.*` reading into `UseEnv`), `installed.rs` (VDB-backed
+  target/host/sysroot views + `action_tag`), `conflicts.rs` (post-solve
+  reverse-dep conflict detection), `subslot.rs` (`:=` slot-operator
+  rebuild detection) all moved verbatim. Same visibility-bump treatment
+  as stage 4 (nearly every `pub(super)` item and its fields → `pub`,
+  since `mod.rs`/`output.rs` — staying in `portage-cli` — construct
+  `ProposedPkg`/read `Conflict`/`VdbEntry`/`SubslotRebuild` fields
+  directly); one over-broad `pub(super) fn load_dep_list` (only ever
+  called within its own file) demoted to private, matching the
+  `entry_satisfied` precedent from stage 3. Same module-path trick as
+  stage 4 (`use portage_resolve::{conflicts, effective_use, installed,
+  repo, subslot, use_env};` in `mod.rs`, replacing 6 `mod X;`
+  declarations) — again zero of the other not-yet-moved files
+  (`output.rs`, `autounmask.rs`, `package_use.rs`, `download_size.rs`,
+  `required_use.rs`, `c7.rs`, `host_copies.rs`, `bdepend_trim.rs`,
+  `depend_trim.rs`) needed touching, **except** one `force_mask` binding:
+  `mod.rs` itself never names `force_mask::` directly (only holds a
+  `ForceMask` *value* from `use_env`), so the bare `use` was flagged
+  unused by `mod.rs`'s own lint even though `c7.rs`/`host_copies.rs`
+  still reach it via `super::force_mask`/`super::super::force_mask` —
+  kept the binding alive with a documented `#[allow(unused_imports)]`
+  rather than removing it and breaking those two files. Needed one new
+  real dependency (`anyhow`, for `use_env.rs`'s error handling) plus
+  `tokio` `macros`/`rt-multi-thread` were already present from stage 4.
+  Fixed 18 new `missing_docs` warnings. Test-count accounting: 160 + 36
+  before → 145 + 51 after (15 moved: 6+3+0+6 `#[test]`/`#[tokio::test]`
+  counted in the 4 files, exact match). Live-verified against the real
+  binary: plain resolve (R tag), `--deep` upgrade resolution (U tag),
+  and confirmed a real `package.use` entry on this host
+  (`cross-riscv64-unknown-linux-gnu/gcc`) is actually applied in the
+  resolved USE flags — not just defaulting to empty. Full workspace
+  check/clippy -D warnings/fmt/test clean. Remaining stages:
   move the `Roots`-consumer group (`root_aware.rs`/`bdepend_trim.rs`/
   `depend_trim.rs`/`host_copies.rs`); move `required_use.rs`/
   `download_size.rs`/split `package_use.rs`/move `c7.rs`. Not yet started.

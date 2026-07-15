@@ -16,6 +16,7 @@ categories = ["algorithms", "development-tools"]
 publish = false
 
 [dependencies]
+anyhow = { workspace = true }
 camino = { workspace = true }
 gentoo-core = { workspace = true }
 portage-atom = { workspace = true }

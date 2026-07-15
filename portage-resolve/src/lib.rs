@@ -14,16 +14,27 @@
 #![warn(missing_docs)]
 
 mod bdepend_avail;
+/// Post-solve reverse-dependency conflict detection against installed
+/// packages the plan doesn't replace.
+pub mod conflicts;
 /// Effective per-package USE after profile/env overrides, IUSE defaults, and
 /// `--autosolve-use` ceded flags.
 pub mod effective_use;
 /// Profile USE `use.force`/`use.mask` (global and per-package), applied as
 /// the unconditional post-fold step real portage uses.
 pub mod force_mask;
+/// VDB-backed installed-package views (target ROOT, build-host BROOT, a
+/// fixed sysroot) and the emerge-style action-tag computation.
+pub mod installed;
 /// Repository-fact adaptation: the `PackageRepository` impl the solver
 /// bridge consumes, plus keyword/mask/license acceptance.
 pub mod repo;
 mod roots;
+/// Slot-operator (`:=`) rebuild detection.
+pub mod subslot;
+/// Config/profile reading into the resolved [`use_env::UseEnv`] the rest of
+/// this crate's policy folding runs on.
+pub mod use_env;
 
 pub use bdepend_avail::{Avail, broot_vdb_packages, collect_unsatisfied, unsatisfied_cpns};
 pub use roots::Roots;

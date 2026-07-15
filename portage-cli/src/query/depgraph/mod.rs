@@ -7,16 +7,18 @@ mod root_aware;
 pub use portage_atom_pubgrub::MergeRoot;
 #[cfg(test)]
 mod c7;
-mod conflicts;
 mod download_size;
-mod installed;
 mod output;
 mod package_use;
 mod required_use;
-mod subslot;
-mod use_env;
 
-use portage_resolve::{effective_use, force_mask, repo};
+use portage_resolve::{conflicts, effective_use, installed, repo, subslot, use_env};
+// Not referenced directly here (only via a `force_mask::ForceMask` value
+// returned from `use_env`), but `c7.rs`/`host_copies.rs`'s own tests still
+// reach it through `super::force_mask`/`super::super::force_mask` — keep the
+// binding alive for them.
+#[allow(unused_imports)]
+use portage_resolve::force_mask;
 
 use std::collections::{HashMap, HashSet};
 

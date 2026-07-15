@@ -6,18 +6,23 @@ use portage_atom::{Cpn, Version};
 use portage_atom_pubgrub::PortagePackage;
 use portage_vdb::Vdb;
 
-pub(super) struct VdbEntry {
-    pub(super) cpn: Cpn,
+/// One VDB-installed package, as the depgraph's post-solve passes need it.
+pub struct VdbEntry {
+    /// The package name.
+    pub cpn: Cpn,
     /// Interned at load time — this entry is re-registered with the solver
     /// on every USE-dep co-solve fixpoint iteration (`mod.rs`'s
     /// `build_and_solve`), so this avoids re-interning the same slot string
     /// on every one of those calls.
-    pub(super) slot: Option<Interned<DefaultInterner>>,
-    pub(super) version: Version,
-    pub(super) active_use: Vec<Interned<DefaultInterner>>,
-    pub(super) iuse: Vec<Interned<DefaultInterner>>,
+    pub slot: Option<Interned<DefaultInterner>>,
+    /// The installed version.
+    pub version: Version,
+    /// USE flags active at build time.
+    pub active_use: Vec<Interned<DefaultInterner>>,
+    /// The package's declared `IUSE`, prefix-stripped.
+    pub iuse: Vec<Interned<DefaultInterner>>,
     /// RDEPEND + DEPEND as stored in the VDB (pre-USE evaluation).
-    pub(super) deps: Vec<DepEntry>,
+    pub deps: Vec<DepEntry>,
 }
 
 /// Installed view for **ROOT** / RDEPEND / merge filtering / action tags.
@@ -28,7 +33,7 @@ pub(super) struct VdbEntry {
 /// `--emptytree` does **not** clear this view — emerge still reads the VDB for
 /// action tags and post-solve checks; only package *selection* changes (see
 /// `InstalledPolicy::Rebuild` in the solver).
-pub(super) fn load_target_installed(roots: &portage_resolve::Roots) -> Vec<VdbEntry> {
+pub fn load_target_installed(roots: &crate::Roots) -> Vec<VdbEntry> {
     let base = roots.base();
     let target = roots.target();
     if base != target {
@@ -39,7 +44,7 @@ pub(super) fn load_target_installed(roots: &portage_resolve::Roots) -> Vec<VdbEn
 
 /// Union of two VDB roots with target shadowing base (prefix / general overlay).
 /// `None` means the host `/var/db/pkg`.
-pub(super) fn load_installed(
+pub fn load_installed(
     base: Option<&camino::Utf8Path>,
     target: Option<&camino::Utf8Path>,
 ) -> Vec<VdbEntry> {
@@ -63,10 +68,14 @@ pub(super) fn load_installed(
 /// package, version, and VDB-recorded active USE / IUSE. The USE/IUSE let the
 /// solver check an edge's atom USE-deps against the host, so a `[flag]` the host
 /// lacks triggers a rebuild rather than being pruned as host-satisfied.
-pub(super) struct HostInstalledEntry {
+pub struct HostInstalledEntry {
+    /// The slot-resolved package identity.
     pub package: PortagePackage,
+    /// The installed version.
     pub version: Version,
+    /// USE flags active at build time.
     pub active_use: Vec<Interned<DefaultInterner>>,
+    /// The package's declared `IUSE`, prefix-stripped.
     pub iuse: Vec<Interned<DefaultInterner>>,
 }
 
@@ -77,7 +86,7 @@ pub(super) struct HostInstalledEntry {
 /// (each slot is a distinct `PortagePackage`).
 ///
 /// The root selection (BROOT, plus the prefix's own VDB under `--prefix`) is
-/// `portage_resolve::broot_vdb_packages` — shared with
+/// `crate::broot_vdb_packages` — shared with
 /// `Avail::initial_bdepend`, which the same #28/#30 bug (reading the bare
 /// host `/var/db/pkg` instead of the given BROOT) was once fixed in
 /// separately; see that function's doc comment for the full rationale.
@@ -85,8 +94,8 @@ pub(super) struct HostInstalledEntry {
 /// keyed by package, so whichever entry is appended last wins — matching
 /// "what is in the prefix drives" for a package present in both (host
 /// entries come first, prefix second).
-pub(super) fn load_host_installed(roots: &portage_resolve::Roots) -> Vec<HostInstalledEntry> {
-    portage_resolve::broot_vdb_packages(roots)
+pub fn load_host_installed(roots: &crate::Roots) -> Vec<HostInstalledEntry> {
+    crate::broot_vdb_packages(roots)
         .into_iter()
         .map(|pkg| {
             let slot = pkg.slot_main().ok();
@@ -117,7 +126,7 @@ pub(super) fn load_host_installed(roots: &portage_resolve::Roots) -> Vec<HostIns
 }
 
 /// VDB entries from a cross sysroot (`ESYSROOT`) for `DEPEND` satisfaction.
-pub(super) fn load_sysroot_entries(sysroot: &camino::Utf8Path) -> Vec<VdbEntry> {
+pub fn load_sysroot_entries(sysroot: &camino::Utf8Path) -> Vec<VdbEntry> {
     load_one(Some(sysroot))
 }
 
@@ -170,7 +179,7 @@ fn load_one(root: Option<&camino::Utf8Path>) -> Vec<VdbEntry> {
 /// - `("U",  Some(v))`  — upgrade within this slot
 /// - `("D",  Some(v))`  — downgrade within this slot
 /// - `("R",  Some(v))`  — same version, rebuild needed (changed USE flags)
-pub(super) fn action_tag<'a>(
+pub fn action_tag<'a>(
     pkg: &PortagePackage,
     ver: &Version,
     installed: &'a HashMap<Cpn, HashMap<Interned<DefaultInterner>, Version>>,
@@ -216,7 +225,7 @@ mod tests {
         .unwrap();
 
         let root_str = tmp.path().to_str().unwrap();
-        let host_roots = portage_resolve::Roots::for_test(root_str);
+        let host_roots = crate::Roots::for_test(root_str);
         let entries = load_host_installed(&host_roots);
 
         assert_eq!(
@@ -261,7 +270,7 @@ mod tests {
             "python_targets_python3_14",
         );
 
-        let roots = portage_resolve::Roots::for_test_overlay(
+        let roots = crate::Roots::for_test_overlay(
             host.path().to_str().unwrap(),
             prefix.path().to_str().unwrap(),
         );
@@ -291,7 +300,7 @@ mod tests {
         let prefix = tempfile::tempdir().unwrap();
         write_fake_vdb_entry(host.path(), "dev-python/jinja2-3.1.6", "");
 
-        let roots = portage_resolve::Roots::for_test_overlay(
+        let roots = crate::Roots::for_test_overlay(
             host.path().to_str().unwrap(),
             prefix.path().to_str().unwrap(),
         );

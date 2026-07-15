@@ -13,14 +13,17 @@ use std::collections::{HashMap, HashSet};
 use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, DepEntry, Slot, SlotDep, SlotOperator, Version};
 
-use super::conflicts::dep_to_version_set;
-use super::installed::VdbEntry;
+use crate::conflicts::dep_to_version_set;
+use crate::installed::VdbEntry;
 
 /// An installed package needing a rebuild because a planned dependency's
 /// subslot no longer matches the `:slot/subslot=` binding recorded in the VDB.
-pub(super) struct SubslotRebuild {
+pub struct SubslotRebuild {
+    /// The installed package that needs rebuilding.
     pub cpn: Cpn,
+    /// Its installed slot.
     pub slot: Option<Interned<DefaultInterner>>,
+    /// Its installed version.
     pub version: Version,
     /// The planned packages whose subslot change triggers the rebuild.
     pub triggers: Vec<Cpn>,
@@ -59,7 +62,7 @@ fn collect_bound_atoms<'a>(entries: &'a [DepEntry], out: &mut Vec<&'a portage_at
 /// plan. `planned_slots` maps each in-plan CPN to its planned versions and
 /// their tree slots; owners already in the plan are skipped (they are being
 /// upgraded or rebuilt anyway).
-pub(super) fn find_rebuilds(
+pub fn find_rebuilds(
     installed: &[VdbEntry],
     planned_slots: &HashMap<Cpn, Vec<(Version, Slot)>>,
     in_plan: &HashSet<Cpn>,

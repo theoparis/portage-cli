@@ -4,13 +4,13 @@ use portage_atom::interner::Interned;
 use portage_atom_pubgrub::UseOverride;
 use portage_repo::{AcceptLicense, LicenseGroupRegistry, ProfileStack, Repository};
 
-use super::force_mask::{ForceMask, index_by_cpn};
-use super::repo::AcceptToken;
+use crate::force_mask::{ForceMask, index_by_cpn};
+use crate::repo::AcceptToken;
 
 type Result<T> = anyhow::Result<T>;
 
 /// Resolved USE environment for the solver and display.
-pub(super) struct UseEnv {
+pub struct UseEnv {
     /// The fold of profile `make.defaults` + `make.conf` (`extra_confs`) —
     /// portage's `defaults`/`conf` layers, from `ResolvedUse::pre_env`. Feed
     /// this into `portage_solver::resolve_effective_use` *before*
@@ -56,7 +56,11 @@ pub(super) struct UseEnv {
     pub provided: Vec<portage_atom::Cpv>,
 }
 
-pub(super) async fn build_use_env(
+/// Read the config/profile/environment sources (profile stack, `make.conf`,
+/// `package.use`/`.mask`/`.unmask`/`.license`/`.accept_keywords`, USE force/
+/// mask) into a resolved [`UseEnv`], the shared input every per-package
+/// policy fold in this crate runs on.
+pub async fn build_use_env(
     repo: &Repository,
     root: Option<&Utf8Path>,
     config_overlay: Option<&Utf8Path>,
@@ -483,7 +487,7 @@ fn load_package_license(path: &str, groups: &LicenseGroupRegistry) -> Vec<(Dep, 
 }
 
 /// Load a simple atom list (one dep per line, `#` comments, optionally a directory).
-pub(super) fn load_dep_list(path: &str) -> Vec<Dep> {
+fn load_dep_list(path: &str) -> Vec<Dep> {
     let p = std::path::Path::new(path);
     if !p.exists() {
         return Vec::new();
