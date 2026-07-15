@@ -9,7 +9,7 @@ use portage_atom_pubgrub::{
 };
 use portage_metadata::{CacheEntry, IUseDefault as MetaIUseDefault};
 
-use super::repo::{self, RepoData};
+use crate::repo::{self, RepoData};
 
 /// Re-apply the solver's ceded (`--autosolve-use`) flag decisions on top of an
 /// already-resolved `UseConfig`, unconditionally — like `use.force`/
@@ -20,7 +20,7 @@ use super::repo::{self, RepoData};
 /// build"` reported a fix but the real build still died with the original,
 /// unceded flags — the ceded override was being wiped by the very `-*` that
 /// made ceding necessary).
-pub(super) fn apply_ceded(cfg: &mut UseConfig, cpn: Cpn, ceded: &[CededFlag]) {
+pub fn apply_ceded(cfg: &mut UseConfig, cpn: Cpn, ceded: &[CededFlag]) {
     for c in ceded.iter().filter(|c| c.cpn == cpn) {
         cfg.set(
             c.flag,
@@ -33,7 +33,9 @@ pub(super) fn apply_ceded(cfg: &mut UseConfig, cpn: Cpn, ceded: &[CededFlag]) {
     }
 }
 
-pub(super) fn iuse_defaults(cache: &CacheEntry) -> HashMap<Interned<DefaultInterner>, IUseDefault> {
+/// Build the `iuse_defaults` map `resolve_effective_use` needs from a cache
+/// entry's parsed `IUSE` list (`+flag`/`-flag` → enabled/disabled default).
+pub fn iuse_defaults(cache: &CacheEntry) -> HashMap<Interned<DefaultInterner>, IUseDefault> {
     cache
         .metadata
         .iuse
@@ -52,7 +54,9 @@ pub(super) fn iuse_defaults(cache: &CacheEntry) -> HashMap<Interned<DefaultInter
         .collect()
 }
 
-pub(super) fn effective_use(
+/// The full effective USE fold for one `(pkg, ver)`: IUSE defaults, `pre_env`,
+/// `package_use`, `env_use`, then any `--autosolve-use` ceded flags on top.
+pub fn effective_use(
     pre_env: &str,
     env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
@@ -81,34 +85,42 @@ pub(super) fn effective_use(
 /// `host_copies`, `bdepend_trim`, and `depend_trim`. `None` when the CPV
 /// isn't in `data` at all (a within-run merge whose cache entry vanished,
 /// e.g. across a repo reload — every caller already treats this as "skip").
-pub(super) struct EvaluatedDeps<'a> {
+pub struct EvaluatedDeps<'a> {
     cache: &'a CacheEntry,
     effective: UseConfig,
 }
 
 impl EvaluatedDeps<'_> {
-    pub(super) fn depend(&self) -> Vec<DepEntry> {
+    /// `DEPEND`, evaluated against this package's effective USE.
+    pub fn depend(&self) -> Vec<DepEntry> {
         DepEntry::evaluate_use(&self.cache.metadata.depend, &self.effective)
     }
 
-    pub(super) fn bdepend(&self) -> Vec<DepEntry> {
+    /// `BDEPEND`, evaluated against this package's effective USE.
+    pub fn bdepend(&self) -> Vec<DepEntry> {
         DepEntry::evaluate_use(&self.cache.metadata.bdepend, &self.effective)
     }
 
-    pub(super) fn rdepend(&self) -> Vec<DepEntry> {
+    /// `RDEPEND`, evaluated against this package's effective USE.
+    pub fn rdepend(&self) -> Vec<DepEntry> {
         DepEntry::evaluate_use(&self.cache.metadata.rdepend, &self.effective)
     }
 
-    pub(super) fn pdepend(&self) -> Vec<DepEntry> {
+    /// `PDEPEND`, evaluated against this package's effective USE.
+    pub fn pdepend(&self) -> Vec<DepEntry> {
         DepEntry::evaluate_use(&self.cache.metadata.pdepend, &self.effective)
     }
 
-    pub(super) fn idepend(&self) -> Vec<DepEntry> {
+    /// `IDEPEND`, evaluated against this package's effective USE.
+    pub fn idepend(&self) -> Vec<DepEntry> {
         DepEntry::evaluate_use(&self.cache.metadata.idepend, &self.effective)
     }
 }
 
-pub(super) fn evaluated_deps<'a>(
+/// Look up `(pkg, ver)`'s cache entry and compute its [`EvaluatedDeps`] in one
+/// step; `None` when the cpv has no cache entry (see [`EvaluatedDeps`]'s doc
+/// comment).
+pub fn evaluated_deps<'a>(
     data: &'a RepoData,
     pre_env: &str,
     env_use: &str,

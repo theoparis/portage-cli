@@ -1,7 +1,6 @@
 mod autounmask;
 mod bdepend_trim;
 mod depend_trim;
-mod effective_use;
 mod host_copies;
 mod root_aware;
 
@@ -10,14 +9,14 @@ pub use portage_atom_pubgrub::MergeRoot;
 mod c7;
 mod conflicts;
 mod download_size;
-mod force_mask;
 mod installed;
 mod output;
 mod package_use;
-mod repo;
 mod required_use;
 mod subslot;
 mod use_env;
+
+use portage_resolve::{effective_use, force_mask, repo};
 
 use std::collections::{HashMap, HashSet};
 

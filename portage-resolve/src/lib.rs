@@ -14,6 +14,15 @@
 #![warn(missing_docs)]
 
 mod bdepend_avail;
+/// Effective per-package USE after profile/env overrides, IUSE defaults, and
+/// `--autosolve-use` ceded flags.
+pub mod effective_use;
+/// Profile USE `use.force`/`use.mask` (global and per-package), applied as
+/// the unconditional post-fold step real portage uses.
+pub mod force_mask;
+/// Repository-fact adaptation: the `PackageRepository` impl the solver
+/// bridge consumes, plus keyword/mask/license acceptance.
+pub mod repo;
 mod roots;
 
 pub use bdepend_avail::{Avail, broot_vdb_packages, collect_unsatisfied, unsatisfied_cpns};

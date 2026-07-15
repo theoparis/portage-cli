@@ -17,10 +17,13 @@ publish = false
 
 [dependencies]
 camino = { workspace = true }
+gentoo-core = { workspace = true }
 portage-atom = { workspace = true }
 portage-atom-pubgrub = { workspace = true }
+portage-metadata = { workspace = true }
 portage-repo = { workspace = true }
 portage-vdb = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

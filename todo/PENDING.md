@@ -553,10 +553,55 @@ still open.
   totals, not just "still green" — 196 before == 178 + 18 after). Live-
   verified `--with-bdeps` across bare/`--root`/`--prefix` topologies
   against the real binary. Full workspace check/clippy -D warnings/fmt/test
-  clean. Remaining stages:
-  move the `repo.rs`/`force_mask.rs`/`effective_use.rs` core; move the
-  `use_env.rs`/`installed.rs`/`conflicts.rs`/`subslot.rs` group; move the
-  `Roots`-consumer group (`root_aware.rs`/`bdepend_trim.rs`/
+  clean.
+  **stage 4 DONE (2026-07-16)** — the big one: `repo.rs` (1676 lines —
+  `RepoData`/`Adapter`/`AcceptKeywords`/`AcceptLicenses`/`load_repos`/
+  `target_package`/`find_autounmask_candidates`/`cpns_for`/`find_cache`/
+  `mask_matches`/`is_masked`/…), `force_mask.rs` (`ForceMask`), and
+  `effective_use.rs` (`effective_use`/`EvaluatedDeps`/`apply_ceded`) all
+  moved verbatim into `portage-resolve`. Nearly every `pub(super)` item
+  bumped to plain `pub` (fields too, on `RepoData`/`Adapter`/`ForceMask`)
+  since `mod.rs`/`output.rs`/`autounmask.rs` — which stay in `portage-cli`
+  and aren't moving until a possible future stage — construct `Adapter`
+  via a bare struct literal and read `RepoData`'s fields directly; no
+  invariant was being protected by the old `pub(super)`, so this cost
+  nothing. `AcceptKeywords::from_global` (a `#[cfg(test)]` helper also
+  called from `portage-cli`'s own `c7.rs`/`host_copies.rs` tests) got the
+  same `#[doc(hidden)] pub` treatment `Roots`'s test constructors did in
+  stage 2, for the same reason.
+  **Key simplification that avoided touching ~10 other files' call
+  sites**: rather than flat-re-exporting individual names at the crate
+  root (the stage 2/3 pattern), `portage-resolve` exposes these as real
+  `pub mod repo;`/`force_mask`/`effective_use` module paths. `query/
+  depgraph/mod.rs`'s old `mod repo; mod force_mask; mod effective_use;`
+  became one line, `use portage_resolve::{effective_use, force_mask,
+  repo};` — kept deliberately non-`pub`, matching the old bare `mod`
+  privacy level, so every existing `super::repo::X`/`super::force_mask::
+  X`/`super::super::repo::X` reference throughout the *other*
+  not-yet-moved files (`output.rs`, `autounmask.rs`, `package_use.rs`,
+  `download_size.rs`, `required_use.rs`, `c7.rs`, `host_copies.rs`,
+  `bdepend_trim.rs`, `depend_trim.rs`, `use_env.rs`) kept working
+  completely unchanged — Rust's privacy rule (private item visible to its
+  defining module and all descendants) applies transparently through a
+  `use`-bound module alias exactly like it did through a real `mod`.
+  Confirmed via a real compile, not just reasoning: zero of those files
+  needed touching. Test-count accounting done precisely (not just "still
+  green"): 178 (`portage-cli`) + 18 (`portage-resolve`) before → 160 + 36
+  after — 18 tests moved, none lost (counted `#[test]`/`#[tokio::test]`
+  in the 3 moved files directly: 11 + 5 + 2 = 18, exact match). Added
+  `tokio` (`macros`, `rt-multi-thread`) as a dev-dependency for
+  `#[tokio::test]` in the moved `load_repos` tests, plus `gentoo-core`/
+  `portage-metadata` as real dependencies. Fixed ~30 new `missing_docs`
+  warnings (`portage-resolve` has `#![warn(missing_docs)]`, `portage-cli`
+  doesn't — every newly-`pub` item needed a real doc comment, not a
+  rubber-stamp one). Live-verified against the real binary: plain
+  resolve, a USE-flag-rich package, `--autosolve-use` (Level-C ceding),
+  cross-`*` alias injection (`load_repos`'s in-memory crossdev-symlink
+  equivalent), `--with-bdeps` full multi-package resolution, and
+  `--autounmask` reporting — all correct. Full workspace check/clippy -D
+  warnings/fmt/test clean. Remaining stages:
+  move the `use_env.rs`/`installed.rs`/`conflicts.rs`/`subslot.rs` group;
+  move the `Roots`-consumer group (`root_aware.rs`/`bdepend_trim.rs`/
   `depend_trim.rs`/`host_copies.rs`); move `required_use.rs`/
   `download_size.rs`/split `package_use.rs`/move `c7.rs`. Not yet started.
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.

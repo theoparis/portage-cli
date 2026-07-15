@@ -26,7 +26,7 @@ use portage_atom::interner::{DefaultInterner, Interned};
 use portage_atom::{Cpn, Cpv, Dep};
 use portage_atom_pubgrub::UseConfig;
 
-use super::repo::mask_matches;
+use crate::repo::mask_matches;
 
 /// An interned USE flag.
 type Flag = Interned<DefaultInterner>;
@@ -40,27 +40,37 @@ type ForceTok = (Flag, bool);
 /// package's lookup into O(1) (a miss costs nothing) instead of a scan over the
 /// whole list for every package the solver evaluates. Per-`Cpn` insertion order
 /// is preserved so the incremental `-flag` (unforce/unmask) resolution is exact.
-pub(super) type PkgRules = HashMap<Cpn, Vec<(Dep, Vec<ForceTok>)>>;
+pub type PkgRules = HashMap<Cpn, Vec<(Dep, Vec<ForceTok>)>>;
 
 /// Resolved profile force/mask policy, flags interned once at config-read time.
 /// The globals are already `-`-resolved (`merge_use_flags`); the per-atom sets
 /// keep the removal bit so a `-flag` (unforce/unmask) is resolved against the
 /// accumulated set per package.
 #[derive(Default)]
-pub(super) struct ForceMask {
+pub struct ForceMask {
+    /// Global `use.force` flags.
     pub use_force: Vec<Flag>,
+    /// Global `use.mask` flags.
     pub use_mask: Vec<Flag>,
+    /// Global `use.stable.force` flags (only applied when merging on a stable
+    /// keyword).
     pub use_stable_force: Vec<Flag>,
+    /// Global `use.stable.mask` flags (only applied when merging on a stable
+    /// keyword).
     pub use_stable_mask: Vec<Flag>,
+    /// Per-package `package.use.force` entries.
     pub pkg_force: PkgRules,
+    /// Per-package `package.use.mask` entries.
     pub pkg_mask: PkgRules,
+    /// Per-package `package.use.stable.force` entries.
     pub pkg_stable_force: PkgRules,
+    /// Per-package `package.use.stable.mask` entries.
     pub pkg_stable_mask: PkgRules,
 }
 
 /// Group flat per-atom entries by `Cpn` (see [`PkgRules`]), parsing each token
 /// to interned form (`-flag` → removal) once.
-pub(super) fn index_by_cpn(entries: Vec<(Dep, Vec<String>)>) -> PkgRules {
+pub fn index_by_cpn(entries: Vec<(Dep, Vec<String>)>) -> PkgRules {
     let mut map = PkgRules::new();
     for (dep, flags) in entries {
         let toks: Vec<ForceTok> = flags
@@ -114,7 +124,7 @@ impl ForceMask {
     /// per-package O(global set) cost into O(package IUSE ∩ global set) — the
     /// dominant cost of `apply()` before this filter, since it ran for every
     /// version the solver instantiated.
-    pub(super) fn effective(
+    pub fn effective(
         &self,
         cpv: &Cpv,
         stable: bool,
@@ -151,7 +161,7 @@ impl ForceMask {
     /// configured value, matching Portage. Flags are already interned.
     ///
     /// `iuse` is the package's own declared `IUSE` flags — see [`Self::effective`].
-    pub(super) fn apply(&self, cfg: &mut UseConfig, cpv: &Cpv, stable: bool, iuse: &HashSet<Flag>) {
+    pub fn apply(&self, cfg: &mut UseConfig, cpv: &Cpv, stable: bool, iuse: &HashSet<Flag>) {
         let (forced, masked) = self.effective(cpv, stable, iuse);
         for &f in &forced {
             cfg.enable(f);
@@ -170,7 +180,7 @@ impl ForceMask {
     /// `cede_required_use` already skips any flag not in `IUSE`), so the
     /// `iuse` restriction on [`Self::effective`]'s internal call here is a
     /// no-op for the final result, just cheaper to compute.
-    pub(super) fn pins(&self, cpv: &Cpv, stable: bool, iuse: &HashSet<Flag>) -> BTreeSet<Flag> {
+    pub fn pins(&self, cpv: &Cpv, stable: bool, iuse: &HashSet<Flag>) -> BTreeSet<Flag> {
         let (mut pins, masked) = self.effective(cpv, stable, iuse);
         pins.extend(masked);
         pins.extend(self.use_force.iter().copied());
@@ -180,7 +190,7 @@ impl ForceMask {
 
     /// Whether `cpv` carries any force/mask entries at all (cheap skip for the
     /// common no-policy case).
-    pub(super) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.use_force.is_empty()
             && self.use_mask.is_empty()
             && self.use_stable_force.is_empty()

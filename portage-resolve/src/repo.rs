@@ -13,7 +13,7 @@ use portage_repo::{CacheReadOpts, Repository, cache_entries_parallel};
 
 /// A reason a package version was excluded from the solver.
 #[derive(Debug, Clone)]
-pub(super) enum FilterReason {
+pub enum FilterReason {
     /// Needs a keyword the system doesn't accept (e.g. `~arm64`).
     Keyword(String),
     /// Masked by the profile or user `package.mask`.
@@ -24,9 +24,12 @@ pub(super) enum FilterReason {
 
 /// A package version that was excluded and could resolve a dropped dep.
 #[derive(Debug, Clone)]
-pub(super) struct AutounmaskCandidate {
+pub struct AutounmaskCandidate {
+    /// The excluded version.
     pub cpv: Cpv,
+    /// Its slot, if known.
     pub slot: Option<Interned<DefaultInterner>>,
+    /// Every reason this version was excluded.
     pub reasons: Vec<FilterReason>,
 }
 
@@ -36,7 +39,7 @@ pub(super) struct AutounmaskCandidate {
 /// solver never sees a keyword string — matching against a package's
 /// [`Keyword`] list is a `u32` comparison with no per-check allocation.
 #[derive(Clone, Copy)]
-pub(super) enum AcceptToken {
+pub enum AcceptToken {
     /// `arch` — accept the stable keyword for this arch.
     Stable(Interned<DefaultInterner>),
     /// `~arch` — accept the testing keyword (implies stable) for this arch.
@@ -57,7 +60,7 @@ impl AcceptToken {
     /// Parse one token. Returns `None` for tokens we don't model — the
     /// incremental `-arch` removal form, which the previous string matcher also
     /// silently ignored.
-    pub(super) fn parse(tok: &str) -> Option<Self> {
+    pub fn parse(tok: &str) -> Option<Self> {
         match tok {
             "**" => Some(Self::Any),
             "~*" => Some(Self::AnyTesting),
@@ -133,7 +136,7 @@ impl ArchAccept {
 /// The global decision is precomputed for the host arch; per-package entries
 /// are folded in per version only when present, so the common no-override path
 /// is allocation-free and reduces to a keyword scan with `u32` comparisons.
-pub(super) struct AcceptKeywords {
+pub struct AcceptKeywords {
     /// Host arch, interned — the axis every acceptance check compares against.
     arch: Interned<DefaultInterner>,
     /// Precomputed decision from the global `ACCEPT_KEYWORDS` tokens.
@@ -149,7 +152,7 @@ impl AcceptKeywords {
     /// Tokens are already interned (parsed at config-read time); a bare
     /// per-package atom arrives as an empty token list and is expanded here to
     /// "accept this arch's `~arch`" (portage's rule).
-    pub(super) fn new(
+    pub fn new(
         arch: &Arch,
         global: &[AcceptToken],
         per_package: Vec<(Dep, Vec<AcceptToken>)>,
@@ -181,8 +184,13 @@ impl AcceptKeywords {
     }
 
     /// Test-only constructor from a global token list (no per-package entries).
-    #[cfg(test)]
-    pub(super) fn from_global(arch: &Arch, global: &[&str]) -> Self {
+    /// `#[doc(hidden)] pub`, not `#[cfg(test)]`: this is also called from
+    /// `portage-cli`'s own tests (`c7.rs`, `host_copies.rs`), and `#[cfg(test)]`
+    /// doesn't survive a crate boundary — it's only `true` while
+    /// `portage-resolve` itself is under test, not for a downstream crate's
+    /// tests that merely depend on it normally.
+    #[doc(hidden)]
+    pub fn from_global(arch: &Arch, global: &[&str]) -> Self {
         let toks: Vec<AcceptToken> = global
             .iter()
             .filter_map(|s| AcceptToken::parse(s))
@@ -210,7 +218,7 @@ impl AcceptKeywords {
     }
 
     /// Whether `keywords` is accepted for this version.
-    pub(super) fn accepts(
+    pub fn accepts(
         &self,
         keywords: &[Keyword],
         cpv: &Cpv,
@@ -221,7 +229,7 @@ impl AcceptKeywords {
 
     /// Whether this version is merged on a *stable* basis (accepted, and not via
     /// a testing keyword) — gates the `use.stable.{force,mask}` sets.
-    pub(super) fn is_stable(
+    pub fn is_stable(
         &self,
         keywords: &[Keyword],
         cpv: &Cpv,
@@ -233,7 +241,7 @@ impl AcceptKeywords {
 
     /// The `~arch` token an autounmask would need: the version is not accepted
     /// but carries a testing keyword for the host arch.
-    pub(super) fn keyword_needed(
+    pub fn keyword_needed(
         &self,
         keywords: &[Keyword],
         cpv: &Cpv,
@@ -254,7 +262,7 @@ impl AcceptKeywords {
 /// The global list applies to every package; per-package entries extend it
 /// (allow more, or `-deny`) for versions whose atom matches. The common
 /// no-override path borrows the global decision — no allocation.
-pub(super) struct AcceptLicenses {
+pub struct AcceptLicenses {
     global: portage_repo::AcceptLicense,
     /// `(atom, overlay)` — each overlay is the per-line tokens parsed into an
     /// `AcceptLicense`, merged onto the global decision for matching versions.
@@ -262,7 +270,9 @@ pub(super) struct AcceptLicenses {
 }
 
 impl AcceptLicenses {
-    pub(super) fn new(
+    /// Build from the global `ACCEPT_LICENSE` decision plus per-package
+    /// `package.license` overlays.
+    pub fn new(
         global: portage_repo::AcceptLicense,
         per_package: Vec<(Dep, portage_repo::AcceptLicense)>,
     ) -> Self {
@@ -299,7 +309,7 @@ impl AcceptLicenses {
 /// Returns true if the license expression is fully covered by `accept`,
 /// evaluating `use? ( … )` branches against `enabled` (a package's effective
 /// USE). For an expression with no conditionals, `enabled` is never consulted.
-pub(super) fn license_accepted(
+pub fn license_accepted(
     expr: &LicenseExpr,
     accept: &portage_repo::AcceptLicense,
     enabled: &dyn Fn(&str) -> bool,
@@ -359,7 +369,7 @@ fn effective_use_config(
     pre_env: &str,
     env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
-    force_mask: &super::force_mask::ForceMask,
+    force_mask: &crate::force_mask::ForceMask,
     accept_keywords: &AcceptKeywords,
     cpv: &Cpv,
     meta: &portage_metadata::EbuildMetadata,
@@ -395,7 +405,7 @@ fn license_ok_for(
     pre_env: &str,
     env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
-    force_mask: &super::force_mask::ForceMask,
+    force_mask: &crate::force_mask::ForceMask,
     accept_keywords: &AcceptKeywords,
 ) -> bool {
     let Some(lic) = &meta.license else {
@@ -423,12 +433,7 @@ fn license_ok_for(
 /// Whether `cpv` (in `slot`) is masked: some mask atom matches and no unmask
 /// atom does (`/etc/portage/package.unmask` cancels masks per package,
 /// portage(5)).
-pub(super) fn is_masked(
-    masks: &[Dep],
-    unmasks: &[Dep],
-    cpv: &Cpv,
-    slot: &portage_atom::Slot,
-) -> bool {
+pub fn is_masked(masks: &[Dep], unmasks: &[Dep], cpv: &Cpv, slot: &portage_atom::Slot) -> bool {
     let hit = |m: &Dep| mask_matches(m, cpv) && mask_slot_matches(m, slot);
     masks.iter().any(hit) && !unmasks.iter().any(hit)
 }
@@ -449,7 +454,9 @@ fn mask_slot_matches(mask_dep: &Dep, slot: &portage_atom::Slot) -> bool {
     }
 }
 
-pub(super) fn mask_matches(mask_dep: &Dep, cpv: &Cpv) -> bool {
+/// Whether `mask_dep`'s version constraint matches `cpv` (CPN + version op;
+/// no slot check — see [`is_masked`] for the slot-aware caller).
+pub fn mask_matches(mask_dep: &Dep, cpv: &Cpv) -> bool {
     if mask_dep.cpn != cpv.cpn {
         return false;
     }
@@ -479,13 +486,17 @@ pub(super) fn mask_matches(mask_dep: &Dep, cpv: &Cpv) -> bool {
     }
 }
 
-pub(super) struct RepoData {
-    pub(super) cpns: Vec<Cpn>,
-    pub(super) versions: HashMap<Cpn, Vec<(Cpv, CacheEntry)>>,
+/// Every loaded package fact: the main repo's md5-cache plus overlay/alias
+/// entries, ready for the solver bridge's [`Adapter`] to read.
+pub struct RepoData {
+    /// Every known `Cpn`, sorted.
+    pub cpns: Vec<Cpn>,
+    /// Every known version per `Cpn`, with its parsed cache entry.
+    pub versions: HashMap<Cpn, Vec<(Cpv, CacheEntry)>>,
     /// The main repo's name; versions from overlays are recorded in `repo_of`.
-    pub(super) repo_name: String,
+    pub repo_name: String,
     /// Source repo of overlay-provided versions (absent ⇒ the main repo).
-    pub(super) repo_of: HashMap<Cpv, String>,
+    pub repo_of: HashMap<Cpv, String>,
     /// Cross-derivation reverse map: `cross-<tuple>/<pkg>` → real `<cat>/<pkg>`.
     /// Populated by `load_repos` from `Location::Alias` entries; empty for
     /// non-cross solves. Used by `PlannedMerge.ebuild_path` construction
@@ -495,50 +506,59 @@ pub(super) struct RepoData {
     /// cross category on an actual merge; see `todo/cross-derive-on-the-fly.md`,
     /// "The merge-path decoupling", before wiring a real producer of
     /// `Location::Alias` entries.
-    pub(super) real_cpn_of: HashMap<Cpn, Cpn>,
+    pub real_cpn_of: HashMap<Cpn, Cpn>,
 }
 
 /// The repo a version comes from (for `::repo` display and constraints).
-pub(super) fn repo_name_of<'a>(data: &'a RepoData, cpv: &Cpv) -> &'a str {
+pub fn repo_name_of<'a>(data: &'a RepoData, cpv: &Cpv) -> &'a str {
     data.repo_of
         .get(cpv)
         .map_or(data.repo_name.as_str(), String::as_str)
 }
 
-pub(super) struct Adapter<'a> {
-    pub(super) data: &'a RepoData,
-    pub(super) accept_keywords: &'a AcceptKeywords,
-    pub(super) package_mask: &'a [Dep],
-    pub(super) package_unmask: &'a [Dep],
-    pub(super) accept_licenses: &'a AcceptLicenses,
+/// The [`portage_atom_pubgrub::PackageRepository`] impl the solver bridge
+/// reads from — a borrowed view over [`RepoData`] plus every resolved policy
+/// input (accept keywords/mask/license, USE layers, force/mask, Level-C).
+pub struct Adapter<'a> {
+    /// The loaded repository facts.
+    pub data: &'a RepoData,
+    /// Resolved `ACCEPT_KEYWORDS`/`package.accept_keywords` decision.
+    pub accept_keywords: &'a AcceptKeywords,
+    /// `package.mask` atoms.
+    pub package_mask: &'a [Dep],
+    /// `package.unmask` atoms (cancel a mask per package).
+    pub package_unmask: &'a [Dep],
+    /// Resolved `ACCEPT_LICENSE`/`package.license` decision.
+    pub accept_licenses: &'a AcceptLicenses,
     /// USE folded up through `make.conf` (profile make.defaults + extra
     /// confs) — everything below the `package.use`/`env` layers in portage's
     /// real fold order. Combined with `env_use` and per-version
     /// `package.use` + IUSE defaults by `desired_use`.
-    pub(super) pre_env: &'a str,
+    pub pre_env: &'a str,
     /// The raw process-environment `USE` value — the highest-priority layer,
     /// applied after `package.use` (see `resolve_effective_use`).
-    pub(super) env_use: &'a str,
-    pub(super) package_use: &'a [(Dep, Vec<UseOverride>)],
+    pub env_use: &'a str,
+    /// Per-version `package.use`/`package.env`-style overrides.
+    pub package_use: &'a [(Dep, Vec<UseOverride>)],
     /// Profile USE force/mask policy: applied to each version's effective USE and
     /// consulted by the Level-C cede gate (pinned flags are never ceded).
-    pub(super) force_mask: &'a super::force_mask::ForceMask,
+    pub force_mask: &'a crate::force_mask::ForceMask,
     /// Exact installed cpvs. A version that is installed and staying installed
     /// never has its `REQUIRED_USE` flags ceded — its USE was decided at build
     /// time, and only packages being built get theirs auto-satisfied (emerge
     /// likewise leaves installed packages' constraints alone).
-    pub(super) installed_cpvs: &'a std::collections::HashSet<Cpv>,
+    pub installed_cpvs: &'a std::collections::HashSet<Cpv>,
     /// Level-C: when set, cede each package's non-pinned `REQUIRED_USE` flags to
     /// the solver (`SolverDecided`) instead of fixing them. See
     /// `portage-atom-pubgrub/docs/required-use-level-c.md`.
-    pub(super) autosolve_use: bool,
+    pub autosolve_use: bool,
 }
 
 impl Adapter<'_> {
     /// The shared version filter: keywords, package.mask/unmask, license.
     /// `versions_for` and `slots_for` must agree, or the slot map would carry
     /// phantom slots for versions the solver can never select.
-    pub(super) fn version_accepted(&self, cpv: &Cpv, cache: &portage_metadata::CacheEntry) -> bool {
+    pub fn version_accepted(&self, cpv: &Cpv, cache: &portage_metadata::CacheEntry) -> bool {
         let meta = &cache.metadata;
         self.accept_keywords
             .accepts(&meta.keywords, cpv, Some(meta.slot.slot))
@@ -552,7 +572,7 @@ impl Adapter<'_> {
     /// caller can't drift from `version_accepted` the way `host_copies`'s own
     /// inline copy once did (`todo/root-topology-refactor.md`, the
     /// `dev-vcs/git-9999` selection bug).
-    pub(super) fn newest_accepted(&self, cpn: Cpn) -> Option<(&Cpv, &CacheEntry)> {
+    pub fn newest_accepted(&self, cpn: Cpn) -> Option<(&Cpv, &CacheEntry)> {
         self.data
             .versions
             .get(&cpn)?
@@ -861,7 +881,7 @@ fn collect_required_use_flags(
 /// Load the main repo's md5-cache plus every overlay's metadata (sourcing
 /// cache-less ebuilds — see `overlay::overlay_entries`). A cpv provided by
 /// the main repo wins over an overlay copy; among overlays, earlier wins.
-pub(super) async fn load_repos(
+pub async fn load_repos(
     repo: &Repository,
     overlays: &[(Repository, Vec<Repository>)],
     aliases: &[portage_repo::RepoEntry],
@@ -963,7 +983,7 @@ pub(super) async fn load_repos(
 
 /// Map a dep atom to a `PortagePackage` for the solver.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn target_package(
+pub fn target_package(
     data: &RepoData,
     dep: &Dep,
     accept_keywords: &AcceptKeywords,
@@ -973,7 +993,7 @@ pub(super) fn target_package(
     pre_env: &str,
     env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
-    force_mask: &super::force_mask::ForceMask,
+    force_mask: &crate::force_mask::ForceMask,
 ) -> portage_atom_pubgrub::PortagePackage {
     let entries = match data.versions.get(&dep.cpn) {
         Some(e) => e,
@@ -1021,7 +1041,7 @@ pub(super) fn target_package(
 /// Walks the full dep tree (across all dep classes, through all conditional and
 /// group nodes) so that masked transitive deps are captured regardless of USE
 /// flag state at detection time.
-pub(super) fn cpns_for(data: &RepoData, cpn: &Cpn, ver: &Version) -> Vec<Cpn> {
+pub fn cpns_for(data: &RepoData, cpn: &Cpn, ver: &Version) -> Vec<Cpn> {
     use portage_atom::DepEntry;
 
     fn walk(entries: &[DepEntry], out: &mut Vec<Cpn>) {
@@ -1058,7 +1078,8 @@ pub(super) fn cpns_for(data: &RepoData, cpn: &Cpn, ver: &Version) -> Vec<Cpn> {
     out
 }
 
-pub(super) fn find_cache<'a>(
+/// Look up `(pkg, ver)`'s parsed cache entry in `data`, if present.
+pub fn find_cache<'a>(
     data: &'a RepoData,
     pkg: &portage_atom_pubgrub::PortagePackage,
     ver: &Version,
@@ -1073,7 +1094,7 @@ pub(super) fn find_cache<'a>(
 /// For each dropped dep, find versions in the unfiltered repo that match its
 /// version range and determine why they were excluded.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn find_autounmask_candidates(
+pub fn find_autounmask_candidates(
     data: &RepoData,
     dropped: &[DroppedDep],
     accept_keywords: &AcceptKeywords,
@@ -1083,7 +1104,7 @@ pub(super) fn find_autounmask_candidates(
     pre_env: &str,
     env_use: &str,
     package_use: &[(Dep, Vec<UseOverride>)],
-    force_mask: &super::force_mask::ForceMask,
+    force_mask: &crate::force_mask::ForceMask,
 ) -> Vec<AutounmaskCandidate> {
     let mut candidates = Vec::new();
 
@@ -1160,8 +1181,8 @@ pub(super) fn find_autounmask_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::super::force_mask::{ForceMask, index_by_cpn};
     use super::*;
+    use crate::force_mask::{ForceMask, index_by_cpn};
     use portage_atom_pubgrub::{PackageRepository, UseFlagState};
     use portage_repo::{AcceptLicense, LicenseGroupRegistry};
 
