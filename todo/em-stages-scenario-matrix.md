@@ -1159,12 +1159,42 @@ run. It only breaks for `gcc`'s own bootstrap specifically, because
 build (deliberately isolating it from the host's own headers, unlike
 ordinary packages, which fall back to the host's default header search
 when nothing chroots) — so it fails exactly where it should, given the
-target truly has no libc. Needs a design decision, not a quick fix: either (a)
-seed a minimal native toolchain into the target root before running
-`stages --stage1` (matching real catalyst's actual pipeline shape), or (b)
-decide `em`'s own from-scratch self-hosting story should explicitly include
-glibc+gcc as an earlier, separate bootstrap phase ahead of
-`packages.build`. Not investigated further this pass.
+target truly has no libc.
+
+**Resolved, differently than the "needs a design decision" framing above
+suggested.** Prompted by "so stages should layer the reset + build at the
+right level to make it work fine": the deeper issue wasn't "needs a seed
+toolchain" — the design decision. `virtual/libc`'s `elibc_glibc? (
+sys-libs/glibc:2.2 )` RDEPEND wasn't firing because `USE_EXPAND_IMPLICIT`
+tokens (`ELIBC`/`KERNEL`, folded as `elibc_glibc`/`kernel_linux` at the
+profile's "defaults" layer) get wiped by stage1's own `-*`, same as
+`BOOTSTRAP_USE`'s own flags — verified directly against real portage's
+`config.py` `regenerate()`. Fixed in commit `663e38b`: `bootstrap_use()`
+(`crossdev/mod.rs`) now also reads `ELIBC`/`KERNEL` from the profile chain
+and appends `elibc_${ELIBC}`/`kernel_${KERNEL}`, the same re-add
+`BOOTSTRAP_USE` itself already needed. Live-verified: the packages.build
+step's USE now reads `"...zstd elibc_glibc kernel_linux"`, and
+`sys-libs/glibc-2.43-r2` now appears as a real `[ebuild N]` merge target.
+
+Same commit also fixed a related, independent bug found along the way:
+`em stages --stage1`'s `USE="-* build ..."` was applied via a real
+`std::env::set_var("USE", ...)` (the process-env layer, above
+`package.use`) instead of catalyst's actual placement (`make.conf`, the
+conf layer, below `package.use`) — meaning any real `package.use` entry
+got silently wiped during a stage1 run. Replaced with a proper conf-layer
+fold (`ConfSource`/`use_flags_with_override` in `portage_repo::build::profile`,
+threaded through `DepgraphOpts::extra_use_override`). New unit test
+(`use_flags_with_override_lands_in_pre_env_not_env_use`) proves the
+override lands in `pre_env`, not `env_use`.
+
+**New, separate, unrelated bug found while verifying the above**:
+`package.use` isn't applied *at all* for a bare `--root`, independent of
+either fix above — confirmed on a fresh root with zero stage1 involvement
+(`em --root <dir> -pv app-alternatives/tar` with a `package.use` entry
+disabling `gnu`/enabling `libarchive` still showed `gnu` enabled,
+`libarchive` disabled — the untouched IUSE defaults, not the configured
+entry). Not investigated further this pass — flagging for its own pass,
+since it's a real, orthogonal correctness gap.
 
 Also noticed, non-blocking, not chased: two `error: the following required
 arguments were not provided: <ATOM>` (`has_version` called with no atom,
@@ -1172,4 +1202,3 @@ during `dev-lang/python`'s build) and two `error: declare: cannot mutate
 readonly variable` (during `sys-devel/gcc`'s Gentoo-patch application) —
 neither stopped its package from registering successfully, so flagged here
 for visibility rather than investigated.
-search) — flagging as a follow-up, not chasing it now.
