@@ -766,14 +766,17 @@ still open.
   differs there) — spot-checked live, no regression.
 - 🔴 **`--local` bootstrap-from-empty-BROOT ordering** — the fix above
   stops the *duplication*, but exposed a separate, real gap underneath:
-  `em --local ... toolchain --setup` still fails `preflight::check` on a
-  fresh prefix, needing `app-portage/elt-patches`/`sys-devel/gettext`/
-  `dev-build/meson`/`dev-lang/python`/`app-arch/xz-utils`/`net-misc/rsync`/
+  `em --local ... toolchain --setup` still fails `preflight::check`,
+  needing `app-portage/elt-patches`/`sys-devel/gettext`/`dev-build/meson`/
+  `dev-lang/python`/`app-arch/xz-utils`/`net-misc/rsync`/
   `sys-libs/glibc[cet(-)?]` before consumers that aren't getting them.
-  Unlike `--root` (which borrows an already-populated real host BROOT,
-  needing no fresh-bootstrap ordering at all), `--local`'s BROOT starts
-  genuinely empty — its *entire* BDEPEND closure must be built in
-  dependency order from nothing, much closer to `em stages --stage1`'s own
+  **Not about the target being empty** — `--root`'s and `--prefix`'s own
+  toolchain bootstraps already work fine into an equally-empty target;
+  both borrow an already-populated real host as BROOT, so there's no
+  fresh-bootstrap ordering to solve. The distinguishing fact is that
+  `--local`'s BROOT itself has nothing to borrow from (its own prefix,
+  standalone) — its *entire* BDEPEND closure must be built in dependency
+  order from nothing, much closer to `em stages --stage1`'s own
   `packages.build`-ordered bootstrap than to `host_copies`'s reactive
   gap-filling (which was never designed/tested for this scale). Needs its
   own investigation — likely a real toposort/staging gap in how

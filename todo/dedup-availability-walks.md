@@ -384,13 +384,16 @@ from `Roots::for_test` (actually `--local`-shaped) to
 
 This fully closes the duplicate-entries/spurious-warnings problem for
 `--local`. It does **not** close a second, separate issue the fix exposed
-underneath: bootstrapping `--local`'s *entire* BDEPEND closure from a
-genuinely empty BROOT (unlike `--root`, which borrows an already-populated
-real host) still hits real ordering gaps in the native path itself
-(`elt-patches`/`gettext`/`meson`/`python`/`xz-utils`/`rsync`/
-`glibc[cet]` needed before consumers that aren't getting them) —
-a from-scratch bootstrap-ordering problem, not a dual-root one, and
-out of scope for this fix. Tracked as a new open item; see `todo/
+underneath: bootstrapping `--local`'s *entire* BDEPEND closure still hits
+real ordering gaps in the native path itself (`elt-patches`/`gettext`/
+`meson`/`python`/`xz-utils`/`rsync`/`glibc[cet]` needed before consumers
+that aren't getting them). This is not about the target being empty —
+`--root`'s and `--prefix`'s own toolchain bootstraps already work into an
+equally-empty target, because both borrow an already-populated real host
+as BROOT. `--local`'s BROOT has nothing to borrow from (its own prefix,
+standalone) — that's the actual distinguishing fact, not "freshness."
+A from-scratch bootstrap-ordering problem, not a dual-root one, and out
+of scope for this fix. Tracked as a new open item; see `todo/
 select-toolchain.md`/`todo/PENDING.md`.
 
 ### Step 5 — out of scope: true dual-root solve
