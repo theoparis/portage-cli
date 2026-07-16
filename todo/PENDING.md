@@ -471,7 +471,7 @@ still open.
   (genuinely broad, no collision found). Verified live: `em use --help`/
   `em pkg use --help` no longer panic in a debug build, `-a`/`--ask` still
   parses both before and after `crossdev`, full workspace test suite green.
-- 🟡 **`query/depgraph/*` → `portage-resolve` (staged migration, in progress)**
+- ✅ **`query/depgraph/*` → `portage-resolve` (staged migration, complete 2026-07-16)**
   — a second opinion (Fable, 2026-07-15) on the round-2 survey's too-hasty
   "belongs in `portage-solver`" guess found that's structurally wrong:
   `portage-solver`/`portage-atom-pubgrub` are both published crates with

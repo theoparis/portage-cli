@@ -90,28 +90,30 @@ pub struct EvaluatedDeps<'a> {
     effective: UseConfig,
 }
 
+/// One USE-evaluated dep-class accessor per PMS dep class; each just picks
+/// the field and hands it to `DepEntry::evaluate_use`.
 impl EvaluatedDeps<'_> {
-    /// `DEPEND`, evaluated against this package's effective USE.
+    /// `DEPEND` edges.
     pub fn depend(&self) -> Vec<DepEntry> {
         DepEntry::evaluate_use(&self.cache.metadata.depend, &self.effective)
     }
 
-    /// `BDEPEND`, evaluated against this package's effective USE.
+    /// `BDEPEND` edges.
     pub fn bdepend(&self) -> Vec<DepEntry> {
         DepEntry::evaluate_use(&self.cache.metadata.bdepend, &self.effective)
     }
 
-    /// `RDEPEND`, evaluated against this package's effective USE.
+    /// `RDEPEND` edges.
     pub fn rdepend(&self) -> Vec<DepEntry> {
         DepEntry::evaluate_use(&self.cache.metadata.rdepend, &self.effective)
     }
 
-    /// `PDEPEND`, evaluated against this package's effective USE.
+    /// `PDEPEND` edges.
     pub fn pdepend(&self) -> Vec<DepEntry> {
         DepEntry::evaluate_use(&self.cache.metadata.pdepend, &self.effective)
     }
 
-    /// `IDEPEND`, evaluated against this package's effective USE.
+    /// `IDEPEND` edges.
     pub fn idepend(&self) -> Vec<DepEntry> {
         DepEntry::evaluate_use(&self.cache.metadata.idepend, &self.effective)
     }
