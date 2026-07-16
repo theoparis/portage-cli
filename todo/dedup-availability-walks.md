@@ -396,6 +396,42 @@ A from-scratch bootstrap-ordering problem, not a dual-root one, and out
 of scope for this fix. Tracked as a new open item; see `todo/
 select-toolchain.md`/`todo/PENDING.md`.
 
+**Follow-up, fixed** (`97e5f1b`): the from-scratch ordering gap traced to a
+real bug in `install_order`'s SCC tie-break (`portage-atom-pubgrub/src/
+graph.rs`'s `order_cycle`), Fable-reviewed. One Tarjan pass over combined
+hard+soft edges can't distinguish "genuinely in an irreducible hard cycle"
+from "merely pulled into a bigger SCC by an unrelated RDEPEND cycle
+elsewhere" — an incidental RDEPEND cycle among core system packages folded
+114 of 229 packages into one SCC, and the flat `indeg_hard`/`indeg_all`
+tie-break inside it is a *preference*, not a *gate*: `sys-libs/gdbm` was
+emitted before its own direct BDEPEND `app-portage/elt-patches` purely
+because both had `indeg_hard == 1` and the tie-break's other term favored
+`gdbm`. Fixed by running a local hard-only Tarjan restricted to each
+component's members to find the real hard sub-groups, then gating the
+existing heuristic so a hard predecessor outside a member's own hard-group
+is always respected (it's provably not part of any real cycle). Verified
+live: `gdbm` now correctly orders after `elt-patches`/`xz-utils`.
+
+This exposed one further, larger genuine hard cycle beyond the known
+`elt-patches`<->`xz-utils` 2-cycle: an 11-node bootstrap cycle among
+`sys-devel/gcc` (BDEPENDs `texinfo` for docs) -> `sys-libs/glibc` ->
+`dev-libs/libgcrypt` -> `dev-libs/libxslt` -> `app-text/po4a` ->
+`sys-apps/util-linux` -> `dev-lang/python` (needs util-linux's libuuid) ->
+`dev-build/meson` -> `dev-libs/libxml2` -> `sys-devel/gettext` ->
+`sys-apps/texinfo` (closes the loop via its own BDEPEND on gettext).
+Confirmed against the real `::gentoo` ebuilds — every edge is real. A true
+cycle has no valid total order by definition; `order_cycle`'s heuristic
+picks the best available tie-break but some edge in a real cycle is
+unavoidably violated, same as the existing `elt-patches`/`xz-utils` case.
+This is *not* an `em` bug — it's the actual reason real Gentoo bootstraps
+from staged tarballs (a pre-existing toolchain/python/meson already present)
+rather than from absolute zero; `--local`'s from-scratch attempt hits this
+real constraint directly. The remaining `preflight::check` failures seen in
+this session's `--local` testing (`pax-utils`/`libxml2`/`zstd`/`pam` all
+needing `meson`; `gcc` needing `glibc[cet]`; `glibc` needing `python`;
+`attr`/`texinfo` needing `gettext`; `xz-utils` needing `elt-patches`) are
+all internal-to-this-cycle violations, not distinct bugs.
+
 ### Step 5 — out of scope: true dual-root solve
 
 Deleting `host_copies.rs` entirely requires the solver to schedule

@@ -764,24 +764,27 @@ still open.
   [[dedup-availability-walks]]'s 2026-07-16 entry for the full trace and
   fix detail). `--root`/`--prefix`/cross unaffected (broot genuinely
   differs there) — spot-checked live, no regression.
-- 🔴 **`--local` bootstrap-from-empty-BROOT ordering** — the fix above
-  stops the *duplication*, but exposed a separate, real gap underneath:
-  `em --local ... toolchain --setup` still fails `preflight::check`,
-  needing `app-portage/elt-patches`/`sys-devel/gettext`/`dev-build/meson`/
-  `dev-lang/python`/`app-arch/xz-utils`/`net-misc/rsync`/
-  `sys-libs/glibc[cet(-)?]` before consumers that aren't getting them.
-  **Not about the target being empty** — `--root`'s and `--prefix`'s own
-  toolchain bootstraps already work fine into an equally-empty target;
-  both borrow an already-populated real host as BROOT, so there's no
-  fresh-bootstrap ordering to solve. The distinguishing fact is that
-  `--local`'s BROOT itself has nothing to borrow from (its own prefix,
-  standalone) — its *entire* BDEPEND closure must be built in dependency
-  order from nothing, much closer to `em stages --stage1`'s own
-  `packages.build`-ordered bootstrap than to `host_copies`'s reactive
-  gap-filling (which was never designed/tested for this scale). Needs its
-  own investigation — likely a real toposort/staging gap in how
-  `toolchain_plan`'s per-step resolves handle a from-scratch BDEPEND
-  closure, not a quick fix. See [[dedup-availability-walks]].
+- ✅ **`install_order`'s SCC tie-break sweeping non-cyclic hard deps — FIXED
+  2026-07-16** (`97e5f1b`, Fable-reviewed). The `--local` from-scratch
+  ordering gap above traced to a real bug in `order_cycle`
+  (`portage-atom-pubgrub/src/graph.rs`): one Tarjan pass over combined
+  hard+soft edges can't tell "genuinely in an irreducible hard cycle" from
+  "merely pulled into a bigger SCC by an unrelated RDEPEND cycle elsewhere"
+  — an incidental RDEPEND cycle folded 114 of 229 packages into one SCC,
+  and the flat `indeg_hard`/`indeg_all` tie-break inside it was a
+  *preference*, not a *gate* (`sys-libs/gdbm` emitted before its own direct
+  BDEPEND `app-portage/elt-patches`). Fixed with a local hard-only Tarjan
+  restricted to each component's members, gating the heuristic so a hard
+  predecessor outside a member's own hard-group is always respected. This
+  exposed one further genuine hard cycle beyond `elt-patches`<->`xz-utils`
+  (matches #34's already-known `gawk↔bison↔gettext↔libxml2↔meson↔python`
+  pattern above): an 11-node `gcc`/`glibc`/`libgcrypt`/`libxslt`/`po4a`/
+  `util-linux`/`python`/`meson`/`libxml2`/`gettext`/`texinfo` bootstrap
+  cycle, confirmed against the real `::gentoo` ebuilds edge-by-edge. A true
+  cycle has no valid total order — some edge is unavoidably violated,
+  exactly like the existing `elt-patches`/`xz-utils` case. Not an `em` bug:
+  it's the real reason Gentoo bootstraps from staged tarballs rather than
+  absolute zero. See [[dedup-availability-walks]] for the full trace.
 - 🔴 **Parser audit pass** — review the recent burst of parser work (incremental
   `-*`, package.use/license/accept_keywords, @set expansion, USE-dep eval, IUSE
   defaults, make.conf sourcing, md5-cache) for PMS/portage faithfulness.
