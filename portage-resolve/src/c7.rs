@@ -27,8 +27,8 @@ use std::collections::HashMap;
 
 use portage_repo::{AcceptLicense, LicenseGroupRegistry};
 
-use super::force_mask::ForceMask;
-use super::repo::{AcceptKeywords, AcceptLicenses, Adapter, RepoData, target_package};
+use crate::force_mask::ForceMask;
+use crate::repo::{AcceptKeywords, AcceptLicenses, Adapter, RepoData, target_package};
 
 /// Build a `RepoData` from `(cpv, md5-cache-text)` pairs.
 fn repo_from(entries: &[(&str, &str)]) -> RepoData {
@@ -133,7 +133,7 @@ fn solve(data: &RepoData, targets: &[&str]) -> Outcome {
 /// Run the C7 co-solve fixpoint (as `depgraph` does under `--autosolve-use`):
 /// returns the augmented `package_use` and the final outcome.
 fn cosolve(data: &RepoData, targets: &[&str]) -> (Vec<(Dep, Vec<UseOverride>)>, Outcome) {
-    let (pu, _applied, solved) = super::package_use::cosolve_use_deps(
+    let (pu, _applied, solved) = crate::package_use::cosolve_use_deps(
         Vec::new(),
         data,
         |pu| solve_with(data, targets, pu),

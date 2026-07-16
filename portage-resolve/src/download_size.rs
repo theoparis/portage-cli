@@ -8,8 +8,8 @@ use portage_atom_pubgrub::{
 };
 use portage_repo::{Manifest, ManifestEntry};
 
-use super::effective_use::{apply_ceded, iuse_defaults};
-use super::repo::{RepoData, find_cache};
+use crate::effective_use::{apply_ceded, iuse_defaults};
+use crate::repo::{RepoData, find_cache};
 
 /// Per-package download size, in **bytes**, of the distfiles that are not
 /// already present in `DISTDIR` — matching what `emerge -pv` totals as
@@ -20,7 +20,7 @@ use super::repo::{RepoData, find_cache};
 /// sized from the package's `Manifest`. A file present in `DISTDIR` at its
 /// recorded size counts as zero (already fetched).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn compute(
+pub fn compute(
     repo_path: &Utf8Path,
     distdir: &str,
     data: &RepoData,

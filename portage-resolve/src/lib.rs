@@ -17,12 +17,17 @@ mod bdepend_avail;
 /// Post-solve trim: drop plan entries only pulled for `BDEPEND` already
 /// satisfied on BROOT or by earlier within-run merges.
 pub mod bdepend_trim;
+#[cfg(test)]
+mod c7;
 /// Post-solve reverse-dependency conflict detection against installed
 /// packages the plan doesn't replace.
 pub mod conflicts;
 /// Post-solve trim: drop plan entries only pulled for `DEPEND` already
 /// satisfied on the sysroot (`ESYSROOT`).
 pub mod depend_trim;
+/// Per-package download size (bytes not already present in `DISTDIR`) for the
+/// `-v`/verbose `-p` report.
+pub mod download_size;
 /// Effective per-package USE after profile/env overrides, IUSE defaults, and
 /// `--autosolve-use` ceded flags.
 pub mod effective_use;
@@ -36,9 +41,14 @@ pub mod host_copies;
 /// VDB-backed installed-package views (target ROOT, build-host BROOT, a
 /// fixed sysroot) and the emerge-style action-tag computation.
 pub mod installed;
+/// `package.use` entry synthesis and the cross-package `[flag]` USE-dep
+/// co-solve fixpoint.
+pub mod package_use;
 /// Repository-fact adaptation: the `PackageRepository` impl the solver
 /// bridge consumes, plus keyword/mask/license acceptance.
 pub mod repo;
+/// Post-solve `REQUIRED_USE` violation check against a package's effective USE.
+pub mod required_use;
 /// Cross-compilation context detection and merge-root display glue.
 pub mod root_aware;
 mod roots;

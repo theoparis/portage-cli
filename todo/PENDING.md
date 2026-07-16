@@ -667,8 +667,60 @@ still open.
   `bdepend_trim.rs`) and combined with `--target` (both `depend_trim.rs`
   sysroot-`DEPEND` and `bdepend_trim.rs` BROOT trims firing together) —
   all correct. Full workspace check/clippy -D warnings/fmt/test clean.
-  Remaining stage: move `required_use.rs`/`download_size.rs`/split
-  `package_use.rs`/move `c7.rs`. Not yet started.
+  **stage 7 DONE (2026-07-16) — final stage** — `required_use.rs`
+  (`REQUIRED_USE` violation check) and `download_size.rs` (per-package
+  distfile-size computation) moved verbatim, visibility bumped to `pub`
+  (both were already fully doc-commented, so zero new `missing_docs`
+  warnings this stage — the first stage with none). `package_use.rs`
+  **split**: `PackageUseEntry`/`PackageUseLine`/`build_entries`/
+  `cosolve_use_deps`/`CosolveOutcome`/`write` (plus their private
+  helpers — `ver_str`/`req_targets`/`build_adjacency`/`parse_root_cpns`/
+  `build_comments`/`merge_content`) moved into
+  `portage-resolve::package_use`; `report()` stays in `portage-cli`'s
+  now-much-smaller `package_use.rs`, since it's the one function in the
+  file coupled to `anstream`/`output::C_*` (portage-resolve depends on
+  neither, deliberately — see the crate doc). Unlike every prior stage,
+  `portage-cli`'s `package_use.rs` isn't deleted, just shrunk: it
+  re-exports the moved items (`pub(super) use portage_resolve::
+  package_use::{PackageUseEntry, build_entries, cosolve_use_deps,
+  write};`) so every existing call site in `mod.rs`
+  (`package_use::cosolve_use_deps(...)`, `package_use::build_entries(...)`,
+  `package_use::write(...)`, `package_use::report(...)`) kept working
+  completely unchanged — this is why `package_use` was kept as its own
+  local `mod package_use;` in `mod.rs` rather than folded into the
+  `use portage_resolve::{...}` aliasing line the other three modules
+  joined (a name collision between a local `mod package_use;` and a
+  `use portage_resolve::package_use;` in the same scope isn't allowed;
+  re-exporting through the local file sidesteps that instead of touching
+  every call site). `c7.rs` (`#[cfg(test)]`-only cross-package `[flag]`
+  co-solve corner-case spec, CC1-CC7) moved into `portage-resolve` as a
+  `#[cfg(test)] mod c7;` in `lib.rs` — it directly exercises
+  `cosolve_use_deps`, so it could only move once `package_use.rs`'s
+  split (above) put that function in `portage-resolve` too; its own
+  `super::force_mask`/`super::repo`/`super::package_use` references
+  became `crate::force_mask`/`crate::repo`/`crate::package_use`. Fixed
+  the same self-referential-path pattern as stage 6 in all four moved
+  files (`super::repo::RepoData` → `crate::repo::RepoData` etc. in
+  `package_use.rs`'s `cosolve_use_deps`/`req_targets` signatures).
+  Test-count accounting: 135 + 61 before → 128 + 68 after (7 moved, all
+  from `c7.rs`'s 7 `#[test]` fns — `required_use.rs`/`download_size.rs`/
+  `package_use.rs` carried no tests of their own, exact match). Live-
+  verified against the real binary: `-pv` on an already-installed
+  package (0 KiB, confirming `download_size.rs`'s already-fetched
+  short-circuit) and on an uninstalled one (correct non-zero per-package
+  sizes and total), and `-p --autosolve-use www-client/firefox` — a real,
+  large co-solve producing a correct multi-entry "USE changes are
+  necessary" block with full required-by dependency chains, exercising
+  the moved `build_entries`/`cosolve_use_deps`/`report` path end-to-end;
+  `required_use::find_violations` runs unconditionally on every one of
+  these real resolves (returning clean each time, as expected) and
+  didn't crash or misbehave in any of them. Full workspace check/clippy
+  -D warnings/fmt/test clean.
+  **This closes Fable's 7-stage `query::depgraph` → `portage-resolve`
+  migration plan.** Deliberately left in `portage-cli` (per that plan,
+  not revisited this arc): `mod.rs` itself, `output.rs`, `autounmask.rs`
+  — the optional `mod.rs` compute/render split is deferred until a
+  non-CLI consumer of the resolve layer actually appears.
 - 🔴 `em stages` defaults to `--buildpkg` so each run feeds the next; per-arch.
 - 🔴 Signing/verify (`BINPKG_GPG_*`) — last (lives in `portage-binpkg`).
 

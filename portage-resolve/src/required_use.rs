@@ -1,12 +1,12 @@
 use portage_atom::{Cpv, Dep, Version};
 use portage_atom_pubgrub::{CededFlag, PortagePackage, UseOverride, resolve_effective_use};
 
-use super::effective_use::{apply_ceded, iuse_defaults};
-use super::repo::{RepoData, find_cache};
+use crate::effective_use::{apply_ceded, iuse_defaults};
+use crate::repo::{RepoData, find_cache};
 
 /// A `REQUIRED_USE` constraint left unsatisfied by a planned package's
 /// effective USE.
-pub(super) struct RequiredUseViolation {
+pub struct RequiredUseViolation {
     /// The package whose constraint is violated.
     pub cpv: Cpv,
     /// The failing sub-constraints, rendered (e.g. `^^ ( llvm_slot_20 llvm_slot_21 )`).
@@ -20,7 +20,7 @@ pub(super) struct RequiredUseViolation {
 /// effective USE, not the solution graph). Portage hard-errors on an unsatisfied
 /// `REQUIRED_USE` and tells the user which flags to change; `em -p` surfaces the
 /// same information as an advisory warning.
-pub(super) fn find_violations(
+pub fn find_violations(
     data: &RepoData,
     order: &[(PortagePackage, Version)],
     pre_env: &str,
