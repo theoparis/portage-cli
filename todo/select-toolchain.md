@@ -185,6 +185,54 @@ irrelevant to *this* mechanism in real portage too.
   real (untouched) `$PATH` already works, matching real portage's own
   reliance on that same fallback.
 
+### 2026-07-16, correction: the native wrapper IS created — it's just a dangling symlink outside a chroot
+
+The "confirmed live" re-check above was against *stale* test roots
+(`/var/tmp/stage1-native` etc., built weeks earlier by an older `em`). Redid
+it in a brand-new `crossdev-stages` sandbox with the current release binary:
+`em toolchain --setup --root /root/native-test` (fresh aarch64-on-aarch64,
+`em-native-0716` sandbox) **does** end with `* Switching native-compiler to
+aarch64-unknown-linux-gnu-16 ... [ok]`, and both `etc/env.d/gcc/config-
+aarch64-unknown-linux-gnu` (`CURRENT=aarch64-unknown-linux-gnu-16`) and the
+bare `usr/bin/aarch64-unknown-linux-gnu-gcc` wrapper exist afterward — i.e.
+activation genuinely runs (most likely via gcc.eclass's own `pkg_postinst`
+invoking the real system `gcc-config`, correctly ROOT-scoped by em's already-
+correct `ROOT`/`EROOT` env — not `em select`'s own reimplementation, whose
+`post_step` is still the no-op described above).
+
+The actual bug: `em toolchain --setup` builds a native, same-arch toolchain
+using the **same crossdev-shaped layout** as a real cross target (matching
+`em-stages-and-binhosts.md`'s "this gets the ROOT a host-usable `<ROOT>/usr/
+bin/<chost>-gcc`, the same shape as crossdev's `<tuple>-gcc`" design) — so
+gcc-config writes the wrapper as `usr/bin/<chost>-gcc -> /usr/<chost>/gcc-bin/
+<ver>/<chost>-gcc`, an **absolute, ROOT-relative** symlink target. That's
+correct real-portage behaviour *inside a chroot* (where `/usr/...` resolves
+to the chroot's own root) — real crossdev's cross-compiler wrapper is safe
+unchrooted only because it's a host-native binary living on the *real* host
+`/usr/bin`, never inside a sysroot. A same-arch toolchain built *into* an
+offset has no such out: outside a chroot, the symlink target resolves
+against the **real host filesystem**, where `/usr/aarch64-unknown-linux-gnu/
+gcc-bin/16/...` doesn't exist. Confirmed directly:
+
+```
+$ /root/native-test/usr/bin/aarch64-unknown-linux-gnu-gcc --version
+bash: /root/native-test/usr/bin/aarch64-unknown-linux-gnu-gcc: No such file or directory
+```
+
+So the wrapper exists, activation ran, and it's still unusable outside a
+chroot — a dangling symlink instead of a missing one, but the same
+underlying fact: **em doesn't chroot, so a native `--root`'s own toolchain
+has no safe way to be invoked from outside that root**, which is exactly why
+`em stages --stage1 --root <R>` (verified working, same sandbox) doesn't
+even try to use it — `CHOST == CBUILD` there, so the `shell.rs` cross-
+toolchain block never fires, and the build falls back to the *host's own*
+`gcc` via the untouched `$PATH` instead. That matches catalyst's own stage1
+model (built with the seed's compiler, not a ROOT-native one) by accident,
+not by the "build a fresh toolchain first, like crossdev" design
+`em-stages-and-binhosts.md` actually wants — closing that gap for real still
+needs the `LD_LIBRARY_PATH`-scoping (or heavier sandboxing) approach noted
+above, not just a wrapper fix.
+
 ### 2026-07-16, fixed: the PATH-prepend/CC-set condition now keys off `broot`, not `build_config_root`
 
 Implemented the "broaden the condition" plan above — but the correct broadening
@@ -230,6 +278,19 @@ host's real riscv64 crossdev toolchain (`em --target riscv64-unknown-linux-gnu
 ebuild <probe> setup`): `CC`/`CXX`/`AS`/`LD`/`PKG_CONFIG` all resolved
 correctly to `/usr/bin/riscv64-unknown-linux-gnu-<tool>`. Full workspace
 check/clippy -D warnings/fmt/test suite clean.
+
+**2026-07-16, further verified end-to-end in a fresh `crossdev-stages`
+sandbox** (`em-prefix-0716`, arm64): `em --prefix /root/prefix-test --target
+riscv64-unknown-linux-gnu crossdev --setup --buildpkg` built the full cross
+toolchain (binutils → headers → gcc-stage1 → libc → gcc-stage2) and
+activated it into the prefix (`usr/bin/riscv64-unknown-linux-gnu-gcc` — a
+real, resolvable symlink this time, since the cross-compiler is host-native).
+Then `em --prefix /root/prefix-test --target riscv64-unknown-linux-gnu
+sys-libs/zlib` — a real, non-pretend build, not just the `ebuild ... setup`
+probe from before — compiled and linked entirely via
+`/root/prefix-test/usr/bin/riscv64-unknown-linux-gnu-gcc`/`-ar`, merging
+cleanly. This is the actual end-to-end path the `broot` fix targets, not
+just the mechanism in isolation.
 
 ## Open: clang linker config (Option B)
 
