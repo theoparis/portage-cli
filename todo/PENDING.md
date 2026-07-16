@@ -785,6 +785,41 @@ still open.
   exactly like the existing `elt-patches`/`xz-utils` case. Not an `em` bug:
   it's the real reason Gentoo bootstraps from staged tarballs rather than
   absolute zero. See [[dedup-availability-walks]] for the full trace.
+- ✅ **Native `--prefix` toolchain bootstrap — first-ever clean run,
+  2026-07-16** (`087fdfb`/`2721574`/`c69919b`). The user's proposed
+  recipe for setting up `--local` ("build a stage1 via `--prefix`, then
+  use it as the starting point") had never actually been tested to
+  completion (`todo/em-stages-scenario-matrix.md`: "`--prefix`/`--local`
+  stage1 has never been end-to-end tested"). Running it surfaced two real
+  bugs, both now fixed:
+  1. `em toolchain --setup`'s installed-view incorrectly shared the
+     host's VDB under `--prefix` (`Roots::base() == None` → `VDB(base) ∪
+     VDB(target)`), so `virtual/os-headers` resolved as already-satisfied
+     by the host's real kernel headers and `sys-kernel/linux-headers`
+     never got merged into the prefix — glibc's own `--with-headers`
+     pointed at an empty dir and failed to configure. Fixed with a
+     dedicated `Roots::installed_view_target_only` flag (deliberately
+     *not* reusing/mutating `base` itself — doing that first broke
+     `build_sysroot()`/`ESYSROOT` for the same steps, doubling gcc's
+     `--with-build-sysroot` path).
+  2. Once glibc built, gcc's own self-build failed compiling
+     `libiberty/obstack.c` against the just-installed target glibc's
+     ABI-mismatched `obstack.h` — the *same* class of bug already fixed
+     for `--root` on 2026-07-03 (`setup.rs`'s `BASHRC_PREFIX`/
+     `self_contained` doc comment), now hit for `--prefix` because that
+     topology's own `BASHRC_PREFIX` still unconditionally injects
+     `CPPFLAGS="-I<prefix>/usr/include ..."` for every package, including
+     the bootstrap's own gcc. Fixed by reusing the same self-contained-
+     bootstrap signal to skip the config-overlay bashrc for just these
+     steps (`ebuild::RootContext::self_contained_bootstrap`).
+  Live-verified end to end: `em --prefix <dir> toolchain --setup` now
+  builds baselayout → binutils → linux-headers/os-headers → glibc → gcc
+  cleanly into a fresh `--prefix`, and the resulting
+  `<prefix>/usr/bin/<chost>-gcc` runs. Real toolchain.eclass evidence
+  (`! is_crosscompile && ! use prefix-guest && [[ -n ${EPREFIX} ]]`)
+  confirms native+EPREFIX+non-guest is genuinely single-stage in real
+  Portage too — an earlier "give Native the same phasing as Cross"
+  hypothesis was checked against the eclass and found wrong, not pursued.
 - 🔴 **Parser audit pass** — review the recent burst of parser work (incremental
   `-*`, package.use/license/accept_keywords, @set expansion, USE-dep eval, IUSE
   defaults, make.conf sourcing, md5-cache) for PMS/portage faithfulness.
