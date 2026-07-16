@@ -190,10 +190,22 @@ still open.
   model). **`packages.build` ingestion + the CLI are done** (2026-07-16 check:
   `ProfileStack::packages_build`/`stage1_packages`, `portage-repo/src/repo/
   profile.rs`, wired into `em stages --stage1` — this line was stale since
-  2026-06-26). What's genuinely still open is building *with the ROOT's own
-  `<chost>-gcc` + SYSROOT=ROOT*, confirmed still missing both at the `em
-  select` layer and one level deeper in the build shell itself — see
-  [[select-toolchain]]'s 2026-07-16 addendum. [[em-stages-and-binhosts]]
+  2026-06-26). **The full native pipeline now runs clean end-to-end**
+  (2026-07-16, `em-native-0716` sandbox): `toolchain --setup` → `stages
+  --stage1` (82 pkgs) → `--emptytree --with-bdeps @system` (140 more,
+  including a full `gcc`/`binutils` self-rebuild) — 201 packages, zero real
+  failures. See [[stage3-vs-real-comparison]]'s 2026-07-16 entry for the
+  exact commands (needs `--autosolve-use` for `app-alternatives` REQUIRED_USE
+  picks under `USE="-* build"`, and `--autounmask-write` + a second identical
+  run for the `virtual/dev-manager`→busybox[mdev] advisory — both match real
+  emerge's own behaviour). What's still genuinely open: building *with the
+  ROOT's own `<chost>-gcc` + SYSROOT=ROOT* rather than the host's compiler
+  (confirmed still missing both at the `em select` layer and one level deeper
+  in the build shell — see [[select-toolchain]]'s 2026-07-16 addendum — this
+  run used the host's gcc, matching catalyst's seed-compiler model by
+  accident, not em's own intended crossdev-style design); the riscv64 *cross*
+  stage3 target (`sys-apps/systemd-utils --cross`, "task #17") is untested by
+  this run (native only). [[em-stages-and-binhosts]]
 - ✅ **`USE="-*"` clear-all** — now honoured across the USE/USE_EXPAND
   incremental merge (profile→globals→conf→env layers) and the shell-state read,
   so catalyst's `USE="-* build"` collapses the closure as expected.

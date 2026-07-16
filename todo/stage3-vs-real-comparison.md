@@ -115,3 +115,39 @@ per-package build issues we haven't hit yet (only the toolchain + a handful of
 
 Artifacts: `/var/tmp/stage3-arm64-openrc.tar.xz`,
 `/var/tmp/stage3-real/var/db/pkg` (extracted package DB).
+
+## 2026-07-16: done — a real, clean, current end-to-end build
+
+Ran the full pipeline for real in the `em-native-0716` `crossdev-stages`
+sandbox (arm64, current release binary): `em toolchain --setup --root
+/root/native-test --buildpkg` → `em stages --stage1 --root /root/native-test
+--autosolve-use --buildpkg` (82 packages, clean) → `MAKEOPTS='-j16' em --root
+/root/native-test --emptytree --with-bdeps --autosolve-use
+--autounmask-write --jobs 8 --buildpkg @system` (140 more packages,
+including a full self-hosting `sys-devel/gcc-16.1.1`/`sys-devel/binutils-
+2.46.1` rebuild) — **zero real failures** (one benign "Failed to find
+cmarkgfm" optional-feature message from an unrelated Python package's own
+build, not an em error). 201 packages installed total. `--jobs 8` +
+`MAKEOPTS=-j16` (128 cores ÷ 8 concurrent packages) kept the whole emptytree
+pass well under the naive "hours" estimate — the per-package auto-MAKEOPTS
+default plus real inter-package overlap both mattered.
+
+Note on `--autounmask-write`: the first attempt (without it) printed the
+mandatory `virtual/dev-manager` → `busybox[mdev]` USE-change advisory and
+exited non-zero without building anything — matching real emerge's own
+behaviour (a "USE changes are necessary" block always stops the run
+regardless of `--autosolve-use`, which only handles `REQUIRED_USE`/Level-C,
+not this class of advisory). Adding `--autounmask-write` wrote `/etc/
+portage/package.use/sys-apps-busybox`, but **that same run also stops**
+(again matching real `--autounmask-write` semantics: write, then stop,
+re-run to pick it up) — the second, identical invocation is what actually
+built. Worth remembering when scripting this: expect up to two "planning"
+runs before the real build starts.
+
+This closes the "worth doing" pending item — `em stages` (with today's
+`broot` fix and the rest of this session's changes) genuinely produces a
+complete, self-hosting native system end-to-end. Not yet done: the riscv64
+*cross* stage3 (`sys-apps/systemd-utils --cross`, the original "task #17"
+target) — this run was native only. A file-tree/version diff against the
+real stage3 tarball (rather than just VDB package-set comparison) is also
+still open.
