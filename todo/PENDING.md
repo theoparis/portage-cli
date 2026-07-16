@@ -820,6 +820,34 @@ still open.
   confirms native+EPREFIX+non-guest is genuinely single-stage in real
   Portage too — an earlier "give Native the same phasing as Cross"
   hypothesis was checked against the eclass and found wrong, not pursued.
+
+  **Also resolves the 2026-07-12 `crossdev --setup --local` open
+  question** (`todo/em-stages-scenario-matrix.md`'s "`em crossdev --setup`
+  across all three root-mode variants" entry, `99bcd06`): that entry asked
+  why bare `--root` toolchain bootstrap got 30+ packages merged before
+  failing while `--local` failed at preflight before merging *anything*,
+  despite `broot` looking identically configured. Re-ran via
+  `regression-matrix.sh` (below) — `--local`'s `crossdev --setup` still
+  fails, but the failure list is now legible: it's exactly the
+  already-known genuine hard-cycle members (`meson`, `gettext`,
+  `elt-patches`/`xz-utils`, `glibc[cet]`, `python`) plus their downstream
+  consumers (`cmake`, `elfutils`, `e2fsprogs`, …) — i.e. `--local`'s own
+  *base* toolchain never finished (blocked by the same unavoidable cycle,
+  see the `install_order` SCC entry above), so the cross toolchain built
+  on top of it is missing the same things. Not a distinct `--local`-vs-
+  `--root` inconsistency after all — a direct, expected consequence of
+  the hard cycle, once the SCC/dual-root fixes made the failure legible
+  instead of an opaque wall of unrelated-looking `DEPEND` entries.
+
+  **New**: `regression-matrix.sh` (repo root) automates this whole
+  cross-topology matrix (native `toolchain --setup`, `stages --stage1
+  -p`, `crossdev --setup`) as a live regression check — plain `-p`
+  checks alone would **not** have caught either of today's two real bugs
+  (both only manifested in a real build), so the toolchain-bootstrap leg
+  runs for real by default. `--local`'s known-partial outcome is checked
+  against its specific expected signature (gdbm still orders after
+  elt-patches; only known cycle members remain unsatisfied), not treated
+  as a plain pass/fail.
 - 🔴 **Parser audit pass** — review the recent burst of parser work (incremental
   `-*`, package.use/license/accept_keywords, @set expansion, USE-dep eval, IUSE
   defaults, make.conf sourcing, md5-cache) for PMS/portage faithfulness.
