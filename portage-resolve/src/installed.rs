@@ -33,9 +33,16 @@ pub struct VdbEntry {
 /// `--emptytree` does **not** clear this view — emerge still reads the VDB for
 /// action tags and post-solve checks; only package *selection* changes (see
 /// `InstalledPolicy::Rebuild` in the solver).
+///
+/// `roots.installed_view_target_only()` drops the `base` side of the union
+/// (see `Roots::with_target_only_installed_view`'s doc comment for why this
+/// is a dedicated flag rather than reusing `base` itself).
 pub fn load_target_installed(roots: &crate::Roots) -> Vec<VdbEntry> {
-    let base = roots.base();
     let target = roots.target();
+    if roots.installed_view_target_only() {
+        return load_one(target);
+    }
+    let base = roots.base();
     if base != target {
         return load_installed(base, target);
     }

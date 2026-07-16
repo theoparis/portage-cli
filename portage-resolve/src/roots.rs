@@ -36,6 +36,8 @@ pub struct Roots {
     /// [`config`](Self::config), never derived from `--root`. See
     /// [`config_root_explicit`](Self::config_root_explicit).
     config_root_explicit: Option<Utf8PathBuf>,
+    /// See [`with_target_only_installed_view`](Self::with_target_only_installed_view).
+    installed_view_target_only: bool,
 }
 
 impl Roots {
@@ -123,6 +125,49 @@ impl Roots {
             self.config_root_explicit = Some(self.merge_root().to_owned());
         }
         self
+    }
+
+    /// Force the planner's installed view to `VDB(target)` alone, dropping
+    /// the general `VDB(base) ∪ VDB(target)` overlay-sharing model
+    /// (`docs/root-model.md`) for this one operation.
+    ///
+    /// The native toolchain bootstrap (`em toolchain --setup`,
+    /// `stages::toolchain_plan(Native, ..)`) is unconditionally
+    /// self-contained regardless of `--root`/`--prefix` topology — it must
+    /// place a working compiler and libc *inside* the target, not treat
+    /// whatever the host already has installed as satisfying it. Under
+    /// `--root` this was accidental (`base == target` there already, so
+    /// there was nothing to share), but under `--prefix` `base` is `None`
+    /// (bare host `/`), so `virtual/os-headers`/`sys-kernel/linux-headers`
+    /// resolved as already-satisfied from the *host's* real VDB and never
+    /// got merged into the prefix — glibc's own `--with-headers` then
+    /// pointed at an empty directory and failed to configure. Found live
+    /// 2026-07-16 running the toolchain bootstrap into a fresh `--prefix`
+    /// for the first time (previously only tested via `-p`/individual
+    /// package builds, never a real end-to-end run — see
+    /// `todo/em-stages-scenario-matrix.md`).
+    ///
+    /// Deliberately does *not* touch `base` itself: `base` also drives
+    /// [`build_sysroot`](Self::build_sysroot) (SYSROOT/ESYSROOT — what the
+    /// build compiles *against*) and [`satisfaction_root`](Self::satisfaction_root)
+    /// (`DepClass::Depend`'s resolution root). Overwriting `base` to force a
+    /// target-only installed view once broke both of those for the exact
+    /// same native-toolchain-bootstrap steps this method targets: with
+    /// `base == target`, `build_sysroot()` returned `None` (SYSROOT defaults
+    /// to ROOT, i.e. the prefix itself, same as EPREFIX) and gcc's own
+    /// `ESYSROOT = SYSROOT + EPREFIX` formula doubled the prefix path
+    /// (`--with-build-sysroot=<prefix>/<prefix>/`), which broke gcc's
+    /// self-build (wrong `-I` search order picked up glibc's own bundled
+    /// `obstack.h` over gcc's newer bundled copy). Found live 2026-07-16,
+    /// same session, testing this exact fix end to end.
+    pub fn with_target_only_installed_view(mut self) -> Self {
+        self.installed_view_target_only = true;
+        self
+    }
+
+    /// See [`with_target_only_installed_view`](Self::with_target_only_installed_view).
+    pub fn installed_view_target_only(&self) -> bool {
+        self.installed_view_target_only
     }
 
     /// User config overlay dir (`package.use`/`bashrc` layered on host config).
