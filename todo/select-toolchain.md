@@ -105,6 +105,87 @@ toolchain selection, parallel to the existing cross one, that prepends the
 ROOT's own toolchain dir to `PATH` even when `CHOST == CBUILD`. (a) alone
 creates the wrapper but doesn't make the build shell use it.
 
+### 2026-07-16, continued: checked against real portage/crossdev's own model — (b) is a *widened condition*, not a new branch
+
+Read `toolchain-funcs.eclass` (`/var/db/repos/gentoo/eclass/toolchain-funcs.eclass`)
+and real crossdev's own `<tuple>-emerge` wrapper (`/usr/bin/riscv64-unknown-
+linux-gnu-emerge`) to check em's model against the real one, since (b) above
+was framed as "add a native branch" — that's not quite what real portage does.
+
+**Real portage's algorithm** (`_tc-getPROG`, `tc-getPROG`/`tc-getBUILD_PROG`):
+for every one of `tc-getCC`/`tc-getCXX`/`tc-getAR`/`tc-getAS`/`tc-getLD`/
+`tc-getNM`/`tc-getRANLIB`/`tc-getSTRIP`/`tc-getOBJCOPY`/`tc-getOBJDUMP`/
+`tc-getCPP`/`tc-getF77`/`tc-getFC`/`tc-getPKG_CONFIG`/`tc-getRC`/`tc-getDLLWRAP`/
+`tc-getGCJ`/`tc-getGO`/`tc-getHIPCXX` (and their `tc-getBUILD_*` twins, keyed
+off `CBUILD` instead of `CHOST`):
+1. If the plain var (`CC`, `AR`, …) is already exported, use it verbatim —
+   **no CHOST check at all**. (`tc-getBUILD_*` also checks `BUILD_CC`/
+   `CC_FOR_BUILD`/`HOSTCC` first, plus the bare var too when
+   `tc-is-cross-compiler` is false.)
+2. Otherwise, search `$PATH` for `${CHOST}-<tool>` (or `${CBUILD}-<tool>` for
+   the `BUILD_*` family) and use the resolved short name if found.
+3. Otherwise, fall back to the bare tool name (`gcc`, `ar`, …).
+
+Critically, **step 2 always runs, native or cross** — `tc-is-cross-compiler`
+(`${CBUILD:-CHOST} != CHOST`) only changes whether the `BUILD_*` family also
+accepts the bare var as a last resort; it never gates the CHOST-prefix search
+itself. This is *why* a plain, non-offset Gentoo system's `tc-getCC` still
+finds `${CHOST}-gcc` (e.g. `x86_64-pc-linux-gnu-gcc`) — `gcc-config` always
+creates that CHOST-prefixed symlink, cross or not, and real portage's own
+build always goes through it, not a bare `gcc`.
+
+**Real crossdev's `<tuple>-emerge` wrapper doesn't set `CC`/`CXX`/... at all**
+— only `CHOST`, `SYSROOT`, `PORTAGE_CONFIGROOT`, `CBUILD` (queried via
+`portageq envvar`), and `BUILD_{CFLAGS,CXXFLAGS,CPPFLAGS,LDFLAGS}`. It relies
+entirely on step 2 above finding the CHOST-prefixed wrapper on `$PATH` — which
+works because either (a) the build is a real chroot (catalyst stage-building:
+the ROOT's own `/usr/bin` *is* `/usr/bin` from inside), or (b) it's a genuine
+crossdev cross-compiler, whose CHOST-prefixed binary is a host-native
+executable installed straight onto the shared host `/usr/bin` (never inside
+a sysroot at all).
+
+**em doesn't chroot**, so neither (a) nor (b) holds for a `--root`/`--prefix`
+offset — `$PATH` never naturally contains the offset's own `usr/bin`. em's
+`shell.rs` compensates for this today, but only for the `chost != cbuild`
+case: it explicitly sets `CC`/`CXX`/`AR`/`NM`/`RANLIB`/`STRIP`/`OBJCOPY`/
+`OBJDUMP`/`READELF`/`LD` to `${chost}-<tool>` and prepends a
+crossdev-sysroot-shaped bin dir (`build_config_root`'s grandparent `/bin`) to
+`PATH` — i.e. em already *does* exactly the extra plumbing real portage gets
+for free from chrooting, just gated behind "is this genuinely cross" rather
+than "is there an offset toolchain directory to prefer regardless of arch".
+
+So (b) isn't a parallel native branch — it's **broadening this existing
+block's condition** so it also fires for a plain same-arch `--root <dir>`
+offset once `em select` has written that dir's own wrapper (from fix (a)),
+using the offset's own `usr/bin` instead of the crossdev-shaped
+`build_config_root` grandparent path. The two cases (`--root` native offset,
+`--cross`/`--prefix`) should end up sharing one "does this topology have its
+own toolchain bin dir, and if so prefer it" check rather than being two
+separate code paths keyed on arch difference — the arch difference is
+irrelevant to *this* mechanism in real portage too.
+
+**Two smaller gaps found doing this comparison, lower priority, worth noting
+while touching this code:**
+- em's explicit tool list omits `AS` (assembler) and `PKG_CONFIG` — both
+  reasonably common (`AS` for anything with hand-written asm, `PKG_CONFIG` for
+  most `configure`/`meson` builds); `CPP`/`F77`/`FC`/`RC`/`DLLWRAP`/`GCJ`/`GO`/
+  `HIPCXX` are genuinely rare and fine to keep deferred.
+- em never sets `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR`/`PKG_CONFIG_PATH`
+  at all, cross or native-offset — a cross/offset build's `pkg-config` calls
+  search the *host's* own `.pc` search path, not the sysroot's. Real portage
+  handles this the same CHOST-prefix-wrapper way (`${CHOST}-pkg-config`,
+  installed by `virtual/pkgconfig`/`dev-util/pkgconf`'s cross variant) — once
+  the broadened PATH-prepend above lands, confirm whether that wrapper alone
+  is sufficient or whether `PKG_CONFIG_SYSROOT_DIR` also needs setting
+  explicitly (real crossdev relies on the wrapper baking in
+  `--with-sysroot=$SYSROOT` at cross-pkgconf build time, so it may need no
+  further em-side change — not yet verified).
+- No gap found for `BUILD_CC`/`CC_FOR_BUILD`/`HOSTCC`: em sets none of them,
+  but doesn't need to — `CBUILD` is already exported correctly, and
+  `tc-getBUILD_CC`'s own PATH search for `${CBUILD}-gcc` against the host's
+  real (untouched) `$PATH` already works, matching real portage's own
+  reliance on that same fallback.
+
 ## Open: clang linker config (Option B)
 
 `-fuse-ld=` lives in `/etc/clang/<SLOT>/gentoo-linker.cfg`, not env.d. Decide:
