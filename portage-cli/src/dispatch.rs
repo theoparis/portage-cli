@@ -44,6 +44,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             config_root,
             sysroot,
             eprefix,
+            broot,
             binpkg,
             buildpkg,
             quiet,
@@ -58,6 +59,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
                 config_root.as_deref(),
                 sysroot.as_deref(),
                 eprefix.as_deref(),
+                broot.as_deref(),
                 binpkg.as_deref(),
                 *buildpkg,
                 *quiet,
@@ -71,6 +73,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
         } => {
             let repo_override = globals.repo.as_deref();
             let roots = globals.roots();
+            let broot = globals.broot();
             ebuild::run(
                 ebuild_path,
                 phase,
@@ -80,6 +83,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
                 roots.config(),
                 roots.build_sysroot(),
                 roots.eprefix(),
+                Some(broot.merge_root()),
             )
             .await
         }

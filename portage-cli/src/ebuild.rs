@@ -241,6 +241,7 @@ pub async fn run(
     config_root: Option<&Utf8Path>,
     sysroot: Option<&Utf8Path>,
     eprefix: Option<&Utf8Path>,
+    broot: Option<&Utf8Path>,
 ) -> Result<()> {
     // Standalone `em ebuild <path> <phase>`: no resolved plan entry exists, so
     // there's no authoritative Cpv to pass — `run_inner` falls back to
@@ -259,6 +260,7 @@ pub async fn run(
         config_root,
         sysroot,
         eprefix,
+        broot,
         None,
         false,
         None,
@@ -283,6 +285,7 @@ pub async fn build_and_merge(
     config_root: Option<&Utf8Path>,
     sysroot: Option<&Utf8Path>,
     eprefix: Option<&Utf8Path>,
+    broot: Option<&Utf8Path>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
     buildpkg: bool,
 ) -> Result<()> {
@@ -308,6 +311,7 @@ pub async fn build_and_merge(
             config_root,
             sysroot,
             eprefix,
+            broot,
             None,
             false,
             None,
@@ -333,6 +337,7 @@ pub async fn build_and_merge(
                 config_root: config_root.map(|c| c.as_str()),
                 sysroot: sysroot.map(|s| s.as_str()),
                 eprefix: eprefix.map(|e| e.as_str()),
+                broot: broot.map(|b| b.as_str()),
                 buildpkg,
                 quiet,
                 binpkg: None,
@@ -358,6 +363,7 @@ pub async fn build_and_merge(
             config_root,
             sysroot,
             eprefix,
+            broot,
             merge_gate,
             buildpkg,
             None,
@@ -384,6 +390,7 @@ pub async fn merge_binpkg(
     config_root: Option<&Utf8Path>,
     sysroot: Option<&Utf8Path>,
     eprefix: Option<&Utf8Path>,
+    broot: Option<&Utf8Path>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
 ) -> Result<()> {
     let ebuild = Ebuild::with_cpv(cpv.clone(), ebuild_path);
@@ -412,6 +419,7 @@ pub async fn merge_binpkg(
                 config_root: config_root.map(|c| c.as_str()),
                 sysroot: sysroot.map(|s| s.as_str()),
                 eprefix: eprefix.map(|e| e.as_str()),
+                broot: broot.map(|b| b.as_str()),
                 buildpkg: false,
                 quiet,
                 binpkg: Some(binpkg_path.as_str()),
@@ -439,6 +447,7 @@ pub async fn merge_binpkg(
             config_root,
             sysroot,
             eprefix,
+            broot,
             merge_gate,
             false,
             Some(binpkg_path),
@@ -463,6 +472,7 @@ pub async fn run_install_worker(
     config_root: Option<&str>,
     sysroot: Option<&str>,
     eprefix: Option<&str>,
+    broot: Option<&str>,
     binpkg: Option<&str>,
     buildpkg: bool,
     quiet: bool,
@@ -503,6 +513,7 @@ pub async fn run_install_worker(
         config_root.map(Utf8Path::new),
         sysroot.map(Utf8Path::new),
         eprefix.map(Utf8Path::new),
+        broot.map(Utf8Path::new),
         None,
         buildpkg,
         binpkg.map(Utf8Path::new),
@@ -573,6 +584,10 @@ async fn run_inner(
     config_root: Option<&Utf8Path>,
     sysroot: Option<&Utf8Path>,
     eprefix: Option<&Utf8Path>,
+    // Where BDEPEND-class build tools (a cross toolchain, its pkg-config, …)
+    // live for this invocation — `Cli::broot()`'s merge root. See
+    // `EbuildShell::build_broot`'s doc comment for the full rationale.
+    broot: Option<&Utf8Path>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
     buildpkg: bool,
     // A pre-built GPKG to merge (`-k`/`-g`): its image is extracted into
@@ -677,7 +692,7 @@ async fn run_inner(
     // NB: in overlay mode (target ≠ base) a package merged into the target is
     // not yet visible to later builds in the run — that needs a merged sysroot,
     // which is shelved (see docs/root-model.md "Overlay support — shelved").
-    shell.set_build_roots(config_root, sysroot, eprefix);
+    shell.set_build_roots(config_root, sysroot, eprefix, broot);
 
     if let Some(flags) = use_flags {
         // The resolved plan's effective USE for this package overrides the

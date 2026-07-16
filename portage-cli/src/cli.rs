@@ -675,6 +675,9 @@ pub enum Applet {
         sysroot: Option<String>,
         #[arg(long)]
         eprefix: Option<String>,
+        /// Where BDEPEND-class build tools live (`Cli::broot()`'s merge root).
+        #[arg(long)]
+        broot: Option<String>,
         /// A pre-built GPKG to merge (`-k`/`-g`).
         #[arg(long)]
         binpkg: Option<String>,

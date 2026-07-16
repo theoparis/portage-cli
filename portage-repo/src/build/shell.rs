@@ -385,6 +385,18 @@ pub struct EbuildShell {
     /// EPREFIX` (== the merge root), and `ED=D+EPREFIX`. `None` ⇒ `EPREFIX=""`
     /// (host / ROOT-offset `--prefix`).
     build_eprefix: Option<Utf8PathBuf>,
+    /// Where `BDEPEND`-class build tools (a `${CHOST}-*` cross toolchain, its
+    /// `pkg-config`, …) actually live for this invocation — `Cli::broot()`'s
+    /// merge root: the real host `/` for a privileged `--root` offset, the
+    /// prefix itself for an unprivileged `--prefix` overlay (which cannot
+    /// write the real host). `None` when unknown (the standalone `em ebuild`
+    /// debug path). Deliberately NOT the package's own merge root — using
+    /// that for a plain same-arch `--root` offset was tried (2026-07-12) and
+    /// reverted (see [`init_build_env`]'s toolchain-selection comment): a
+    /// same-arch binary built into an offset is not safely runnable
+    /// unchrooted, unlike a cross-compiler (host-native by construction) or
+    /// the real host's own tools.
+    build_broot: Option<Utf8PathBuf>,
     /// Portage `bashrc` hooks sourced per phase after the environment is set up
     /// (profile `profile.bashrc` files in stack order, then the user's
     /// `${PORTAGE_CONFIGROOT}/etc/portage/bashrc`). Not PMS; matches portage's
@@ -686,6 +698,7 @@ impl EbuildShell {
             build_config_root: None,
             build_sysroot: None,
             build_eprefix: None,
+            build_broot: None,
             bashrc_files: Vec::new(),
             baseline: None,
             phase_sourced_ebuild: None,
@@ -712,18 +725,23 @@ impl EbuildShell {
     }
 
     /// Set `PORTAGE_CONFIGROOT` (config source) and `SYSROOT`/`ESYSROOT` (the
-    /// base the build resolves `DEPEND` against) for subsequent phases. `None`
-    /// keeps the defaults: host config, and `SYSROOT = ROOT` (the install
-    /// target). See docs/root-model.md.
+    /// base the build resolves `DEPEND` against) for subsequent phases, plus
+    /// `broot` — where `BDEPEND`-class build tools live (the `build_broot`
+    /// field's own doc comment has the full rationale). `None` keeps the
+    /// defaults: host config, `SYSROOT = ROOT` (the install target), and no
+    /// toolchain-tool bin dir beyond the host's own `$PATH`. See
+    /// docs/root-model.md.
     pub fn set_build_roots(
         &mut self,
         config_root: Option<&Utf8Path>,
         sysroot: Option<&Utf8Path>,
         eprefix: Option<&Utf8Path>,
+        broot: Option<&Utf8Path>,
     ) {
         self.build_config_root = config_root.map(Utf8Path::to_path_buf);
         self.build_sysroot = sysroot.map(Utf8Path::to_path_buf);
         self.build_eprefix = eprefix.map(Utf8Path::to_path_buf);
+        self.build_broot = broot.map(Utf8Path::to_path_buf);
     }
 
     /// Set the `bashrc` hooks to source per phase (profile `profile.bashrc`
@@ -1178,23 +1196,24 @@ impl EbuildShell {
         // (CBUILD unset, or CHOST == CBUILD) are untouched.
         //
         // For `--cross` into a `--local` prefix the `<chost>-*` wrappers
-        // (`crossdev --setup`) live in `<EROOT>/usr/bin`, which is under $HOME and
-        // thus stripped from the sanitised build PATH — and the prefix bashrc PATH
-        // hook does not run (EPREFIX unset under `--cross`). The cross sysroot is
-        // `<EROOT>/usr/<tuple>` (== build_config_root), so the toolchain bin is its
-        // grandparent `bin`; expose it on PATH so the whole toolchain
-        // (gcc/g++/ld/as/…) resolves. Host crossdev (toolchain in `/usr/bin`) is
-        // already on PATH, so this is a no-op there.
+        // (`crossdev --setup`) live in `<broot>/usr/bin`, which is under $HOME
+        // and thus stripped from the sanitised build PATH — and the prefix
+        // bashrc PATH hook does not run (EPREFIX unset under `--cross`).
+        // `build_broot` is `Cli::broot()`'s merge root: the prefix itself for
+        // this unprivileged-overlay case (see `build_broot`'s doc comment),
+        // so `<build_broot>/usr/bin` is exactly that toolchain bin dir; expose
+        // it on PATH so the whole toolchain (gcc/g++/ld/as/…) resolves. Host
+        // crossdev (toolchain in `/usr/bin`, `build_broot` == the real host
+        // `/`) is already on PATH, so this is a no-op there.
         if let (Some(chost), Some(cbuild)) = (
             self.get_var("CHOST").filter(|s| !s.is_empty()),
             self.get_var("CBUILD").filter(|s| !s.is_empty()),
         ) && chost != cbuild
         {
             let prefix_bin = self
-                .build_config_root
+                .build_broot
                 .as_deref()
-                .and_then(Utf8Path::parent)
-                .map(|usr| usr.join("bin"))
+                .map(|broot| broot.join("usr/bin"))
                 .filter(|bin| bin.join(format!("{chost}-gcc")).is_file());
             if let Some(bin) = &prefix_bin {
                 let path = self.get_var("PATH").unwrap_or_default();
@@ -1207,6 +1226,7 @@ impl EbuildShell {
                     ("CC", "gcc"),
                     ("CXX", "g++"),
                     ("AR", "ar"),
+                    ("AS", "as"),
                     ("NM", "nm"),
                     ("RANLIB", "ranlib"),
                     ("STRIP", "strip"),
@@ -1214,6 +1234,7 @@ impl EbuildShell {
                     ("OBJDUMP", "objdump"),
                     ("READELF", "readelf"),
                     ("LD", "ld"),
+                    ("PKG_CONFIG", "pkg-config"),
                 ] {
                     if self.get_var(var).filter(|s| !s.is_empty()).is_none() {
                         // Use the absolute prefix path when known: em's own

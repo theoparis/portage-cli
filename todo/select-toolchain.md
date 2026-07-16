@@ -164,27 +164,72 @@ own toolchain bin dir, and if so prefer it" check rather than being two
 separate code paths keyed on arch difference — the arch difference is
 irrelevant to *this* mechanism in real portage too.
 
-**Two smaller gaps found doing this comparison, lower priority, worth noting
-while touching this code:**
-- em's explicit tool list omits `AS` (assembler) and `PKG_CONFIG` — both
+**Two smaller gaps found doing this comparison:**
+- em's explicit tool list omitted `AS` (assembler) and `PKG_CONFIG` — both
   reasonably common (`AS` for anything with hand-written asm, `PKG_CONFIG` for
   most `configure`/`meson` builds); `CPP`/`F77`/`FC`/`RC`/`DLLWRAP`/`GCJ`/`GO`/
-  `HIPCXX` are genuinely rare and fine to keep deferred.
+  `HIPCXX` are genuinely rare and fine to keep deferred. **Fixed 2026-07-16**
+  (both added to the explicit tool list).
 - em never sets `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR`/`PKG_CONFIG_PATH`
-  at all, cross or native-offset — a cross/offset build's `pkg-config` calls
-  search the *host's* own `.pc` search path, not the sysroot's. Real portage
-  handles this the same CHOST-prefix-wrapper way (`${CHOST}-pkg-config`,
-  installed by `virtual/pkgconfig`/`dev-util/pkgconf`'s cross variant) — once
-  the broadened PATH-prepend above lands, confirm whether that wrapper alone
-  is sufficient or whether `PKG_CONFIG_SYSROOT_DIR` also needs setting
-  explicitly (real crossdev relies on the wrapper baking in
-  `--with-sysroot=$SYSROOT` at cross-pkgconf build time, so it may need no
-  further em-side change — not yet verified).
+  itself. **Checked, no fix needed**: real crossdev's `${CTARGET}-pkg-config`
+  wrapper (`/usr/bin/cross-pkg-config` on this host, symlinked per target) is
+  a shell script that derives `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR`
+  itself at invocation time from `$ESYSROOT`/`$SYSROOT`/`$ROOT` (whichever is
+  set) — the exact same vars em already exports correctly (`portage-repo/src/
+  build/shell.rs`'s `ROOT`/`EROOT`/`SYSROOT`/`ESYSROOT`/`BROOT` block). So
+  once the wrapper itself is *findable* (the PATH/broot fix below), it needs
+  no further help from em.
 - No gap found for `BUILD_CC`/`CC_FOR_BUILD`/`HOSTCC`: em sets none of them,
   but doesn't need to — `CBUILD` is already exported correctly, and
   `tc-getBUILD_CC`'s own PATH search for `${CBUILD}-gcc` against the host's
   real (untouched) `$PATH` already works, matching real portage's own
   reliance on that same fallback.
+
+### 2026-07-16, fixed: the PATH-prepend/CC-set condition now keys off `broot`, not `build_config_root`
+
+Implemented the "broaden the condition" plan above — but the correct broadening
+turned out to be narrower and more precise than "also handle native `--root`":
+the existing `chost != cbuild` block's own bin-dir source was wrong on its own
+terms, independent of the (still-deferred) native-offset question. It derived
+`prefix_bin` from `build_config_root` (`PORTAGE_CONFIGROOT`) via a
+crossdev-sysroot-shaped grandparent-of-`<tuple>` computation — a proxy that
+only coincidentally produced the right answer for the one topology
+(`--prefix --cross`) it was written for, not a principled "where do
+BDEPEND-class build tools live" answer.
+
+The correct source, already established elsewhere in this codebase for
+exactly this question, is `Cli::broot()`'s merge root (what `merge/mod.rs`
+already computes once per run as `host_roots`, `let host_roots =
+globals.broot();`): the real host `/` for a privileged `--root` offset, the
+prefix itself for an unprivileged `--prefix` overlay (which cannot write the
+real host). `EbuildShell` had no notion of this at all — `set_build_roots`
+only ever received `config_root`/`sysroot`/`eprefix`. Fixed by:
+- Adding a `build_broot: Option<Utf8PathBuf>` field to `EbuildShell`, set via
+  a 4th `set_build_roots` param.
+- Threading `broot: Option<&Utf8Path>` through `run_inner`/`build_and_merge`/
+  `merge_binpkg`/`run_install_worker`/`run` (`ebuild.rs`), the `WorkerArgs`
+  IPC struct + `--broot` worker CLI flag (`privilege.rs`/`cli.rs`), and every
+  `merge/mod.rs` call site — each now passes `Some(host_roots.merge_root())`
+  (a value merge/mod.rs already had in scope) instead of nothing.
+- The toolchain-selection block in `shell.rs`'s `init_build_env` now computes
+  `prefix_bin` from `build_broot.join("usr/bin")` directly (no
+  grandparent-of-parent arithmetic needed — `broot` is already a root
+  directory, unlike the old sysroot-shaped `build_config_root`).
+
+This is a pure correctness fix, not an extension to native `--root`: for a
+plain native offset the whole block still doesn't run (`chost == cbuild`
+there), so the already-reverted-once native-ROOT-toolchain hazard (see the
+2026-07-16 entry above) is untouched. For the cases the block *does* run
+(`--cross`, `--cross --prefix`, `--cross --local`), `broot` resolves to
+exactly the same directory `build_config_root`'s grandparent trick used to
+land on by construction, so no regression — confirmed both by two new unit
+tests (`cross_toolchain_selection_uses_broot_not_config_root`,
+`cross_toolchain_selection_no_op_when_tool_unreachable`,
+`portage-repo/src/build/shell/tests.rs`) and by a live check against this
+host's real riscv64 crossdev toolchain (`em --target riscv64-unknown-linux-gnu
+ebuild <probe> setup`): `CC`/`CXX`/`AS`/`LD`/`PKG_CONFIG` all resolved
+correctly to `/usr/bin/riscv64-unknown-linux-gnu-<tool>`. Full workspace
+check/clippy -D warnings/fmt/test suite clean.
 
 ## Open: clang linker config (Option B)
 

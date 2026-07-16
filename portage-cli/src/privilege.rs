@@ -201,6 +201,9 @@ pub struct WorkerArgs<'a> {
     pub config_root: Option<&'a str>,
     pub sysroot: Option<&'a str>,
     pub eprefix: Option<&'a str>,
+    /// Where BDEPEND-class build tools live for this invocation
+    /// (`Cli::broot()`'s merge root) — see `EbuildShell::build_broot`.
+    pub broot: Option<&'a str>,
     pub binpkg: Option<&'a str>,
     pub buildpkg: bool,
     pub quiet: bool,
@@ -248,6 +251,9 @@ pub async fn spawn_install_worker(backend: Backend, args: &WorkerArgs<'_>) -> st
     }
     if let Some(e) = args.eprefix {
         cmd.arg("--eprefix").arg(e);
+    }
+    if let Some(b) = args.broot {
+        cmd.arg("--broot").arg(b);
     }
     if let Some(b) = args.binpkg {
         cmd.arg("--binpkg").arg(b);

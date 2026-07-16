@@ -512,3 +512,68 @@ async fn docompress_dostrip_builtins_accumulate_shared_lists() {
     assert_eq!(paths.strip, ["/usr/lib/debug-me"]);
     assert_eq!(paths.strip_exclude, ["/usr/lib/keep.so"]);
 }
+
+async fn minimal_shell(dir: &std::path::Path) -> EbuildShell {
+    let repo_path = dir.join("repo");
+    std::fs::create_dir_all(repo_path.join("metadata")).unwrap();
+    std::fs::create_dir_all(repo_path.join("profiles")).unwrap();
+    std::fs::write(repo_path.join("metadata/layout.conf"), "masters =\n").unwrap();
+    std::fs::write(repo_path.join("profiles/repo_name"), "t\n").unwrap();
+    let repo = Repository::open(&repo_path).unwrap();
+    repo.shell().await.unwrap()
+}
+
+/// Regression test for the 2026-07-16 fix: the cross-toolchain PATH/CC
+/// selection used to derive its bin dir from `build_config_root`
+/// (`PORTAGE_CONFIGROOT`) — a proxy that only coincidentally matched the
+/// crossdev sysroot layout. It must instead come from `build_broot`
+/// (`Cli::broot()`'s merge root — the real host for a privileged `--root`,
+/// the prefix itself for an unprivileged `--prefix` overlay), so a `${CHOST}-
+/// gcc` built into the prefix (not the host) is still found.
+#[tokio::test]
+async fn cross_toolchain_selection_uses_broot_not_config_root() {
+    let dir = tempdir().unwrap();
+    let mut shell = minimal_shell(dir.path()).await;
+
+    let broot = dir.path().join("broot");
+    let bin = broot.join("usr/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let gcc = bin.join("riscv64-unknown-linux-gnu-gcc");
+    std::fs::write(&gcc, "#!/bin/sh\n:\n").unwrap();
+
+    let broot_utf8 = Utf8PathBuf::from_path_buf(broot.clone()).unwrap();
+    // config_root deliberately left as a decoy under a different directory,
+    // with no `usr/bin` of its own — proves the bin dir comes from broot,
+    // not from build_config_root the way it used to.
+    let decoy_config_root =
+        Utf8PathBuf::from_path_buf(dir.path().join("decoy/usr/riscv64-unknown-linux-gnu")).unwrap();
+    shell.set_build_roots(Some(&decoy_config_root), None, None, Some(&broot_utf8));
+
+    shell.set_var("CHOST", "riscv64-unknown-linux-gnu");
+    shell.set_var("CBUILD", "aarch64-unknown-linux-gnu");
+    shell.init_build_env().await.unwrap();
+
+    let expected_cc = gcc.to_str().unwrap().to_string();
+    assert_eq!(shell.get_var("CC").as_deref(), Some(expected_cc.as_str()));
+    let path = shell.get_var("PATH").unwrap_or_default();
+    assert!(
+        path.split(':').any(|p| p == bin.to_str().unwrap()),
+        "broot's usr/bin must be on PATH: {path}"
+    );
+}
+
+/// Without a `${CHOST}-gcc` reachable at all (no `build_broot`, and a bogus
+/// tuple that can't be on the real test-runner's `$PATH`), the cross-
+/// toolchain block must leave `CC` untouched rather than setting a bare,
+/// unreachable `${CHOST}-gcc`.
+#[tokio::test]
+async fn cross_toolchain_selection_no_op_when_tool_unreachable() {
+    let dir = tempdir().unwrap();
+    let mut shell = minimal_shell(dir.path()).await;
+
+    shell.set_var("CHOST", "bogus-tuple-that-does-not-exist");
+    shell.set_var("CBUILD", "aarch64-unknown-linux-gnu");
+    shell.init_build_env().await.unwrap();
+
+    assert!(shell.get_var("CC").unwrap_or_default().is_empty());
+}

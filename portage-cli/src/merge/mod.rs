@@ -331,6 +331,7 @@ async fn merge_sequential(
                 entry_roots.config(),
                 entry_roots.build_sysroot(),
                 entry_roots.eprefix(),
+                Some(host_roots.merge_root()),
                 None,
             )
             .await
@@ -349,6 +350,7 @@ async fn merge_sequential(
                         entry_roots.config(),
                         entry_roots.build_sysroot(),
                         entry_roots.eprefix(),
+                        Some(host_roots.merge_root()),
                         None,
                     )
                     .await
@@ -378,6 +380,7 @@ async fn merge_sequential(
                         entry_roots.config(),
                         entry_roots.build_sysroot(),
                         entry_roots.eprefix(),
+                        Some(host_roots.merge_root()),
                         None,
                         buildpkg,
                     )
@@ -410,6 +413,7 @@ async fn merge_sequential(
                 entry_roots.config(),
                 entry_roots.build_sysroot(),
                 entry_roots.eprefix(),
+                Some(host_roots.merge_root()),
                 None,
                 buildpkg,
             )
@@ -628,6 +632,7 @@ async fn merge_parallel(
                         entry_roots.config(),
                         entry_roots.build_sysroot(),
                         entry_roots.eprefix(),
+                        Some(host_roots.merge_root()),
                         Some(gate),
                     )
                     .await
@@ -645,6 +650,7 @@ async fn merge_parallel(
                                 entry_roots.config(),
                                 entry_roots.build_sysroot(),
                                 entry_roots.eprefix(),
+                                Some(host_roots.merge_root()),
                                 Some(gate),
                             )
                             .await
@@ -667,6 +673,7 @@ async fn merge_parallel(
                         entry_roots.config(),
                         entry_roots.build_sysroot(),
                         entry_roots.eprefix(),
+                        Some(host_roots.merge_root()),
                         Some(gate),
                         buildpkg,
                     )
