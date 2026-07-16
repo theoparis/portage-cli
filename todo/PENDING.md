@@ -185,11 +185,15 @@ still open.
   the plan is to scope fake-root to `src_install`/archive only, not the compile.
   [[fakeroot-privilege-backends]] § Open Q6
   [[stage-build-shakeout]]
-- 🟡 **`em stages`** — stage1 (`baselayout` + `packages.build`, built with the
-  ROOT `<chost>-gcc` + SYSROOT=ROOT) → stage3 (`--emptytree @system`). No stage2
-  (em builds a fresh toolchain, crossdev model). Needs `packages.build` ingestion
-  and the CLI (the `package.use` `-*` colon gap below is now closed).
-  [[em-stages-and-binhosts]]
+- 🟡 **`em stages`** — stage1 (`baselayout` + `packages.build`) → stage3
+  (`--emptytree @system`). No stage2 (em builds a fresh toolchain, crossdev
+  model). **`packages.build` ingestion + the CLI are done** (2026-07-16 check:
+  `ProfileStack::packages_build`/`stage1_packages`, `portage-repo/src/repo/
+  profile.rs`, wired into `em stages --stage1` — this line was stale since
+  2026-06-26). What's genuinely still open is building *with the ROOT's own
+  `<chost>-gcc` + SYSROOT=ROOT*, confirmed still missing both at the `em
+  select` layer and one level deeper in the build shell itself — see
+  [[select-toolchain]]'s 2026-07-16 addendum. [[em-stages-and-binhosts]]
 - ✅ **`USE="-*"` clear-all** — now honoured across the USE/USE_EXPAND
   incremental merge (profile→globals→conf→env layers) and the shell-state read,
   so catalyst's `USE="-* build"` collapses the closure as expected.

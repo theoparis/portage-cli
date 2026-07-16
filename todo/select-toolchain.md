@@ -71,6 +71,40 @@ that's cross-only), and cross keeps its current hook. One shared activation seam
 working ELF; and the stages then build via `<chost>-gcc`. (Today the same works
 only via the full `usr/<chost>/gcc-bin/<ver>/<chost>-gcc` path.)
 
+### 2026-07-16 re-check: confirmed live, and the gap is one layer deeper than written above
+
+Verified against real, already-built native toolchain roots on this host
+(`/var/tmp/stage1-native`, `/var/tmp/stage1-base`, both aarch64-on-aarch64):
+`usr/bin/` has only gcc's own versioned install (`aarch64-unknown-linux-gnu-
+gcc-16`), no bare `<chost>-gcc` wrapper, no `gcc`/`cc`; `etc/env.d/gcc/` has
+only the ebuild-written profile file, no `config-<chost>` — confirming
+`activate_latest`/`set_profile` never ran for these, exactly as `post_step`
+being `|_| Ok(())` in both `toolchain()` and `stage1()` (`crossdev/mod.rs`)
+predicts.
+
+**Second, deeper gap found tracing what would actually consume that wrapper**:
+`portage-repo/src/build/shell.rs`'s cross-toolchain-selection block
+(~line 1170-1220, sets `CC`/`CXX`/`PATH` to `<chost>-*`) is explicitly gated
+on `chost != cbuild`, skipped for "native (CBUILD unset, or CHOST == CBUILD)"
+by design — and a native `--root` build always ends up `CHOST == CBUILD`
+(an earlier block in the same file defaults `CBUILD` to `CHOST` when unset).
+`PATH` itself (~line 1071-1085) is built from the **host's own**
+`/usr/bin:/bin` (sanitised of `$HOME`/`/usr/local`), with no ROOT-scoped
+prepend in the native case. So even after `em select`'s wrapper gap is fixed,
+nothing in the native build path would put that wrapper ahead of the host's
+real `gcc` on `PATH` — a native stage build's `CC` silently resolves to the
+**host's** compiler today, not the freshly-built ROOT one. This is exactly
+the "host lib leaks in" failure mode `em-stages-and-binhosts.md`'s design
+question #5 warns about; it just wasn't previously pinned to this specific
+code path.
+
+Closing this needs two changes, not one: (a) this doc's already-planned
+`env_d.rs` merge-root-awareness + a real native `post_step` (unblocks `em
+select`/the wrapper itself), and (b) a native-offset branch in `shell.rs`'s
+toolchain selection, parallel to the existing cross one, that prepends the
+ROOT's own toolchain dir to `PATH` even when `CHOST == CBUILD`. (a) alone
+creates the wrapper but doesn't make the build shell use it.
+
 ## Open: clang linker config (Option B)
 
 `-fuse-ld=` lives in `/etc/clang/<SLOT>/gentoo-linker.cfg`, not env.d. Decide:
