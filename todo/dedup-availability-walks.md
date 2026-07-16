@@ -335,6 +335,64 @@ versions: `git-2.53.0` not `-9999`, `Crypt-URandom-0.540.0`) and then real
   plan wasn't run — the crossdev case already gave a real, load-bearing
   answer to the only open question 4b was gated on.)
 
+### 2026-07-16: `--local` was engaging this machinery too, and shouldn't have
+
+Testing `em --local /root/local-test toolchain --setup -p` against a
+completely fresh, empty `--local` prefix fired the Step 4a `eprintln!`
+warning **dozens of times** (`virtual/pkgconfig`, `app-arch/unzip`, a very
+deep `dev-perl/*` module chain, `dev-python/jinja2`, `dev-build/meson`, …) —
+far beyond anything Step 4b anticipated (3 hits, for a real cross build).
+The final plan for one step contained the *same* package listed twice,
+non-adjacently (`dev-perl/Capture-Tiny`, `Config-AutoConf`,
+`Class-Inspector`, `List-MoreUtils`, `Params-Util`, `File-ShareDir-Install`
+all doubled), and the real (non-pretend) run failed `preflight::check` for
+~20 packages needing `sys-devel/gettext`/`sys-devel/m4`/`dev-libs/gmp`/
+`dev-build/meson` that were in the plan but not correctly ordered before
+their consumers.
+
+Root cause (confirmed with Fable's review, `todo/PENDING.md` links the
+session): `CrossContext::detect()` (`portage-resolve/src/root_aware.rs`)
+computed its `active`/dual-root flag from `offset_build = target != "/"` —
+true for `--root`/`--prefix`/cross **and** `--local` alike, since all four
+have a non-`/` target. But `--local`'s BROOT is the *same* prefix as the
+target (`Cli::base_roots()`'s `--local` branch sets base == target == broot
+== the one prefix path) — structurally identical to the bare invocation
+(broot == target == `/`), just at a different path. `host_copies`'s Tier-1
+walk (designed for an already-populated real host, missing only a handful
+of build tools) ran against `--local`'s own, initially-*empty* BROOT VDB,
+found *everything* "missing," and inserted a parallel `@Host` copy of
+nearly the whole closure interleaved with the regular `@Target` one — the
+duplicate-entries and preflight-ordering-confusion evidence above.
+
+**Fixed**: `detect()` now computes dual-root activation from
+`broot_differs = roots.broot().is_some_and(|b| b != target)` instead of
+`offset_build`. Verified per topology: bare (`/ == /`, inactive, unchanged),
+`--local` (prefix == prefix, **now inactive**, the fix), `--root`/
+`--prefix`/`--target` (broot genuinely differs, active, unchanged — spot-
+checked live post-fix against already-built sandboxes, no regression).
+Companion fix: `detect()`'s inactive return used to hardcode
+`sysroot`/`target` to `/`, which would have silently broken `--local`'s own
+`-p` ` to <prefix>/` display annotations once it stopped being "active" —
+now populates them truthfully regardless of `active`, and `display_root`'s
+Target arm no longer special-cases `active` at all (it already suppressed
+the `to .../` suffix whenever the resolved path is literally `/`, so bare
+stays visually unchanged). New tests: `local_shaped_roots_are_not_active_
+but_still_report_the_real_target`, `bare_invocation_is_not_active`;
+`host_entry_displays_as_landing_on_the_real_host_under_offset` retargeted
+from `Roots::for_test` (actually `--local`-shaped) to
+`for_test_root_with_broot` (genuinely `--root`-shaped) for honesty.
+
+This fully closes the duplicate-entries/spurious-warnings problem for
+`--local`. It does **not** close a second, separate issue the fix exposed
+underneath: bootstrapping `--local`'s *entire* BDEPEND closure from a
+genuinely empty BROOT (unlike `--root`, which borrows an already-populated
+real host) still hits real ordering gaps in the native path itself
+(`elt-patches`/`gettext`/`meson`/`python`/`xz-utils`/`rsync`/
+`glibc[cet]` needed before consumers that aren't getting them) —
+a from-scratch bootstrap-ordering problem, not a dual-root one, and
+out of scope for this fix. Tracked as a new open item; see `todo/
+select-toolchain.md`/`todo/PENDING.md`.
+
 ### Step 5 — out of scope: true dual-root solve
 
 Deleting `host_copies.rs` entirely requires the solver to schedule

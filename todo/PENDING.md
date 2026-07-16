@@ -752,6 +752,33 @@ still open.
   `--local` to `--prefix` (overlay borrows host tools; standalone must own
   its python), `--prefix` sets EPREFIX=P. Design: [[root-topology]] (doc)
   + [[root-topology-refactor]] (tasks).
+- ✅ **`--local` spuriously engaging dual-root solver machinery — FIXED
+  2026-07-16.** `CrossContext::detect()` treated any non-`/` target as
+  needing dual-root bookkeeping, which wrongly included `--local` (whose
+  BROOT is the *same* prefix as the target, not a genuinely different
+  filesystem). `host_copies`'s Tier-1 walk then ran against `--local`'s own
+  empty BROOT VDB and fabricated a parallel `@Host` copy of nearly the
+  whole closure — dozens of spurious warnings, duplicate plan entries,
+  preflight rejecting the order. Fixed by keying `active` off
+  `broot != merge_root` instead of `target != "/"` (Fable-reviewed; see
+  [[dedup-availability-walks]]'s 2026-07-16 entry for the full trace and
+  fix detail). `--root`/`--prefix`/cross unaffected (broot genuinely
+  differs there) — spot-checked live, no regression.
+- 🔴 **`--local` bootstrap-from-empty-BROOT ordering** — the fix above
+  stops the *duplication*, but exposed a separate, real gap underneath:
+  `em --local ... toolchain --setup` still fails `preflight::check` on a
+  fresh prefix, needing `app-portage/elt-patches`/`sys-devel/gettext`/
+  `dev-build/meson`/`dev-lang/python`/`app-arch/xz-utils`/`net-misc/rsync`/
+  `sys-libs/glibc[cet(-)?]` before consumers that aren't getting them.
+  Unlike `--root` (which borrows an already-populated real host BROOT,
+  needing no fresh-bootstrap ordering at all), `--local`'s BROOT starts
+  genuinely empty — its *entire* BDEPEND closure must be built in
+  dependency order from nothing, much closer to `em stages --stage1`'s own
+  `packages.build`-ordered bootstrap than to `host_copies`'s reactive
+  gap-filling (which was never designed/tested for this scale). Needs its
+  own investigation — likely a real toposort/staging gap in how
+  `toolchain_plan`'s per-step resolves handle a from-scratch BDEPEND
+  closure, not a quick fix. See [[dedup-availability-walks]].
 - 🔴 **Parser audit pass** — review the recent burst of parser work (incremental
   `-*`, package.use/license/accept_keywords, @set expansion, USE-dep eval, IUSE
   defaults, make.conf sourcing, md5-cache) for PMS/portage faithfulness.
