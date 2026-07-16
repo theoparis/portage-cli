@@ -316,11 +316,37 @@ fn tarjan_scc(succ: &[Vec<usize>]) -> Vec<usize> {
     comp_of
 }
 
-/// Order the members of a single cyclic component.  Every member has an
-/// incoming edge from within the cycle, so a plain topological sort is
-/// impossible; we break soft (RDEPEND) edges before hard (build-time) ones by
-/// repeatedly emitting the member closest to ready — fewest pending hard deps,
-/// then fewest pending soft deps, then largest key for determinism.
+/// Order the members of a single `succ_all` (hard+soft) component.
+///
+/// A multi-member component here does NOT mean every member is part of a
+/// genuine hard cycle — an ordinary soft (RDEPEND) cycle anywhere among these
+/// packages folds everything reachable through it into one component, even
+/// packages with a perfectly ordinary, acyclic hard (DEPEND/BDEPEND) chain
+/// onto something inside it (e.g. dozens of bootstrap tools all needing
+/// `app-portage/elt-patches`, which itself has a genuine 2-node hard cycle
+/// with `app-arch/xz-utils` — found live 2026-07-16, a real `--local`
+/// from-scratch bootstrap folded 114 of 229 packages into one component this
+/// way). Those non-cyclic hard dependents must still be ordered after their
+/// real hard prerequisite, unconditionally — only the *actual* hard-cycle
+/// members have no valid total order and need a heuristic tie-break.
+///
+/// So: first isolate the genuinely irreducible hard cycles within this
+/// component (Tarjan over `succ_hard` restricted to `members` — cheap, this
+/// component is usually tiny once soft edges are set aside). A member with
+/// an unmet hard predecessor *outside its own hard-group* is never emitted
+/// while an eligible member remains — every hard edge that isn't part of a
+/// real hard cycle is respected exactly, regardless of what unrelated soft
+/// cycle pulled it into this bigger component. This can't stall: the
+/// hard-group condensation is itself a DAG, so an eligible member (no
+/// pending cross-group hard predecessor) always exists.
+///
+/// Within one hard-group (a real cycle, no valid order exists), fall back to
+/// the original heuristic: repeatedly emit the member closest to ready —
+/// fewest pending in-component hard deps, then fewest pending in-component
+/// soft+hard deps, then largest key for determinism. Groups that are all
+/// singletons (no real hard cycle present) behave identically to a plain
+/// topological sort — this only changes the outcome for components that
+/// actually contain a hard cycle.
 fn order_cycle(
     members: &[usize],
     succ_hard: &[Vec<usize>],
@@ -352,18 +378,54 @@ fn order_cycle(
         }
     }
 
+    // Hard-only sub-SCCs within this component: the genuinely irreducible
+    // hard cycles. `local` remaps member node-ids to a dense 0..members.len()
+    // range for `tarjan_scc`.
+    let local: HashMap<usize, usize> = members.iter().enumerate().map(|(i, &m)| (m, i)).collect();
+    let mut sub_hard: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
+    for &u in members {
+        for &v in &succ_hard[u] {
+            if let Some(&lv) = local.get(&v) {
+                sub_hard[local[&u]].push(lv);
+            }
+        }
+    }
+    let group_of_local = tarjan_scc(&sub_hard);
+    let group_of = |m: usize| -> usize { group_of_local[local[&m]] };
+
+    // A member with an unmet hard predecessor outside its own hard-group is
+    // never eligible while any node without one remains — that predecessor
+    // is not part of any real cycle, so waiting for it is always possible.
+    let mut cross_pending: HashMap<usize, usize> = members.iter().map(|&m| (m, 0)).collect();
+    for &u in members {
+        for &v in &succ_hard[u] {
+            if set.contains(&v) && group_of(u) != group_of(v) {
+                // SAFETY: v is in set which is the keys of cross_pending (initialized above),
+                // so get_mut must succeed.
+                *cross_pending
+                    .get_mut(&v)
+                    .expect("v in set implies v in cross_pending") += 1;
+            }
+        }
+    }
+
     let mut remaining: HashSet<usize> = set.clone();
     let mut out = Vec::with_capacity(members.len());
     while !remaining.is_empty() {
         let pick = *remaining
             .iter()
             .min_by(|&&a, &&b| {
+                let pa = cross_pending[&a] > 0;
+                let pb = cross_pending[&b] > 0;
                 let ha = indeg_hard[&a];
                 let hb = indeg_hard[&b];
                 let aa = indeg_all[&a];
                 let ab = indeg_all[&b];
-                // Largest key wins ties: compare b before a on the key.
-                ha.cmp(&hb)
+                // A pending cross-group hard predecessor always loses: that
+                // hard edge is never violated, unlike edges inside a genuine
+                // hard cycle. Largest key wins remaining ties.
+                pa.cmp(&pb)
+                    .then(ha.cmp(&hb))
                     .then(aa.cmp(&ab))
                     .then_with(|| node_pv[b].0.cmp(&node_pv[a].0))
             })
@@ -377,6 +439,12 @@ fn order_cycle(
         }
         for &v in &succ_hard[pick] {
             if let Some(e) = indeg_hard.get_mut(&v) {
+                *e = e.saturating_sub(1);
+            }
+            if set.contains(&v)
+                && group_of(pick) != group_of(v)
+                && let Some(e) = cross_pending.get_mut(&v)
+            {
                 *e = e.saturating_sub(1);
             }
         }
@@ -581,6 +649,168 @@ mod tests {
         assert!(
             dep_classes.contains(&DepClass::Rdepend),
             "should have RDEPEND edge"
+        );
+    }
+
+    /// Regression test for the 2026-07-16 `order_cycle` bug: an ordinary,
+    /// acyclic hard (BDEPEND) dependent of a genuine hard-cycle member must
+    /// still be ordered *after* it, even when an unrelated soft (RDEPEND)
+    /// cycle elsewhere folds both into the same `succ_all` component.
+    ///
+    /// Shape: `dev-util/elt` <-> `dev-util/xz` is a genuine hard (BDEPEND)
+    /// cycle. `sys-apps/sweep` has an ordinary hard BDEPEND on `elt` — no
+    /// cyclic relationship with it at all. `dev-util/fn` RDEPENDs on
+    /// `sweep`, and `elt` RDEPENDs on `fn` — a soft back-path that pulls
+    /// `sweep` into the same `succ_all` component as the `elt`/`xz` hard
+    /// cycle. `sweep`'s name is deliberately picked with a *larger* sort key
+    /// than `elt`'s, so the old, ungated indeg tie-break picked it first
+    /// (traced by hand against the pre-fix code): `fn` reaches `indeg_hard
+    /// == 0` first and is emitted, then `elt` and `sweep` tie at
+    /// `indeg_hard == 1` / `indeg_all == 1`, and the largest-key tie-break
+    /// picked `sweep` — before its own real hard dependency `elt`.
+    #[test]
+    fn ordinary_hard_dependent_of_a_cycle_member_still_orders_after_it() {
+        let mut repo = InMemoryRepository::new();
+        let empty = || PackageDeps {
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
+        };
+
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-util/elt-1.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                bdepend: (vec![DepEntry::Atom(Dep::parse("dev-util/xz").unwrap())]).into(),
+                rdepend: (vec![DepEntry::Atom(Dep::parse("dev-util/fn").unwrap())]).into(),
+                ..empty()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-util/xz-1.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                bdepend: (vec![DepEntry::Atom(Dep::parse("dev-util/elt").unwrap())]).into(),
+                ..empty()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-util/fn-1.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                rdepend: (vec![DepEntry::Atom(Dep::parse("sys-apps/sweep").unwrap())]).into(),
+                ..empty()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("sys-apps/sweep-1.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                bdepend: (vec![DepEntry::Atom(Dep::parse("dev-util/elt").unwrap())]).into(),
+                ..empty()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/top-1.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                depend: (vec![
+                    DepEntry::Atom(Dep::parse("dev-util/fn").unwrap()),
+                    DepEntry::Atom(Dep::parse("sys-apps/sweep").unwrap()),
+                ])
+                .into(),
+                ..empty()
+            },
+        );
+
+        let mut provider = PortageDependencyProvider::new(repo);
+        let top = PortagePackage::unslotted(Cpn::parse("app-misc/top").unwrap());
+        let solution = provider
+            .resolve_targets(vec![(top, PortageVersionSet::any())])
+            .unwrap_or_else(|e| panic!("resolution failed: {e:?}"));
+
+        let order = provider.install_order(&solution);
+        let names: Vec<&str> = order
+            .iter()
+            .map(|(p, _)| p.cpn().package.as_str())
+            .collect();
+        let elt_pos = names.iter().position(|&n| n == "elt").unwrap();
+        let sweep_pos = names.iter().position(|&n| n == "sweep").unwrap();
+        assert!(
+            elt_pos < sweep_pos,
+            "elt (sweep's real hard BDEPEND) must order before sweep, got: {names:?}"
+        );
+    }
+
+    /// Guard against regressing the case `order_cycle`'s original heuristic
+    /// exists for: a component with NO genuine hard cycle (only an ordinary
+    /// soft/RDEPEND cycle, e.g. `gtk+` <-> its icon-theme runtime deps) must
+    /// still resolve — the hard-group gate added above is a no-op when every
+    /// hard-group is a singleton, so this is unaffected by the 2026-07-16 fix.
+    #[test]
+    fn pure_soft_cycle_still_orders_a_hard_dependent_after_it() {
+        let mut repo = InMemoryRepository::new();
+        let empty = || PackageDeps {
+            depend: (vec![]).into(),
+            rdepend: (vec![]).into(),
+            bdepend: (vec![]).into(),
+            pdepend: (vec![]).into(),
+            idepend: (vec![]).into(),
+        };
+
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-libs/a-1.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                rdepend: (vec![DepEntry::Atom(Dep::parse("dev-libs/b").unwrap())]).into(),
+                ..empty()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("dev-libs/b-1.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                rdepend: (vec![DepEntry::Atom(Dep::parse("dev-libs/a").unwrap())]).into(),
+                ..empty()
+            },
+        );
+        repo.add_version(
+            portage_atom::Cpv::parse("app-misc/c-1.0").unwrap(),
+            None,
+            None,
+            PackageDeps {
+                bdepend: (vec![DepEntry::Atom(Dep::parse("dev-libs/a").unwrap())]).into(),
+                ..empty()
+            },
+        );
+
+        let mut provider = PortageDependencyProvider::new(repo);
+        let c = PortagePackage::unslotted(Cpn::parse("app-misc/c").unwrap());
+        let solution = provider
+            .resolve_targets(vec![(c, PortageVersionSet::any())])
+            .unwrap_or_else(|e| panic!("resolution failed: {e:?}"));
+
+        let order = provider.install_order(&solution);
+        let names: Vec<&str> = order
+            .iter()
+            .map(|(p, _)| p.cpn().package.as_str())
+            .collect();
+        let a_pos = names.iter().position(|&n| n == "a").unwrap();
+        let b_pos = names.iter().position(|&n| n == "b");
+        let c_pos = names.iter().position(|&n| n == "c").unwrap();
+        assert!(b_pos.is_some(), "b must still be scheduled, got: {names:?}");
+        assert!(
+            a_pos < c_pos,
+            "a (c's real hard BDEPEND) must order before c, got: {names:?}"
         );
     }
 
