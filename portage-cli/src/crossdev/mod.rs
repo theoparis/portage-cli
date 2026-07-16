@@ -271,6 +271,7 @@ async fn setup(
         merge_depgraph_flags(globals, &args.depgraph_flags),
         merge_flags,
         true,
+        false,
         post_step,
     )
     .await?;
@@ -316,6 +317,7 @@ async fn run_staged(
     depgraph_flags: crate::cli::DepgraphFlags,
     merge_flags: MergeFlags,
     bypass_cross_root: bool,
+    target_only_installed_view: bool,
     post_step: impl Fn(&stages::StageStep) -> Result<()>,
 ) -> Result<()> {
     let mut out = anstream::stdout();
@@ -343,6 +345,7 @@ async fn run_staged(
                 depgraph_flags: Some(depgraph_flags.clone()),
                 merge_flags: Some(merge_flags.clone()),
                 bypass_cross_root,
+                target_only_installed_view,
             },
         )
         .await?;
@@ -487,6 +490,7 @@ pub(crate) async fn toolchain(args: &crate::cli::ToolchainArgs, globals: &Cli) -
         merge_depgraph_flags(globals, &args.depgraph_flags),
         merge_flags,
         false,
+        true,
         |_| Ok(()),
     )
     .await?;
@@ -542,6 +546,7 @@ pub(crate) async fn stage1(args: &crate::cli::StagesArgs, globals: &Cli) -> Resu
             merge_depgraph_flags(globals, &args.depgraph_flags),
             merge_merge_flags(globals, &args.merge_flags),
             true,
+            false,
             post_step,
         )
         .await?;
@@ -558,6 +563,7 @@ pub(crate) async fn stage1(args: &crate::cli::StagesArgs, globals: &Cli) -> Resu
         globals,
         merge_depgraph_flags(globals, &args.depgraph_flags),
         merge_merge_flags(globals, &args.merge_flags),
+        false,
         false,
         |_| Ok(()),
     )

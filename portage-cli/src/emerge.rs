@@ -119,6 +119,14 @@ pub(crate) struct EmergeOpts<'a> {
     /// doc), never the target sysroot subdirectory `roots()` would otherwise
     /// substitute in.
     pub bypass_cross_root: bool,
+    /// Drop the general `VDB(base) ∪ VDB(target)` installed-view sharing
+    /// (`Roots::with_target_only_installed_view`) for this call. The native
+    /// toolchain bootstrap (`crossdev::mod.rs`'s `toolchain()`) sets this: it
+    /// is unconditionally self-contained regardless of `--root`/`--prefix`
+    /// topology, and must not let the host's already-installed
+    /// `virtual/os-headers`/etc. stand in for a copy actually merged into
+    /// the target.
+    pub target_only_installed_view: bool,
 }
 
 /// Resolve and (unless `--pretend`) merge `raw_atoms` with the global config in
@@ -143,11 +151,13 @@ pub(crate) async fn emerge_atoms(
         opts.depgraph_flags,
         opts.merge_flags,
         opts.bypass_cross_root,
+        opts.target_only_installed_view,
         extra_use_override.as_deref(),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn emerge_atoms_inner(
     cli: &cli::Cli,
     raw_atoms: &[String],
@@ -155,6 +165,7 @@ async fn emerge_atoms_inner(
     depgraph_flags_override: Option<crate::cli::DepgraphFlags>,
     merge_flags_override: Option<crate::cli::MergeFlags>,
     bypass_cross_root: bool,
+    target_only_installed_view: bool,
     extra_use_override: Option<&str>,
 ) -> Result<()> {
     let merge_flags = merge_flags_override.as_ref().unwrap_or(&cli.merge_flags);
@@ -193,6 +204,11 @@ async fn emerge_atoms_inner(
         cli.outer_roots()
     } else {
         cli.roots()
+    };
+    let roots = if target_only_installed_view {
+        roots.with_target_only_installed_view()
+    } else {
+        roots
     };
     // `Cli::broot()` (not `roots`): stays overlay-aware under `--target`
     // substitution, so a `MergeRoot::Host` entry's `-p` display matches its
@@ -335,6 +351,7 @@ pub(crate) async fn run_emerge(cli: &cli::Cli) -> Result<()> {
             depgraph_flags: None,
             merge_flags: None,
             bypass_cross_root: false,
+            target_only_installed_view: false,
         },
     )
     .await
