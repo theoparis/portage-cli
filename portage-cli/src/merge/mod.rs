@@ -276,6 +276,11 @@ async fn merge_sequential(
     let mut merged = 0usize;
     let mut skipped = 0usize;
     let mut failures: Vec<MergeFailure> = Vec::new();
+    // See `ebuild::RootContext::self_contained_bootstrap` — the native
+    // toolchain bootstrap sets this on `roots` (`with_target_only_installed_view`)
+    // and every plan entry built under this invocation must see it, not just
+    // the ones whose `entry_roots` happens to preserve it.
+    let self_contained_bootstrap = roots.installed_view_target_only();
 
     for (i, planned) in plan.iter().enumerate() {
         let entry_roots = entry_roots(planned, roots, host_roots);
@@ -328,10 +333,13 @@ async fn merge_sequential(
                 work_base,
                 merge_root,
                 quiet,
-                entry_roots.config(),
-                entry_roots.build_sysroot(),
-                entry_roots.eprefix(),
-                Some(host_roots.merge_root()),
+                ebuild::RootContext {
+                    config_root: entry_roots.config(),
+                    sysroot: entry_roots.build_sysroot(),
+                    eprefix: entry_roots.eprefix(),
+                    broot: Some(host_roots.merge_root()),
+                    self_contained_bootstrap,
+                },
                 None,
             )
             .await
@@ -347,10 +355,13 @@ async fn merge_sequential(
                         work_base,
                         merge_root,
                         quiet,
-                        entry_roots.config(),
-                        entry_roots.build_sysroot(),
-                        entry_roots.eprefix(),
-                        Some(host_roots.merge_root()),
+                        ebuild::RootContext {
+                            config_root: entry_roots.config(),
+                            sysroot: entry_roots.build_sysroot(),
+                            eprefix: entry_roots.eprefix(),
+                            broot: Some(host_roots.merge_root()),
+                            self_contained_bootstrap,
+                        },
                         None,
                     )
                     .await
@@ -377,10 +388,13 @@ async fn merge_sequential(
                         merge_root,
                         distdir,
                         quiet,
-                        entry_roots.config(),
-                        entry_roots.build_sysroot(),
-                        entry_roots.eprefix(),
-                        Some(host_roots.merge_root()),
+                        ebuild::RootContext {
+                            config_root: entry_roots.config(),
+                            sysroot: entry_roots.build_sysroot(),
+                            eprefix: entry_roots.eprefix(),
+                            broot: Some(host_roots.merge_root()),
+                            self_contained_bootstrap,
+                        },
                         None,
                         buildpkg,
                     )
@@ -410,10 +424,13 @@ async fn merge_sequential(
                 merge_root,
                 distdir,
                 quiet,
-                entry_roots.config(),
-                entry_roots.build_sysroot(),
-                entry_roots.eprefix(),
-                Some(host_roots.merge_root()),
+                ebuild::RootContext {
+                    config_root: entry_roots.config(),
+                    sysroot: entry_roots.build_sysroot(),
+                    eprefix: entry_roots.eprefix(),
+                    broot: Some(host_roots.merge_root()),
+                    self_contained_bootstrap,
+                },
                 None,
                 buildpkg,
             )
@@ -553,6 +570,8 @@ async fn merge_parallel(
 ) -> (usize, usize, Vec<MergeFailure>) {
     let total = plan.len();
     let merge_gate = tokio::sync::Mutex::new(());
+    // See `merge_sequential`'s matching comment.
+    let self_contained_bootstrap = roots.installed_view_target_only();
 
     let mut sched = Scheduler::new(blockers);
     let mut merged = 0usize;
@@ -629,10 +648,13 @@ async fn merge_parallel(
                         work_base,
                         merge_root,
                         quiet,
-                        entry_roots.config(),
-                        entry_roots.build_sysroot(),
-                        entry_roots.eprefix(),
-                        Some(host_roots.merge_root()),
+                        ebuild::RootContext {
+                            config_root: entry_roots.config(),
+                            sysroot: entry_roots.build_sysroot(),
+                            eprefix: entry_roots.eprefix(),
+                            broot: Some(host_roots.merge_root()),
+                            self_contained_bootstrap,
+                        },
                         Some(gate),
                     )
                     .await
@@ -647,10 +669,13 @@ async fn merge_parallel(
                                 work_base,
                                 merge_root,
                                 quiet,
-                                entry_roots.config(),
-                                entry_roots.build_sysroot(),
-                                entry_roots.eprefix(),
-                                Some(host_roots.merge_root()),
+                                ebuild::RootContext {
+                                    config_root: entry_roots.config(),
+                                    sysroot: entry_roots.build_sysroot(),
+                                    eprefix: entry_roots.eprefix(),
+                                    broot: Some(host_roots.merge_root()),
+                                    self_contained_bootstrap,
+                                },
                                 Some(gate),
                             )
                             .await
@@ -670,10 +695,13 @@ async fn merge_parallel(
                         merge_root,
                         distdir,
                         quiet,
-                        entry_roots.config(),
-                        entry_roots.build_sysroot(),
-                        entry_roots.eprefix(),
-                        Some(host_roots.merge_root()),
+                        ebuild::RootContext {
+                            config_root: entry_roots.config(),
+                            sysroot: entry_roots.build_sysroot(),
+                            eprefix: entry_roots.eprefix(),
+                            broot: Some(host_roots.merge_root()),
+                            self_contained_bootstrap,
+                        },
                         Some(gate),
                         buildpkg,
                     )

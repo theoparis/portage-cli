@@ -141,6 +141,35 @@ impl PhaseGroup {
     }
 }
 
+/// The root-model views an ebuild execution needs, bundled so the
+/// build/merge call chain (`run`/`build_and_merge`/`merge_binpkg`/
+/// `run_inner`) takes one parameter for this instead of one per field.
+#[derive(Clone, Copy, Default)]
+pub struct RootContext<'a> {
+    pub config_root: Option<&'a Utf8Path>,
+    pub sysroot: Option<&'a Utf8Path>,
+    pub eprefix: Option<&'a Utf8Path>,
+    /// Where BDEPEND-class build tools (a cross toolchain, its pkg-config, …)
+    /// live for this invocation — `Cli::broot()`'s merge root. See
+    /// `EbuildShell::build_broot`'s doc comment for the full rationale.
+    pub broot: Option<&'a Utf8Path>,
+    /// The native toolchain bootstrap (`em toolchain --setup`) is
+    /// unconditionally self-contained regardless of `--root`/`--prefix`
+    /// topology (mirrors `Roots::installed_view_target_only`, the same
+    /// signal for the same reason) — it must not source the `--prefix`
+    /// overlay's config-overlay `bashrc`. That recipe's `CPPFLAGS="-I<prefix>/
+    /// usr/include ..."` is right for an ordinary package layered over an
+    /// already-populated prefix (finds already-installed headers ahead of
+    /// the host's), but for THIS bootstrap it lands ahead of a package's own
+    /// project-local `-I` flags and can shadow a version-matched local header
+    /// with an incompatible one from the freshly-installed target libc —
+    /// found live 2026-07-16 running gcc's own `libiberty/obstack.c` self-
+    /// build under `--prefix` (the exact same class of bug already fixed for
+    /// `--root` on 2026-07-03, see `setup.rs`'s `BASHRC_PREFIX`/`self_contained`
+    /// doc comment).
+    pub self_contained_bootstrap: bool,
+}
+
 /// The base directory for build work trees: `<prefix>/var/tmp/portage` under
 /// a prefix; otherwise the system `/var/tmp/portage` when writable, falling
 /// back to the user cache.
@@ -231,17 +260,13 @@ async fn apply_profile_env(
     Ok(true)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     ebuild_path: &str,
     phases: &[String],
     work_dir: Option<&Utf8Path>,
     repo_override: Option<&str>,
     root: &Utf8Path,
-    config_root: Option<&Utf8Path>,
-    sysroot: Option<&Utf8Path>,
-    eprefix: Option<&Utf8Path>,
-    broot: Option<&Utf8Path>,
+    roots: RootContext<'_>,
 ) -> Result<()> {
     // Standalone `em ebuild <path> <phase>`: no resolved plan entry exists, so
     // there's no authoritative Cpv to pass — `run_inner` falls back to
@@ -257,10 +282,7 @@ pub async fn run(
         None,
         None,
         None,
-        config_root,
-        sysroot,
-        eprefix,
-        broot,
+        roots,
         None,
         false,
         None,
@@ -282,10 +304,7 @@ pub async fn build_and_merge(
     root: &Utf8Path,
     distdir: Option<&Utf8Path>,
     quiet: bool,
-    config_root: Option<&Utf8Path>,
-    sysroot: Option<&Utf8Path>,
-    eprefix: Option<&Utf8Path>,
-    broot: Option<&Utf8Path>,
+    roots: RootContext<'_>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
     buildpkg: bool,
 ) -> Result<()> {
@@ -308,10 +327,7 @@ pub async fn build_and_merge(
             Some(use_flags),
             distdir,
             Some((log.clone(), quiet)),
-            config_root,
-            sysroot,
-            eprefix,
-            broot,
+            roots,
             None,
             false,
             None,
@@ -334,10 +350,11 @@ pub async fn build_and_merge(
                 work_base: work_base.as_str(),
                 root: root.as_str(),
                 distdir: distdir.map(|d| d.as_str()),
-                config_root: config_root.map(|c| c.as_str()),
-                sysroot: sysroot.map(|s| s.as_str()),
-                eprefix: eprefix.map(|e| e.as_str()),
-                broot: broot.map(|b| b.as_str()),
+                config_root: roots.config_root.map(|c| c.as_str()),
+                sysroot: roots.sysroot.map(|s| s.as_str()),
+                eprefix: roots.eprefix.map(|e| e.as_str()),
+                broot: roots.broot.map(|b| b.as_str()),
+                self_contained_bootstrap: roots.self_contained_bootstrap,
                 buildpkg,
                 quiet,
                 binpkg: None,
@@ -360,10 +377,7 @@ pub async fn build_and_merge(
             Some(use_flags),
             distdir,
             Some((log.clone(), quiet)),
-            config_root,
-            sysroot,
-            eprefix,
-            broot,
+            roots,
             merge_gate,
             buildpkg,
             None,
@@ -387,10 +401,7 @@ pub async fn merge_binpkg(
     work_base: &Utf8Path,
     root: &Utf8Path,
     quiet: bool,
-    config_root: Option<&Utf8Path>,
-    sysroot: Option<&Utf8Path>,
-    eprefix: Option<&Utf8Path>,
-    broot: Option<&Utf8Path>,
+    roots: RootContext<'_>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
 ) -> Result<()> {
     let ebuild = Ebuild::with_cpv(cpv.clone(), ebuild_path);
@@ -416,10 +427,11 @@ pub async fn merge_binpkg(
                 work_base: work_base.as_str(),
                 root: root.as_str(),
                 distdir: None,
-                config_root: config_root.map(|c| c.as_str()),
-                sysroot: sysroot.map(|s| s.as_str()),
-                eprefix: eprefix.map(|e| e.as_str()),
-                broot: broot.map(|b| b.as_str()),
+                config_root: roots.config_root.map(|c| c.as_str()),
+                sysroot: roots.sysroot.map(|s| s.as_str()),
+                eprefix: roots.eprefix.map(|e| e.as_str()),
+                broot: roots.broot.map(|b| b.as_str()),
+                self_contained_bootstrap: roots.self_contained_bootstrap,
                 buildpkg: false,
                 quiet,
                 binpkg: Some(binpkg_path.as_str()),
@@ -444,10 +456,7 @@ pub async fn merge_binpkg(
             Some(use_flags),
             None,
             Some((log.clone(), quiet)),
-            config_root,
-            sysroot,
-            eprefix,
-            broot,
+            roots,
             merge_gate,
             false,
             Some(binpkg_path),
@@ -473,6 +482,7 @@ pub async fn run_install_worker(
     sysroot: Option<&str>,
     eprefix: Option<&str>,
     broot: Option<&str>,
+    self_contained_bootstrap: bool,
     binpkg: Option<&str>,
     buildpkg: bool,
     quiet: bool,
@@ -510,10 +520,13 @@ pub async fn run_install_worker(
         Some(&use_flags),
         distdir.map(Utf8Path::new),
         Some((log.clone(), quiet)),
-        config_root.map(Utf8Path::new),
-        sysroot.map(Utf8Path::new),
-        eprefix.map(Utf8Path::new),
-        broot.map(Utf8Path::new),
+        RootContext {
+            config_root: config_root.map(Utf8Path::new),
+            sysroot: sysroot.map(Utf8Path::new),
+            eprefix: eprefix.map(Utf8Path::new),
+            broot: broot.map(Utf8Path::new),
+            self_contained_bootstrap,
+        },
         None,
         buildpkg,
         binpkg.map(Utf8Path::new),
@@ -581,13 +594,7 @@ async fn run_inner(
     use_flags: Option<&[portage_atom::interner::Interned<portage_atom::interner::DefaultInterner>]>,
     distdir: Option<&Utf8Path>,
     phase_log: Option<(Utf8PathBuf, bool)>,
-    config_root: Option<&Utf8Path>,
-    sysroot: Option<&Utf8Path>,
-    eprefix: Option<&Utf8Path>,
-    // Where BDEPEND-class build tools (a cross toolchain, its pkg-config, …)
-    // live for this invocation — `Cli::broot()`'s merge root. See
-    // `EbuildShell::build_broot`'s doc comment for the full rationale.
-    broot: Option<&Utf8Path>,
+    roots: RootContext<'_>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
     buildpkg: bool,
     // A pre-built GPKG to merge (`-k`/`-g`): its image is extracted into
@@ -595,6 +602,13 @@ async fn run_inner(
     // [`PhaseGroup::Install`]. None for a normal source build.
     binpkg: Option<&Utf8Path>,
 ) -> Result<()> {
+    let RootContext {
+        config_root,
+        sysroot,
+        eprefix,
+        broot,
+        self_contained_bootstrap,
+    } = roots;
     let path = Utf8Path::new(ebuild_path);
     let ebuild = match cpv {
         Some(cpv) => Ebuild::with_cpv(cpv.clone(), path),
@@ -647,7 +661,10 @@ async fn run_inner(
     // read directly. This also resolves the profile's effective USE.
     // The config overlay (`package.use`/`bashrc` over host config) is the
     // prefix's `etc/portage` in an in-place `--local` build (`EPREFIX/etc/portage`).
-    let config_overlay = eprefix.map(|e| e.join("etc/portage"));
+    let config_overlay = (!self_contained_bootstrap)
+        .then_some(eprefix)
+        .flatten()
+        .map(|e| e.join("etc/portage"));
     if !apply_profile_env(&mut shell, config_root, config_overlay.as_deref()).await? {
         let cr = config_root.unwrap_or_else(|| Utf8Path::new("/"));
         eprintln!(

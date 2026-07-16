@@ -133,6 +133,19 @@ pub(crate) struct EmergeOpts<'a> {
 /// `cli`, plus the per-call [`EmergeOpts`]. Factored out of [`run_emerge`] so the
 /// crossdev staged-build driver can run each toolchain step through the very
 /// same path.
+/// [`EmergeOpts`] minus its borrowed `use_override` (already folded into
+/// `extra_use_override` by the time [`emerge_atoms_inner`] needs it) — keeps
+/// that function to a single options argument instead of one parameter per
+/// field.
+struct ResolvedEmergeOpts {
+    nodeps: bool,
+    depgraph_flags: Option<crate::cli::DepgraphFlags>,
+    merge_flags: Option<crate::cli::MergeFlags>,
+    bypass_cross_root: bool,
+    target_only_installed_view: bool,
+    extra_use_override: Option<String>,
+}
+
 pub(crate) async fn emerge_atoms(
     cli: &cli::Cli,
     raw_atoms: &[String],
@@ -147,27 +160,32 @@ pub(crate) async fn emerge_atoms(
     emerge_atoms_inner(
         cli,
         raw_atoms,
-        opts.nodeps,
-        opts.depgraph_flags,
-        opts.merge_flags,
-        opts.bypass_cross_root,
-        opts.target_only_installed_view,
-        extra_use_override.as_deref(),
+        ResolvedEmergeOpts {
+            nodeps: opts.nodeps,
+            depgraph_flags: opts.depgraph_flags,
+            merge_flags: opts.merge_flags,
+            bypass_cross_root: opts.bypass_cross_root,
+            target_only_installed_view: opts.target_only_installed_view,
+            extra_use_override,
+        },
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn emerge_atoms_inner(
     cli: &cli::Cli,
     raw_atoms: &[String],
-    nodeps: bool,
-    depgraph_flags_override: Option<crate::cli::DepgraphFlags>,
-    merge_flags_override: Option<crate::cli::MergeFlags>,
-    bypass_cross_root: bool,
-    target_only_installed_view: bool,
-    extra_use_override: Option<&str>,
+    opts: ResolvedEmergeOpts,
 ) -> Result<()> {
+    let ResolvedEmergeOpts {
+        nodeps,
+        depgraph_flags: depgraph_flags_override,
+        merge_flags: merge_flags_override,
+        bypass_cross_root,
+        target_only_installed_view,
+        extra_use_override,
+    } = opts;
+    let extra_use_override = extra_use_override.as_deref();
     let merge_flags = merge_flags_override.as_ref().unwrap_or(&cli.merge_flags);
     let resolved = cli.repo_path();
     let repo_path = camino::Utf8Path::new(&resolved);

@@ -678,6 +678,9 @@ pub enum Applet {
         /// Where BDEPEND-class build tools live (`Cli::broot()`'s merge root).
         #[arg(long)]
         broot: Option<String>,
+        /// See `ebuild::RootContext::self_contained_bootstrap`.
+        #[arg(long)]
+        self_contained_bootstrap: bool,
         /// A pre-built GPKG to merge (`-k`/`-g`).
         #[arg(long)]
         binpkg: Option<String>,

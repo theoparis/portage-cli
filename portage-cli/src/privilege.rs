@@ -204,6 +204,8 @@ pub struct WorkerArgs<'a> {
     /// Where BDEPEND-class build tools live for this invocation
     /// (`Cli::broot()`'s merge root) — see `EbuildShell::build_broot`.
     pub broot: Option<&'a str>,
+    /// See `ebuild::RootContext::self_contained_bootstrap`.
+    pub self_contained_bootstrap: bool,
     pub binpkg: Option<&'a str>,
     pub buildpkg: bool,
     pub quiet: bool,
@@ -254,6 +256,9 @@ pub async fn spawn_install_worker(backend: Backend, args: &WorkerArgs<'_>) -> st
     }
     if let Some(b) = args.broot {
         cmd.arg("--broot").arg(b);
+    }
+    if args.self_contained_bootstrap {
+        cmd.arg("--self-contained-bootstrap");
     }
     if let Some(b) = args.binpkg {
         cmd.arg("--binpkg").arg(b);

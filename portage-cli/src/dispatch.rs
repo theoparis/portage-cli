@@ -45,6 +45,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
             sysroot,
             eprefix,
             broot,
+            self_contained_bootstrap,
             binpkg,
             buildpkg,
             quiet,
@@ -60,6 +61,7 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
                 sysroot.as_deref(),
                 eprefix.as_deref(),
                 broot.as_deref(),
+                *self_contained_bootstrap,
                 binpkg.as_deref(),
                 *buildpkg,
                 *quiet,
@@ -80,10 +82,13 @@ async fn run_applet(applet: &Applet, globals: &cli::Cli) -> Result<()> {
                 work_dir.as_deref(),
                 repo_override,
                 roots.merge_root(),
-                roots.config(),
-                roots.build_sysroot(),
-                roots.eprefix(),
-                Some(broot.merge_root()),
+                ebuild::RootContext {
+                    config_root: roots.config(),
+                    sysroot: roots.build_sysroot(),
+                    eprefix: roots.eprefix(),
+                    broot: Some(broot.merge_root()),
+                    self_contained_bootstrap: false,
+                },
             )
             .await
         }
