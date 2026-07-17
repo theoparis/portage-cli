@@ -369,6 +369,37 @@ blocked by the three independent findings above, tracked separately.
   nothing in the native (`chost == cbuild`) build path prefers this wrapper
   over the host's own `gcc` on `$PATH` — out of scope for this fix, tracked in
   [[select-toolchain]].
+- ✅ **`em select` used `roots()` instead of `outer_roots()` everywhere —
+  FIXED 2026-07-17 (`75067f1`).** Found live verifying the new `pkgconf`
+  wrapper across `--root`/`--prefix`/`--local` (per Luca: "what is important
+  is that `--local`/`--prefix`/`--root` work as intended"): a bare `--prefix
+  DIR select pkgconf show --target T` reported "not set" even though
+  `crossdev --setup` had *just* created the wrapper. Root cause, confirmed
+  by debug-printing the resolved `Roots`: clap's derive macro applies a
+  `select` subcommand's own `--target` value to *both* that local field
+  and the global `Cli::target` (same long name "target", even though only
+  the global one has the `-T` short alias) — so `em select <module> ...
+  --target T` was silently also setting `Cli::target`, and `roots()`
+  treats a non-`None` `Cli::target` as "substitute the sysroot in", which
+  `select` never wants (it only means "which target's own config-root
+  state", never "merge into this sysroot"). Affected every `select`
+  subcommand with its own `--target` option — **`compiler`/`binutils`/
+  `linker` had this bug too**, pre-existing since 2026-06-24, not something
+  introduced this session; a "control" test against `compiler show`
+  happened to report a plausible-looking answer only because this exact
+  host has stray real system crossdev artifacts (`/etc/env.d/gcc/config-
+  riscv64-unknown-linux-gnu`) that coincidentally matched. Fixed by
+  switching every `select::*::run()`/helper from `globals.roots()` to
+  `globals.outer_roots()` (which never consults `Cli::target` at all, so
+  it's immune regardless of whether the flag-name collision itself gets
+  addressed) — `env_d.rs`'s `run_list`/`run_show`/`run_set`, `select/
+  mod.rs`'s `config_portage_dir`/`is_prefix_context`, `repos.rs`/`clang.rs`
+  (no `--target` of their own, but fixed for the same underlying reason),
+  and `pkgconf.rs`. Verified live across all three topologies: `--root`
+  unaffected (still correctly requires `--config-root` for a bare
+  invocation, matching real eselect), `--prefix` now resolves correctly
+  without `--config-root` (the broken case), `--local` verified end-to-end
+  including a real wrapper execution.
 - ✅ **`em stages --stage1 --cross` install-order/preflight bugs — FIXED
   2026-07-03.** Confirmed with real portage (`qdepends`) that the apparent
   `util-linux` ↔ `python` cycle was never real: util-linux's `python? (
