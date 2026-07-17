@@ -364,13 +364,8 @@ fn iuse_defaults_map(
 /// force/mask sets — the same layering `Adapter::desired_use` does, minus the
 /// Level-C cede. Used to evaluate USE-conditional `LICENSE` expressions both in
 /// the version filter and the autounmask reasons (which have no `Adapter`).
-#[allow(clippy::too_many_arguments)]
 fn effective_use_config(
-    pre_env: &str,
-    env_use: &str,
-    package_use: &[(Dep, Vec<UseOverride>)],
-    force_mask: &crate::force_mask::ForceMask,
-    accept_keywords: &AcceptKeywords,
+    policy: &ResolvePolicy,
     cpv: &Cpv,
     meta: &portage_metadata::EbuildMetadata,
     slot: Option<Interned<DefaultInterner>>,
@@ -378,12 +373,19 @@ fn effective_use_config(
     use portage_atom_pubgrub::resolve_effective_use;
 
     let iuse_defaults = iuse_defaults_map(meta);
-    let mut cfg = resolve_effective_use(&iuse_defaults, pre_env, cpv, slot, package_use, env_use);
-    if !force_mask.is_empty() {
-        let stable = accept_keywords.is_stable(&meta.keywords, cpv, slot);
+    let mut cfg = resolve_effective_use(
+        &iuse_defaults,
+        policy.pre_env,
+        cpv,
+        slot,
+        policy.package_use,
+        policy.env_use,
+    );
+    if !policy.force_mask.is_empty() {
+        let stable = policy.accept_keywords.is_stable(&meta.keywords, cpv, slot);
         let iuse: std::collections::HashSet<Interned<DefaultInterner>> =
             meta.iuse.iter().map(Interned::from).collect();
-        force_mask.apply(&mut cfg, cpv, stable, &iuse);
+        policy.force_mask.apply(&mut cfg, cpv, stable, &iuse);
     }
     cfg
 }
@@ -397,35 +399,20 @@ fn use_predicate(cfg: &portage_atom_pubgrub::UseConfig) -> impl Fn(&str) -> bool
 /// Whether `meta`'s `LICENSE` is accepted for version `cpv`, evaluating any
 /// `use? ( … )` branch against the version's effective USE. Effective USE is
 /// computed only when the expression has conditionals.
-#[allow(clippy::too_many_arguments)]
 fn license_ok_for(
     cpv: &Cpv,
     meta: &portage_metadata::EbuildMetadata,
-    accept_licenses: &AcceptLicenses,
-    pre_env: &str,
-    env_use: &str,
-    package_use: &[(Dep, Vec<UseOverride>)],
-    force_mask: &crate::force_mask::ForceMask,
-    accept_keywords: &AcceptKeywords,
+    policy: &ResolvePolicy,
 ) -> bool {
     let Some(lic) = &meta.license else {
         return true;
     };
     let slot = Some(meta.slot.slot);
-    let accept = accept_licenses.effective_for(cpv, slot);
+    let accept = policy.accept_licenses.effective_for(cpv, slot);
     if !license_has_conditional(lic) {
         return license_accepted(lic, &accept, &|_| false);
     }
-    let cfg = effective_use_config(
-        pre_env,
-        env_use,
-        package_use,
-        force_mask,
-        accept_keywords,
-        cpv,
-        meta,
-        slot,
-    );
+    let cfg = effective_use_config(policy, cpv, meta, slot);
     license_accepted(lic, &accept, &use_predicate(&cfg))
 }
 
@@ -516,6 +503,37 @@ pub fn repo_name_of<'a>(data: &'a RepoData, cpv: &Cpv) -> &'a str {
         .map_or(data.repo_name.as_str(), String::as_str)
 }
 
+/// The resolved keyword/mask/license/USE policy, shared by every version
+/// filter and USE-config computation ([`effective_use_config`],
+/// [`license_ok_for`], [`target_package`], [`find_autounmask_candidates`],
+/// `download_size::compute`) so each takes one reference instead of
+/// re-listing the same fields. The solver-specific remainder of [`Adapter`]
+/// (`data`, `installed_cpvs`, `autosolve_use`) isn't part of this — those
+/// three vary by call site in ways this shared policy doesn't. `Copy` so a
+/// caller can build one base value and override just `package_use` per call
+/// site (it's the one field that legitimately varies mid-resolution, e.g.
+/// across a Level-C co-solve fixpoint) via `ResolvePolicy { package_use: X,
+/// ..base }`.
+#[derive(Clone, Copy)]
+pub struct ResolvePolicy<'a> {
+    /// Resolved `ACCEPT_KEYWORDS`/`package.accept_keywords` decision.
+    pub accept_keywords: &'a AcceptKeywords,
+    /// `package.mask` atoms.
+    pub package_mask: &'a [Dep],
+    /// `package.unmask` atoms (cancel a mask per package).
+    pub package_unmask: &'a [Dep],
+    /// Resolved `ACCEPT_LICENSE`/`package.license` decision.
+    pub accept_licenses: &'a AcceptLicenses,
+    /// USE folded up through `make.conf` — see [`Adapter::pre_env`].
+    pub pre_env: &'a str,
+    /// The raw process-environment `USE` value — see [`Adapter::env_use`].
+    pub env_use: &'a str,
+    /// Per-version `package.use`/`package.env`-style overrides.
+    pub package_use: &'a [(Dep, Vec<UseOverride>)],
+    /// Profile USE force/mask policy — see [`Adapter::force_mask`].
+    pub force_mask: &'a crate::force_mask::ForceMask,
+}
+
 /// The [`portage_atom_pubgrub::PackageRepository`] impl the solver bridge
 /// reads from — a borrowed view over [`RepoData`] plus every resolved policy
 /// input (accept keywords/mask/license, USE layers, force/mask, Level-C).
@@ -586,16 +604,7 @@ impl Adapter<'_> {
     /// branch against the version's effective USE (computed only when the
     /// expression actually has conditionals).
     fn license_ok(&self, cpv: &Cpv, meta: &portage_metadata::EbuildMetadata) -> bool {
-        license_ok_for(
-            cpv,
-            meta,
-            self.accept_licenses,
-            self.pre_env,
-            self.env_use,
-            self.package_use,
-            self.force_mask,
-            self.accept_keywords,
-        )
+        license_ok_for(cpv, meta, &self.policy())
     }
 
     /// Level-C cede: when `--autosolve-use` is on and the package's REQUIRED_USE
@@ -667,6 +676,23 @@ impl Adapter<'_> {
             }
             let prefer = matches!(cfg.get(flag), UseFlagState::Enabled);
             cfg.solver_decide(flag, prefer);
+        }
+    }
+}
+
+impl<'a> Adapter<'a> {
+    /// Borrow out the policy fields, for the free functions that don't need
+    /// the rest of `Adapter` (`data`/`installed_cpvs`/`autosolve_use`).
+    fn policy(&self) -> ResolvePolicy<'a> {
+        ResolvePolicy {
+            accept_keywords: self.accept_keywords,
+            package_mask: self.package_mask,
+            package_unmask: self.package_unmask,
+            accept_licenses: self.accept_licenses,
+            pre_env: self.pre_env,
+            env_use: self.env_use,
+            package_use: self.package_use,
+            force_mask: self.force_mask,
         }
     }
 }
@@ -982,18 +1008,10 @@ pub async fn load_repos(
 }
 
 /// Map a dep atom to a `PortagePackage` for the solver.
-#[allow(clippy::too_many_arguments)]
 pub fn target_package(
     data: &RepoData,
     dep: &Dep,
-    accept_keywords: &AcceptKeywords,
-    package_mask: &[Dep],
-    package_unmask: &[Dep],
-    accept_licenses: &AcceptLicenses,
-    pre_env: &str,
-    env_use: &str,
-    package_use: &[(Dep, Vec<UseOverride>)],
-    force_mask: &crate::force_mask::ForceMask,
+    policy: &ResolvePolicy,
 ) -> portage_atom_pubgrub::PortagePackage {
     let entries = match data.versions.get(&dep.cpn) {
         Some(e) => e,
@@ -1011,18 +1029,16 @@ pub fn target_package(
         .filter(|(cpv, cache)| {
             let slot = cache.metadata.slot.slot;
             dep.matches_cpv(cpv, Some(slot.as_str()))
-                && accept_keywords.accepts(&cache.metadata.keywords, cpv, Some(slot))
-                && !is_masked(package_mask, package_unmask, cpv, &cache.metadata.slot)
-                && license_ok_for(
+                && policy
+                    .accept_keywords
+                    .accepts(&cache.metadata.keywords, cpv, Some(slot))
+                && !is_masked(
+                    policy.package_mask,
+                    policy.package_unmask,
                     cpv,
-                    &cache.metadata,
-                    accept_licenses,
-                    pre_env,
-                    env_use,
-                    package_use,
-                    force_mask,
-                    accept_keywords,
+                    &cache.metadata.slot,
                 )
+                && license_ok_for(cpv, &cache.metadata, policy)
         })
         .max_by(|a, b| a.0.version.cmp(&b.0.version))
         .map(|(_, cache)| cache.metadata.slot.slot);
@@ -1093,18 +1109,10 @@ pub fn find_cache<'a>(
 
 /// For each dropped dep, find versions in the unfiltered repo that match its
 /// version range and determine why they were excluded.
-#[allow(clippy::too_many_arguments)]
 pub fn find_autounmask_candidates(
     data: &RepoData,
     dropped: &[DroppedDep],
-    accept_keywords: &AcceptKeywords,
-    package_mask: &[Dep],
-    package_unmask: &[Dep],
-    accept_licenses: &AcceptLicenses,
-    pre_env: &str,
-    env_use: &str,
-    package_use: &[(Dep, Vec<UseOverride>)],
-    force_mask: &crate::force_mask::ForceMask,
+    policy: &ResolvePolicy,
 ) -> Vec<AutounmaskCandidate> {
     let mut candidates = Vec::new();
 
@@ -1131,27 +1139,21 @@ pub fn find_autounmask_candidates(
 
             let mut reasons = Vec::new();
 
-            if let Some(kw) = accept_keywords.keyword_needed(&meta.keywords, cpv, slot) {
+            if let Some(kw) = policy
+                .accept_keywords
+                .keyword_needed(&meta.keywords, cpv, slot)
+            {
                 reasons.push(FilterReason::Keyword(kw));
             }
-            if is_masked(package_mask, package_unmask, cpv, &meta.slot) {
+            if is_masked(policy.package_mask, policy.package_unmask, cpv, &meta.slot) {
                 reasons.push(FilterReason::Masked);
             }
             if let Some(lic) = &meta.license {
-                let accept = accept_licenses.effective_for(cpv, slot);
+                let accept = policy.accept_licenses.effective_for(cpv, slot);
                 // Evaluate `use? ( … )` branches against the version's effective
                 // USE so a non-FREE license behind a disabled flag is not flagged.
                 let needed = if license_has_conditional(lic) {
-                    let cfg = effective_use_config(
-                        pre_env,
-                        env_use,
-                        package_use,
-                        force_mask,
-                        accept_keywords,
-                        cpv,
-                        meta,
-                        slot,
-                    );
+                    let cfg = effective_use_config(policy, cpv, meta, slot);
                     licenses_needed(lic, &accept, &use_predicate(&cfg))
                 } else {
                     licenses_needed(lic, &accept, &|_| false)
@@ -1448,14 +1450,16 @@ mod tests {
             target_package(
                 &data,
                 &dep(atom),
-                &ak,
-                &[],
-                &[],
-                &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
-                "",
-                "",
-                &[],
-                &ForceMask::default(),
+                &ResolvePolicy {
+                    accept_keywords: &ak,
+                    package_mask: &[],
+                    package_unmask: &[],
+                    accept_licenses: &AcceptLicenses::new(accept_all_licenses(), Vec::new()),
+                    pre_env: "",
+                    env_use: "",
+                    package_use: &[],
+                    force_mask: &ForceMask::default(),
+                },
             )
             .slot()
             .map(|s| s.as_str().to_string())

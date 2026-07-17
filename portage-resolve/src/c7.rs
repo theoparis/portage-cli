@@ -28,7 +28,9 @@ use std::collections::HashMap;
 use portage_repo::{AcceptLicense, LicenseGroupRegistry};
 
 use crate::force_mask::ForceMask;
-use crate::repo::{AcceptKeywords, AcceptLicenses, Adapter, RepoData, target_package};
+use crate::repo::{
+    AcceptKeywords, AcceptLicenses, Adapter, RepoData, ResolvePolicy, target_package,
+};
 
 /// Build a `RepoData` from `(cpv, md5-cache-text)` pairs.
 fn repo_from(entries: &[(&str, &str)]) -> RepoData {
@@ -104,12 +106,22 @@ fn solve_with(
         force_mask: &fm,
         autosolve_use: true,
     };
+    let policy = ResolvePolicy {
+        accept_keywords: &accept,
+        package_mask: &[],
+        package_unmask: &[],
+        accept_licenses: &lic,
+        pre_env: "",
+        env_use: "",
+        package_use: pu,
+        force_mask: &fm,
+    };
     let mut provider = PortageDependencyProvider::new(adapter);
     let roots: Vec<_> = targets
         .iter()
         .map(|t| {
             let dep = Dep::parse(t).unwrap();
-            let pkg = target_package(data, &dep, &accept, &[], &[], &lic, "", "", pu, &fm);
+            let pkg = target_package(data, &dep, &policy);
             (pkg, PortageVersionSet::any())
         })
         .collect();

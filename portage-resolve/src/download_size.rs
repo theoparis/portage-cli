@@ -2,14 +2,12 @@ use std::collections::HashMap;
 
 use camino::Utf8Path;
 use portage_atom::interner::Interned;
-use portage_atom::{Cpn, Cpv, Dep, Version};
-use portage_atom_pubgrub::{
-    CededFlag, PortagePackage, UseFlagState, UseOverride, resolve_effective_use,
-};
+use portage_atom::{Cpn, Cpv, Version};
+use portage_atom_pubgrub::{CededFlag, PortagePackage, UseFlagState, resolve_effective_use};
 use portage_repo::{Manifest, ManifestEntry};
 
 use crate::effective_use::{apply_ceded, iuse_defaults};
-use crate::repo::{RepoData, find_cache};
+use crate::repo::{RepoData, ResolvePolicy, find_cache};
 
 /// Per-package download size, in **bytes**, of the distfiles that are not
 /// already present in `DISTDIR` — matching what `emerge -pv` totals as
@@ -19,15 +17,12 @@ use crate::repo::{RepoData, find_cache};
 /// effective USE (so USE-conditional sources are only counted when active) and
 /// sized from the package's `Manifest`. A file present in `DISTDIR` at its
 /// recorded size counts as zero (already fetched).
-#[allow(clippy::too_many_arguments)]
 pub fn compute(
     repo_path: &Utf8Path,
     distdir: &str,
     data: &RepoData,
     order: &[(PortagePackage, Version)],
-    pre_env: &str,
-    env_use: &str,
-    package_use: &[(Dep, Vec<UseOverride>)],
+    policy: &ResolvePolicy,
     ceded: &[CededFlag],
 ) -> HashMap<Cpv, u64> {
     let distdir = Utf8Path::new(distdir);
@@ -51,8 +46,14 @@ pub fn compute(
 
         let cpv = Cpv::new(*pkg.cpn(), ver.clone());
         let defaults = iuse_defaults(cache);
-        let mut effective =
-            resolve_effective_use(&defaults, pre_env, &cpv, pkg.slot(), package_use, env_use);
+        let mut effective = resolve_effective_use(
+            &defaults,
+            policy.pre_env,
+            &cpv,
+            pkg.slot(),
+            policy.package_use,
+            policy.env_use,
+        );
         apply_ceded(&mut effective, *pkg.cpn(), ceded);
         let enabled = |flag: &str| -> bool {
             matches!(effective.get(Interned::intern(flag)), UseFlagState::Enabled)

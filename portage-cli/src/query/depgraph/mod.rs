@@ -356,14 +356,16 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         let pkg = repo::target_package(
             &data,
             &dep,
-            &accept_keywords,
-            &package_mask,
-            &package_unmask,
-            &accept_licenses,
-            &pre_env,
-            &env_use,
-            &package_use,
-            &force_mask,
+            &repo::ResolvePolicy {
+                accept_keywords: &accept_keywords,
+                package_mask: &package_mask,
+                package_unmask: &package_unmask,
+                accept_licenses: &accept_licenses,
+                pre_env: &pre_env,
+                env_use: &env_use,
+                package_use: &package_use,
+                force_mask: &force_mask,
+            },
         );
         let vs = match &dep.version {
             Some(v) => {
@@ -642,23 +644,27 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
         combined
     };
 
+    // `package_use` is settled from here on (no further rebind below), so
+    // this is built once and reused by every remaining filter/size call
+    // instead of each one re-listing the same 8 fields.
+    let final_policy = repo::ResolvePolicy {
+        accept_keywords: &accept_keywords,
+        package_mask: &package_mask,
+        package_unmask: &package_unmask,
+        accept_licenses: &accept_licenses,
+        pre_env: &pre_env,
+        env_use: &env_use,
+        package_use: &package_use,
+        force_mask: &force_mask,
+    };
+
     if verbose >= 3 {
         output::report_dropped_deps(provider.dropped_deps(), &data, arch.as_str());
     }
 
     // Autounmask: detect filtered candidates from dropped deps.
-    let autounmask_candidates = repo::find_autounmask_candidates(
-        &data,
-        provider.dropped_deps(),
-        &accept_keywords,
-        &package_mask,
-        &package_unmask,
-        &accept_licenses,
-        &pre_env,
-        &env_use,
-        &package_use,
-        &force_mask,
-    );
+    let autounmask_candidates =
+        repo::find_autounmask_candidates(&data, provider.dropped_deps(), &final_policy);
 
     let root_pkgs: Vec<PortagePackage> = root_deps.iter().map(|(p, _)| p.clone()).collect();
 
@@ -970,16 +976,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             // Verbose mode shows per-package download size and a total; skip the
             // Manifest/DISTDIR work entirely in plain mode.
             let sizes = if verbose >= 1 {
-                download_size::compute(
-                    repo_path,
-                    &distdir,
-                    &data,
-                    &order,
-                    &pre_env,
-                    &env_use,
-                    &package_use,
-                    &ceded,
-                )
+                download_size::compute(repo_path, &distdir, &data, &order, &final_policy, &ceded)
             } else {
                 HashMap::new()
             };
