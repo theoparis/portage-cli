@@ -333,8 +333,20 @@ pub(super) fn symlink_force(content: &Utf8Path, link: &Utf8Path) -> Result<()> {
 }
 
 /// Run a list action.
+///
+/// `outer_roots()`, not `roots()`: found live 2026-07-17 testing `em select
+/// pkgconf` under `--prefix` — clap's derive macro applies a subcommand's
+/// own `--target` value to *both* that local field and the global `Cli`
+/// one (they share the long name "target", even though only the global one
+/// has the `-T` short alias), so `em select <module> ... --target T` was
+/// silently also setting `Cli::target`. `roots()` treats a non-`None`
+/// `Cli::target` as "substitute the sysroot in", which `select` never
+/// wants — it only cares about `T` as "which target's own profile file to
+/// read/write", a config-root-space question, not a merge-root one.
+/// `outer_roots()` never consults `Cli::target` at all, so it's immune to
+/// this collision regardless of whether the collision itself gets fixed.
 pub fn run_list<T: EnvDProfile>(globals: &Cli) -> Result<()> {
-    let roots = globals.roots();
+    let roots = globals.outer_roots();
     let profiles_by_target = list_all_profiles::<T>(&roots)?;
     let mut out = anstream::stdout();
 
@@ -390,9 +402,10 @@ pub fn run_list<T: EnvDProfile>(globals: &Cli) -> Result<()> {
     Ok(())
 }
 
-/// Run a show action.
+/// Run a show action. `outer_roots()`, not `roots()` — see [`run_list`]'s
+/// doc comment.
 pub fn run_show<T: EnvDProfile>(globals: &Cli, target: &str) -> Result<()> {
-    match get_current_profile::<T>(&globals.roots(), target) {
+    match get_current_profile::<T>(&globals.outer_roots(), target) {
         Some(profile) => println!("{}", profile),
         None => println!(
             "(no {} profile set for target '{}')",
@@ -403,14 +416,15 @@ pub fn run_show<T: EnvDProfile>(globals: &Cli, target: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run a set action.
+/// Run a set action. `outer_roots()`, not `roots()` — see [`run_list`]'s
+/// doc comment.
 pub fn run_set<T: EnvDProfile>(
     globals: &Cli,
     target: &str,
     profile: &str,
     base_dir: &Utf8PathBuf,
 ) -> Result<()> {
-    let roots = globals.roots();
+    let roots = globals.outer_roots();
     let profiles_by_target = list_all_profiles::<T>(&roots)?;
 
     let resolved_profile = if let Ok(n) = profile.parse::<usize>() {

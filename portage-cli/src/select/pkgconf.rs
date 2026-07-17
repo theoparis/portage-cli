@@ -226,8 +226,11 @@ fn link_target(roots: &Roots, target: &str) -> Result<()> {
 }
 
 /// The backend the shared script's `REAL_PKG_CONFIG=` line currently names,
-/// plus its resolved path — `None` if there's no shared script yet.
-fn current_backend(roots: &Roots) -> Option<(String, Utf8PathBuf)> {
+/// plus its resolved path — `None` if there's no shared script yet
+/// (root-wide: used internally by [`activate_pkgconf`] to decide whether a
+/// backend has already been chosen for this root at all, regardless of
+/// which target is asking).
+fn shared_backend(roots: &Roots) -> Option<(String, Utf8PathBuf)> {
     let content = std::fs::read_to_string(shared_script_path(roots)).ok()?;
     let raw = content
         .lines()
@@ -235,6 +238,19 @@ fn current_backend(roots: &Roots) -> Option<(String, Utf8PathBuf)> {
     let path = Utf8PathBuf::from(raw);
     let name = path.file_name()?.to_string();
     Some((name, path))
+}
+
+/// [`shared_backend`], but scoped to `target`: the backend choice itself is
+/// root-wide, but whether *this target* has actually been wired up for
+/// pkg-config is real per-target state — its own `<target>-pkg-config`
+/// symlink either exists or doesn't. Returns `None` if `target`'s symlink
+/// isn't there yet, even if some other target under the same root already
+/// established a shared script (matches `show`/`list`'s user-facing
+/// expectation: a target you haven't activated pkg-config for yet should
+/// report as unset, not silently inherit another target's status).
+fn current_backend(roots: &Roots, target: &str) -> Option<(String, Utf8PathBuf)> {
+    std::fs::symlink_metadata(wrapper_path(roots, target)).ok()?;
+    shared_backend(roots)
 }
 
 /// Create the `<target>-pkg-config` symlink (and the shared script it
@@ -252,7 +268,7 @@ pub fn activate_pkgconf(roots: &Roots, target: &str) -> Result<bool> {
     if std::fs::symlink_metadata(&link).is_ok() {
         return Ok(true);
     }
-    if current_backend(roots).is_none() {
+    if shared_backend(roots).is_none() {
         let Some(backend_path) = BACKENDS.iter().find_map(|b| find_on_path(b)) else {
             return Ok(false);
         };
@@ -263,7 +279,10 @@ pub fn activate_pkgconf(roots: &Roots, target: &str) -> Result<bool> {
 }
 
 pub fn run(action: &PkgconfAction, globals: &Cli) -> Result<()> {
-    let roots = globals.roots();
+    // outer_roots(), not roots() -- see env_d::run_list's doc comment (the
+    // --target flag collision between this subcommand's own field and the
+    // global one).
+    let roots = globals.outer_roots();
     let target = match action {
         PkgconfAction::List { target, .. } | PkgconfAction::Show { target, .. } => target
             .clone()
@@ -275,7 +294,7 @@ pub fn run(action: &PkgconfAction, globals: &Cli) -> Result<()> {
 
     match action {
         PkgconfAction::List { .. } => {
-            let current = current_backend(&roots);
+            let current = current_backend(&roots, &target);
             for (i, backend) in BACKENDS.iter().enumerate() {
                 let reachable = find_on_path(backend);
                 let is_current = current.as_ref().is_some_and(|(name, _)| name == backend);
@@ -291,9 +310,9 @@ pub fn run(action: &PkgconfAction, globals: &Cli) -> Result<()> {
             Ok(())
         }
         PkgconfAction::Show { .. } => {
-            match current_backend(&roots) {
+            match current_backend(&roots, &target) {
                 Some((name, path)) => println!("{name} ({path})"),
-                None => println!("(no pkg-config backend set for this root)"),
+                None => println!("(no pkg-config wrapper set for target '{target}')"),
             }
             Ok(())
         }
@@ -400,7 +419,7 @@ mod tests {
         let roots = test_roots(dir.path());
         assert!(activate_pkgconf(&roots, "riscv64-unknown-linux-gnu").unwrap());
 
-        let (name, _) = current_backend(&roots).unwrap();
+        let (name, _) = current_backend(&roots, "riscv64-unknown-linux-gnu").unwrap();
         assert_eq!(name, "pkgconf", "must prefer pkgconf over pkg-config");
 
         let script = shared_script_path(&roots);
@@ -437,7 +456,7 @@ mod tests {
 
         let roots = test_roots(dir.path());
         assert!(activate_pkgconf(&roots, "riscv64-unknown-linux-gnu").unwrap());
-        let (name, _) = current_backend(&roots).unwrap();
+        let (name, _) = current_backend(&roots, "riscv64-unknown-linux-gnu").unwrap();
         assert_eq!(name, "pkg-config");
     }
 
@@ -453,7 +472,7 @@ mod tests {
 
         let roots = test_roots(dir.path());
         assert!(!activate_pkgconf(&roots, "riscv64-unknown-linux-gnu").unwrap());
-        assert!(current_backend(&roots).is_none());
+        assert!(current_backend(&roots, "riscv64-unknown-linux-gnu").is_none());
     }
 
     /// A deliberate `em select pkgconf set` choice (or an earlier
@@ -490,7 +509,7 @@ mod tests {
         // A second target's auto-activation must reuse the same choice,
         // not silently re-pick pkgconf.
         assert!(activate_pkgconf(&roots, "aarch64-unknown-linux-gnu").unwrap());
-        let (name, _) = current_backend(&roots).unwrap();
+        let (name, _) = current_backend(&roots, "aarch64-unknown-linux-gnu").unwrap();
         assert_eq!(
             name, "pkg-config",
             "existing root-wide choice must not be overwritten by a second target"
@@ -504,6 +523,15 @@ mod tests {
                 std::path::Path::new(SHARED_SCRIPT_NAME)
             );
         }
+
+        // A *third* target that was never activated must report as unset,
+        // even though the shared script (and its backend choice) already
+        // exists from the other two targets -- the symlink's existence is
+        // real per-target state, not just the shared script's content.
+        assert!(
+            current_backend(&roots, "x86_64-unknown-linux-gnu").is_none(),
+            "an unconfigured target must not inherit another target's status"
+        );
     }
 
     /// The shared script must actually work as a real shell script,

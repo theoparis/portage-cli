@@ -33,7 +33,14 @@ fn repo_conf_file(globals: &Cli, name: &str) -> Utf8PathBuf {
 }
 
 fn list(globals: &Cli) -> Result<()> {
-    let conf = globals.roots().repos_conf().context("reading repos.conf")?;
+    // outer_roots(), not roots(): `RepositoryAction` has no --target of its
+    // own, but the global one can still be set for unrelated reasons on the
+    // same invocation -- select never wants roots()'s sysroot substitution
+    // regardless (see env_d::run_list's doc comment).
+    let conf = globals
+        .outer_roots()
+        .repos_conf()
+        .context("reading repos.conf")?;
     let mut out = anstream::stdout();
     for r in conf.repos() {
         // Tint the main repo's marker green, matching the current-profile `*`.

@@ -113,7 +113,10 @@ pub fn run(action: &CompilerAction, globals: &Cli) -> Result<()> {
             .unwrap_or_else(|| env_d::get_default_target(globals)),
     };
 
-    let base_dir = env_d::env_d_dir::<GccProfileType>(&globals.roots());
+    // outer_roots(), not roots() -- see env_d::run_list's doc comment (the
+    // --target flag collision between this subcommand's own field and the
+    // global one).
+    let base_dir = env_d::env_d_dir::<GccProfileType>(&globals.outer_roots());
 
     match action {
         CompilerAction::List { .. } => env_d::run_list::<GccProfileType>(globals),

@@ -112,7 +112,10 @@ pub fn run(action: &BinutilsAction, globals: &Cli) -> Result<()> {
             .unwrap_or_else(|| env_d::get_default_target(globals)),
     };
 
-    let base_dir = env_d::env_d_dir::<BinutilsProfileType>(&globals.roots());
+    // outer_roots(), not roots() -- see env_d::run_list's doc comment (the
+    // --target flag collision between this subcommand's own field and the
+    // global one).
+    let base_dir = env_d::env_d_dir::<BinutilsProfileType>(&globals.outer_roots());
 
     match action {
         BinutilsAction::List { .. } => env_d::run_list::<BinutilsProfileType>(globals),

@@ -76,8 +76,19 @@ pub async fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
 
 /// The configuration root for `etc/portage` operations: `--config-root`
 /// (cross sysroot / offset) when given, else `--prefix`/`--local` overlay, else `/`.
+///
+/// `outer_roots()`, not `roots()` — found live 2026-07-17: clap's derive
+/// macro applies a `select` subcommand's own `--target` value to *both*
+/// that local field and the global `Cli::target` (same long name, "target",
+/// even though the global one alone has the `-T` short alias), so `em
+/// select <module> ... --target T` was silently also setting `Cli::target`
+/// and triggering `roots()`'s sysroot substitution — completely unwanted
+/// here, since `select` only ever means "which target's own config-root
+/// state", never "merge into this sysroot". `outer_roots()` doesn't consult
+/// `Cli::target` at all, so it's immune regardless of whether the
+/// underlying flag collision itself gets fixed.
 fn config_portage_dir(globals: &Cli) -> Utf8PathBuf {
-    config_portage_dir_for(&globals.roots())
+    config_portage_dir_for(&globals.outer_roots())
 }
 
 /// [`config_portage_dir`], but from an already-computed [`Roots`] rather than
@@ -109,9 +120,11 @@ pub(super) fn config_portage_dir_for(roots: &Roots) -> Utf8PathBuf {
     Utf8PathBuf::from("/etc/portage")
 }
 
-/// Check if we're in a prefix/local context (--local or --prefix without --config-root).
+/// Check if we're in a prefix/local context (--local or --prefix without
+/// --config-root). `outer_roots()`, not `roots()` — see
+/// [`config_portage_dir`]'s doc comment.
 pub fn is_prefix_context(globals: &Cli) -> bool {
-    is_prefix_context_for(&globals.roots())
+    is_prefix_context_for(&globals.outer_roots())
 }
 
 /// [`is_prefix_context`], but from an already-computed [`Roots`] — see

@@ -18,7 +18,10 @@ fn llvm_base_dir(globals: &Cli) -> Utf8PathBuf {
     // Check if we're in a prefix/local context
     if is_prefix_context(globals) {
         // For prefix, LLVM would be under EPREFIX/usr/lib/llvm
-        let roots = globals.roots();
+        // outer_roots(), not roots(): ClangAction has no --target of its
+        // own, but select never wants roots()'s sysroot substitution
+        // regardless (see env_d::run_list's doc comment).
+        let roots = globals.outer_roots();
         if let Some(eprefix) = roots.eprefix() {
             return eprefix.join("usr/lib/llvm");
         }
