@@ -90,6 +90,7 @@ fn merge_merge_flags(globals: &Cli, args: &MergeFlags) -> MergeFlags {
         oneshot: args.oneshot || g.oneshot,
         fetchonly: args.fetchonly || g.fetchonly,
         buildpkg: args.buildpkg || g.buildpkg,
+        buildpkgonly: args.buildpkgonly || g.buildpkgonly,
         usepkg: args.usepkg || g.usepkg,
         usepkgonly: args.usepkgonly || g.usepkgonly,
         getbinpkg: args.getbinpkg || g.getbinpkg,

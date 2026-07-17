@@ -39,6 +39,13 @@ enum PhaseGroup {
     /// Merge a pre-built GPKG (`-k`/`-g`): clean → extract image → `qmerge` →
     /// tree-drop. No src_install — the extracted image is the payload.
     BinpkgMerge,
+    /// `-B`/`--buildpkgonly`: clean → `pretend..install` → buildpkg →
+    /// tree-drop. No `qmerge` at all, unlike every other merge-shaped
+    /// group — the image is packaged but never installed into the live
+    /// ROOT/VDB. Real emerge's own caveat applies: this doesn't resolve or
+    /// install anything, so the ebuild's own DEPEND/BDEPEND closure must
+    /// already be satisfied on the build host.
+    BuildOnly,
     /// Debug (`em ebuild`): run the given phases only; no clean/drop/buildpkg.
     Debug(Vec<String>),
 }
@@ -80,6 +87,20 @@ impl PhaseGroup {
                 .map(|s| s.to_string())
                 .collect(),
             Self::BinpkgMerge => vec!["qmerge".to_string()],
+            Self::BuildOnly => [
+                "pretend",
+                "setup",
+                "fetch",
+                "unpack",
+                "prepare",
+                "configure",
+                "compile",
+                "test",
+                "install",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
             Self::Debug(p) => p.clone(),
         }
     }
@@ -110,7 +131,7 @@ impl PhaseGroup {
     /// chasing a stage1 gnupg failure — see `todo/stage-build-shakeout.md`.
     fn clean_subs(&self) -> Option<&'static [&'static str]> {
         match self {
-            Self::Full | Self::Compile | Self::BinpkgMerge => {
+            Self::Full | Self::Compile | Self::BinpkgMerge | Self::BuildOnly => {
                 Some(&["work", "image", "temp", "homedir"])
             }
             Self::Install => Some(&["image", "homedir"]),
@@ -130,14 +151,18 @@ impl PhaseGroup {
         matches!(self, Self::Install)
     }
 
-    /// Build a binpkg after qmerge (Full + Install, when `-b` is set).
+    /// Build a binpkg (Full + Install, when `-b` is set; BuildOnly
+    /// unconditionally, since packaging the image is the entire point).
     fn should_buildpkg(&self) -> bool {
-        matches!(self, Self::Full | Self::Install)
+        matches!(self, Self::Full | Self::Install | Self::BuildOnly)
     }
 
-    /// Drop the build tree after qmerge.
+    /// Drop the build tree afterward.
     fn should_tree_drop(&self) -> bool {
-        matches!(self, Self::Full | Self::Install | Self::BinpkgMerge)
+        matches!(
+            self,
+            Self::Full | Self::Install | Self::BinpkgMerge | Self::BuildOnly
+        )
     }
 }
 
@@ -307,11 +332,41 @@ pub async fn build_and_merge(
     roots: RootContext<'_>,
     merge_gate: Option<&tokio::sync::Mutex<()>>,
     buildpkg: bool,
+    // `-B`/`--buildpkgonly`: package the image, never qmerge it. Checked
+    // first and unconditionally single-process -- there's no install into
+    // the live ROOT/VDB to delegate to a privilege-wrapped worker, so the
+    // Q6 compile/install split this function otherwise does has nothing to
+    // scope around (an unprivileged run is instead wrapped whole by
+    // `maybe_supervise`, see `needs_whole_process_wrap`). `buildpkg` is
+    // forced `true` for the `run_inner` call below regardless of the
+    // caller's own `-b`: producing the binpkg is the entire point of `-B`,
+    // not a separate opt-in on top of it.
+    buildpkgonly: bool,
 ) -> Result<()> {
     let ebuild = Ebuild::with_cpv(cpv.clone(), ebuild_path);
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
     let work_dir = work_base.join(ebuild.category()).join(pf);
     let log = work_dir.join("build.log");
+
+    if buildpkgonly {
+        return run_inner(
+            ebuild_path.as_str(),
+            Some(cpv),
+            &PhaseGroup::BuildOnly,
+            Some(&work_dir),
+            None,
+            root,
+            Some(use_flags),
+            distdir,
+            Some((log.clone(), quiet)),
+            roots,
+            merge_gate,
+            true,
+            None,
+        )
+        .await
+        .with_context(|| format!("build log: {log}"));
+    }
 
     if let Some(backend) = crate::privilege::install_wrap_backend() {
         // Scoped privilege (Q6): compile runs un-wrapped in this process;
@@ -880,10 +935,23 @@ async fn run_inner(
     // Build a binary package from the freshly-merged image + VDB entry, if asked.
     // Runs after qmerge (VDB + CONTENTS written) and before the build tree is
     // dropped, inside the same privilege session so ${D} ownership/xattrs are
-    // read correctly.
+    // read correctly. `-B`/`BuildOnly` never ran qmerge at all, so it computes
+    // its own scratch metadata instead (`build_binpkg_standalone`) -- and,
+    // unlike `-b`'s packaging (a bonus on top of an already-successful
+    // install), a packaging failure here is the *whole* operation failing,
+    // so it propagates instead of just printing a warning.
     if buildpkg && group.should_buildpkg() {
-        match build_binpkg(&shell, &ebuild, &work_root, root) {
+        let is_buildonly = matches!(group, PhaseGroup::BuildOnly);
+        let result = if is_buildonly {
+            build_binpkg_standalone(&mut shell, &ebuild, &work_root, root).await
+        } else {
+            build_binpkg(&shell, &ebuild, &work_root, root)
+        };
+        match result {
             Ok(path) => println!(">>> Created binary package: {path}"),
+            Err(e) if is_buildonly => {
+                return Err(e.context("--buildpkgonly: creating binary package"));
+            }
             Err(e) => eprintln!("warning: --buildpkg failed for {}: {e:#}", ebuild.cpv()),
         }
     }
@@ -953,12 +1021,88 @@ fn build_binpkg(
 ) -> Result<Utf8PathBuf> {
     let cat = ebuild.category();
     let pf = format!("{}-{}", ebuild.name(), ebuild.version());
-    let image_dir = ed_image_dir(shell, work_root);
     let vdb_dir = root.join("var/db/pkg").join(cat).join(&pf);
     anyhow::ensure!(
         vdb_dir.exists(),
         "VDB entry {vdb_dir} not found (qmerge did not write it?)"
     );
+    write_binpkg(shell, ebuild, work_root, root, &vdb_dir)
+}
+
+/// `-B`/`--buildpkgonly`: package the image without ever touching the live
+/// ROOT/VDB. Matches real portage's own model (`EbuildBuild.py`): it never
+/// calls `merge()` for `-B` either, packaging straight from `${D}` instead.
+/// Computes CONTENTS/metadata the exact same way a normal merge would --
+/// `walk_image` + `Vdb::register` -- just pointed at scratch locations
+/// under `work_root/temp` (already covered by the existing tree-drop
+/// cleanup) rather than the real root and the real VDB, which are
+/// genuinely never written to at any point.
+async fn build_binpkg_standalone(
+    shell: &mut portage_repo::EbuildShell,
+    ebuild: &Ebuild,
+    work_root: &Utf8Path,
+    root: &Utf8Path,
+) -> Result<Utf8PathBuf> {
+    let env = shell.collect_env();
+    let env_dump = capture_environment(shell, work_root).await;
+    let image_dir = ed_image_dir(shell, work_root);
+    let cp = ConfigProtect::from_shell(shell);
+
+    // A throwaway destination -- CONTENTS records absolute installed paths
+    // (`/usr/bin/foo`) independent of where the corresponding real bytes
+    // land, so pointing walk_image here instead of at `root` produces an
+    // identical contents list without copying a single file into the real
+    // system.
+    let scratch_dest = work_root.join("temp/buildpkgonly-dest");
+    let WalkResult { contents, size, .. } = walk_image(&image_dir, &scratch_dest, &cp)?;
+
+    let scratch_vdb_root = work_root.join("temp/buildpkgonly-vdb");
+    let vdb = open_or_create_vdb(&scratch_vdb_root)?;
+    let counter = vdb.next_counter()?;
+    let build_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let elf = crate::elfscan::scan_image(&image_dir);
+    let spec = merge_spec_from_env(
+        env,
+        ebuild.cpv().clone(),
+        contents,
+        elf,
+        size,
+        build_time,
+        counter,
+    );
+    let installed = vdb.register(&spec)?;
+
+    let pf = format!("{}-{}", ebuild.name(), ebuild.version());
+    let ebuild_dest = installed.path().join(format!("{pf}.ebuild"));
+    if let Err(e) = std::fs::copy(ebuild.path(), ebuild_dest.as_std_path()) {
+        eprintln!("warning: could not copy ebuild into package metadata: {e}");
+    }
+    if let Ok(ref data) = env_dump
+        && let Err(e) = write_environment_bz2(&installed, data)
+    {
+        eprintln!("warning: could not write environment.bz2: {e}");
+    }
+
+    write_binpkg(shell, ebuild, work_root, root, installed.path())
+}
+
+/// Shared GPKG-writing core: pack `image_dir` (`${D}`) + `metadata_dir` (a
+/// VDB-shaped directory -- the real VDB entry for a normal `-b` merge via
+/// [`build_binpkg`], or a scratch one for `-B` via
+/// [`build_binpkg_standalone`]) into a GPKG under `PKGDIR`.
+fn write_binpkg(
+    shell: &portage_repo::EbuildShell,
+    ebuild: &Ebuild,
+    work_root: &Utf8Path,
+    root: &Utf8Path,
+    metadata_dir: &Utf8Path,
+) -> Result<Utf8PathBuf> {
+    let cat = ebuild.category();
+    let pf = format!("{}-{}", ebuild.name(), ebuild.version());
+    let image_dir = ed_image_dir(shell, work_root);
     // PKGDIR precedence: $PKGDIR env (portage honours it) → the shell's resolved
     // value (make.conf/make.globals) → the default. Must agree with the
     // consumer's `binpkg::resolve_pkgdir` — including its root-awareness:
@@ -983,7 +1127,7 @@ fn build_binpkg(
     portage_binpkg::write_gpkg(
         &portage_binpkg::GpkgInput {
             image_dir: image_dir.as_std_path(),
-            metadata_dir: vdb_dir.as_std_path(),
+            metadata_dir: metadata_dir.as_std_path(),
             basename: &pf,
         },
         out.as_std_path(),

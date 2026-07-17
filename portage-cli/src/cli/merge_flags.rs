@@ -75,6 +75,12 @@ pub struct MergeFlags {
     #[arg(short = 'b', long)]
     pub buildpkg: bool,
 
+    /// Build binary packages without merging/installing them. All
+    /// build-time dependencies must already be satisfied on the system --
+    /// this does not resolve or install anything to make that true.
+    #[arg(short = 'B', long)]
+    pub buildpkgonly: bool,
+
     /// Use binary packages if available, otherwise fall back to source.
     #[arg(short = 'k', long)]
     pub usepkg: bool,

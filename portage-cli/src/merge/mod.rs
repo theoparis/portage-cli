@@ -88,6 +88,7 @@ pub(crate) async fn run_merge_plan(
     emptytree: bool,
     jobs: usize,
     buildpkg: bool,
+    buildpkgonly: bool,
     usepkg: bool,
     getbinpkg: bool,
     getbinpkgonly: bool,
@@ -103,10 +104,15 @@ pub(crate) async fn run_merge_plan(
     // hit a permission-denied PKGDIR (fixed separately — resolve_pkgdir is now
     // root-aware), and each failure surfaced as an unexplained, silent worker
     // death rather than the single clear error this check now gives instead.
-    if buildpkg {
+    if buildpkg || buildpkgonly {
+        let flag = if buildpkg {
+            "--buildpkg"
+        } else {
+            "--buildpkgonly"
+        };
         let pkgdir = binpkg::resolve_pkgdir(globals);
         check_pkgdir_writable(&pkgdir)
-            .with_context(|| format!("--buildpkg: PKGDIR {pkgdir} is not writable"))?;
+            .with_context(|| format!("{flag}: PKGDIR {pkgdir} is not writable"))?;
     }
 
     // Implication chain (portage actions.py): -g ⇒ --usepkg, -G ⇒ --getbinpkg +
@@ -197,6 +203,7 @@ pub(crate) async fn run_merge_plan(
             keep_going,
             emptytree,
             buildpkg,
+            buildpkgonly,
             binpkg_index.as_ref(),
             &remote_indices,
             enforce_no_source,
@@ -215,6 +222,7 @@ pub(crate) async fn run_merge_plan(
             emptytree,
             jobs,
             buildpkg,
+            buildpkgonly,
             binpkg_index.as_ref(),
             &remote_indices,
             enforce_no_source,
@@ -224,7 +232,9 @@ pub(crate) async fn run_merge_plan(
 
     // Refresh ${ROOT}/etc/profile.env and the linker cache, as emerge does
     // after merging — only worthwhile if something was actually installed.
+    // `-B` installed nothing (the live root is untouched by contract).
     if merged > 0
+        && !buildpkgonly
         && let Err(e) = maint::env::env_update(merge_root)
     {
         eprintln!("warning: env-update failed: {e:#}");
@@ -236,7 +246,12 @@ pub(crate) async fn run_merge_plan(
         } else {
             String::new()
         };
-        println!("\n>>> Done — {merged} package(s) merged into {merge_root}{extra}");
+        let done = if buildpkgonly {
+            format!("{merged} binary package(s) built")
+        } else {
+            format!("{merged} package(s) merged into {merge_root}")
+        };
+        println!("\n>>> Done — {done}{extra}");
         return Ok(());
     }
 
@@ -270,6 +285,7 @@ async fn merge_sequential(
     keep_going: bool,
     emptytree: bool,
     buildpkg: bool,
+    buildpkgonly: bool,
     binpkg_index: Option<&portage_binpkg::BinpkgIndex>,
     remote_indices: &[portage_binpkg::RemoteBinpkgIndex],
     enforce_no_source: bool,
@@ -399,6 +415,7 @@ async fn merge_sequential(
                         },
                         None,
                         buildpkg,
+                        buildpkgonly,
                     )
                     .await
                 }
@@ -435,6 +452,7 @@ async fn merge_sequential(
                 },
                 None,
                 buildpkg,
+                buildpkgonly,
             )
             .await
         };
@@ -451,8 +469,8 @@ async fn merge_sequential(
                 // installed `libpkgconf.so`, even though both the package and
                 // the cache entry were correct by the time the whole run
                 // finished — the cache just wasn't refreshed yet at the
-                // moment it was needed).
-                if let Err(e) = maint::env::env_update(merge_root) {
+                // moment it was needed). `-B` installed nothing to refresh for.
+                if !buildpkgonly && let Err(e) = maint::env::env_update(merge_root) {
                     eprintln!("warning: env-update failed: {e:#}");
                 }
             }
@@ -566,6 +584,7 @@ async fn merge_parallel(
     emptytree: bool,
     jobs: usize,
     buildpkg: bool,
+    buildpkgonly: bool,
     binpkg_index: Option<&portage_binpkg::BinpkgIndex>,
     remote_indices: &[portage_binpkg::RemoteBinpkgIndex],
     enforce_no_source: bool,
@@ -706,6 +725,7 @@ async fn merge_parallel(
                         },
                         Some(gate),
                         buildpkg,
+                        buildpkgonly,
                     )
                     .await
                 };
@@ -725,7 +745,7 @@ async fn merge_parallel(
                 // whole batch — a still-running or not-yet-started sibling may
                 // need to dynamically load what this merge just installed.
                 let merge_root = entry_roots(&plan[i], roots, host_roots).merge_root();
-                if let Err(e) = maint::env::env_update(merge_root) {
+                if !buildpkgonly && let Err(e) = maint::env::env_update(merge_root) {
                     eprintln!("warning: env-update failed: {e:#}");
                 }
             }

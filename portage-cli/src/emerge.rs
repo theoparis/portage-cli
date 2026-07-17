@@ -330,7 +330,13 @@ async fn emerge_atoms_inner(
     let distdir = relocate.map(|p| p.join("var/cache/distfiles"));
     let work_base = ebuild::default_work_base(relocate);
 
-    if merge_flags.ask && !confirm_action("merge", outcome.plan.len())? {
+    // `-B` builds without merging — ask about what will actually happen.
+    let verb = if merge_flags.buildpkgonly {
+        "build"
+    } else {
+        "merge"
+    };
+    if merge_flags.ask && !confirm_action(verb, outcome.plan.len())? {
         println!(">>> Quitting.");
         return Ok(());
     }
@@ -346,6 +352,7 @@ async fn emerge_atoms_inner(
         merge_flags.emptytree,
         merge_flags.jobs.map(|j| j as usize).unwrap_or(1).max(1),
         merge_flags.buildpkg,
+        merge_flags.buildpkgonly,
         merge_flags.usepkg,
         merge_flags.getbinpkg,
         merge_flags.getbinpkgonly,
