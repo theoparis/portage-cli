@@ -577,3 +577,39 @@ async fn cross_toolchain_selection_no_op_when_tool_unreachable() {
 
     assert!(shell.get_var("CC").unwrap_or_default().is_empty());
 }
+
+/// Regression test for a bug found live 2026-07-17 building `sys-libs/readline`
+/// in a from-scratch riscv64 cross build: the cross-toolchain block's own
+/// gate only checks that `${chost}-gcc` exists, then used to set all 12
+/// tool vars (including `PKG_CONFIG`) unconditionally from that same
+/// assumption. Unlike the other 11 (built by crossdev's own toolchain steps
+/// alongside gcc), nothing em builds ever creates a `${chost}-pkg-config`
+/// wrapper, so `PKG_CONFIG` ended up pointing at a file that doesn't exist —
+/// worse than leaving it unset, since `tc-getPKG_CONFIG`'s own "already set"
+/// fast path then skips its real PATH-search/bare-name fallback entirely,
+/// turning a normally-recoverable "no pkg-config" case into a hard failure.
+#[tokio::test]
+async fn cross_toolchain_selection_skips_pkg_config_when_wrapper_missing() {
+    let dir = tempdir().unwrap();
+    let mut shell = minimal_shell(dir.path()).await;
+
+    let broot = dir.path().join("broot");
+    let bin = broot.join("usr/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // Only gcc exists in this toolchain bin dir — no pkg-config wrapper,
+    // matching em's real crossdev bootstrap (which never creates one).
+    std::fs::write(bin.join("riscv64-unknown-linux-gnu-gcc"), "#!/bin/sh\n:\n").unwrap();
+
+    let broot_utf8 = Utf8PathBuf::from_path_buf(broot).unwrap();
+    shell.set_build_roots(None, None, None, Some(&broot_utf8));
+
+    shell.set_var("CHOST", "riscv64-unknown-linux-gnu");
+    shell.set_var("CBUILD", "aarch64-unknown-linux-gnu");
+    shell.init_build_env().await.unwrap();
+
+    assert!(shell.get_var("CC").unwrap_or_default().ends_with("-gcc"));
+    assert!(
+        shell.get_var("PKG_CONFIG").unwrap_or_default().is_empty(),
+        "PKG_CONFIG must stay unset when the wrapper doesn't exist, not point at a dead path"
+    );
+}

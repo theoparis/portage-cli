@@ -1237,16 +1237,40 @@ impl EbuildShell {
                     ("PKG_CONFIG", "pkg-config"),
                 ] {
                     if self.get_var(var).filter(|s| !s.is_empty()).is_none() {
-                        // Use the absolute prefix path when known: em's own
-                        // post-`src_install` estrip (and any helper) runs the tool
-                        // outside the build shell, with the host process PATH that
-                        // lacks the $HOME prefix bin — a bare `${CHOST}-strip` then
-                        // fails. A bare name is fine for host crossdev (on PATH).
-                        let val = match &prefix_bin {
-                            Some(bin) => format!("{bin}/{chost}-{tool}"),
-                            None => format!("{chost}-{tool}"),
+                        // Unlike the other 11 (built by crossdev's own toolchain
+                        // steps alongside gcc, so they exist whenever gcc does),
+                        // `${chost}-pkg-config` is never created by anything em
+                        // builds — real crossdev relies on a separately-installed
+                        // `cross-pkg-config` wrapper this project doesn't
+                        // reproduce. Blindly setting PKG_CONFIG here pointed at a
+                        // file that doesn't exist, which — unlike an unset var —
+                        // short-circuits `tc-getPKG_CONFIG`'s own "already set"
+                        // fast path and skips its real PATH-search/bare-name
+                        // fallback entirely. Found live via `sys-libs/readline`
+                        // in a from-scratch riscv64 cross build: `PKG_CONFIG`
+                        // ended up pointing at a nonexistent
+                        // `/usr/bin/<chost>-pkg-config`, and every command
+                        // substitution using it died with "command not found"
+                        // instead of falling back to bare `pkg-config`. Verify
+                        // existence per tool instead of trusting the gate above,
+                        // which only checked `${chost}-gcc`.
+                        let candidate = match &prefix_bin {
+                            Some(bin) => bin.join(format!("{chost}-{tool}")),
+                            None => Utf8PathBuf::from(format!("{chost}-{tool}")),
                         };
-                        self.set_var(var, &val);
+                        let exists = match &prefix_bin {
+                            Some(_) => candidate.is_file(),
+                            None => program_on_path(&format!("{chost}-{tool}")),
+                        };
+                        if exists {
+                            // Use the absolute prefix path when known: em's own
+                            // post-`src_install` estrip (and any helper) runs the
+                            // tool outside the build shell, with the host process
+                            // PATH that lacks the $HOME prefix bin — a bare
+                            // `${CHOST}-strip` then fails. A bare name is fine for
+                            // host crossdev (on PATH).
+                            self.set_var(var, candidate.as_str());
+                        }
                     }
                 }
             }
