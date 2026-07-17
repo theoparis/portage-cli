@@ -168,8 +168,24 @@ run_crossdev() {
     local extra_flags="$1" dir_flag="$2" dir="$3" label="$4"
     [[ -n "$dir" ]] && fresh_dir "$dir" >/dev/null 2>&1
     local log="/root/regress-crossdev-$label.log"
+    # No separate `em ... setup` pre-step here: `crossdev --setup`'s own
+    # `init_target` already bootstraps the outer root itself
+    # (`crossdev/mod.rs`'s `init_target` calls `setup::bootstrap(&globals
+    # .outer_roots())`). A prior version of this script ran `em --target $T
+    # $dir_flag $dir setup` first — with `--target` set, that hits
+    # `Applet::Setup => setup::bootstrap(&globals.roots())`, which follows
+    # the `--target` sysroot substitution instead of the outer root, writing
+    # the generic self-contained-root make.conf template (ACCEPT_KEYWORDS
+    # mirroring the *host* arch) directly into the cross sysroot. Because
+    # `crossdev --setup` itself lays down config via `FillGapsOnly` (which
+    # treats "a file already exists at this path" as done, regardless of
+    # content), its own correct sysroot make.conf write was then silently
+    # skipped — found live 2026-07-17 chasing an unrelated riscv64
+    # `sys-apps/systemd-utils --emptytree` resolution failure that traced
+    # back to `ACCEPT_KEYWORDS="~arm64"` (the host's arch) in the riscv64
+    # sysroot's own make.conf.
     if [[ -n "$dir" ]]; then
-        sbx "/root/em-bin --target $CROSS_TARGET $dir_flag $dir setup >/dev/null 2>&1; /root/em-bin --target $CROSS_TARGET $dir_flag $dir $extra_flags crossdev --setup > $log 2>&1; echo EXIT=\$? >> $log"
+        sbx "/root/em-bin --target $CROSS_TARGET $dir_flag $dir $extra_flags crossdev --setup > $log 2>&1; echo EXIT=\$? >> $log"
     else
         sbx "/root/em-bin --target $CROSS_TARGET $extra_flags crossdev --setup > $log 2>&1; echo EXIT=\$? >> $log"
     fi
