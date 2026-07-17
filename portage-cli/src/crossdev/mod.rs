@@ -416,6 +416,37 @@ fn activate_toolchain(target: &CrossTarget, globals: &Cli, step: &stages::StageS
     Ok(())
 }
 
+/// Native twin of [`activate_toolchain`]: run the `binutils-config`/
+/// `gcc-config` equivalent after each native toolchain step builds, so
+/// `<EROOT>/usr/bin/<CHOST>-*` wrappers actually exist. `em toolchain --setup`
+/// used to pass `|_| Ok(())` as its post_step here — see `todo/PENDING.md`'s
+/// "Native toolchain activation via `em select`" entry. `tuple` is the host's
+/// own CHOST (native means `CHOST == CBUILD`; `--root`/`--prefix`/`--local`
+/// all inherit the host's profile/make.conf for a native build, so
+/// `select::get_chost` already resolves it correctly there — no separate
+/// per-topology CHOST is ever written for native, unlike the cross sysroot's
+/// own `CHOST=<tuple>`).
+fn activate_native_toolchain(globals: &Cli, step: &stages::StageStep) -> Result<()> {
+    let Some(atom) = step.atoms.first() else {
+        return Ok(());
+    };
+    let tuple = crate::select::get_chost(globals)?;
+    let roots = globals
+        .outer_roots()
+        .with_own_config_root_if_self_contained();
+    let activated = if atom_is_package(atom, "binutils") {
+        crate::select::activate_binutils(&roots, &tuple)?
+    } else if atom_is_package(atom, "gcc") {
+        crate::select::activate_compiler(&roots, &tuple)?
+    } else {
+        return Ok(());
+    };
+    if activated {
+        println!("    activated {} for {tuple}", step.label);
+    }
+    Ok(())
+}
+
 /// Render a step's USE override / `--nodeps` as a compact suffix for the plan.
 fn step_flags(step: &stages::StageStep) -> String {
     let mut parts = Vec::new();
@@ -491,7 +522,7 @@ pub(crate) async fn toolchain(args: &crate::cli::ToolchainArgs, globals: &Cli) -
         merge_flags,
         false,
         true,
-        |_| Ok(()),
+        move |step: &stages::StageStep| activate_native_toolchain(globals, step),
     )
     .await?;
     if !globals.pretend {
