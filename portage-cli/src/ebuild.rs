@@ -191,7 +191,7 @@ pub fn default_work_base(prefix: Option<&Utf8Path>) -> Utf8PathBuf {
 /// `/etc/portage/profile`) and make.conf into the shell, and set its
 /// effective USE. Returns `false` when no profile is resolvable (the build
 /// proceeds with bare defaults).
-async fn apply_profile_env(
+pub(crate) async fn apply_profile_env(
     shell: &mut portage_repo::EbuildShell,
     config_root: Option<&Utf8Path>,
     config_overlay: Option<&Utf8Path>,
@@ -1361,27 +1361,27 @@ async fn run_merge(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn unmerge_slot_occupant(
+/// Run `pkg_prerm`, delete `old_pkg`'s CONTENTS files that aren't also owned
+/// by `new_contents` (an empty slice for a full removal, as opposed to an
+/// in-place replace), unregister from the VDB, then run `pkg_postrm` — all
+/// within `old_work_root` (a scratch dir the caller owns and cleans up).
+///
+/// Shared by [`unmerge_slot_occupant`] (an in-place replace during a normal
+/// merge, which also presets `REPLACED_BY_VERSION` before calling this) and
+/// [`unmerge_standalone`] (the standalone `-C`/`--unmerge` command — no
+/// replacement, so no `REPLACED_BY_VERSION`).
+async fn unmerge_package(
     shell: &mut portage_repo::EbuildShell,
     old_pkg: &InstalledPackage,
-    work_root: &Utf8Path,
+    old_work_root: &Utf8Path,
     root: &Utf8Path,
     vdb: &Vdb,
     new_contents: &[ContentsEntry],
-    new_version: &portage_atom::Version,
 ) -> Result<()> {
-    // PMS 11.1: the old package's pkg_prerm/pkg_postrm see the version
-    // replacing it.
-    shell.preset_var("REPLACED_BY_VERSION", &new_version.to_string());
     let old_pn = old_pkg.cpv().cpn.package.as_ref();
     let old_pvr = old_pkg.cpv().version.to_string();
     let old_pf = format!("{old_pn}-{old_pvr}");
 
-    let old_work_root = work_root
-        .parent()
-        .unwrap_or(work_root)
-        .join(format!("{old_pf}.old"));
     std::fs::create_dir_all(old_work_root.join("temp").as_std_path())
         .context("creating old work root")?;
 
@@ -1425,7 +1425,7 @@ async fn unmerge_slot_occupant(
                 .context("pkg_prerm failed")?;
             true
         }
-        None => try_run_phase_from_env_bz2(shell, old_pkg, "prerm", &old_work_root, root).await,
+        None => try_run_phase_from_env_bz2(shell, old_pkg, "prerm", old_work_root, root).await,
     };
 
     let old_contents = old_pkg.contents().context("reading old CONTENTS")?;
@@ -1443,14 +1443,58 @@ async fn unmerge_slot_occupant(
                     .context("pkg_postrm failed")?;
             }
             None => {
-                let _ = try_run_phase_from_env_bz2(shell, old_pkg, "postrm", &old_work_root, root)
-                    .await;
+                let _ =
+                    try_run_phase_from_env_bz2(shell, old_pkg, "postrm", old_work_root, root).await;
             }
         }
     }
 
-    let _ = std::fs::remove_dir_all(old_work_root.as_std_path());
+    Ok(())
+}
 
+async fn unmerge_slot_occupant(
+    shell: &mut portage_repo::EbuildShell,
+    old_pkg: &InstalledPackage,
+    work_root: &Utf8Path,
+    root: &Utf8Path,
+    vdb: &Vdb,
+    new_contents: &[ContentsEntry],
+    new_version: &portage_atom::Version,
+) -> Result<()> {
+    // PMS 11.1: the old package's pkg_prerm/pkg_postrm see the version
+    // replacing it.
+    shell.preset_var("REPLACED_BY_VERSION", &new_version.to_string());
+    let old_pn = old_pkg.cpv().cpn.package.as_ref();
+    let old_pvr = old_pkg.cpv().version.to_string();
+    let old_pf = format!("{old_pn}-{old_pvr}");
+    let old_work_root = work_root
+        .parent()
+        .unwrap_or(work_root)
+        .join(format!("{old_pf}.old"));
+
+    unmerge_package(shell, old_pkg, &old_work_root, root, vdb, new_contents).await?;
+    let _ = std::fs::remove_dir_all(old_work_root.as_std_path());
+    Ok(())
+}
+
+/// Standalone removal for `-C`/`--unmerge` (`emerge.rs::unmerge_atoms`): no
+/// replacement and no active install to derive a sibling scratch dir from,
+/// so the scratch tree is `<work_base>/<category>/<pf>.unmerge`. Reuses
+/// [`unmerge_package`] with an empty `new_contents`, so every file the
+/// package owns is removed.
+pub async fn unmerge_standalone(
+    shell: &mut portage_repo::EbuildShell,
+    old_pkg: &InstalledPackage,
+    work_base: &Utf8Path,
+    root: &Utf8Path,
+    vdb: &Vdb,
+) -> Result<()> {
+    let old_work_root = work_base
+        .join(old_pkg.category())
+        .join(format!("{}.unmerge", old_pkg.pf()));
+
+    unmerge_package(shell, old_pkg, &old_work_root, root, vdb, &[]).await?;
+    let _ = std::fs::remove_dir_all(old_work_root.as_std_path());
     Ok(())
 }
 

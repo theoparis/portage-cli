@@ -808,7 +808,7 @@ fn sysroot(target: &CrossTarget, globals: &Cli) -> Utf8PathBuf {
 /// default location (mirroring `Cli::repo_path`'s fallback), so the very first
 /// `--init-target` on a fresh root can still find the real ebuild tree to
 /// symlink/reference.
-fn main_repo(globals: &Cli) -> Result<Repository> {
+pub(crate) fn main_repo(globals: &Cli) -> Result<Repository> {
     let target_conf = globals.outer_roots().repos_conf().ok();
     let host_conf = ReposConf::load_rooted(Utf8Path::new("/"), &[]).ok();
     let entry = target_conf

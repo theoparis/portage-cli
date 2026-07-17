@@ -2,12 +2,12 @@
 
 use std::str::FromStr;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use camino::Utf8Path;
 
 use crate::cli;
 use crate::error::{self, Result};
-use crate::merge::confirm_merge;
+use crate::merge::confirm_action;
 use crate::merge::run_merge_plan;
 use crate::vdb::open_cli_vdb;
 use crate::{ebuild, preflight, query, search};
@@ -330,7 +330,7 @@ async fn emerge_atoms_inner(
     let distdir = relocate.map(|p| p.join("var/cache/distfiles"));
     let work_base = ebuild::default_work_base(relocate);
 
-    if merge_flags.ask && !confirm_merge(outcome.plan.len())? {
+    if merge_flags.ask && !confirm_action("merge", outcome.plan.len())? {
         println!(">>> Quitting.");
         return Ok(());
     }
@@ -356,6 +356,12 @@ async fn emerge_atoms_inner(
 
 /// Run the default emerge path for a parsed CLI invocation.
 pub(crate) async fn run_emerge(cli: &cli::Cli) -> Result<()> {
+    // emerge -C: remove the matching installed packages directly, no
+    // dependency graph at all. Checked first: -C together with -s/-S makes
+    // no sense, and real emerge treats -C as its own action too.
+    if cli.unmerge {
+        return unmerge_atoms(cli, &cli.atoms).await;
+    }
     // emerge -s / -S: the arguments are search patterns, not atoms.
     if cli.search || cli.searchdesc {
         return search::run_emerge_style(&cli.search_repos(), &cli.atoms, cli.searchdesc).await;
@@ -373,4 +379,106 @@ pub(crate) async fn run_emerge(cli: &cli::Cli) -> Result<()> {
         },
     )
     .await
+}
+
+/// `-C`/`--unmerge`: remove the installed packages matching `atoms`
+/// directly, without any dependency graph at all — matches real emerge's
+/// `-C` semantics (a dangerous removal with zero dependency checking;
+/// `depclean` is the safe "and clean up what's no longer needed"
+/// alternative). Every installed slot/version matching any given atom is
+/// removed; there is no plan to preview beyond the match list itself, so
+/// `--pretend` just prints what would be removed and `--ask` confirms
+/// against that same list.
+async fn unmerge_atoms(cli: &cli::Cli, atoms: &[String]) -> Result<()> {
+    if atoms.is_empty() {
+        bail!("-C/--unmerge needs at least one atom");
+    }
+
+    let vdb = open_cli_vdb(cli)?;
+
+    // The same installed package can match two atoms given on the command
+    // line (e.g. "foo" and "cat/foo") -- dedup on Cpv identity (Hash + Eq
+    // already, no need to stringify) rather than sort+dedup by Display,
+    // which would also scramble the natural match order for no reason.
+    let mut seen = std::collections::HashSet::new();
+    let mut matched: Vec<portage_vdb::InstalledPackage> = Vec::new();
+    for raw in atoms {
+        let pkgs = crate::vdb::find_packages(&vdb, raw);
+        if pkgs.is_empty() {
+            eprintln!("!!! no installed package matches '{raw}'");
+            continue;
+        }
+        for pkg in pkgs {
+            if seen.insert(pkg.cpv().clone()) {
+                matched.push(pkg);
+            }
+        }
+    }
+
+    if matched.is_empty() {
+        return Ok(());
+    }
+
+    println!("\n>>> These are the packages that would be unmerged:\n");
+    for pkg in &matched {
+        println!(" {pkg}");
+    }
+    println!();
+
+    if cli.pretend {
+        return Ok(());
+    }
+
+    if cli.merge_flags.ask && !confirm_action("unmerge", matched.len())? {
+        println!(">>> Quitting.");
+        return Ok(());
+    }
+
+    // Same root/shell setup `dispatch.rs`'s `Applet::Ebuild` arm uses:
+    // `roots()` for config/sysroot/eprefix (this *is* a merge-target
+    // operation, unlike `select`'s config-root-only concerns — see
+    // `select-target-flag-collision-fix` memory for why those differ), and
+    // the separate `broot()` for BDEPEND-class tooling, never `roots()`'s
+    // own value.
+    let roots = cli.roots();
+    let root = roots.merge_root().to_owned();
+    let broot = cli.broot();
+    // Scratch trees for pkg_prerm/postrm land where builds would
+    // (`emerge_atoms_inner`'s relocation rule).
+    let work_base = ebuild::default_work_base(roots.relocate().then(|| roots.merge_root()));
+
+    let repo = crate::crossdev::main_repo(cli)?;
+    let mut shell = repo.shell().await.context("creating shell")?;
+    shell.set_build_roots(
+        roots.config(),
+        roots.build_sysroot(),
+        roots.eprefix(),
+        Some(broot.merge_root()),
+    );
+    let config_overlay = roots.eprefix().map(|e| e.join("etc/portage"));
+    if !ebuild::apply_profile_env(&mut shell, roots.config(), config_overlay.as_deref()).await? {
+        eprintln!(
+            "warning: no usable profile at {}/etc/portage/make.profile — unmerging without profile defaults",
+            roots.config().unwrap_or(Utf8Path::new("/"))
+        );
+    }
+
+    let mut failures = 0usize;
+    for pkg in &matched {
+        println!(">>> Unmerging {pkg}...");
+        if let Err(e) = ebuild::unmerge_standalone(&mut shell, pkg, &work_base, &root, &vdb).await {
+            eprintln!("!!! failed to unmerge {pkg}: {e:#}");
+            failures += 1;
+            continue;
+        }
+        println!(">>> unmerge success: {pkg}");
+    }
+
+    if failures > 0 {
+        bail!(
+            "{failures} of {} package(s) failed to unmerge",
+            matched.len()
+        );
+    }
+    Ok(())
 }

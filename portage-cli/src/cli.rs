@@ -90,6 +90,12 @@ pub struct Cli {
     #[arg(short = 'O', long)]
     pub nodeps: bool,
 
+    /// Remove the matching installed packages completely, without regard to
+    /// dependencies. Matches every installed slot/version of each atom. For
+    /// removing unneeded dependencies too, use `depclean` instead.
+    #[arg(short = 'C', long)]
+    pub unmerge: bool,
+
     #[command(flatten)]
     pub merge_flags: MergeFlags,
 

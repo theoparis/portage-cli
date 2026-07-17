@@ -31,10 +31,12 @@ fn check_pkgdir_writable(pkgdir: &camino::Utf8Path) -> Result<()> {
     Ok(())
 }
 
-/// Prompt before merging (`--ask`). Defaults to no on empty input or EOF.
-pub(crate) fn confirm_merge(count: usize) -> Result<bool> {
+/// Prompt before acting on `count` packages (`--ask`) — `verb` is what the
+/// run would do ("merge", "unmerge", "build"). Defaults to no on empty input
+/// or EOF.
+pub(crate) fn confirm_action(verb: &str, count: usize) -> Result<bool> {
     use std::io::Write;
-    print!("\n>>> Would you like to merge these {count} package(s)? [y/N] ");
+    print!("\n>>> Would you like to {verb} these {count} package(s)? [y/N] ");
     std::io::stdout().flush().ok();
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line)? == 0 {

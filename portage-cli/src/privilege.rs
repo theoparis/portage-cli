@@ -149,17 +149,25 @@ pub fn maybe_supervise(cli: &Cli) -> Option<i32> {
         Backend::RealRoot => None,
         // Fakeroost/pseudoroot/sudo are scoped, not umbrellas (Q6): the ptrace
         // tax / real root must stay off the compile. build_and_merge delegates
-        // only install+qmerge to a wrapped __worker child. The exception is
-        // `em ebuild … install/qmerge` — the debug applet runs phases
-        // in-process with no worker seam, so wrap that whole invocation.
+        // only install+qmerge to a wrapped __worker child. The exceptions
+        // (see `needs_whole_process_wrap`) run without that worker seam and
+        // are wrapped whole instead.
         #[cfg(all(feature = "fakeroost", target_os = "linux"))]
-        Backend::Fakeroost => ebuild_applet_installs(cli).then(fakeroost::reexec),
+        Backend::Fakeroost => needs_whole_process_wrap(cli).then(fakeroost::reexec),
         #[cfg(all(feature = "pseudoroot", any(target_os = "linux", target_os = "macos")))]
-        Backend::Pseudoroot => ebuild_applet_installs(cli).then(pseudoroot::reexec),
-        Backend::Sudo => ebuild_applet_installs(cli).then(reexec_sudo),
+        Backend::Pseudoroot => needs_whole_process_wrap(cli).then(pseudoroot::reexec),
+        Backend::Sudo => needs_whole_process_wrap(cli).then(reexec_sudo),
         #[cfg(all(feature = "hakoniwa", target_os = "linux"))]
         Backend::Hakoniwa => Some(hakoniwa::reexec(cli)),
     }
+}
+
+/// Whether this invocation has no per-package `__worker` seam to delegate
+/// privileged work to, so the *whole* process needs wrapping instead:
+/// `em ebuild … install/qmerge` (the debug applet runs phases in-process)
+/// and `-C`/`--unmerge` (pure removal, no install to attach a worker to).
+fn needs_whole_process_wrap(cli: &Cli) -> bool {
+    ebuild_applet_installs(cli) || cli.unmerge
 }
 
 /// `em ebuild … <phase>` with a merge-side phase: the only build path that does
