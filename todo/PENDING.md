@@ -189,6 +189,27 @@ sys-apps/systemd-utils --emptytree --with-bdeps --autounmask-write --jobs 8
      `sys-apps/systemd-utils --emptytree` re-run gets all the way through
      `sys-libs/glibc`'s own rebuild with no new pkg-config failures anywhere
      — only the two already-documented acl/pambase bugs above remain.
+     **Closed the underlying gap for real, same session (`5a11f13`)**: `80e0fd9`
+     only stopped `em` from lying about `PKG_CONFIG` — packages that
+     genuinely need a working `${CTARGET}-pkg-config` (not just a graceful
+     fallback to bare `pkg-config`) still had nothing. Added
+     **`em select pkgconf`**, a new select module creating the
+     `<CTARGET>-pkg-config` wrapper real crossdev provides. No versioned
+     env.d state needed (unlike `compiler`/`binutils`): both `pkgconf`/
+     `pkg-config` already read `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR`
+     from the environment, and `em` already exports those generically from
+     the sysroot's own `make.conf` (`export_sourced_env`) — so a plain
+     symlink to whichever backend is reachable (preferring `pkgconf`) is all
+     that's missing. Wired into the existing gcc-activation `post_step`
+     (`activate_toolchain`/`activate_native_toolchain`) so a plain
+     `crossdev --setup`/`toolchain --setup` leaves a working wrapper behind
+     with no extra manual step; idempotent (never clobbers a deliberate
+     `em select pkgconf set` choice). **Verified live end-to-end**:
+     `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR` correctly re-root
+     `-I`/`-L` flags for a riscv64 sysroot's `zlib.pc` through the new
+     wrapper (`pkg-config zlib --libs --cflags` → paths inside the sysroot,
+     not the host), and a plain `crossdev --setup` re-run recreates the
+     wrapper automatically after it was removed.
 
 **Net**: task #17 (the BROOT/VDB conflation bug) stays ✅ closed — today's run
 is the first real proof it holds under an actual from-scratch cross build,

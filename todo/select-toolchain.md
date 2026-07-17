@@ -22,6 +22,22 @@ the activation half — the seam where `em select` meets the toolchain/stages wo
 Shared engine: `select/env_d.rs` (the `EnvDProfile` trait + `activate_latest`,
 `set_profile`, `install_wrappers`).
 
+## `pkgconf` (2026-07-17), a deliberately different shape
+
+`select/pkgconf.rs` picks between `pkgconf`/`pkg-config` and creates the
+`<CTARGET>-pkg-config` wrapper real crossdev provides (see the 2026-07-17
+task #17 addendum in `todo/PENDING.md` for the bug this closes — a from-scratch
+riscv64 cross build had no way to satisfy `tc-getPKG_CONFIG`'s `$PATH` search
+for it). Doesn't use the `EnvDProfile`/`env_d.rs` machinery at all: unlike
+gcc/binutils/linker, there's no versioned profile to track — a plain symlink
+into whichever backend is chosen is the entire state, since both real
+backends read `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR` from the
+environment directly and `em` already exports those generically from the
+sysroot's own `make.conf`. Auto-activated alongside gcc in both
+`activate_toolchain` (cross) and `activate_native_toolchain` (native);
+idempotent (skips if a wrapper already exists, whether from an earlier
+auto-run or a deliberate `em select pkgconf set`).
+
 ## Auto-activation from the build — the real consolidation
 
 The ebuild `pkg_postinst` runs the **host** `binutils-config`/`gcc-config`, which
