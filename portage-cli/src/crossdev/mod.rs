@@ -406,7 +406,14 @@ fn activate_toolchain(target: &CrossTarget, globals: &Cli, step: &stages::StageS
     let activated = if atom_is_package(atom, "binutils") {
         crate::select::activate_binutils(&roots, tuple)?
     } else if atom_is_package(atom, "gcc") {
-        crate::select::activate_compiler(&roots, tuple)?
+        let activated = crate::select::activate_compiler(&roots, tuple)?;
+        // Piggyback the pkg-config wrapper on gcc's own activation step: by
+        // this point the toolchain is ready and nothing else in the plan
+        // gates on it (real crossdev's own `cross-pkg-config` has no build
+        // step at all — it's a static script plus a per-target symlink).
+        // See `select/pkgconf.rs`'s module doc for why this needs to exist.
+        crate::select::activate_pkgconf(&roots, tuple)?;
+        activated
     } else {
         return Ok(());
     };
@@ -437,7 +444,9 @@ fn activate_native_toolchain(globals: &Cli, step: &stages::StageStep) -> Result<
     let activated = if atom_is_package(atom, "binutils") {
         crate::select::activate_binutils(&roots, &tuple)?
     } else if atom_is_package(atom, "gcc") {
-        crate::select::activate_compiler(&roots, &tuple)?
+        let activated = crate::select::activate_compiler(&roots, &tuple)?;
+        crate::select::activate_pkgconf(&roots, &tuple)?;
+        activated
     } else {
         return Ok(());
     };

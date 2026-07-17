@@ -17,6 +17,7 @@ mod compiler;
 mod env_d;
 mod linker;
 mod mirrors;
+mod pkgconf;
 mod profile;
 mod repos;
 
@@ -50,6 +51,15 @@ pub fn current_compiler_slot(roots: &Roots, target: &str) -> Option<String> {
     compiler::current_slot(roots, target)
 }
 
+/// Create the `<target>-pkg-config` wrapper in `roots`' merge root if one
+/// doesn't already exist (see [`pkgconf`]'s module doc for why this needs to
+/// exist at all). Run alongside [`activate_binutils`]/[`activate_compiler`]
+/// so a plain `crossdev --setup`/`toolchain --setup` leaves a real, working
+/// `pkg-config` behind without an extra manual step.
+pub fn activate_pkgconf(roots: &Roots, target: &str) -> Result<bool> {
+    pkgconf::activate_pkgconf(roots, target)
+}
+
 /// Dispatch `em select <module> <action>`.
 pub async fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
     match command {
@@ -59,6 +69,7 @@ pub async fn run(command: &SelectCommand, globals: &Cli) -> Result<()> {
         SelectCommand::Binutils { action } => binutils::run(action, globals),
         SelectCommand::Linker { action } => linker::run(action, globals),
         SelectCommand::Clang { action } => clang::run(action, globals),
+        SelectCommand::Pkgconf { action } => pkgconf::run(action, globals),
         SelectCommand::Mirrors { action } => mirrors::run(action, globals).await,
     }
 }

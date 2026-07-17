@@ -1072,6 +1072,11 @@ pub enum SelectCommand {
         #[command(subcommand)]
         action: ClangAction,
     },
+    #[command(about = "Select the pkg-config backend and create the <CTARGET>-pkg-config wrapper")]
+    Pkgconf {
+        #[command(subcommand)]
+        action: PkgconfAction,
+    },
     #[command(
         visible_alias = "mirror",
         about = "Manage Gentoo distfile mirrors (mirrorselect workalike)"
@@ -1208,6 +1213,34 @@ pub enum ClangAction {
     Set {
         /// LLVM slot to activate (e.g., `22` or `1` for list number).
         slot: String,
+    },
+}
+
+/// `em select pkgconf <action>` — picks the `pkg-config`/`pkgconf` backend
+/// and creates the `<CTARGET>-pkg-config` wrapper real crossdev provides but
+/// `em` otherwise never builds (`toolchain-funcs.eclass`'s `tc-getPKG_CONFIG`
+/// searches `$PATH` for exactly this name).
+#[derive(Subcommand)]
+pub enum PkgconfAction {
+    #[command(about = "List available pkg-config backends (pkgconf, pkg-config)")]
+    List {
+        /// Target tuple (CTARGET) to show the wrapper for.
+        #[arg(short, long)]
+        target: Option<String>,
+    },
+    #[command(about = "Show the backend the <target>-pkg-config wrapper currently points at")]
+    Show {
+        /// Target tuple (CTARGET) to show the wrapper for.
+        #[arg(short, long)]
+        target: Option<String>,
+    },
+    #[command(about = "Create/update the <target>-pkg-config wrapper")]
+    Set {
+        /// Backend to wrap (`pkgconf`, `pkg-config`, or a list number from `list`).
+        backend: String,
+        /// Target tuple (CTARGET) to create the wrapper for.
+        #[arg(short, long)]
+        target: Option<String>,
     },
 }
 
