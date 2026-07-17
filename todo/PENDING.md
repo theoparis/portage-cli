@@ -159,31 +159,36 @@ sys-apps/systemd-utils --emptytree --with-bdeps --autounmask-write --jobs 8
      ISN'T already installed (true almost nowhere in practice, but true here
      in a genuine from-scratch closure where pam/pambase can build in
      parallel).
-  3. **Suspicious, not yet root-caused**: `sys-libs/readline`'s `src_prepare`
-     (real portage's own "we don't have pkg-config yet" bootstrap guess path
-     is scoped to `use prefix && [[ -n ${STAGE} ]]`, which doesn't apply to
-     `em`'s cross/native bootstrap) falls through to a real
-     `$(tc-getPKG_CONFIG)` call, which resolves to the CHOST-prefixed
-     absolute path `/usr/bin/riscv64-unknown-linux-gnu-pkg-config` — a file
-     confirmed via `readlink`/`ls`/`command -v` (real host bash) to **not
-     exist anywhere** — yet brush's own command execution reports "command
-     not found" against that *exact resolved absolute path*, implying
-     brush's own PATH-resolution (`type -p`/`find_first_executable_in_path`,
-     `shell/fs.rs`) believed it found an executable there when nothing does.
-     Reproduced deterministically with `--jobs 1`, a single fresh `em`
-     process, single target — ruling out a cross-package hash-cache leak or a
-     `--jobs 8` race. `Backend::detect()` confirmed `RealRoot` (already root
-     in this sandbox), ruling out pseudoroot's LD_PRELOAD interposer as the
-     source. Root cause not yet pinned down (candidates: brush's
-     `program_location_cache`/PATH-search logic itself, vs. a separate,
-     legitimate em gap — **`em`'s own crossdev bootstrap never creates a
-     `<CTARGET>-pkg-config` wrapper at all**, unlike real crossdev's
-     `cross-pkg-config`, which is a real, independent, and probably more
-     important gap regardless of the brush anomaly, since it would block
-     essentially any pkg-config-consuming package in a cross build). Left
-     open for a dedicated investigation — do not re-guess this from the
-     symptom alone next time; start from the confirmed absolute-path
-     resolution and a minimal brush repro.
+  3. ✅ **FIXED, 2026-07-17 (`80e0fd9`) — not a brush bug after all.**
+     `sys-libs/readline`'s `src_prepare` (real portage's own "we don't have
+     pkg-config yet" bootstrap guess path is scoped to `use prefix &&
+     [[ -n ${STAGE} ]]`, which doesn't apply to `em`'s cross/native bootstrap)
+     falls through to a real `$(tc-getPKG_CONFIG)` call, which died with
+     "command not found" against the absolute path
+     `/usr/bin/riscv64-unknown-linux-gnu-pkg-config` — a file confirmed via
+     `readlink`/`ls`/`command -v` to not exist anywhere. Initially looked like
+     a `brush` PATH-resolution bug (`type -p` returning a false positive);
+     **root-caused instead by instrumenting the ebuild directly** (a debug
+     build printing `PKG_CONFIG` right before `tc-getPKG_CONFIG` ran):
+     `PKG_CONFIG` was **already set** to that dead path *before* the ebuild's
+     own logic ever touched it, so real `_tc-getPROG`'s "already set, trust
+     it" fast path fired and its own `type -p` PATH-search/bare-name fallback
+     never ran at all — `type -p` itself was correct the whole time.
+     Traced to `portage-repo/src/build/shell.rs`'s cross-toolchain-selection
+     block: it gates all 12 tool vars (`CC`/`CXX`/…/`PKG_CONFIG`) on a single
+     check that `${chost}-gcc` exists, then set every var unconditionally
+     from that same assumption. The other 11 are built by crossdev's own
+     toolchain steps alongside gcc, so they genuinely exist whenever gcc
+     does — but nothing `em` builds ever creates a `${chost}-pkg-config`
+     wrapper (real crossdev relies on a separately-installed
+     `cross-pkg-config` this project doesn't reproduce), so `em` was setting
+     `PKG_CONFIG` to a promise it never keeps. Fixed by verifying each tool's
+     own existence instead of trusting the gcc-only gate (new test:
+     `cross_toolchain_selection_skips_pkg_config_when_wrapper_missing`).
+     **Verified live**: `sys-libs/readline` now merges cleanly, and a full
+     `sys-apps/systemd-utils --emptytree` re-run gets all the way through
+     `sys-libs/glibc`'s own rebuild with no new pkg-config failures anywhere
+     — only the two already-documented acl/pambase bugs above remain.
 
 **Net**: task #17 (the BROOT/VDB conflation bug) stays ✅ closed — today's run
 is the first real proof it holds under an actual from-scratch cross build,
