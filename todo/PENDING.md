@@ -189,27 +189,40 @@ sys-apps/systemd-utils --emptytree --with-bdeps --autounmask-write --jobs 8
      `sys-apps/systemd-utils --emptytree` re-run gets all the way through
      `sys-libs/glibc`'s own rebuild with no new pkg-config failures anywhere
      — only the two already-documented acl/pambase bugs above remain.
-     **Closed the underlying gap for real, same session (`5a11f13`)**: `80e0fd9`
-     only stopped `em` from lying about `PKG_CONFIG` — packages that
-     genuinely need a working `${CTARGET}-pkg-config` (not just a graceful
-     fallback to bare `pkg-config`) still had nothing. Added
-     **`em select pkgconf`**, a new select module creating the
-     `<CTARGET>-pkg-config` wrapper real crossdev provides. No versioned
-     env.d state needed (unlike `compiler`/`binutils`): both `pkgconf`/
-     `pkg-config` already read `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR`
-     from the environment, and `em` already exports those generically from
-     the sysroot's own `make.conf` (`export_sourced_env`) — so a plain
-     symlink to whichever backend is reachable (preferring `pkgconf`) is all
-     that's missing. Wired into the existing gcc-activation `post_step`
-     (`activate_toolchain`/`activate_native_toolchain`) so a plain
-     `crossdev --setup`/`toolchain --setup` leaves a working wrapper behind
-     with no extra manual step; idempotent (never clobbers a deliberate
-     `em select pkgconf set` choice). **Verified live end-to-end**:
-     `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR` correctly re-root
-     `-I`/`-L` flags for a riscv64 sysroot's `zlib.pc` through the new
-     wrapper (`pkg-config zlib --libs --cflags` → paths inside the sysroot,
-     not the host), and a plain `crossdev --setup` re-run recreates the
-     wrapper automatically after it was removed.
+     **Closed the underlying gap for real, same session (`5a11f13`,
+     corrected `6df928e`)**: `80e0fd9` only stopped `em` from lying about
+     `PKG_CONFIG` — packages that genuinely need a working
+     `${CTARGET}-pkg-config` still had nothing. Added **`em select
+     pkgconf`**, a new select module creating the `<CTARGET>-pkg-config`
+     wrapper real crossdev provides. First cut (`5a11f13`) was just a
+     symlink to the chosen backend — **caught as insufficient**: real
+     crossdev's own `cross-pkg-config` script does real work beyond
+     forwarding the call (self-derives `PKG_CONFIG_SYSROOT_DIR` from
+     `ROOT`/`SYSROOT`/`ESYSROOT` at invocation time; probes the ABI-correct
+     `libdir` instead of hardcoding `lib64`/`lib`; sets
+     `PKG_CONFIG_SYSTEM_LIBRARY_PATH`/`_INCLUDE_PATH` +
+     `PKG_CONFIG_FDO_SYSROOT_RULES` so pkgconf suppresses redundant `-I`/
+     `-L` for paths the cross-compiler already searches by default;
+     sanitizes an inherited `PKG_CONFIG_PATH`; sanity-checks the output for
+     leaked host `-I`/`-L` paths — the exact bug class already documented
+     for `net-libs/libtirpc`). `6df928e` replaced the symlink with
+     `WRAPPER_TEMPLATE`, a close adaptation of that real script, with only
+     the resolved backend path baked in per target — the one piece
+     genuinely specific to this wrapper. Still no env.d/versioned-profile
+     state needed (unlike `compiler`/`binutils`): the script itself carries
+     all the state, read back by `show`/`list` via its own
+     `REAL_PKG_CONFIG=` line. Wired into the existing gcc-activation
+     `post_step` (`activate_toolchain`/`activate_native_toolchain`) so a
+     plain `crossdev --setup`/`toolchain --setup` leaves a working wrapper
+     behind with no extra manual step; idempotent (never clobbers a
+     deliberate `em select pkgconf set` choice). **Verified live
+     end-to-end**: the generated script correctly suppresses redundant
+     `-I`/`-L` for a real riscv64 sysroot's `zlib.pc` (matching real
+     crossdev's own behavior exactly, confirmed by reading the real
+     `/usr/bin/cross-pkg-config` script on this host), and works invoked
+     *standalone* (just `SYSROOT`/`ESYSROOT`/`CHOST` set, no `em`-managed
+     phase environment needed) — plus a plain `crossdev --setup` re-run
+     recreates the wrapper automatically after it was removed.
 
 **Net**: task #17 (the BROOT/VDB conflation bug) stays ✅ closed — today's run
 is the first real proof it holds under an actual from-scratch cross build,

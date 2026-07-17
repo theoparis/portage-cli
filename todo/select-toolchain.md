@@ -29,14 +29,34 @@ Shared engine: `select/env_d.rs` (the `EnvDProfile` trait + `activate_latest`,
 task #17 addendum in `todo/PENDING.md` for the bug this closes — a from-scratch
 riscv64 cross build had no way to satisfy `tc-getPKG_CONFIG`'s `$PATH` search
 for it). Doesn't use the `EnvDProfile`/`env_d.rs` machinery at all: unlike
-gcc/binutils/linker, there's no versioned profile to track — a plain symlink
-into whichever backend is chosen is the entire state, since both real
-backends read `PKG_CONFIG_SYSROOT_DIR`/`PKG_CONFIG_LIBDIR` from the
-environment directly and `em` already exports those generically from the
-sysroot's own `make.conf`. Auto-activated alongside gcc in both
-`activate_toolchain` (cross) and `activate_native_toolchain` (native);
-idempotent (skips if a wrapper already exists, whether from an earlier
-auto-run or a deliberate `em select pkgconf set`).
+gcc/binutils/linker, there's no versioned profile to track.
+
+**First cut was a bare symlink to the chosen backend — caught as
+insufficient** (Luca: "the symlink to pkgconf is not enough, we need to
+provide the same features"). Read real crossdev's own `cross-pkg-config`
+script directly (`/usr/bin/cross-pkg-config`, present on this host from a
+real system crossdev install) rather than guessing: it self-derives
+`PKG_CONFIG_SYSROOT_DIR` from `ROOT`/`SYSROOT`/`ESYSROOT` at invocation time,
+probes the ABI-correct `libdir` (`LIBDIR_${ABI}`, else asks the compiler),
+sets `PKG_CONFIG_SYSTEM_LIBRARY_PATH`/`_INCLUDE_PATH` +
+`PKG_CONFIG_FDO_SYSROOT_RULES=1` (so pkgconf suppresses redundant `-I`/`-L`
+for paths the cross-compiler already searches by default — the reason a real
+`zlib --cflags --libs` through the wrapper correctly comes back as just
+`-lz`, not `-I<sysroot>/usr/include -L<sysroot>/usr/lib64 -lz`), sanitizes an
+inherited `PKG_CONFIG_PATH` (unlike `_LIBDIR` it *adds* to the search list),
+and sanity-checks the output for host `-I`/`-L` leaks. `WRAPPER_TEMPLATE` is
+a close adaptation of that real script — the only piece genuinely specific
+to *this* wrapper is the resolved backend path, baked in per target by
+`select pkgconf set`/auto-activation; everything else is self-derived at
+invocation time, so the wrapper works standalone too (just
+`SYSROOT`/`ESYSROOT`/`CHOST` set), not only inside an em-managed build
+phase. The script itself carries all state (`show`/`list` read its own
+`REAL_PKG_CONFIG=` line) — still no env.d state needed.
+
+Auto-activated alongside gcc in both `activate_toolchain` (cross) and
+`activate_native_toolchain` (native); idempotent (skips if a wrapper already
+exists, whether from an earlier auto-run or a deliberate `em select pkgconf
+set`).
 
 ## Auto-activation from the build — the real consolidation
 
