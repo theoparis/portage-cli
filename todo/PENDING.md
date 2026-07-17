@@ -114,6 +114,82 @@ host-satisfied). The rest of the 2026-07-05 review checklist (re-derive
 "stage1 is clean" from a fresh run; spot-check the 4 committed fixes) is
 still open.
 
+**2026-07-17: task #17 finally run for real (not pretend) against a complete
+riscv64 cross toolchain** (`regress-crossdev-root` from `regression-matrix.sh`,
+`gcc-stage2` activated, real host-native `riscv64-unknown-linux-gnu-gcc`
+confirmed working). `em --root <dir> --target riscv64-unknown-linux-gnu
+sys-apps/systemd-utils --emptytree --with-bdeps --autounmask-write --jobs 8
+--buildpkg` (no `--keep-going`, see [[no-keep-going-flag]]):
+
+- **The core task #17 fix is confirmed**: `-p` resolution succeeds cleanly
+  (46 packages, correct `Root-aware cross plan: CHOST=riscv64-unknown-linux-gnu
+  CBUILD=aarch64-unknown-linux-gnu` banner), and the real build genuinely
+  cross-compiles and merges packages (glibc's own dependency chain, zlib,
+  ncurses, xz-utils, etc. — 21+ packages merged with real
+  `riscv64-unknown-linux-gnu-gcc` output) into the sysroot before hitting
+  unrelated failures below. This is the first real (non-pretend) confirmation
+  since the 2026-07-05/07-09 BROOT fix landed.
+- **Blocker found and fixed first**: the fixture's own sysroot make.conf had
+  `ACCEPT_KEYWORDS="~arm64"` (the *host's* arch) instead of `"riscv ~riscv"` —
+  traced to `regression-matrix.sh`'s `run_crossdev` running a redundant
+  `em --target $T $dir_flag $dir setup` pre-step before `crossdev --setup`.
+  With `--target` set, that hits `Applet::Setup => setup::bootstrap(&globals
+  .roots())` (the sysroot-substituted view, not the outer root), writing the
+  generic self-contained-root make.conf template directly into the cross
+  sysroot; `crossdev --setup`'s own correct write was then silently skipped by
+  `FillGapsOnly` (`config_plan.rs`'s `ConfigEntry::File` treats "exists" as
+  "done" regardless of content). `init_target` already bootstraps the outer
+  root correctly itself (`setup::bootstrap(&globals.outer_roots())`) — the
+  pre-step was never needed. Fixed by removing it from the script; the two
+  already-contaminated fixture sysroots were repaired via `crossdev
+  --init-target` (`Sync` policy, force-regenerates). Not an `em` correctness
+  bug — a test-script mistake — but a real trap for anyone reaching for
+  `em setup` manually before `crossdev --setup` with `--target` already set.
+- **Three genuine, independent findings surfaced by this being the first real
+  from-scratch closure test**, none blocking the actual task #17 fix:
+  1. `sys-apps/acl-2.4.0`'s configure hard-fails on a missing
+     `attr/error_context.h` even though its own `DEPEND`/`RDEPEND` never
+     mentions `sys-apps/attr` at all — a real, pre-existing Gentoo ebuild gap
+     (undeclared implicit dependency) that's dormant in virtually all real
+     installs because `sys-apps/attr` is already present from `@system`.
+  2. `sys-auth/pambase`'s `dopamd -r stack/.` forwards `-r` as a positional
+     arg to `cleanpamd()` (`pam.eclass`), which blindly iterates every arg as
+     a filename with no flag-stripping — a real, pre-existing `pam.eclass`
+     bug, dormant because its guarding `sed` only runs when `sys-libs/pam`
+     ISN'T already installed (true almost nowhere in practice, but true here
+     in a genuine from-scratch closure where pam/pambase can build in
+     parallel).
+  3. **Suspicious, not yet root-caused**: `sys-libs/readline`'s `src_prepare`
+     (real portage's own "we don't have pkg-config yet" bootstrap guess path
+     is scoped to `use prefix && [[ -n ${STAGE} ]]`, which doesn't apply to
+     `em`'s cross/native bootstrap) falls through to a real
+     `$(tc-getPKG_CONFIG)` call, which resolves to the CHOST-prefixed
+     absolute path `/usr/bin/riscv64-unknown-linux-gnu-pkg-config` — a file
+     confirmed via `readlink`/`ls`/`command -v` (real host bash) to **not
+     exist anywhere** — yet brush's own command execution reports "command
+     not found" against that *exact resolved absolute path*, implying
+     brush's own PATH-resolution (`type -p`/`find_first_executable_in_path`,
+     `shell/fs.rs`) believed it found an executable there when nothing does.
+     Reproduced deterministically with `--jobs 1`, a single fresh `em`
+     process, single target — ruling out a cross-package hash-cache leak or a
+     `--jobs 8` race. `Backend::detect()` confirmed `RealRoot` (already root
+     in this sandbox), ruling out pseudoroot's LD_PRELOAD interposer as the
+     source. Root cause not yet pinned down (candidates: brush's
+     `program_location_cache`/PATH-search logic itself, vs. a separate,
+     legitimate em gap — **`em`'s own crossdev bootstrap never creates a
+     `<CTARGET>-pkg-config` wrapper at all**, unlike real crossdev's
+     `cross-pkg-config`, which is a real, independent, and probably more
+     important gap regardless of the brush anomaly, since it would block
+     essentially any pkg-config-consuming package in a cross build). Left
+     open for a dedicated investigation — do not re-guess this from the
+     symptom alone next time; start from the confirmed absolute-path
+     resolution and a minimal brush repro.
+
+**Net**: task #17 (the BROOT/VDB conflation bug) stays ✅ closed — today's run
+is the first real proof it holds under an actual from-scratch cross build,
+not just `-p`/preflight. Full `sys-apps/systemd-utils` completion is now
+blocked by the three independent findings above, tracked separately.
+
 ## Stage building (the active goal: a real stage3)
 
 - 🟡 **Privilege / fakeroot for stage builds.** `sys-apps/util-linux`'s own
@@ -224,11 +300,22 @@ still open.
     until the vars exist.
   - `use.mask`/`use.force` correctly take only per-flag `-` (no `-*`, portage(5)).
   [[em-root-characterization]]
-- 🟡 **Native toolchain activation via `em select`.** `em toolchain --setup`
-  writes env.d profiles but no `usr/bin/<chost>-gcc` wrappers (post_step is a
-  no-op). Blocker: `select/env_d.rs` is config-root-keyed, must be merge-root-aware
-  for the activation path (trait-sig change across the four select modules). The
-  stages need the ROOT `<chost>-gcc`. [[select-toolchain]]
+- ✅ **Native toolchain activation via `em select` — wrapper fixed 2026-07-17.**
+  `em toolchain --setup --root <dir>` already activated via the real
+  `gcc-config`/`binutils-config` in postinst (ROOT-scoped correctly by em's own
+  `ROOT`/`EROOT` env) — but for a plain `--root` offset the resulting
+  `usr/bin/<chost>-gcc` was a genuinely **dangling** symlink (its target isn't
+  re-rooted, so it resolves against the real host filesystem, not the offset —
+  confirmed via `readlink -f` failing). `--prefix`/`--local` never had this
+  problem (real gcc-config is EPREFIX-aware there). Gave `em toolchain --setup`'s
+  native path a real `post_step` (`activate_native_toolchain`, `crossdev/mod.rs`
+  — it was `|_| Ok(())`) that re-activates via `em`'s own EPREFIX-aware `select`
+  machinery, which re-roots the wrapper correctly. Verified live: both gcc and
+  binutils wrappers now resolve and run under `--root`; `--prefix` unaffected
+  (idempotent re-activation, no regression). **Still open, separately**:
+  nothing in the native (`chost == cbuild`) build path prefers this wrapper
+  over the host's own `gcc` on `$PATH` — out of scope for this fix, tracked in
+  [[select-toolchain]].
 - ✅ **`em stages --stage1 --cross` install-order/preflight bugs — FIXED
   2026-07-03.** Confirmed with real portage (`qdepends`) that the apparent
   `util-linux` ↔ `python` cycle was never real: util-linux's `python? (

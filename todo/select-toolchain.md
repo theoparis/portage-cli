@@ -292,6 +292,63 @@ probe from before — compiled and linked entirely via
 cleanly. This is the actual end-to-end path the `broot` fix targets, not
 just the mechanism in isolation.
 
+### 2026-07-17, fixed: native `--root`'s wrapper was genuinely dangling, not just unusable "in principle"
+
+Picked this back up to close the "native ROOT toolchain hazard" left open above.
+Re-confirmed the 2026-07-16 finding still held (a fresh check against
+`regress-toolchain-root`, a `--root` native toolchain built by
+`regression-matrix.sh`): `readlink -f usr/bin/aarch64-unknown-linux-gnu-gcc`
+failed (exit 1) — the wrapper existed but its symlink target
+(`/usr/aarch64-unknown-linux-gnu/gcc-bin/16/...`, no ROOT prefix) resolves
+against the real host filesystem, not the offset, because real
+`gcc-config`/`binutils-config` (invoked for real by toolchain.eclass's own
+`pkg_postinst`, correctly ROOT-scoped by em's `ROOT`/`EROOT` env) has no
+EPREFIX concept for a plain `ROOT=` offset — unlike `--prefix`/`--local`
+(EPREFIX set), where the same real tool already writes a correctly re-rooted,
+resolvable symlink (confirmed working with no fix needed).
+
+**Fix**: gave `em toolchain --setup`'s native path a real `post_step` (it was
+`|_| Ok(())`, exactly as this doc's "NOT done; the open item" line said) —
+`activate_native_toolchain` (`crossdev/mod.rs`), the direct native twin of
+the existing `activate_toolchain` cross helper: after each step, if the
+step's atom is `binutils`/`gcc`, re-activate via `select::activate_binutils`/
+`activate_compiler` against `outer_roots().with_own_config_root_if_self_contained()`,
+using `select::get_chost(globals)` as the tuple (native means `CHOST ==
+CBUILD`, and `--root`/`--prefix`/`--local` all inherit the host's own
+profile/make.conf for a native build — no separate per-topology CHOST is
+ever written for native, unlike the cross sysroot's own `CHOST=<tuple>`).
+This re-activation runs `em`'s own `install_wrappers`, which — unlike real
+gcc-config — re-roots `GCC_PATH`/`LDPATH`/etc under `env_d::eprefix(roots)`
+before creating the `usr/bin/<CHOST>-*` symlinks, so for the self-contained
+`--root` case (`eprefix(roots) == the offset itself`, via
+`with_own_config_root_if_self_contained`) the result is a fully offset-scoped
+absolute symlink target, not the real gcc-config's plain `/usr/...` one.
+
+**Verified live** against the already-built `regress-toolchain-root` fixture
+by re-running `toolchain --setup` (idempotent re-invocation re-triggers
+`post_step` for the packages already present): both wrappers now resolve —
+```
+$ readlink -f usr/bin/aarch64-unknown-linux-gnu-gcc
+/root/regress-toolchain-root/usr/aarch64-unknown-linux-gnu/gcc-bin/16/aarch64-unknown-linux-gnu-gcc
+$ usr/bin/aarch64-unknown-linux-gnu-gcc --version
+aarch64-unknown-linux-gnu-gcc (Gentoo 16.1.1_p20260613 p3) ...
+```
+Same for `usr/bin/aarch64-unknown-linux-gnu-{as,ld}` (binutils). `--prefix`
+re-checked too (already worked before this fix, since real gcc-config is
+EPREFIX-aware there) — no regression, activation just runs twice
+(idempotent). Full workspace clippy -D warnings/build clean.
+
+**Still explicitly not addressed** (per the 2026-07-16 entries above, and out
+of scope for this fix): the wrapper now *exists and works when invoked
+directly*, but nothing in the native (`chost == cbuild`) build path prefers
+it over the host's own `gcc` on `$PATH` — `shell.rs`'s cross-toolchain
+selection block is still gated on `chost != cbuild`. `em stages --stage1
+--root <R>` (native) still silently uses the host's compiler, matching
+catalyst's seed-compiler model by accident. Broadening that gate to also
+prefer a same-arch offset's own toolchain dir (this doc's still-open
+"broadening the condition" plan, distinct from today's wrapper fix) remains
+undone.
+
 ## Open: clang linker config (Option B)
 
 `-fuse-ld=` lives in `/etc/clang/<SLOT>/gentoo-linker.cfg`, not env.d. Decide:
