@@ -223,6 +223,20 @@ sys-apps/systemd-utils --emptytree --with-bdeps --autounmask-write --jobs 8
      *standalone* (just `SYSROOT`/`ESYSROOT`/`CHOST` set, no `em`-managed
      phase environment needed) — plus a plain `crossdev --setup` re-run
      recreates the wrapper automatically after it was removed.
+     **Second correction, same session (`8b080a9`)**: `6df928e` still
+     wrote a full rendered copy of the script per target — real crossdev
+     instead ships *one* `cross-pkg-config`, symlinked per target, deriving
+     `CHOST` from `${0##*/}`. Matched that shape: `em-cross-pkg-config` is
+     now written once per root, `<CTARGET>-pkg-config` is a plain symlink
+     to it, and the backend choice is shared across every target under
+     that root (a host-tool decision with no reason to vary per target) —
+     `select pkgconf set` deliberately always rewrites the shared script
+     (affecting every configured target's symlink), while auto-activation
+     only creates the symlink + shared script if missing. Verified live:
+     both manual `set` and `crossdev --setup`'s automatic activation
+     produce the shared script + symlink correctly; new test confirms a
+     second target reuses the first's backend choice instead of re-picking
+     a default.
 
 **Net**: task #17 (the BROOT/VDB conflation bug) stays ✅ closed — today's run
 is the first real proof it holds under an actual from-scratch cross build,
