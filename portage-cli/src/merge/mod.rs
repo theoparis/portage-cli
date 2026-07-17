@@ -76,24 +76,23 @@ fn entry_roots<'a>(
 /// there at the planned version is skipped (a previous run merged it), so
 /// re-running after an interruption continues from the first unmerged entry
 /// without a separate state file. `--emptytree` forces every entry to rebuild.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_merge_plan(
     plan: &[query::depgraph::PlannedMerge],
     blockers: &[Vec<usize>],
     roots: &portage_resolve::Roots,
     work_base: &camino::Utf8Path,
     distdir: Option<&camino::Utf8Path>,
-    quiet: bool,
-    keep_going: bool,
-    emptytree: bool,
-    jobs: usize,
-    buildpkg: bool,
-    buildpkgonly: bool,
-    usepkg: bool,
-    getbinpkg: bool,
-    getbinpkgonly: bool,
+    merge_flags: &cli::MergeFlags,
     globals: &cli::Cli,
 ) -> Result<()> {
+    let quiet = globals.quiet;
+    let jobs = merge_flags.jobs.map(|j| j as usize).unwrap_or(1).max(1);
+    let buildpkg = merge_flags.buildpkg;
+    let buildpkgonly = merge_flags.buildpkgonly;
+    let usepkg = merge_flags.usepkg;
+    let getbinpkg = merge_flags.getbinpkg;
+    let getbinpkgonly = merge_flags.getbinpkgonly;
+
     let merge_root = roots.merge_root();
     let total = plan.len();
 
@@ -200,10 +199,7 @@ pub(crate) async fn run_merge_plan(
             work_base,
             distdir,
             quiet,
-            keep_going,
-            emptytree,
-            buildpkg,
-            buildpkgonly,
+            merge_flags,
             binpkg_index.as_ref(),
             &remote_indices,
             enforce_no_source,
@@ -218,11 +214,8 @@ pub(crate) async fn run_merge_plan(
             work_base,
             distdir,
             quiet,
-            keep_going,
-            emptytree,
             jobs,
-            buildpkg,
-            buildpkgonly,
+            merge_flags,
             binpkg_index.as_ref(),
             &remote_indices,
             enforce_no_source,
@@ -282,14 +275,16 @@ async fn merge_sequential(
     work_base: &camino::Utf8Path,
     distdir: Option<&camino::Utf8Path>,
     quiet: bool,
-    keep_going: bool,
-    emptytree: bool,
-    buildpkg: bool,
-    buildpkgonly: bool,
+    merge_flags: &cli::MergeFlags,
     binpkg_index: Option<&portage_binpkg::BinpkgIndex>,
     remote_indices: &[portage_binpkg::RemoteBinpkgIndex],
     enforce_no_source: bool,
 ) -> (usize, usize, Vec<MergeFailure>) {
+    let keep_going = merge_flags.keep_going;
+    let emptytree = merge_flags.emptytree;
+    let buildpkg = merge_flags.buildpkg;
+    let buildpkgonly = merge_flags.buildpkgonly;
+
     let total = plan.len();
     let mut merged = 0usize;
     let mut skipped = 0usize;
@@ -580,15 +575,17 @@ async fn merge_parallel(
     work_base: &camino::Utf8Path,
     distdir: Option<&camino::Utf8Path>,
     quiet: bool,
-    keep_going: bool,
-    emptytree: bool,
     jobs: usize,
-    buildpkg: bool,
-    buildpkgonly: bool,
+    merge_flags: &cli::MergeFlags,
     binpkg_index: Option<&portage_binpkg::BinpkgIndex>,
     remote_indices: &[portage_binpkg::RemoteBinpkgIndex],
     enforce_no_source: bool,
 ) -> (usize, usize, Vec<MergeFailure>) {
+    let keep_going = merge_flags.keep_going;
+    let emptytree = merge_flags.emptytree;
+    let buildpkg = merge_flags.buildpkg;
+    let buildpkgonly = merge_flags.buildpkgonly;
+
     let total = plan.len();
     let merge_gate = tokio::sync::Mutex::new(());
     // See `merge_sequential`'s matching comment.

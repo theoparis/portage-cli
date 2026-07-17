@@ -347,15 +347,7 @@ async fn emerge_atoms_inner(
         &roots,
         &work_base,
         distdir.as_deref(),
-        cli.quiet,
-        merge_flags.keep_going,
-        merge_flags.emptytree,
-        merge_flags.jobs.map(|j| j as usize).unwrap_or(1).max(1),
-        merge_flags.buildpkg,
-        merge_flags.buildpkgonly,
-        merge_flags.usepkg,
-        merge_flags.getbinpkg,
-        merge_flags.getbinpkgonly,
+        merge_flags,
         cli,
     )
     .await
