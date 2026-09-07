@@ -88,12 +88,16 @@ pub struct StagePlan {
 }
 
 impl Libc {
-    /// Package name in `::gentoo` (the `cross-*` overlay symlinks the same name)
+    /// Package name in `::gentoo` (the `cross-*` overlay symlinks the same
+    /// name) — Darwin's `libsystem` never reaches this path in practice
+    /// ([`toolchain_plan`] returns early for it before any `libc_pkg()`
+    /// call), but the arm is still needed for exhaustiveness.
     fn pkg_name(self) -> &'static str {
         match self {
             Libc::Glibc => "glibc",
             Libc::Musl => "musl",
             Libc::Newlib => "newlib",
+            Libc::Darwin => "libsystem",
         }
     }
 }
@@ -215,6 +219,26 @@ pub fn toolchain_plan(kind: &BootstrapKind, self_contained: bool, prefix_guest: 
         nodeps: false,
         into_sysroot: baselayout_into_sysroot,
     });
+    // Darwin: no GCC/LLVM-runtimes bootstrap at all — each package in
+    // `CrossTarget::packages`'s stage order (host toolchain-support tools,
+    // then `libsystem`/`od-init`/`xnu` into the sysroot) already builds
+    // standalone against the just-built host `clang`/`lld` (llvm-core), with
+    // no ABI-multilib or `sys-kernel/linux-headers` step to intertwine.
+    if let BootstrapKind::Cross(t) = kind {
+        if t.libc == Libc::Darwin {
+            for (real_cat, pkg, _arch) in t.packages() {
+                steps.push(StageStep {
+                    label: pkg.into(),
+                    atoms: vec![atom(real_cat, pkg)],
+                    use_override: vec![],
+                    nodeps: false,
+                    into_sysroot: false,
+                });
+            }
+            return StagePlan { steps };
+        }
+    }
+
 
     if kind.llvm() {
         // LLVM model: host clang already cross-targets, so there is no two-stage
