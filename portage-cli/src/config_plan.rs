@@ -23,9 +23,9 @@ use crate::util::write_if_absent;
 /// drift apart. `name` is per-target so each cross target gets its own
 /// section/file, instead of the last `--setup`/`--init-target` silently
 /// orphaning the previous target's alias.
-fn alias_body(name: &str, category: &str, packages_line: &str) -> String {
+fn alias_body(source: &str, name: &str, category: &str, packages_line: &str) -> String {
     format!(
-        "[{name}]\nalias-source = gentoo\nalias-target = {category}\n\
+        "[{name}]\nalias-source = {source}\nalias-target = {category}\n\
          alias-packages = {packages_line}\n"
     )
 }
@@ -49,6 +49,9 @@ pub(crate) enum ConfigEntry {
     /// filename stem — each target's alias lives in its own file/section.
     Alias {
         path: Utf8PathBuf,
+        /// The repo the aliased packages actually live in (`gentoo` for
+        /// every model but Darwin — see `CrossTarget::source_repo`).
+        source: String,
         name: String,
         category: String,
         packages_line: String,
@@ -133,6 +136,7 @@ impl ConfigEntry {
             }
             ConfigEntry::Alias {
                 path,
+                source,
                 name,
                 category,
                 packages_line,
@@ -146,7 +150,9 @@ impl ConfigEntry {
                 // package silently survive while an edit anywhere else in
                 // the line would just as silently have been clobbered, an
                 // inconsistency with no principled reason to keep.
-                Ok(existing) if existing == alias_body(name, category, packages_line) => {
+                Ok(existing)
+                    if existing == alias_body(source, name, category, packages_line) =>
+                {
                     Change::Unchanged
                 }
                 // Foreign (no `alias-target =` key at all) — never touch.
@@ -180,6 +186,7 @@ impl ConfigEntry {
             ConfigEntry::CreateOnly { path, desired } => write_if_absent(path, desired),
             ConfigEntry::Alias {
                 path,
+                source,
                 name,
                 category,
                 packages_line,
@@ -191,7 +198,7 @@ impl ConfigEntry {
                 {
                     return Ok(());
                 }
-                std::fs::write(path, alias_body(name, category, packages_line))
+                std::fs::write(path, alias_body(source, name, category, packages_line))
                     .with_context(|| format!("writing {path}"))
             }
             ConfigEntry::Dir { path } => {
@@ -415,6 +422,7 @@ mod tests {
         std::fs::write(&path, &foreign)?;
         let entries = vec![ConfigEntry::Alias {
             path: path.clone(),
+            source: "gentoo".to_owned(),
             name: "crossdev.riscv64-unknown-linux-gnu".to_owned(),
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils".to_owned(),
@@ -444,6 +452,7 @@ mod tests {
         )?;
         let entries = vec![ConfigEntry::Alias {
             path: path.clone(),
+            source: "gentoo".to_owned(),
             name: "crossdev.riscv64-unknown-linux-gnu".to_owned(),
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils".to_owned(),
@@ -502,6 +511,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = utf8_join(&dir, "crossdev.conf")?;
         let existing = alias_body(
+            "gentoo",
             "crossdev.riscv64-unknown-linux-gnu",
             "cross-riscv64-unknown-linux-gnu",
             "sys-devel/binutils",
@@ -509,6 +519,7 @@ mod tests {
         std::fs::write(&path, &existing)?;
         let entries = vec![ConfigEntry::Alias {
             path: path.clone(),
+            source: "gentoo".to_owned(),
             name: "crossdev.riscv64-unknown-linux-gnu".to_owned(),
             category: "cross-riscv64-unknown-linux-gnu".to_owned(),
             packages_line: "sys-devel/binutils dev-vcs/git".to_owned(),

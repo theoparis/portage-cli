@@ -241,7 +241,7 @@ async fn setup(
     let profile_dir_holder;
     let make_conf_holder;
     let sysroot_override = if globals.pretend {
-        let gentoo_path = main_repo(globals)?.path().to_owned();
+        let gentoo_path = source_repo(globals, target)?.path().to_owned();
         profile_dir_holder = gentoo_path.join("profiles").join(target.profile_path());
         make_conf_holder = make_conf_body(target, globals.outer_roots().merge_root());
         Some(portage_resolve::use_env::SysrootOverride {
@@ -981,6 +981,34 @@ fn sysroot(target: &CrossTarget, globals: &Cli) -> Utf8PathBuf {
         .join(&target.tuple)
 }
 
+/// A configured repo, looked up by name (`repos.conf` section) —
+/// [`main_repo`] specialises this for `gentoo` with a hardcoded fallback
+/// path; [`source_repo`] uses it for [`CrossTarget::source_repo`] (`gentoo`
+/// for every model but Darwin, whose base toolchain lives in the
+/// `darwin-cross` overlay instead).
+///
+/// Same "target config-root, then host, then default" fallback chain as
+/// `main_repo` — a self-contained `--root DIR` target starts with no
+/// `repos.conf` of its own, so the very first `--init-target` still needs
+/// to find the real repo to alias from.
+fn named_repo(globals: &Cli, name: &str, default_path: Option<&str>) -> Result<Repository> {
+    let target_conf = globals.outer_roots().repos_conf().ok();
+    let host_conf = ReposConf::load_rooted(Utf8Path::new("/"), &[]).ok();
+    let entry = target_conf
+        .as_ref()
+        .and_then(|c| c.find(name))
+        .or_else(|| host_conf.as_ref().and_then(|c| c.find(name)));
+    match entry {
+        Some(e) => crate::repo_open::open(e.location.as_path().unwrap_or(std::path::Path::new(".")))
+            .with_context(|| format!("opening {name} repo at {}", e.location.as_path().map(|p| p.display().to_string()).unwrap_or_else(|| "(virtual)".to_string()))),
+        None => match default_path {
+            Some(p) => crate::repo_open::open(p)
+                .with_context(|| format!("no {name} repo configured in repos.conf (target or host) and the default {p} is not a repo either")),
+            None => anyhow::bail!("no {name} repo configured in repos.conf (target or host)"),
+        },
+    }
+}
+
 /// The configured main repo (`gentoo`) — the real ebuilds the overlay links to
 ///
 /// A self-contained `--root DIR` target starts with no `repos.conf` of its
@@ -990,6 +1018,8 @@ fn sysroot(target: &CrossTarget, globals: &Cli) -> Utf8PathBuf {
 /// portage's well-known default, so the very first `--init-target` on a
 /// fresh root can still find the real ebuild tree to symlink/reference.
 pub(crate) fn main_repo(globals: &Cli) -> Result<Repository> {
+    // `main_repo()`/`find("gentoo")` first (an explicit non-`gentoo`-named
+    // main repo still resolves), falling back to plain `find("gentoo")`.
     let target_conf = globals.outer_roots().repos_conf().ok();
     let host_conf = ReposConf::load_rooted(Utf8Path::new("/"), &[]).ok();
     let entry = target_conf
@@ -1005,6 +1035,20 @@ pub(crate) fn main_repo(globals: &Cli) -> Result<Repository> {
             .with_context(|| format!("opening main repo at {}", e.location.as_path().map(|p| p.display().to_string()).unwrap_or_else(|| "(virtual)".to_string()))),
         None => crate::repo_open::open("/var/db/repos/gentoo")
             .context("no main repo configured in repos.conf (target or host) and the default /var/db/repos/gentoo is not a repo either"),
+    }
+}
+
+/// The repo [`CrossTarget::packages`]/the target's profile actually live
+/// in — `main_repo` for every model but Darwin, which resolves the
+/// `darwin-cross` overlay by name via [`named_repo`] instead (no hardcoded
+/// default path: unlike `gentoo`, there's no portage-wide well-known
+/// location for it, so a missing entry is a real configuration error).
+pub(crate) fn source_repo(globals: &Cli, target: &CrossTarget) -> Result<Repository> {
+    let name = target.source_repo();
+    if name == "gentoo" {
+        main_repo(globals)
+    } else {
+        named_repo(globals, name, None)
     }
 }
 
@@ -1079,6 +1123,12 @@ async fn init_target(
         ensure_config_site_packages(globals).await?;
     }
     let gentoo_path = main_repo(globals)?.path().to_owned();
+    let source_name = target.source_repo();
+    let source_path = if source_name == "gentoo" {
+        gentoo_path.clone()
+    } else {
+        source_repo(globals, target)?.path().to_owned()
+    };
     let sysroot = sysroot(target, globals);
     let category = target.category();
 
@@ -1086,25 +1136,32 @@ async fn init_target(
     entries.extend(self_contained_prefix_entries(globals, &gentoo_path)?);
     // Derive the cross packages on the fly: a `Location::Alias` repos.conf
     // entry declares `cross-<tuple>/<pkg>` as a virtual alias for its real
-    // `::gentoo` package, materialised in-memory at load time. No on-disk
-    // symlink overlay.
+    // source-repo package. No on-disk symlink overlay.
     entries.push(alias_repo_conf_entry(
         globals,
-        &gentoo_path,
+        &source_path,
         target,
         &category,
         extras,
     )?);
-    entries.extend(cross_env_entries(target, globals, &gentoo_path, extras)?);
+    entries.extend(cross_env_entries(
+        target,
+        globals,
+        &gentoo_path,
+        &source_path,
+        extras,
+    )?);
     entries.extend(sysroot_config_entries(
         target,
         &sysroot,
         globals.outer_roots().merge_root(),
-        &gentoo_path,
+        &source_path,
     )?);
     entries.extend(sysroot_repos_conf_entries(
         &sysroot,
         &gentoo_path,
+        source_name,
+        &source_path,
         target,
         &category,
         extras,
@@ -1139,24 +1196,26 @@ async fn init_target(
 /// tree still resolves the packages that *are* present.
 fn alias_repo_conf_entry(
     globals: &Cli,
-    gentoo: &Utf8Path,
+    source: &Utf8Path,
     target: &CrossTarget,
     category: &str,
     extras: &[Cpn],
 ) -> Result<config_plan::ConfigEntry> {
-    // Validate every source package exists under ::gentoo, with a clear error
-    // naming the cross package it's needed for, before declaring the alias.
-    // Covers `--ex-pkg`/`--ex-gdb` extras too — same requirement, same error
-    // shape, so a typo'd or nonexistent extra is rejected up front instead of
-    // surfacing later as an opaque resolver `NoVersions`.
+    // Validate every source package exists under the target's source repo
+    // (`::gentoo` for every model but Darwin — see `CrossTarget::source_repo`),
+    // with a clear error naming the cross package it's needed for, before
+    // declaring the alias. Covers `--ex-pkg`/`--ex-gdb` extras too — same
+    // requirement, same error shape, so a typo'd or nonexistent extra is
+    // rejected up front instead of surfacing later as an opaque resolver
+    // `NoVersions`.
     for (real_cat, pkg, _) in target.packages() {
-        let dst = gentoo.join(real_cat).join(pkg);
+        let dst = source.join(real_cat).join(pkg);
         if !dst.is_dir() {
             bail!("{real_cat}/{pkg} not found at {dst} (needed for {category}/{pkg})");
         }
     }
     for cpn in extras {
-        let dst = gentoo
+        let dst = source
             .join(cpn.category.as_str())
             .join(cpn.package.as_str());
         if !dst.is_dir() {
@@ -1171,6 +1230,7 @@ fn alias_repo_conf_entry(
     let name = overlay_name(target);
     Ok(config_plan::ConfigEntry::Alias {
         path: conf_dir.join(format!("{name}.conf")),
+        source: target.source_repo().to_owned(),
         name,
         category: category.to_owned(),
         packages_line: alias_packages_line(target, extras),
@@ -1196,7 +1256,7 @@ fn alias_repo_entry(target: &CrossTarget, extras: &[Cpn]) -> portage_repo::RepoE
     portage_repo::RepoEntry {
         name: Interned::<DefaultInterner>::intern(&overlay_name(target)),
         location: portage_repo::Location::Alias {
-            source: Interned::intern("gentoo"),
+            source: Interned::intern(target.source_repo()),
             aliases,
         },
         masters: None,
@@ -1207,6 +1267,7 @@ fn alias_repo_entry(target: &CrossTarget, extras: &[Cpn]) -> portage_repo::RepoE
         priority: None,
     }
 }
+
 
 /// The self-contained-`--root`-only config entries (`gentoo.conf` +
 /// `make.profile` link) that both `em toolchain --setup` (native) and `em
@@ -1335,11 +1396,13 @@ async fn ensure_config_site_packages(globals: &Cli) -> Result<()> {
 }
 
 /// Write the cross sysroot `etc/portage/{make.conf,make.profile}`
+/// `source` is the repo the target's profile lives in — `::gentoo` for
+/// every model but Darwin (see [`CrossTarget::source_repo`]).
 fn sysroot_config_entries(
     target: &CrossTarget,
     sysroot: &Utf8Path,
     outer_root: &Utf8Path,
-    gentoo: &Utf8Path,
+    source: &Utf8Path,
 ) -> Result<Vec<config_plan::ConfigEntry>> {
     let portage = sysroot.join("etc/portage");
     let mut entries = Vec::new();
@@ -1366,7 +1429,7 @@ fn sysroot_config_entries(
 
     // Link make.profile DIRECTLY (absolute) to the target-arch profile — eselect
     // profile validates against the host arch and refuses a foreign one.
-    let profile_dir = gentoo.join("profiles").join(target.profile_path());
+    let profile_dir = source.join("profiles").join(target.profile_path());
     if !profile_dir.is_dir() {
         bail!(
             "target profile '{}' not found at {profile_dir}",
@@ -1384,27 +1447,43 @@ fn sysroot_config_entries(
 /// (main) repo and the crossdev overlay, so a cross build with
 /// `PORTAGE_CONFIGROOT=<sysroot>` still sees the ebuild tree — the sysroot has no
 /// repos of its own (crossdev-stages copies the host `repos.conf` likewise).
+///
+/// `source_name`/`source_path` are the alias's actual source repo (see
+/// [`CrossTarget::source_repo`]): `gentoo` for every model but Darwin, whose
+/// `darwin-cross` overlay also gets its own entry here so DEPEND chains
+/// inside the sysroot (e.g. `sys-kernel/xnu`'s BDEPEND on `sys-devel/
+/// iig-tools`) resolve it directly, not just through the alias.
 fn sysroot_repos_conf_entries(
     sysroot: &Utf8Path,
     gentoo: &Utf8Path,
+    source_name: &str,
+    source_path: &Utf8Path,
     target: &CrossTarget,
     category: &str,
     extras: &[Cpn],
 ) -> Vec<config_plan::ConfigEntry> {
     let dir = sysroot.join("etc/portage/repos.conf");
     let name = overlay_name(target);
-    vec![
-        config_plan::ConfigEntry::CreateOnly {
-            path: dir.join("gentoo.conf"),
-            desired: format!("[DEFAULT]\nmain-repo = gentoo\n\n[gentoo]\nlocation = {gentoo}\n"),
-        },
-        config_plan::ConfigEntry::Alias {
-            path: dir.join(format!("{name}.conf")),
-            name,
-            category: category.to_owned(),
-            packages_line: alias_packages_line(target, extras),
-        },
-    ]
+    let mut entries = vec![config_plan::ConfigEntry::CreateOnly {
+        path: dir.join("gentoo.conf"),
+        desired: format!("[DEFAULT]\nmain-repo = gentoo\n\n[gentoo]\nlocation = {gentoo}\n"),
+    }];
+    if source_name != "gentoo" {
+        entries.push(config_plan::ConfigEntry::CreateOnly {
+            path: dir.join(format!("{source_name}.conf")),
+            desired: format!(
+                "[{source_name}]\nlocation = {source_path}\nmasters = gentoo\n"
+            ),
+        });
+    }
+    entries.push(config_plan::ConfigEntry::Alias {
+        path: dir.join(format!("{name}.conf")),
+        source: source_name.to_owned(),
+        name,
+        category: category.to_owned(),
+        packages_line: alias_packages_line(target, extras),
+    });
+    entries
 }
 
 /// The special cross `make.conf` body (crossdev `set_metadata`): `CHOST`/`CBUILD`
@@ -1572,6 +1651,7 @@ fn cross_env_entries(
     target: &CrossTarget,
     globals: &Cli,
     gentoo: &Utf8Path,
+    source: &Utf8Path,
     extras: &[Cpn],
 ) -> Result<Vec<config_plan::ConfigEntry>> {
     let eclass_dir = gentoo.join("eclass");
@@ -1624,7 +1704,7 @@ fn cross_env_entries(
         mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
         if arch == target::PackageArch::Host {
             keyword_entries.push_str(&host_arch_keyword_line(
-                &base, gentoo, &category, pkg, real_cat, pkg,
+                &base, source, &category, pkg, real_cat, pkg,
             ));
         }
     }
@@ -1649,7 +1729,7 @@ fn cross_env_entries(
         mappings.push_str(&format!("{category}/{pkg} {category}/{pkg}.conf\n"));
         keyword_entries.push_str(&host_arch_keyword_line(
             &base,
-            gentoo,
+            source,
             &category,
             pkg.as_str(),
             cpn.category.as_str(),

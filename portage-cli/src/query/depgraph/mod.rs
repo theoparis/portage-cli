@@ -839,9 +839,12 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 }
                 // `package.provided`: CPVs the system supplies externally. Registered as
                 // an ordinary installed/Favor package (not a separate edge filter), so a
-                // dependency edge is satisfied normally (version-range-checked) and an
-                // explicit target naming a provided CPN still gets solved/built via the
-                // existing root_pkgs reinstall check below — same as any installed pkg.
+                // dependency edge is satisfied normally (version-range-checked). The
+                // plan-membership filter below (`already_installed`) also treats a
+                // provided CPV as satisfied regardless of merge root, and exempts it
+                // from the explicit-target forced-reinstall rule — an explicit `em
+                // <atom>` naming a provided CPN stays satisfied, never solved/built,
+                // matching real Portage.
                 // Skipped when a real VDB entry already covers the same (cpn, slot): once
                 // genuinely built, the real entry wins on every later resolve for free.
                 let target_installed_keys: HashSet<(Cpn, Option<String>)> = target_installed
@@ -1185,13 +1188,25 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                     // (built into `base_roots()`) must only be dropped if it's
                     // installed *there*, never because the unrelated Target sysroot
                     // happens to have a same-named, same-version package.
-                    let already_installed = match pkg.merge_root() {
-                        MergeRoot::Host => host_installed_cpvs.contains(&cpv),
-                        MergeRoot::Base => base_installed_cpvs.contains(&cpv),
-                        MergeRoot::Target => {
-                            target_installed_cpvs.contains(&cpv) || provided_cpvs.contains(&cpv)
-                        }
-                    };
+                    // `package.provided` is a system-wide declaration ("this
+                    // exists, don't build it"), not scoped to any one merge
+                    // root — checked uniformly here, unlike
+                    // `target_installed_cpvs`/`host_installed_cpvs`, which
+                    // are deliberately root-specific (see the comment above
+                    // `host_installed_cpvs`'s declaration). Previously only
+                    // the `Target` arm consulted `provided_cpvs`, so a plain
+                    // (non-cross) `--prefix`/`--local` build — `MergeRoot::Base`,
+                    // the common case — never treated a provided package as
+                    // satisfied at all: it always rebuilt, contradicting
+                    // `package.provided`'s whole purpose. Found live testing
+                    // an ad hoc host-tool seed for `sys-devel/xcbuild`'s
+                    // BDEPEND closure under bare `--prefix`.
+                    let already_installed = provided_cpvs.contains(&cpv)
+                        || match pkg.merge_root() {
+                            MergeRoot::Host => host_installed_cpvs.contains(&cpv),
+                            MergeRoot::Base => base_installed_cpvs.contains(&cpv),
+                            MergeRoot::Target => target_installed_cpvs.contains(&cpv),
+                        };
                     // `-N`/`-U` registers USE-drift packages as `InstalledPolicy::Rebuild`
                     // and still selects the installed CPV for a same-version rebuild —
                     // those must stay in the plan ([R]), not be dropped as "already
@@ -1208,7 +1223,16 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
                 // `python` target) must not be re-listed. Set provenance plays
                 // no part: `emerge @world` reinstalls its members exactly as it
                 // reinstalls a named atom (measured).
+                //
+                // Never for a `package.provided` CPV: there is no real
+                // merge behind it to redo — "reinstalling" a fiction just
+                // means building it for real the first time, exactly the
+                // outcome `package.provided` exists to avoid. An explicit
+                // `em <atom>` naming a provided package must stay satisfied,
+                // matching real Portage (`package.provided` overrides even
+                // an explicit target).
                 || (!selective
+                    && !provided_cpvs.contains(&cpv)
                     && root_pkgs
                         .iter()
                         .any(|r| r.cpn() == pkg.cpn() && r.slot() == pkg.slot()))
@@ -1410,7 +1434,8 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             // Native offset (same-arch `--root`/`--prefix`): a target
             // package's build edges the host lacks are merged to BROOT
             // (`/`) so the target can build against them.
-            let host_plan = root_closure::host(&order, &closure_adapter, roots, &cross);
+            let host_plan =
+                root_closure::host(&order, &closure_adapter, roots, &cross, &provided_avail);
             order = host_plan.order;
             // Board-root topology (`--target T --root R`): the toolchain
             // sysroot is a separate merge destination from ROOT, so a
@@ -1419,7 +1444,7 @@ pub async fn depgraph(opts: DepgraphOpts<'_>) -> anyhow::Result<DepgraphOutcome>
             // host_config_stage Target-only retain above, so it never
             // schedules an entry the plan doesn't hold, and its own entries
             // are never retained away.
-            let base_plan = root_closure::base(&order, &closure_adapter, roots);
+            let base_plan = root_closure::base(&order, &closure_adapter, roots, &provided_avail);
             order = base_plan.order;
             let mut closure_blockers = host_plan.blockers;
             closure_blockers.extend(base_plan.blockers);

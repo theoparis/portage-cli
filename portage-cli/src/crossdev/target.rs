@@ -20,15 +20,24 @@ pub enum Libc {
     Musl,
     /// `…-elf`/`-eabi`/`-newlib` — `sys-libs/newlib`, bare metal (no kernel)
     Newlib,
+    /// `…-apple-darwinNN` — `sys-libs/libsystem` (this overlay's Darwin
+    /// libSystem/headers package, not a `::gentoo` libc). Always LLVM —
+    /// there is no GCC bootstrap for Darwin here, host `clang`/`lld`
+    /// already cross-target it directly, matching the LLVM model's own
+    /// premise ("no per-target compiler build").
+    Darwin,
 }
 
 impl Libc {
-    /// The real `category/package` providing this libc in `::gentoo`
+    /// The real `category/package` providing this libc — `::gentoo` for
+    /// every model but Darwin, whose libc lives in the `darwin-cross`
+    /// overlay (see [`CrossTarget::source_repo`]).
     fn package(self) -> (&'static str, &'static str) {
         match self {
             Libc::Glibc => ("sys-libs", "glibc"),
             Libc::Musl => ("sys-libs", "musl"),
             Libc::Newlib => ("sys-libs", "newlib"),
+            Libc::Darwin => ("sys-libs", "libsystem"),
         }
     }
 }
@@ -60,19 +69,28 @@ impl CrossTarget {
             .ok_or_else(|| anyhow::anyhow!("empty target tuple"))?;
 
         // libc/OS from the tuple suffix (crossdev `parse_target`, abbreviated).
-        let (libc, has_kernel) = if tuple.ends_with("gnu")
-            || tuple.ends_with("gnueabi")
-            || tuple.ends_with("gnueabihf")
+        // Darwin is checked first: `-apple-darwinNN` never matches any of the
+        // Linux/bare-metal suffixes below.
+        let (libc, has_kernel, llvm) = if tuple.contains("-apple-darwin") {
+            // No GCC bootstrap exists for Darwin here — host `clang`/`lld`
+            // (llvm-core/clang, llvm-core/lld) already cross-target it
+            // directly, so the LLVM model always applies regardless of
+            // whether `-L`/`--llvm` was passed. `has_kernel` is `false`
+            // in the Linux-headers sense (there is no `sys-kernel/
+            // linux-headers` step) — the XNU kernel is its own base-set
+            // package ([`CrossTarget::packages`]), not a headers-only step.
+            (Libc::Darwin, false, true)
+        } else if tuple.ends_with("gnu") || tuple.ends_with("gnueabi") || tuple.ends_with("gnueabihf")
         {
-            (Libc::Glibc, true)
+            (Libc::Glibc, true, llvm)
         } else if tuple.ends_with("musl") {
-            (Libc::Musl, true)
+            (Libc::Musl, true, llvm)
         } else if tuple.ends_with("elf") || tuple.ends_with("eabi") || tuple.ends_with("newlib") {
-            (Libc::Newlib, false)
+            (Libc::Newlib, false, llvm)
         } else {
             bail!(
                 "unsupported target '{tuple}': em crossdev handles gnu (glibc), \
-                 musl, and bare-metal -elf/-eabi (newlib) tuples"
+                 musl, bare-metal -elf/-eabi (newlib), and -apple-darwinNN tuples"
             );
         };
 
@@ -101,7 +119,19 @@ impl CrossTarget {
     }
 
     /// The Gentoo `ARCH`/keyword for the target CPU (e.g. `riscv64` → `riscv`)
+    ///
+    /// Darwin uses Gentoo Prefix's own `<cpu>-macos` keyword family
+    /// (`arm64-macos`/`x64-macos`), not the bare CPU spelling
+    /// `Arch::from_chost` gives every other model — see
+    /// `gentoo_core::arch::current_keyword`'s identical `x86_64` → `x64`
+    /// remap for the same keyword family.
     pub fn gentoo_arch(&self) -> String {
+        if self.libc == Libc::Darwin {
+            return match self.cpu.as_str() {
+                "x86_64" => "x64-macos".to_owned(),
+                other => format!("{other}-macos"),
+            };
+        }
         Arch::from_chost(&self.tuple)
             .map(|a| a.as_keyword().to_owned())
             .unwrap_or_else(|| self.cpu.clone())
@@ -116,7 +146,19 @@ impl CrossTarget {
     /// `embedded` profile for every sysroot and then has to re-inject
     /// ARCH/ELIBC/KERNEL + the multilib ABI chain via a `profile/` shim — a
     /// shortcoming. The arch profile supplies all of that directly.
+    ///
+    /// Darwin's profile lives under the `darwin-cross` overlay itself
+    /// (`profiles/targets/darwin/macos/<cpu>`, layered onto Gentoo Prefix's
+    /// real `prefix/darwin/macos/…` profile), not `::gentoo` — resolved
+    /// against [`CrossTarget::source_repo`], not the main repo, by
+    /// callers (`sysroot_config_entries`).
     pub fn profile_path(&self) -> String {
+        if self.libc == Libc::Darwin {
+            return match self.cpu.as_str() {
+                "x86_64" => "targets/darwin/macos/x64".to_owned(),
+                _ => "targets/darwin/macos/arm64".to_owned(),
+            };
+        }
         // Bare-metal (newlib, no kernel) is the one case the arch fix can't
         // cover: there is no `default/linux/<arch>` profile, so fall back to the
         // arch-neutral `embedded` base (the `default/linux/*` profiles force
@@ -128,6 +170,24 @@ impl CrossTarget {
             "riscv" => "default/linux/riscv/23.0/rv64/lp64d".to_owned(),
             "x86" => "default/linux/x86/23.0/i686".to_owned(),
             arch => format!("default/linux/{arch}/23.0"),
+        }
+    }
+
+    /// The repo the [`packages`](Self::packages) set (and profile) come
+    /// from — `gentoo` for every model but Darwin, whose toolchain
+    /// (`xcode-toolchain-wrappers`/`bootstrap-cmds`/`iig-tools`/
+    /// `u-boot-xnu`/`libsystem`/`od-init`/`xnu`) are real, non-aliased
+    /// packages in the `darwin-cross` overlay — unlike GCC/musl/newlib,
+    /// which reuse generic `::gentoo` ebuilds via the `cross-*` category
+    /// alias trick, Darwin's packages already know their own arch (real
+    /// category names, `KEYWORDS=~arm64-macos`), so they need no
+    /// `toolchain.eclass`-style redirection — just a different source repo
+    /// for the same alias mechanism.
+    pub fn source_repo(&self) -> &'static str {
+        if self.libc == Libc::Darwin {
+            "darwin-cross"
+        } else {
+            "gentoo"
         }
     }
 
@@ -158,7 +218,24 @@ impl CrossTarget {
     /// previously here unconditionally by mistake.
     pub fn packages(&self) -> Vec<(&'static str, &'static str, PackageArch)> {
         let mut pkgs: Vec<(&'static str, &'static str)> = Vec::new();
-        if self.llvm {
+        if self.libc == Libc::Darwin {
+            // No two-stage compiler bootstrap and no `sys-kernel/
+            // linux-headers` step: `xcode-toolchain-wrappers` wraps the
+            // already-cross-targeting host `llvm-core/clang`+`llvm-core/lld`,
+            // `bootstrap-cmds`/`iig-tools` are host build tools XNU's own
+            // build needs (mig, iig), `u-boot-xnu` is a host-built boot
+            // artifact, and `libsystem` (headers + libSystem runtime — XNU's
+            // own `make installhdrs` folded in) must land in the sysroot
+            // before `xnu`/`od-init`, which link/compile against it.
+            pkgs.push(("sys-devel", "xcode-toolchain-wrappers"));
+            pkgs.push(("sys-devel", "bootstrap-cmds"));
+            pkgs.push(("sys-devel", "iig-tools"));
+            pkgs.push(("sys-boot", "u-boot-xnu"));
+            pkgs.push(self.libc.package());
+            pkgs.push(("sys-devel", "dyld"));
+            pkgs.push(("sys-apps", "od-init"));
+            pkgs.push(("sys-kernel", "xnu"));
+        } else if self.llvm {
             // Clang already cross-targets: no per-target compiler, just the
             // wrapper + the target runtimes built into the sysroot.
             pkgs.push(("sys-devel", "clang-crossdev-wrappers"));
@@ -219,6 +296,14 @@ const CROSS_PACKAGE_ARCH: &[(&str, &str, PackageArch)] = &[
     ("llvm-runtimes", "libunwind", PackageArch::Host),
     ("llvm-runtimes", "libcxxabi", PackageArch::Host),
     ("llvm-runtimes", "libcxx", PackageArch::Host),
+    ("sys-devel", "xcode-toolchain-wrappers", PackageArch::Host),
+    ("sys-devel", "bootstrap-cmds", PackageArch::Host),
+    ("sys-devel", "iig-tools", PackageArch::Host),
+    ("sys-boot", "u-boot-xnu", PackageArch::Host),
+    ("sys-libs", "libsystem", PackageArch::Target),
+    ("sys-devel", "dyld", PackageArch::Target),
+    ("sys-apps", "od-init", PackageArch::Target),
+    ("sys-kernel", "xnu", PackageArch::Target),
 ];
 
 /// The arch a `cross-<tuple>/<pkg>` package builds for, looked up by the
