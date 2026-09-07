@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use portage_atom::interner::Interned;
 use portage_atom::{Cpn, Cpv, Version};
 use portage_atom_pubgrub::{DepClass, MergeRoot, PortagePackage};
 
@@ -60,16 +61,14 @@ pub fn base(
     target_order: &[(PortagePackage, Version)],
     adapter: &Adapter<'_>,
     roots: &Roots,
+    provided: &[(Cpv, Option<String>)],
 ) -> Plan {
     if roots.base_merge_root().is_none() {
         return passthrough(target_order);
     }
-    run(
-        target_order,
-        adapter,
-        Avail::initial_base_depend(roots),
-        &BASE,
-    )
+    let mut avail = Avail::initial_base_depend(roots);
+    seed_provided(&mut avail, provided);
+    run(target_order, adapter, avail, &BASE)
 }
 
 /// Splice the build host's missing `DEPEND`/`BDEPEND`/`IDEPEND` closure
@@ -82,11 +81,28 @@ pub fn host(
     adapter: &Adapter<'_>,
     roots: &Roots,
     cross: &CrossContext,
+    provided: &[(Cpv, Option<String>)],
 ) -> Plan {
     if !cross.active || cross.is_cross_arch() {
         return passthrough(target_order);
     }
-    run(target_order, adapter, Avail::initial_bdepend(roots), &HOST)
+    let mut avail = Avail::initial_bdepend(roots);
+    seed_provided(&mut avail, provided);
+    run(target_order, adapter, avail, &HOST)
+}
+
+/// `package.provided` is a system-wide declaration, not scoped to any one
+/// root — seed it into a closure walk's availability the same way the main
+/// solver treats it (`InstalledPolicy::Provided`), so a BROOT/base closure
+/// walk never re-derives a build for something the profile already declares
+/// present. Without this, `root_closure`'s own VDB-only `Avail` construction
+/// (`initial_bdepend`/`initial_base_depend`) silently reintroduces a provided
+/// CPV the post-solve plan filter (`depgraph::mod.rs`) already dropped, the
+/// moment it's needed only via BDEPEND/DEPEND rather than as a solved target.
+fn seed_provided(avail: &mut Avail, provided: &[(Cpv, Option<String>)]) {
+    for (cpv, slot) in provided {
+        avail.record_provided(cpv.clone(), slot.as_deref().map(Interned::intern));
+    }
 }
 
 fn passthrough(target_order: &[(PortagePackage, Version)]) -> Plan {
@@ -95,6 +111,7 @@ fn passthrough(target_order: &[(PortagePackage, Version)]) -> Plan {
         blockers: Vec::new(),
     }
 }
+
 
 /// Static inputs shared across the walk
 struct Ctx<'a> {
@@ -186,7 +203,8 @@ fn visit(
             DepClass::Pdepend => deps.pdepend(),
             DepClass::Idepend => deps.idepend(),
         };
-        for cpn in unsatisfied_cpns(&listed, avail) {
+        let unsat = unsatisfied_cpns(&listed, avail);
+        for cpn in unsat {
             if graph.of_cpn.contains_key(&cpn) {
                 continue;
             }
@@ -467,7 +485,7 @@ mod tests {
 
         let (_sysroot, _board, roots) = board_roots();
         test_adapter!(a, &data, "x86");
-        let plan = base(&target_order, &a, &roots);
+        let plan = base(&target_order, &a, &roots, &[]);
         let got: Vec<(String, String, MergeRoot)> = plan
             .order
             .iter()
@@ -518,7 +536,7 @@ mod tests {
         write_fake_vdb_entry(sysroot.path(), "sys-libs/ncurses-6.5");
 
         test_adapter!(a, &data, "x86");
-        assert_eq!(base(&target_order, &a, &roots).order, target_order);
+        assert_eq!(base(&target_order, &a, &roots, &[]).order, target_order);
     }
 
     // BDEPEND is a build-host tool concern (`host`'s job), never routed to
@@ -539,7 +557,7 @@ mod tests {
 
         let (_sysroot, _board, roots) = board_roots();
         test_adapter!(a, &data, "x86");
-        assert_eq!(base(&target_order, &a, &roots).order, target_order);
+        assert_eq!(base(&target_order, &a, &roots, &[]).order, target_order);
     }
 
     // A Target entry's own RDEPEND is never examined (only DEPEND is) — but
@@ -570,7 +588,7 @@ mod tests {
 
         let (_sysroot, _board, roots) = board_roots();
         test_adapter!(a, &data, "x86");
-        let plan = base(&target_order, &a, &roots);
+        let plan = base(&target_order, &a, &roots, &[]);
         let names = names(&plan);
         assert!(
             names.contains(&"dev-libs/libx".to_string()),
@@ -630,7 +648,7 @@ mod tests {
 
         let (_sysroot, _board, roots) = board_roots();
         test_adapter!(a, &data, "x86");
-        let plan = base(&target_order, &a, &roots);
+        let plan = base(&target_order, &a, &roots, &[]);
         let names = names(&plan);
         assert_eq!(
             names.iter().filter(|n| *n == "dev-libs/liba").count(),
@@ -673,14 +691,14 @@ mod tests {
         test_adapter!(a, &data, "x86");
         let dir = tempfile::tempdir().unwrap();
         let plain = Roots::for_test(dir.path().to_str().unwrap());
-        assert_eq!(base(&target_order, &a, &plain).order, target_order);
+        assert_eq!(base(&target_order, &a, &plain, &[]).order, target_order);
 
         let broot = tempfile::tempdir().unwrap();
         let native_offset = Roots::for_test_root_with_broot(
             dir.path().to_str().unwrap(),
             broot.path().to_str().unwrap(),
         );
-        assert_eq!(base(&target_order, &a, &native_offset).order, target_order);
+        assert_eq!(base(&target_order, &a, &native_offset, &[]).order, target_order);
     }
 
     // Regression test for the `dev-perl/Digest-HMAC` duplicate-plan-entry
@@ -715,9 +733,46 @@ mod tests {
 
         test_adapter!(a, &data, "amd64");
         assert_eq!(
-            host(&target_order, &a, &roots, &cross).order,
+            host(&target_order, &a, &roots, &cross, &[]).order,
             target_order,
             "must not re-derive a CPN the solver already scheduled @host"
+        );
+    }
+
+    // Regression test for the `dev-cpp/tomlplusplus` incident: a BDEPEND on a
+    // `package.provided` CPN must not be rediscovered as a real closure
+    // build, even though it never appears in `target_order` (nothing in the
+    // solver's own solution names it — `package.provided` only ever
+    // satisfies resolution, per the profile, without a real merge).
+    #[test]
+    fn a_provided_bdepend_is_not_rediscovered_as_a_host_closure_build() {
+        let data = repo_from(&[
+            (
+                "sys-apps/consumer-1.0",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\nBDEPEND=dev-build/cmake\n",
+            ),
+            (
+                "dev-build/cmake-4.3.4",
+                "EAPI=8\nSLOT=0\nKEYWORDS=amd64\nDESCRIPTION=t\n",
+            ),
+        ]);
+        let target_order = vec![(pkg("sys-apps/consumer"), ver("1.0"))];
+        let provided = vec![(Cpv::parse("dev-build/cmake-4.3.4").unwrap(), Some("0".to_string()))];
+
+        let (_host, _prefix, roots, cross) = offset_roots();
+        test_adapter!(a, &data, "amd64");
+        assert_eq!(
+            host(&target_order, &a, &roots, &cross, &provided).order,
+            target_order,
+            "a provided BDEPEND must not gain a closure build entry"
+        );
+
+        // Without the `provided` seed, the same input schedules a real build
+        // — proves the assertion above exercises the fix, not a no-op input.
+        let plan = host(&target_order, &a, &roots, &cross, &[]);
+        assert!(
+            names(&plan).contains(&"dev-build/cmake".to_string()),
+            "sanity: unprovided cmake must still get discovered normally"
         );
     }
 
@@ -750,7 +805,7 @@ mod tests {
 
         let (_host, _prefix, roots, cross) = offset_roots();
         test_adapter!(a, &data, "amd64");
-        let plan = host(&target_order, &a, &roots, &cross);
+        let plan = host(&target_order, &a, &roots, &cross, &[]);
         let names = names(&plan);
         let pos = |n: &str| names.iter().position(|x| x == n).unwrap();
         assert!(
@@ -786,7 +841,7 @@ mod tests {
 
         let (_host, _prefix, roots, cross) = offset_roots();
         test_adapter!(a, &data, "amd64");
-        let plan = host(&target_order, &a, &roots, &cross);
+        let plan = host(&target_order, &a, &roots, &cross, &[]);
         let names = names(&plan);
         let pos = |n: &str| names.iter().position(|x| x == n).unwrap();
         assert!(
@@ -834,7 +889,7 @@ mod tests {
 
         let (_host, _prefix, roots, cross) = offset_roots();
         test_adapter!(a, &data, "amd64");
-        let plan = host(&target_order, &a, &roots, &cross);
+        let plan = host(&target_order, &a, &roots, &cross, &[]);
         let names = names(&plan);
         assert_eq!(
             names.iter().filter(|n| *n == "dev-libs/liba").count(),
@@ -897,7 +952,7 @@ mod tests {
 
         let (_host, _prefix, roots, cross) = offset_roots();
         test_adapter!(a, &data, "amd64");
-        let plan = host(&target_order, &a, &roots, &cross);
+        let plan = host(&target_order, &a, &roots, &cross, &[]);
         let names = names(&plan);
         assert_eq!(
             names.iter().filter(|n| *n == "dev-libs/l").count(),
@@ -944,7 +999,7 @@ mod tests {
 
         let (_host, _prefix, roots, cross) = offset_roots();
         test_adapter!(a, &data, "amd64");
-        let plan = host(&target_order, &a, &roots, &cross);
+        let plan = host(&target_order, &a, &roots, &cross, &[]);
         let names = names(&plan);
         for n in ["dev-libs/a", "dev-libs/b"] {
             assert_eq!(
