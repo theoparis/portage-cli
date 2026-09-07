@@ -1383,7 +1383,19 @@ async fn ensure_config_site_packages(globals: &Cli) -> Result<()> {
             depgraph_flags: None,
             merge_flags: None,
             use_outer_eroot: true,
-            target_only_installed_view: false,
+            // Same fix as the native toolchain bootstrap
+            // (`Roots::with_target_only_installed_view`'s doc comment):
+            // under `--prefix`/`--local` this installs into the outer
+            // EROOT, a genuinely separate root from the build host `/`.
+            // Without this, `load_target_installed` unions in the host
+            // VDB, so a host-installed `config-site`/`crossdev` show up
+            // as phantom `R` (not-actually-there reinstalls), and
+            // `virtual/os-headers`' `prefix-guest`-conditional blocker
+            // against `sys-kernel/linux-headers` gets evaluated against
+            // the *host's* real linux-headers install even though
+            // neither package is installed or planned in the prefix —
+            // see `crossdev-prefix-spurious-os-headers-blocker.md`.
+            target_only_installed_view: true,
             update_world: false,
             is_resume: false,
             activity: None,

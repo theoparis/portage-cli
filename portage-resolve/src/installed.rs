@@ -368,6 +368,39 @@ mod tests {
         assert_eq!(entries[0].version.to_string(), "2.46.1");
     }
 
+    // Regression test for `Roots::with_target_only_installed_view` (used by
+    // `em crossdev`'s host-tool bootstrap under `--prefix`): a base entry
+    // that is neither installed in nor planned for the target must not
+    // leak into the installed view once the flag is set — otherwise a
+    // host-installed `sys-kernel/linux-headers` makes `virtual/os-headers`'
+    // `prefix-guest`-conditional blocker fire against a package that is
+    // absent from both the target VDB and the plan (see
+    // `crossdev-prefix-spurious-os-headers-blocker.md`).
+    #[test]
+    fn target_only_installed_view_drops_the_base_side_of_the_union() {
+        let host = tempfile::tempdir().unwrap();
+        let prefix = tempfile::tempdir().unwrap();
+        write_fake_vdb_entry(host.path(), "sys-kernel/linux-headers-6.18", "");
+
+        let base = camino::Utf8PathBuf::from_path_buf(host.path().to_path_buf()).unwrap();
+        let target = camino::Utf8PathBuf::from_path_buf(prefix.path().to_path_buf()).unwrap();
+        let plain = crate::Roots::default()
+            .with_base(Some(base.clone()))
+            .with_target(Some(target.clone()));
+        assert_eq!(
+            load_target_installed(&plain).len(),
+            1,
+            "plain union must still see the host-only entry"
+        );
+
+        let target_only = plain.with_target_only_installed_view();
+        assert_eq!(
+            load_target_installed(&target_only).len(),
+            0,
+            "target-only view must drop the base-only entry entirely"
+        );
+    }
+
     // Same package, genuinely different slots (e.g. two active `gcc` slots)
     // must both survive — the fix must not over-collapse by `Cpn` alone
     #[test]
