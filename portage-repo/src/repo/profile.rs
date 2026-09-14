@@ -179,8 +179,27 @@ impl Profile {
     ///
     /// Paths are relative to this profile directory and resolved to absolute paths.
     pub fn parents(&self) -> Result<Vec<PathBuf>> {
+        self.parents_with_repos(&std::collections::HashMap::new())
+    }
+
+    /// Resolve parent entries, including PMS `repo:path` cross-repository
+    /// references. `repos` maps repository names to their filesystem roots.
+    pub fn parents_with_repos(
+        &self,
+        repos: &std::collections::HashMap<String, PathBuf>,
+    ) -> Result<Vec<PathBuf>> {
         let lines = util::read_lines(self.path.join("parent"))?;
-        Ok(lines.iter().map(|l| self.path.join(l)).collect())
+        Ok(lines
+            .iter()
+            .map(|line| {
+                if let Some((repo, profile)) = line.split_once(':') {
+                    if let Some(root) = repos.get(repo) {
+                        return root.join("profiles").join(profile);
+                    }
+                }
+                self.path.join(line)
+            })
+            .collect())
     }
 
     /// Parse the `packages` file into raw [`PackageEntry`]s (no cross-profile
@@ -351,8 +370,23 @@ impl ProfileStack {
     /// directory is included at most once even in diamond-shaped inheritance.
     /// Cycle detection uses canonicalized paths.
     pub fn build(path: PathBuf) -> Result<Self> {
+        let mut repos = std::collections::HashMap::new();
+        let gentoo = std::env::var_os("GENTOO_REPO")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/var/db/repos/gentoo"));
+        if gentoo.is_dir() {
+            repos.insert("gentoo".to_string(), gentoo);
+        }
+        Self::build_with_repos(path, &repos)
+    }
+
+    /// Build a profile stack with PMS `repo:path` parent resolution.
+    pub fn build_with_repos(
+        path: PathBuf,
+        repos: &std::collections::HashMap<String, PathBuf>,
+    ) -> Result<Self> {
         let mut visited = HashSet::new();
-        let profiles = collect_stack(&path, &mut visited)?;
+        let profiles = collect_stack_with_repos(&path, &mut visited, repos)?;
         if profiles.is_empty() {
             return Err(Error::InvalidProfile("empty profile stack".into()));
         }
@@ -842,7 +876,11 @@ pub(crate) fn merge_flag_lists_signed<'a>(iter: impl Iterator<Item = &'a str>) -
 ///
 /// `visited` is a set of canonicalized paths already added; a profile seen a
 /// second time (diamond inheritance or cycle) is silently skipped.
-fn collect_stack(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Vec<Profile>> {
+fn collect_stack_with_repos(
+    path: &Path,
+    visited: &mut HashSet<PathBuf>,
+    repos: &std::collections::HashMap<String, PathBuf>,
+) -> Result<Vec<Profile>> {
     let canonical = path.canonicalize().map_err(|e| Error::Io {
         path: path.to_path_buf(),
         source: e,
@@ -852,8 +890,8 @@ fn collect_stack(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Vec<Prof
     }
     let profile = Profile::open(canonical)?;
     let mut result = Vec::new();
-    for parent in profile.parents()? {
-        result.extend(collect_stack(&parent, visited)?);
+    for parent in profile.parents_with_repos(repos)? {
+        result.extend(collect_stack_with_repos(&parent, visited, repos)?);
     }
     result.push(profile);
     Ok(result)

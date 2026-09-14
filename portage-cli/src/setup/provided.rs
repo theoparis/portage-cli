@@ -51,20 +51,10 @@ struct Tier1Pkg {
 }
 
 const TIER1: &[Tier1Pkg] = &[
-    // Also a stage-product (`toolchain_plan`'s own "python" step still
-    // builds a real one — same InstalledPolicy::Provided root-target
-    // override that already lets the libc step build a real glibc despite
-    // it being provided too). Needed here to break a genuine, irreducible
-    // bootstrap cycle found live 2026-08-24: dev-build/meson-format-array
-    // RDEPENDs on python (needs it to run when invoked as a BDEPEND tool),
-    // python RDEPENDs on app-arch/zstd, and zstd BDEPENDs on
-    // meson-format-array (needs it to build) — no linear order can satisfy
-    // all three from an empty prefix.
-    Tier1Pkg {
-        category: "dev-lang",
-        package: "python",
-        probe: Some(Probe::Command("python3", &["--version"])),
-    },
+    // Do not provide Python: python-exec wrappers installed by Python eclasses
+    // need a matching interpreter *inside* EPREFIX.  A host Python claim lets
+    // meson-format-array install its wrapper without that interpreter, making
+    // every Meson machine-file entry empty at runtime.
     Tier1Pkg {
         category: "dev-lang",
         package: "perl",
@@ -75,17 +65,8 @@ const TIER1: &[Tier1Pkg] = &[
         package: "meson",
         probe: Some(Probe::Command("meson", &["--version"])),
     },
-    // Never an explicit toolchain_plan step, only ever reached transitively.
-    // Its RDEPEND on python forms a real bootstrap cycle with any real
-    // (non-provided) BDEPEND consumer whose own closure reaches python
-    // (zstd, pam, … — found live 2026-08-24); providing it removes the
-    // whole conflict class. One version ever in the tree, no version
-    // banner to parse (`--help` just echoes its args), so presence-only.
-    Tier1Pkg {
-        category: "dev-build",
-        package: "meson-format-array",
-        probe: Some(Probe::CommandSucceeds("meson-format-array", &["--help"])),
-    },
+    // Likewise, meson-format-array is a Python wrapper and must be built
+    // alongside the prefix Python rather than claimed from the host.
     Tier1Pkg {
         category: "dev-build",
         package: "ninja",
@@ -290,26 +271,41 @@ fn tree_versions(repo: &Repository, category: &str, package: &str) -> Vec<Versio
         .collect()
 }
 
-/// The tree version that best represents the host's probed one, else the
-/// oldest tree version — never an invented version absent from the tree.
+/// The tree version that best represents the host's probed one — never an
+/// invented version absent from the tree, and never a claim the host cannot
+/// back up.
 ///
-/// Prefers a tree version sharing the host's `major.minor` line over a
-/// strictly-older one from a different line — guards a multi-SLOT package
-/// (one SLOT per `major.minor`, e.g. `dev-lang/python`) whose tree ebuild
-/// can outrun the host's patch level, which a plain "closest `<= host`"
-/// compare would skip past. No current Tier-1 entry is multi-SLOT.
+/// `None` when the host version is unknown (unparseable banner — BSD
+/// `sed`/`grep` print no GNU `--version` at all) or older than every tree
+/// version (macOS `m4` 1.4.6 against a tree starting at 1.4.19): claiming
+/// the oldest tree version there would tell the solver a tool exists that
+/// the build cannot reach, turning into a `command not found` — or a
+/// too-old-behavior failure — deep inside an unrelated package's phase
+/// instead of a package the prefix plans and builds for itself. The caller
+/// leaves the entry out entirely in that case.
+///
+/// Otherwise prefers a tree version sharing the host's `major.minor` line
+/// over a strictly-older one from a different line — guards a multi-SLOT
+/// package (one SLOT per `major.minor`, e.g. `dev-lang/python`) whose tree
+/// ebuild can outrun the host's patch level, which a plain "closest
+/// `<= host`" compare would skip past. No current Tier-1 entry is
+/// multi-SLOT.
 fn pick_version(versions: &[Version], host: Option<&Version>) -> Option<Version> {
-    if let Some(host) = host {
-        let n = host.numbers.len().min(2);
-        let same_line = Version::new(&host.numbers[..n]);
-        if let Some(best) = versions.iter().filter(|v| v.glob_matches(&same_line)).max() {
-            return Some(best.clone());
-        }
-        if let Some(best) = versions.iter().filter(|v| *v <= host).max() {
-            return Some(best.clone());
-        }
+    let host = host?;
+    let n = host.numbers.len().min(2);
+    let same_line = Version::new(&host.numbers[..n]);
+    if let Some(best) = versions.iter().filter(|v| v.glob_matches(&same_line)).max() {
+        return Some(best.clone());
     }
-    versions.iter().min().cloned()
+    // No same-line match and the host outruns the whole tree: a different
+    // numbering scheme, not a newer adequate tool — Apple `gzip` 487 and
+    // `bsdtar` 3.5.3 against GNU gzip/tar trees ending at 1.x. Claiming the
+    // newest tree version there would bless bsdtar/Apple utilities as their
+    // GNU counterparts, whose flags ebuilds rely on.
+    if versions.iter().all(|v| v < host) {
+        return None;
+    }
+    versions.iter().filter(|v| *v <= host).max().cloned()
 }
 
 fn rewrite_managed_block(existing: &str, block: &str) -> String {
@@ -350,6 +346,9 @@ pub(super) fn ensure_provided(
         }
         let mut host_version = None;
         let mut newest_if_present = false;
+        // `probe: None` (Gentoo-only snapshot, no host equivalent to check)
+        // is always claimed, as before — there is nothing to verify against.
+        let mut always_claim = false;
         match &pkg.probe {
             Some(Probe::Command(bin, args)) => {
                 let Some(found) = super::host_tools::which(bin, extra_path) else {
@@ -381,12 +380,24 @@ pub(super) fn ensure_provided(
                 }
                 newest_if_present = true;
             }
-            None => {}
+            None => {
+                always_claim = true;
+            }
         }
         let picked = if newest_if_present {
             versions.iter().max().cloned()
+        } else if always_claim {
+            versions.iter().min().cloned()
         } else {
-            pick_version(&versions, host_version.as_ref())
+            let got = pick_version(&versions, host_version.as_ref());
+            if got.is_none() {
+                tracing::info!(
+                    "host tool for {}/{} is missing, unparseable, or older than every tree version: \
+                     the prefix will build it itself",
+                    pkg.category, pkg.package
+                );
+            }
+            got
         };
         if let Some(v) = picked {
             lines.push(format!("{}/{}-{v}", pkg.category, pkg.package));
@@ -458,16 +469,28 @@ mod tests {
     }
 
     #[test]
-    fn pick_version_falls_back_to_oldest_when_host_is_older_than_everything() {
+    fn pick_version_skips_an_alien_newer_numbering_scheme() {
+        // Apple gzip 487 / bsdtar 3.5.3 against GNU trees ending at 1.x:
+        // newer-than-everything with no same-line match is a different
+        // tool's build number, never an adequate host binary.
+        let versions = vec![
+            Version::parse("1.14").unwrap(),
+            Version::parse("1.13").unwrap(),
+        ];
+        let host = Version::parse("487.0.1").unwrap();
+        assert_eq!(pick_version(&versions, Some(&host)), None);
+    }
+
+    #[test]
+    fn pick_version_skips_when_host_is_older_than_everything() {
+        // macOS m4 1.4.6 against a tree starting at 1.4.19: claiming the
+        // oldest tree version would lie upward, so the prefix builds its own.
         let versions = vec![
             Version::parse("2.0").unwrap(),
             Version::parse("3.0").unwrap(),
         ];
         let host = Version::parse("1.0").unwrap();
-        assert_eq!(
-            pick_version(&versions, Some(&host)),
-            Some(Version::parse("2.0").unwrap())
-        );
+        assert_eq!(pick_version(&versions, Some(&host)), None);
     }
 
     #[test]
@@ -490,15 +513,14 @@ mod tests {
     }
 
     #[test]
-    fn pick_version_falls_back_to_oldest_when_no_host_probe() {
+    fn pick_version_skips_when_no_host_version_parsed() {
+        // BSD sed/grep print no GNU `--version` banner: nothing parseable
+        // means nothing claimed, so the prefix builds its own.
         let versions = vec![
             Version::parse("2.0").unwrap(),
             Version::parse("1.0").unwrap(),
         ];
-        assert_eq!(
-            pick_version(&versions, None),
-            Some(Version::parse("1.0").unwrap())
-        );
+        assert_eq!(pick_version(&versions, None), None);
     }
 
     #[test]

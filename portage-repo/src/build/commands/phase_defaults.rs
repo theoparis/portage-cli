@@ -688,8 +688,8 @@ impl builtins::Command for EapiSrcPrepare8Command {
     }
 }
 
-/// `eapply_user` — no user patch directory support (yet); a no-op is a
-/// conforming implementation (PMS only requires it be safe to call).
+/// Apply user patches from `${PORTAGE_CONFIGROOT}/etc/portage/patches`, using
+/// the PMS PF-then-PN lookup locations.  Missing directories are harmless.
 #[derive(Parser)]
 pub(crate) struct EapplyUserCommand;
 
@@ -700,8 +700,26 @@ impl builtins::Command for EapplyUserCommand {
 
     async fn execute<SE: brush_core::ShellExtensions>(
         &self,
-        _context: brush_core::ExecutionContext<'_, SE>,
+        context: brush_core::ExecutionContext<'_, SE>,
     ) -> Result<brush_core::ExecutionResult, Self::Error> {
+        let shell = context.shell;
+        let get = |name: &str| {
+            shell.env().get(name).and_then(|v| match v.base_var().value() {
+                ShellValue::String(s) => Some(s.clone()),
+                _ => None,
+            }).unwrap_or_default()
+        };
+        let root = { let r = get("PORTAGE_CONFIGROOT"); if r.is_empty() { "/".into() } else { r } };
+        let category = get("CATEGORY");
+        let pf = get("PF");
+        let pn = get("PN");
+        let base = format!("{root}/etc/portage/patches/{category}");
+        // eapply itself handles the patch list; use the PF and PN globs in
+        // separate commands so an absent alternate directory is harmless.
+        let script = format!(
+            "if [[ -d {base}/{pf} ]]; then eapply -- {base}/{pf}/*; fi; if [[ -d {base}/{pn} ]]; then eapply -- {base}/{pn}/*; fi"
+        );
+        shell.run_string(&script, &brush_core::SourceInfo::from("eapply_user"), &context.params).await?;
         Ok(brush_core::ExecutionResult::success())
     }
 }

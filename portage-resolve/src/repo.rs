@@ -1449,11 +1449,6 @@ pub async fn load_repos(set: &portage_repo::RepoSet) -> RawRepoData {
         let portage_repo::Location::Alias { source, aliases } = &entry.location else {
             continue;
         };
-        // Only the main repo is a supported alias source today — a same-named
-        // cpn from a non-main repo can't be disambiguated here.
-        if *source != set.main().name() {
-            continue;
-        }
         let repo_name = entry.name;
         for (dest_cat, source_cpns) in aliases {
             let dest_cat_interned = Interned::<DefaultInterner>::intern(dest_cat.as_str());
@@ -1464,8 +1459,11 @@ pub async fn load_repos(set: &portage_repo::RepoSet) -> RawRepoData {
                 let cross_cpn = Cpn::new(dest_cat_interned, source_cpn.package);
                 real_cpn_of.insert(cross_cpn, *source_cpn);
                 cpns_set.insert(cross_cpn);
+                // An alias is explicitly rooted at `source`; do not clone a
+                // same-named package from another overlay or the main repo.
                 let copies: Vec<(Cpv, CacheEntry, Interned<DefaultInterner>)> = real_entries
                     .iter()
+                    .filter(|(_, _, owner)| owner == source)
                     .map(|(cpv, cache, _)| {
                         (
                             Cpv::new(cross_cpn, cpv.version.clone()),

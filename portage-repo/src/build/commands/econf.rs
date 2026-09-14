@@ -49,6 +49,7 @@ impl builtins::Command for EconfCommand {
         let pf = get("PF");
         let chost = get("CHOST");
         let cbuild = get("CBUILD");
+        let broot = get("BROOT");
         let ctarget = get("CTARGET");
         let esysroot = {
             let s = get("ESYSROOT");
@@ -91,6 +92,21 @@ impl builtins::Command for EconfCommand {
             let configure = base.join("configure");
             if !configure.exists() {
                 return 0u8;
+            }
+
+            // Older autotools releases predate Apple's `arm64` spelling,
+            // while the Darwin profile intentionally uses arm64 rather than
+            // GNU's aarch64 alias. Refresh bundled scripts exactly as the
+            // gnuconfig.eclass does, but centrally for this bootstrap class.
+            if chost.starts_with("arm64-apple-darwin") {
+                let prefix_scripts = std::path::Path::new(&eprefix).join("usr/share/gnuconfig");
+                let broot_scripts = std::path::Path::new(&broot).join("usr/share/gnuconfig");
+                let config_dir = if prefix_scripts.is_dir() {
+                    prefix_scripts
+                } else {
+                    broot_scripts
+                };
+                refresh_gnuconfig(&base, &config_dir);
             }
 
             // Probe EAPI-conditional flags from configure --help.
@@ -196,6 +212,33 @@ impl builtins::Command for EconfCommand {
 /// non-identifier character (space, newline, `=`, end-of-string).
 /// Prevents `--disable-dependency-tracking` from matching
 /// `--disable-dependency-tracking-fast`.
+/// Replace stale bundled GNU config scripts recursively, best-effort. Missing
+/// gnuconfig leaves the package untouched; the normal configure error remains
+/// more useful than turning this compatibility refresh into a hard dependency.
+fn refresh_gnuconfig(root: &std::path::Path, source_dir: &std::path::Path) {
+    let sub = source_dir.join("config.sub");
+    let guess = source_dir.join("config.guess");
+    if !sub.is_file() || !guess.is_file() {
+        return;
+    }
+    fn visit(dir: &std::path::Path, sub: &std::path::Path, guess: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, sub, guess);
+            } else if path.file_name().is_some_and(|n| n == "config.sub") {
+                let _ = std::fs::copy(sub, path);
+            } else if path.file_name().is_some_and(|n| n == "config.guess") {
+                let _ = std::fs::copy(guess, path);
+            }
+        }
+    }
+    visit(root, &sub, &guess);
+}
+
 fn contains_flag(text: &str, flag: &str) -> bool {
     let mut rest = text;
     while let Some(pos) = rest.find(flag) {

@@ -88,6 +88,14 @@ fn with_buildpkg(mut flags: MergeFlags) -> MergeFlags {
 /// entries.
 const OVERLAY_NAME: &str = "crossdev";
 
+// Gentoo's Darwin LLVM ebuild currently BDEPENDs on libc++, while libc++
+// depends on that same LLVM. Xcode supplies libc++ for the one bootstrap
+// build; this provision is written to a dedicated fragment and removed as
+// soon as the open-source Xcrun toolchain has merged.
+const XCRUN_LLVM_BOOTSTRAP_BEGIN: &str = "# BEGIN em xcrun LLVM bootstrap\n";
+const XCRUN_LLVM_BOOTSTRAP_PROVIDED: &str = "llvm-runtimes/libcxx-23.1.1\n";
+const XCRUN_LLVM_BOOTSTRAP_END: &str = "# END em xcrun LLVM bootstrap\n";
+
 /// Per-target overlay/section name (`crossdev.<tuple>`)
 ///
 /// One section per target so a second `--setup` under `FillGapsOnly` cannot treat a shared
@@ -221,16 +229,12 @@ async fn setup(
     let mut merge_flags = globals.merge_flags();
     merge_flags.root_deps = true;
     // Host-side `cross-*` tools must resolve against the outer EROOT, not the
-    // `--target` sysroot (sysroot make.conf is target-arch). Under `-p`,
-    // init_target only previews config — pass the alias in-memory so the
-    // staged plan still sees `cross-*` packages.
-    let pretend_alias;
-    let extra_aliases: &[portage_repo::RepoEntry] = if globals.pretend {
-        pretend_alias = [alias_repo_entry(target, extras)];
-        &pretend_alias
-    } else {
-        &[]
-    };
+    // `--target` sysroot (sysroot make.conf is target-arch). `init_target`
+    // writes the alias configuration during this invocation, while the repo
+    // set may already have been opened; inject it in-memory for both real and
+    // pretend runs rather than relying on a config reload.
+    let alias = [alias_repo_entry(target, extras)];
+    let extra_aliases: &[portage_repo::RepoEntry] = &alias;
     // Same pretend-only gate as `extra_aliases` above: a never-initialized
     // target's `make.conf`/`make.profile` don't exist on disk yet under `-p`
     // (init_target only previewed them), so depgraph's own config read would
@@ -286,6 +290,9 @@ fn post_step_cross(target: &CrossTarget, globals: &Cli, step: &stages::StageStep
     activate_toolchain(target, globals, step)?;
     if step.label == "libc" {
         link_abi_osdirs(target, globals)?;
+    }
+    if target.source_repo() == "darwin-cross" && step.label == "xcode-toolchain-wrappers" {
+        remove_xcrun_llvm_bootstrap_provision(globals)?;
     }
     Ok(())
 }
@@ -548,11 +555,11 @@ pub(crate) async fn toolchain(args: &crate::cli::ToolchainArgs, globals: &Cli) -
              native toolchain"
         );
     }
-    if globals.target().is_some() && (args.root_arg.root.is_some() || globals.root.is_some()) {
+    if let Some(target) = globals.target() {
         bail!(
-            "em toolchain --setup does not take --root together with --target: \
-             --root under --target is `stages`' board-root override, and a native \
-             toolchain has no cross sysroot — drop --target to bootstrap into --root."
+            "em toolchain --setup is native and cannot build target '{target}'; \
+             run `em toolchain --local --setup` to bootstrap the arm64 host prefix, \
+             then `em crossdev --local --target {target} --setup` for the cross sysroot"
         );
     }
     // outer_roots(), not roots(): a native toolchain bootstrap must anchor to
@@ -919,7 +926,28 @@ fn profile_stack(globals: &Cli) -> Result<ProfileStack> {
     let profile_link = config_root.join("etc/portage/make.profile");
     let canon = std::fs::canonicalize(profile_link.as_std_path())
         .with_context(|| format!("cannot resolve make.profile at {profile_link}"))?;
-    ProfileStack::build(canon).context("failed to build profile stack")
+    // Parent files may use PMS's cross-repository `repo:path` syntax. Build
+    // the lookup from the same repos.conf view used by the rest of em.
+    let mut repos = std::collections::HashMap::new();
+    if let Ok(conf) = globals.roots().repos_conf() {
+        for entry in conf.repos() {
+            if let Some(path) = entry.location.as_path() {
+                repos.insert(entry.name.to_string(), path.to_path_buf());
+            }
+        }
+    }
+    // During `--setup -p`, the target repos.conf exists only in the planned
+    // (not yet written) configuration. Keep the standard host Gentoo tree
+    // available for the profile's `gentoo:...` parent in that phase.
+    if !repos.contains_key("gentoo") {
+        let gentoo = std::env::var_os("GENTOO_REPO")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("/var/db/repos/gentoo"));
+        if gentoo.is_dir() {
+            repos.insert("gentoo".into(), gentoo);
+        }
+    }
+    ProfileStack::build_with_repos(canon, &repos).context("failed to build profile stack")
 }
 
 /// The profile's `BOOTSTRAP_USE` variable, after sourcing the profile chain
@@ -1122,9 +1150,6 @@ async fn init_target(
         // Sysroot baselayout is a separate step in `toolchain_plan`.
         crate::setup::merge_baselayout(globals, &[]).await?;
     }
-    if !globals.pretend {
-        ensure_config_site_packages(globals).await?;
-    }
     let gentoo_path = main_repo(globals)?.path().to_owned();
     let source_name = target.source_repo();
     let source_path = if source_name == "gentoo" {
@@ -1174,7 +1199,9 @@ async fn init_target(
     if !outcome.applied() {
         return Ok(outcome);
     }
-
+    if target.source_repo() == "darwin-cross" && !globals.pretend {
+        install_xcrun_llvm_bootstrap_provision(globals)?;
+    }
     println!(">>> cross target {} ready", target.tuple);
     println!("    alias:     {category}  (derived from ::gentoo)");
     println!("    sysroot:  {sysroot}");
@@ -1197,6 +1224,51 @@ async fn init_target(
 /// source package would later surface as a resolver `NoVersions` with no hint
 /// at the cause); the alias declaration itself is always written so a partial
 /// tree still resolves the packages that *are* present.
+fn xcrun_llvm_bootstrap_provided_path(globals: &Cli) -> Utf8PathBuf {
+    let base = globals.base_roots();
+    let portage = base
+        .config_overlay()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| base.merge_root().join("etc/portage"));
+    portage.join("profile/package.provided")
+}
+
+fn install_xcrun_llvm_bootstrap_provision(globals: &Cli) -> Result<()> {
+    let path = xcrun_llvm_bootstrap_provided_path(globals);
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    if !text.contains(XCRUN_LLVM_BOOTSTRAP_BEGIN) {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(XCRUN_LLVM_BOOTSTRAP_BEGIN);
+        text.push_str(XCRUN_LLVM_BOOTSTRAP_PROVIDED);
+        text.push_str(XCRUN_LLVM_BOOTSTRAP_END);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, text)
+            .with_context(|| format!("writing temporary Xcrun LLVM provision {path}"))?;
+    }
+    Ok(())
+}
+
+fn remove_xcrun_llvm_bootstrap_provision(globals: &Cli) -> Result<()> {
+    let path = xcrun_llvm_bootstrap_provided_path(globals);
+    let Ok(mut text) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let Some(start) = text.find(XCRUN_LLVM_BOOTSTRAP_BEGIN) else {
+        return Ok(());
+    };
+    let tail = &text[start..];
+    let Some(end) = tail.find(XCRUN_LLVM_BOOTSTRAP_END) else {
+        bail!("malformed temporary Xcrun LLVM provision in {path}");
+    };
+    text.replace_range(start..start + end + XCRUN_LLVM_BOOTSTRAP_END.len(), "");
+    std::fs::write(&path, text)
+        .with_context(|| format!("removing temporary Xcrun LLVM provision {path}"))
+}
+
 fn alias_repo_conf_entry(
     globals: &Cli,
     source: &Utf8Path,
@@ -1361,41 +1433,6 @@ fn prefix_profile_entries(globals: &Cli) -> Result<Vec<config_plan::ConfigEntry>
         link,
         target: host_profile,
     }])
-}
-
-/// Ensure the host has real crossdev's own config.site machinery
-///
-/// autoconf reads `${prefix}/share/config.site` automatically; `sys-apps/
-/// config-site` owns that loader, and `sys-devel/crossdev` owns the
-/// selector plus the full per-target cache-answer library that answers
-/// configure's RUN-tests while cross-compiling (e.g. gnulib's "whether
-/// strcasecmp works", dev-lang/python's `/dev/ptmx` device-file probe).
-async fn ensure_config_site_packages(globals: &Cli) -> Result<()> {
-    crate::emerge_atoms(
-        globals,
-        &[
-            "sys-apps/config-site".to_string(),
-            "sys-devel/crossdev".to_string(),
-        ],
-        crate::EmergeOpts {
-            use_override: &[],
-            nodeps: false,
-            depgraph_flags: None,
-            merge_flags: None,
-            use_outer_eroot: true,
-            target_only_installed_view: false,
-            update_world: false,
-            is_resume: false,
-            activity: None,
-            activity_session: Default::default(),
-            extra_aliases: &[],
-            extra_path: &[],
-            autounmask_widen: false,
-            extra_package_use: &[],
-            sysroot_override: None,
-        },
-    )
-    .await
 }
 
 /// Write the cross sysroot `etc/portage/{make.conf,make.profile}`
@@ -1694,7 +1731,8 @@ fn cross_env_entries(
     // host; keyword them for the *host* arch, not the active `--target` arch.
     // Prefer the host's installed/release-branch pin over a blanket `**`
     // (which would also pick live `9999` ebuilds).
-    let mut keyword_entries = String::new();
+    // iig-tools' host bootstrap uses Gentoo's currently unkeyworded unifdef.
+    let mut keyword_entries = String::from("dev-util/unifdef **\n");
     for (real_cat, pkg, arch) in target.packages() {
         let body = format!(
             "{header}{}",

@@ -413,6 +413,7 @@ fn bootstrap_mode(roots: &Roots, mode: Mode) -> Result<()> {
     };
     write_if_absent(&portage.join("bashrc"), bashrc)?;
     write_if_absent(&portage.join("make.conf"), &make_conf_template(mode, eroot))?;
+    ensure_gentoo_mirrors(&portage.join("make.conf"))?;
 
     // Host-python/host-tool symlinks: overlay only (--prefix). The overlay
     // borrows host tools (base is the host), and EPREFIX makes installed
@@ -538,6 +539,47 @@ fn host_accept_keywords() -> Option<String> {
     portage_repo::MakeConf::load_default()
         .ok()
         .and_then(|m| m.get("ACCEPT_KEYWORDS").map(str::to_owned))
+}
+
+/// `GENTOO_MIRRORS` for a new prefix/root: the host's own entry, else
+/// `distfiles.gentoo.org`.
+///
+/// A `--local` prefix reads only its own `make.conf` (host `/etc/portage`
+/// is never consulted), so without this the mirror list is empty and a
+/// distfile whose upstream URL fails — `downloads.sourceforge.net` serves a
+/// mirror-selection HTML page for old-style `/project/file` paths — has no
+/// fallback (found live: `app-arch/unzip`'s `unzip60.tar.gz`).
+fn host_gentoo_mirrors() -> String {
+    portage_repo::MakeConf::load_default()
+        .ok()
+        .and_then(|m| m.get("GENTOO_MIRRORS").map(str::to_owned))
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "https://distfiles.gentoo.org".to_string())
+}
+
+/// Ensure the prefix's `make.conf` carries a `GENTOO_MIRRORS` assignment.
+///
+/// Runs on every setup (not just first bootstrap): `make.conf` is
+/// `write_if_absent`, so an existing prefix predating the mirror seeding
+/// would otherwise never get one. Appends only when no assignment is
+/// present — a hand-tuned value always wins.
+fn ensure_gentoo_mirrors(make_conf: &Utf8Path) -> Result<()> {
+    let existing = std::fs::read_to_string(make_conf.as_std_path()).unwrap_or_default();
+    let has_assignment = existing.lines().any(|l| {
+        let t = l.trim_start();
+        !t.starts_with('#') && t.starts_with("GENTOO_MIRRORS")
+    });
+    if !has_assignment {
+        use std::fmt::Write;
+        let mut out = existing;
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "GENTOO_MIRRORS=\"{}\"", host_gentoo_mirrors());
+        std::fs::write(make_conf.as_std_path(), out)
+            .with_context(|| format!("writing {make_conf}"))?;
+    }
+    Ok(())
 }
 
 /// Expose the host's Python at the prefix paths the eclasses expect
